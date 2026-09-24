@@ -23,7 +23,7 @@ import { FyndExecutionError } from './errors.js'
 /**
  * @typedef {{tokenIn:string, tokenOut:string, amountIn:bigint, sender:string,
  *   recipient:string, minAmountOut:bigint, slippage:string}} SwapRequest
- * @typedef {{amount:bigint, complete:boolean, estimated:boolean}} NetworkEstimate
+ * @typedef {{amount:bigint, complete:boolean}} NetworkEstimate
  * @typedef {{quote:import('./fynd-api.js').EncodedQuote, request:SwapRequest,
  *   transaction:{to:string,data:string,value:bigint}, approvals:bigint[],
  *   network:NetworkEstimate}} Prepared
@@ -110,11 +110,9 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       throw new ValueError('Execution requires an ordinary, non-delegated WDK EVM account.')
     }
     const limits = {
-      maxNetworkFeeBps: config.maxNetworkFeeBps === undefined ? this.#settings.maxNetworkFeeBps : config.maxNetworkFeeBps,
-      maxProtocolFeeBps: config.maxProtocolFeeBps === undefined ? this.#settings.maxProtocolFeeBps : config.maxProtocolFeeBps
+      maxNetworkFeeBps: cap(config.maxNetworkFeeBps === undefined ? this.#settings.maxNetworkFeeBps : config.maxNetworkFeeBps, 'maxNetworkFeeBps'),
+      maxProtocolFeeBps: cap(config.maxProtocolFeeBps === undefined ? this.#settings.maxProtocolFeeBps : config.maxProtocolFeeBps, 'maxProtocolFeeBps')
     }
-    cap(limits.maxNetworkFeeBps, 'maxNetworkFeeBps')
-    cap(limits.maxProtocolFeeBps, 'maxProtocolFeeBps')
     let prepared = await this.#prepare(options)
     await this.#enforceLimits(prepared, limits)
     /** @type {SwidgeTransaction[]} */
@@ -152,7 +150,6 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       submissionUnknown = false
       // Add confirmed approval fees once, after refreshing the swap estimate.
       prepared.network.amount += spent
-      prepared.network.estimated ||= spent > 0n
       const result = this.#resultQuote(prepared)
       return { ...result, id: submitted.hash, hash: submitted.hash, transactions }
     } catch (cause) {
@@ -245,10 +242,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     return { quote, request, transaction, approvals, network }
   }
 
-  /** @param {Prepared} prepared @param {FeeCaps} limits */
-  async #enforceLimits ({ quote, request, approvals, network }, limits) {
-    const protocolCap = cap(limits.maxProtocolFeeBps, 'maxProtocolFeeBps')
-    const networkCap = cap(limits.maxNetworkFeeBps, 'maxNetworkFeeBps')
+  /** @param {Prepared} prepared @param {{maxNetworkFeeBps?: bigint, maxProtocolFeeBps?: bigint}} limits */
+  async #enforceLimits ({ quote, request, approvals, network }, { maxNetworkFeeBps: networkCap, maxProtocolFeeBps: protocolCap }) {
     enforceCap(quote.routerFee, quote.grossOutput, protocolCap, 'protocol')
     if (networkCap !== undefined) {
       if (approvals.length) {
@@ -259,7 +254,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       }
       const value = request.tokenIn === NATIVE ? request.amountIn : (await this.#api.quote(
         { ...request, receiver: request.recipient, tokenOut: NATIVE },
-        { encode: false, slippage: request.slippage }
+        { encode: false }
       )).grossOutput
       enforceCap(network.amount, value, networkCap, 'network')
     }
@@ -283,7 +278,6 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
    */
   async #networkEstimate (quote, transaction, tokenIn, approvals) {
     let total = 0n
-    let estimated = false
     let complete = !!this.#account && this.#chain.id === 1 && approvals.length === 0
     const account = this.#account
     for (const approval of approvals) {
@@ -291,7 +285,6 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
         if (!account) throw new Error('No account')
         const result = await account.quoteSendTransaction({ to: tokenIn, value: 0n, data: ERC20.encodeFunctionData('approve', [this.#chain.router, approval]) })
         total += amount(result.fee, 'approval estimate')
-        estimated = true
       } catch {
         complete = false
       }
@@ -300,15 +293,13 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       if (!account) throw new Error('No account')
       const result = await account.quoteSendTransaction(transaction)
       total += amount(result.fee, 'swap estimate')
-      estimated = true
     } catch {
       complete = false
       if (quote.gasPrice !== undefined && quote.gasPrice > 0n && quote.gas > 0n) {
         total += quote.gas * quote.gasPrice
-        estimated = true
       }
     }
-    return { amount: total, complete, estimated }
+    return { amount: total, complete }
   }
 
   /** @param {Prepared} prepared */
@@ -317,12 +308,12 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     const fees = [
       { type: 'protocol', amount: quote.routerFee, token: request.tokenOut, chain: this.#chain.id, included: true, description: 'Quoted Tycho router fee; positive-slippage fees can add to the settled fee.' }
     ]
-    if (network.estimated) {
+    if (network.amount > 0n) {
       fees.unshift({
         type: 'network', amount: network.amount, token: NATIVE, chain: this.#chain.id, included: false,
         description: network.complete
           ? 'Estimated network cost for all transactions; not a settlement guarantee.'
-          : 'Partial network estimate; may omit approval costs and Base L1 fees.'
+          : 'Partial network estimate; may omit transaction costs, including Base L1 fees.'
       })
     }
     return {

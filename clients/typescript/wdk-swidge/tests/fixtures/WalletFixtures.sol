@@ -6,7 +6,7 @@ pragma solidity 0.8.33;
 contract FixtureToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
-    bool public requireReset;
+    bool private requireReset;
 
     function setRequireReset(bool enabled) external { requireReset = enabled; }
     function mint(address recipient, uint256 value) external { balanceOf[recipient] += value; }
@@ -38,7 +38,6 @@ contract FixtureRouter {
         uint256 deadline;
         bytes clientSignature;
     }
-    event Settled(address sender, address recipient, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut);
 
     function singleSwap(
         uint256 amountIn, address tokenIn, address tokenOut,
@@ -57,6 +56,5 @@ contract FixtureRouter {
             (bool sent,) = receiver.call{value: amountOut}("");
             require(sent, "native output");
         } else FixtureToken(tokenOut).mint(receiver, amountOut);
-        emit Settled(msg.sender, receiver, tokenIn, tokenOut, amountIn, amountOut);
     }
 }

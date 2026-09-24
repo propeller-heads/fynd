@@ -3,6 +3,7 @@
 
 import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
 import { getAddress, Interface, ZeroAddress } from 'ethers'
+import { token } from './amounts.js'
 
 /** @typedef {{ id: number, router: string, nativeSymbol: string }} Chain */
 
@@ -21,15 +22,6 @@ const routerInterface = new Interface([
   `function sequentialSwap(${PARAMETERS},address receiver,${FEE_TUPLE} clientFeeParams,bytes swaps) payable returns (uint256)`,
   `function splitSwap(${PARAMETERS},uint256 nTokens,address receiver,${FEE_TUPLE} clientFeeParams,bytes swaps) payable returns (uint256)`
 ])
-
-/** Normalize WDK/Fynd native-token aliases to Fynd's zero address.
- * @param {string} token
- * @returns {string}
- */
-export function normalizeToken (token) {
-  const address = getAddress(token).toLowerCase()
-  return address === ROUTER_NATIVE ? ZeroAddress : address
-}
 
 /** @param {string} message */
 function invalid (message) {
@@ -50,8 +42,8 @@ export function validateTransaction (quote, request, chain) {
   const { transaction } = quote
   let tokenIn, tokenOut, recipient, destination
   try {
-    tokenIn = normalizeToken(request.tokenIn)
-    tokenOut = normalizeToken(request.tokenOut)
+    tokenIn = token(request.tokenIn)
+    tokenOut = token(request.tokenOut)
     recipient = getAddress(request.recipient).toLowerCase()
     destination = getAddress(transaction.to).toLowerCase()
   } catch {

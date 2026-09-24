@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { inspect } from 'node:util'
 import { Interface, MaxUint256, ZeroAddress } from 'ethers'
+import { ValueError } from '@tetherto/wdk-wallet'
 import FyndSwidgeProtocol from '../src/fynd-swidge.js'
 import { CHAINS } from '../src/router.js'
 
@@ -88,6 +89,14 @@ function harness ({ chainId = 1, allowance = AMOUNT, config = {}, mode = 'full' 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('public quote and execution modes', () => {
+  it.each([
+    { chainId: 2 }, { chainId: '1' }, { chainId: undefined },
+    { maxProtocolFeeBps: -1 }, { maxNetworkFeeBps: 1.5 }, { maxNetworkFeeBps: null },
+    { quoteSender: 'invalid' }, { approvalTimeoutMs: 0 }
+  ])('rejects invalid public configuration %o', config => {
+    expect(() => new FyndSwidgeProtocol(undefined, { chainId: 1, ...config })).toThrow(ValueError)
+  })
+
   it('keeps the API key out of inspectable protocol fields', () => {
     const secret = 'private-fynd-test-key'
     const { api } = harness({ mode: 'none', config: { apiKey: secret, quoteSender: SENDER, maxProtocolFeeBps: 10 } })
@@ -156,7 +165,8 @@ describe('public quote and execution modes', () => {
 
   it.each([
     { toTokenAmount: 1n }, { toChain: 8453 }, { fromTokenAmount: 0n }, { fromTokenAmount: 9007199254740992 },
-    { fromToken: 'ETH' }, { toToken: WETH }, { recipient: ZeroAddress }, { slippage: 1 }, { refundAddress: SENDER }
+    { fromTokenAmount: 1n << 256n }, { fromToken: 'ETH' }, { toToken: WETH }, { recipient: ZeroAddress },
+    { slippage: 1 }, { slippage: -0.1 }, { slippage: NaN }, { slippage: Infinity }, { slippage: '0.005' }, { refundAddress: SENDER }
   ])('rejects unsupported or invalid request %o before any network request or write', async patch => {
     const { api, account, fetchMock } = harness()
     await expect(api.swidge({ ...options, ...patch })).rejects.toThrow()
@@ -338,6 +348,14 @@ describe('allowances, fresh execution and partial progress', () => {
 })
 
 describe('requested fee caps', () => {
+  it.each(['maxNetworkFeeBps', 'maxProtocolFeeBps'])('rejects null %s before requesting a quote or spending', async field => {
+    const { api, account, fetchMock } = harness()
+    await expect(api.swidge(options, { [field]: null })).rejects.toMatchObject({ name: 'ValueError' })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(account.approve).not.toHaveBeenCalled()
+    expect(account.sendTransaction).not.toHaveBeenCalled()
+  })
+
   it.each(['maxNetworkFeeBps', 'maxProtocolFeeBps'])('snapshots %s before awaiting account inspection', async field => {
     const { api, account } = harness()
     let resolveDelegation

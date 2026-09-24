@@ -28,8 +28,6 @@ import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
  * @property {string} address
  * @property {string} symbol
  * @property {number} decimals
- * @property {number} quality
- * @property {number} tax
  */
 
 const QUOTE_FAILURES = new Set([
@@ -78,7 +76,7 @@ export class FyndApi {
   #timeoutMs
 
   /**
-   * @param {{baseUrl?: string, apiKey?: string, chain: string, timeoutMs?: number}} config
+   * @param {{baseUrl?: string, apiKey?: string, chain: 'ethereum' | 'base', timeoutMs?: number}} config
    */
   constructor ({ baseUrl = 'https://fynd-api.propellerheads.xyz', apiKey, chain, timeoutMs = 10000 }) {
     let url
@@ -88,7 +86,6 @@ export class FyndApi {
         url.username || url.password || url.search || url.hash) {
       throw new ValueError('baseUrl must use HTTPS without credentials, query or fragment (HTTP is allowed on localhost).')
     }
-    if (typeof chain !== 'string' || !/^[a-z]+$/.test(chain)) throw new ValueError('chain must be a Fynd chain slug.')
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2147483647) {
       throw new ValueError('timeoutMs must be a positive 32-bit integer.')
     }
@@ -100,21 +97,19 @@ export class FyndApi {
     this.#timeoutMs = timeoutMs
   }
 
-  /** @returns {Promise<{chainId: number, routerAddress: string | null, version: string}>} */
+  /** @returns {Promise<{chainId: number, routerAddress: string | null}>} */
   async info () {
     const info = object(await this.#request('/info'), 'instance metadata')
-    if (typeof info.version !== 'string') throw malformed('instance version')
     return {
       chainId: integer(info.chain_id, 'chain ID'),
-      routerAddress: info.router_address === null ? null : address(info.router_address, 'router address'),
-      version: info.version
+      routerAddress: info.router_address === null ? null : address(info.router_address, 'router address')
     }
   }
 
   /**
    * @overload
    * @param {FyndOrder} order
-   * @param {{encode: false, slippage?: string}} options
+   * @param {{encode: false}} options
    * @returns {Promise<ValuationQuote>}
    */
   /**
@@ -129,14 +124,6 @@ export class FyndApi {
    * @returns {Promise<EncodedQuote | ValuationQuote>}
    */
   async quote (order, { slippage, encode = true }) {
-    if (typeof order.amountIn !== 'bigint' || order.amountIn <= 0n || order.amountIn > MAX_UINT256) {
-      throw new ValueError('Fynd quote amountIn must be a positive uint256 bigint.')
-    }
-    if (encode && (typeof slippage !== 'string' ||
-        !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/.test(slippage) ||
-        !Number.isFinite(Number(slippage)) || Number(slippage) >= 1)) {
-      throw new ValueError('Fynd quote slippage must be a numeric string from 0 (inclusive) to 1 (exclusive).')
-    }
     const request = {
       orders: [{
         token_in: order.tokenIn, token_out: order.tokenOut, amount: order.amountIn.toString(),
@@ -185,7 +172,7 @@ export class FyndApi {
     }
   }
 
-  /** Returns a complete single-block list filtered to ordinary, untaxed tokens. @returns {Promise<FyndToken[]>} */
+  /** Returns complete single-block metadata filtered to quality 100/tax 0. @returns {Promise<FyndToken[]>} */
   async tokens () {
     const deadline = Date.now() + this.#timeoutMs
     /** @type {FyndToken[]} */
@@ -216,7 +203,7 @@ export class FyndApi {
         const tax = integer(token.tax, 'token tax')
         const decimals = integer(token.decimals, 'token decimals')
         if (decimals > 255 || typeof token.symbol !== 'string') throw malformed('token metadata')
-        if (quality === 100 && tax === 0) tokens.push({ address: tokenAddress, symbol: token.symbol, decimals, quality, tax })
+        if (quality === 100 && tax === 0) tokens.push({ address: tokenAddress, symbol: token.symbol, decimals })
       }
       offset += page.tokens.length
     } while (offset < expectedTotal)
