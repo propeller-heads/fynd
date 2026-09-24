@@ -389,6 +389,10 @@ struct PassState {
     /// is the only stamp a token that cannot be priced has, and it is what stops such a token
     /// from holding a slot in every pass.
     last_attempted: FxHashMap<Address, u64>,
+    /// Tokens a component brought that no pass has attempted since. A component that arrives is
+    /// in no stored dependency set, so once its tokens lose the arrived rank nothing points at
+    /// them again. They keep the rank until a pass attempts them.
+    pending_arrivals: FxHashSet<Address>,
 }
 
 /// How much of a pass the interval allows right now.
@@ -606,26 +610,31 @@ impl TokenGasPriceComputation {
         PassSlot::Deferred
     }
 
-    /// Snapshots what the next pass ranks its candidates by.
+    /// Snapshots what the next pass ranks its candidates by, and holds this block's arrivals
+    /// until a pass attempts them.
     ///
-    /// `priced` says which tokens have a stored price; the stamps come from the pass state.
+    /// `priced` says which tokens have a stored price; the stamps come from the pass state. The
+    /// arrived rank covers the tokens of every component that has arrived since the last pass
+    /// attempted them, not only this block's: the cap can cut the rank short, and a component
+    /// that arrives is in no stored dependency set, so a token it carries that loses the rank
+    /// has nothing left to point at it.
     fn pass_priority(
         &self,
         arrived: FxHashSet<Address>,
         priced: FxHashSet<Address>,
     ) -> PassPriority {
+        let mut state = self.lock_pass_state();
+        state.pending_arrivals.extend(arrived);
         PassPriority {
-            arrived,
+            arrived: state.pending_arrivals.clone(),
             priced,
-            last_attempted: self
-                .lock_pass_state()
-                .last_attempted
-                .clone(),
+            last_attempted: state.last_attempted.clone(),
         }
     }
 
-    /// Takes the number of the pass that just ran, stamps every token it attempted, and forgets
-    /// the ones the market no longer holds so the map cannot grow without bound.
+    /// Takes the number of the pass that just ran, stamps every token it attempted, drops the
+    /// attempted tokens from the arrived rank, and forgets the ones the market no longer holds
+    /// so neither set can grow without bound.
     ///
     /// Attempted means selected and not carried: a token the cap or the deadline left out comes
     /// back as unattempted and keeps whatever stamp it had. Priced and failed tokens are stamped
@@ -647,10 +656,14 @@ impl TokenGasPriceComputation {
             state
                 .last_attempted
                 .insert(token.clone(), pass);
+            state.pending_arrivals.remove(token);
         }
         state
             .last_attempted
             .retain(|token, _| universe.contains(token));
+        state
+            .pending_arrivals
+            .retain(|token| universe.contains(token));
     }
 
     /// Sets the longest route the algorithm may build.
@@ -1007,8 +1020,8 @@ impl TokenGasPriceComputation {
         // Seeding is cut off by the same budget as any other pass, so it needs the same rank:
         // unpriced tokens first, then the ones that have gone longest without a pass. On a market
         // where one budget cannot price everything, that is what makes a lag-recovery seed cover
-        // the set instead of re-pricing the same head. Nothing has arrived here — a seeding pass
-        // offers every token anyway.
+        // the set instead of re-pricing the same head. Nothing arrives on this path, but a
+        // seeding pass offers every token anyway, so the rank is all this changes.
         let priority = {
             let store_guard = store.read().await;
             let priced = store_guard
@@ -1720,6 +1733,77 @@ mod tests {
         assert!(
             (ratio(&output.data[&ccc.address]) - 5000.0).abs() < 1e-6,
             "an arriving token is priced although the interval has not elapsed"
+        );
+    }
+
+    /// An arrived token the cap cuts keeps the arrived rank until a pass attempts it.
+    ///
+    /// The component that carried it is in no stored dependency set, so nothing else would ever
+    /// point at the token again.
+    #[tokio::test]
+    async fn test_a_cut_arrival_is_attempted_by_the_next_pass() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let ccc = token(2, "CCC");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_max_tokens_per_pass(1);
+        let store = DerivedData::new_shared();
+        let seeded = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+
+        // A new pool prices AAA far better, and a new token arrives on the same block. The cap
+        // of one takes the token with no price, so AAA is cut.
+        let mut added = FxHashMap::default();
+        {
+            let mut guard = market.write().await;
+            guard.upsert_tokens([ccc.clone()]);
+            guard.upsert_components([
+                component("eth_aaa_2", &[eth.clone(), aaa.clone()]),
+                component("eth_ccc", &[eth.clone(), ccc.clone()]),
+            ]);
+            guard.update_states([
+                (
+                    "eth_aaa_2".to_string(),
+                    Box::new(MockProtocolSim::new(9000.0)) as Box<dyn ProtocolSim>,
+                ),
+                (
+                    "eth_ccc".to_string(),
+                    Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
+                ),
+            ]);
+            added.insert("eth_aaa_2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
+            added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()]);
+        }
+        let cut = computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+        assert!(
+            (ratio(&cut.data[&aaa.address]) - 2000.0).abs() < 1e-6,
+            "the cap took the token with no price, so AAA keeps its old price"
+        );
+        TokenGasPriceComputation::persist(&mut *store.write().await, cut, 2, false);
+
+        // Nothing changes on this block. Only the arrived rank can reach AAA: its stored
+        // dependencies do not name the new pool.
+        let next = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        // The new pool only carries the buy leg: selling 9000 AAA back returns more through
+        // the deeper old pool, so the mean of the two rates lands between them.
+        assert!(
+            ratio(&next.data[&aaa.address]) > 2000.0,
+            "the next pass attempts the cut arrival and re-prices it through its new pool"
         );
     }
 
