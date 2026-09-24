@@ -65,8 +65,7 @@ async function handleApi (request, response) {
     }] }))
     return
   }
-  // Independently mirror Fynd's documented integer slippage calculation.
-  // Keep this separate from the production guard so the fixture can catch drift.
+  // Compute Fynd's slippage independently to catch drift in the production guard.
   const slippageUnits = BigInt(Math.floor(Number(query.options.encoding_options.slippage) * 1_000_000))
   const encodedMinimum = grossOutput - grossOutput * slippageUnits / 1_000_000n
   const minimum = nextMinimum(quoteCalls.length, encodedMinimum)
@@ -269,8 +268,7 @@ describe('published WDK account against local fixture contracts', () => {
     await provider.send('anvil_setAutomine', [false])
     const result = await protocol.swidge(options({ fromToken: ZeroAddress }))
     expect((await protocol.getSwidgeStatus(result.hash)).status).toBe('pending')
-    // A local state change after broadcast forces a real EVM revert on inclusion.
-    // This is a receipt-handling test, not a simulation of a Tycho router upgrade.
+    // Force an EVM revert after broadcast to test receipt handling.
     await provider.send('anvil_setCode', [router, '0x5f5ffd'])
     await provider.send('anvil_mine', [1])
     expect((await account.getTransaction(result.hash)).success).toBe(false)

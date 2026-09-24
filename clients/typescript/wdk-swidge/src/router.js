@@ -6,8 +6,8 @@ import { getAddress, Interface, ZeroAddress } from 'ethers'
 
 /** @typedef {{ id: number, router: string, nativeSymbol: string }} Chain */
 
-// tycho-execution 0.423.0, config/router_addresses.json. Deployment provenance
-// and the release procedure are documented in docs/router-verification.md.
+// Addresses: tycho-execution 0.423.0, config/router_addresses.json.
+// Verification and upgrades: docs/router-verification.md.
 export const CHAINS = Object.freeze({
   ethereum: Object.freeze({ id: 1, router: '0x1644d2477f809cc2c71bccfd6dc9497e3f83210d', nativeSymbol: 'ETH' }),
   base: Object.freeze({ id: 8453, router: '0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67', nativeSymbol: 'ETH' })
@@ -74,8 +74,7 @@ export function validateTransaction (quote, request, chain) {
 
   let call
   try {
-    // Solidity ignores trailing attribution bytes. Ethers decodes the ABI payload
-    // without requiring the Fynd watermark to be removed or re-encoded.
+    // Solidity ignores trailing bytes; ethers decodes the call with its Fynd watermark.
     call = routerInterface.parseTransaction({ data: transaction.data })
     if (!call) throw invalid('unsupported router method')
     const { args } = call
@@ -91,8 +90,7 @@ export function validateTransaction (quote, request, chain) {
         fee.maxClientContribution !== 0n || fee.clientSignature !== '0x') {
       throw invalid('client fee or signing parameters are unsupported')
     }
-    // With a zero client receiver the router ignores the deadline entirely.
-    // Do not describe this tuple as providing an on-chain quote expiry.
+    // A zero client receiver disables the on-chain deadline.
     if (args.swaps === '0x' || (call.name === 'splitSwap' && args.nTokens < 2n)) {
       throw invalid('empty or invalid swap route')
     }

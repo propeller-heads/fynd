@@ -1,18 +1,26 @@
 # Local WDK account fixtures
 
-`wdk-account.test.js` launches an ephemeral Anvil chain on loopback with chain ID 1 and a local mock Fynd HTTP server. It uses the actual published WDK core and EVM wallet packages for account registration, signing, approval, broadcast, transaction waits and receipt/status reads. No private WDK fields or wallet-method mocks are used.
+`wdk-account.test.js` starts an ephemeral Anvil chain (ID 1) and mock Fynd HTTP server on loopback. Published WDK packages handle registration, signing, approvals, broadcast, waits and status. Tests use no wallet-method mocks or private WDK fields.
 
-`WalletFixtures.sol` is deliberately smaller than Tycho's contracts: its token has permissionless minting and an optional USDT-style approval reset; its router accepts the verified `singleSwap` outer ABI but decodes route bytes as a fixed output quantity. Anvil installs this fixture runtime at the adapter's pinned router address **on the disposable local chain only**. The public Anvil mnemonic and all balances are development fixtures, never production credentials or funds. The suite checks custom recipients, native input/output, fresh quotes after approvals, partial progress, reset approvals and real pending/reverted receipts. It does not claim real DEX settlement, chain liquidity, production gas accuracy or live-router end-to-end coverage.
+`WalletFixtures.sol` provides a permissionlessly mintable token with optional USDT-style resets. Its router accepts `singleSwap` but interprets route bytes as a fixed output amount. Anvil installs that runtime at the pinned router address on the local chain only. The mnemonic and balances are public development fixtures.
 
-Run from the package directory with Anvil installed on PATH, or set `ANVIL_BIN`:
+Tests cover recipients, native input/output, approval refresh/reset, partial progress and pending/reverted receipts. They do not establish live DEX settlement, liquidity or production gas costs.
+
+Run from the package directory with Anvil on `PATH`, or set `ANVIL_BIN`:
 
 ```sh
 pnpm exec vitest run tests/wdk-account.test.js
 ```
 
-The compiled fixture was generated with npm `solc@0.8.33`, installed with scripts disabled in a temporary directory. `wallet-fixtures.json` records the exact compiler version, npm integrity, SHA-256 of the Solidity source, settings, ABI and deployed runtime. Tests verify the source checksum. No compiler dependency is needed to run the suite.
+`wallet-fixtures.json` records solc 0.8.33, npm integrity, source SHA-256, compiler settings, ABI and runtime. Tests check the source hash; running them needs no compiler.
 
-To regenerate, install `solc@0.8.33` with `npm install --prefix /tmp/fynd-wdk-fixture-build --ignore-scripts --save-exact solc@0.8.33`, then run the following from this package directory. Review any compiler diagnostics and the JSON diff:
+To regenerate, install the compiler with scripts disabled:
+
+```sh
+npm install --prefix /tmp/fynd-wdk-fixture-build --ignore-scripts --save-exact solc@0.8.33
+```
+
+Then run this from the package directory and review diagnostics and the JSON diff:
 
 ```sh
 node --input-type=module <<'JS'

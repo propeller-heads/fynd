@@ -499,8 +499,7 @@ describe('status, discovery and inherited WDK delegates', () => {
   it('uses inherited swap helpers and exposes their documented mixed-unit fee limitation', async () => {
     const { api } = harness()
     const legacy = { tokenIn: WETH, tokenOut: USDC, tokenInAmount: AMOUNT }
-    // This is evidence of the pinned upstream limitation, not a correct gas amount:
-    // beta.19 adds 100 native units to 20 output-token units in this legacy scalar.
+    // beta.19 incorrectly sums 100 native units and 20 output-token units.
     await expect(api.quoteSwap(legacy)).resolves.toMatchObject({ fee: 120n, tokenInAmount: AMOUNT, tokenOutAmount: 19980n })
     await expect(api.swap(legacy)).resolves.toMatchObject({ hash: SWAP_HASH, tokenInAmount: AMOUNT, tokenOutAmount: 19980n })
   })

@@ -117,11 +117,8 @@ pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
 
 ### WDK Swidge adapter
 
-`wdk-swidge/` is an independently packaged, private-alpha ESM JavaScript adapter with JSDoc
-Typescript declarations. It wraps hosted Fynd for same-chain exact-input swaps. Its API parser
-and bounded router validator are separate from wallet orchestration; WDK performs approvals,
-signing, sending and status lookup. It does not reuse FyndClient's signer or execution flow.
-See [the adapter README](typescript/wdk-swidge/README.md) for limitations and test prerequisites.
+[WDK Swidge](typescript/wdk-swidge/README.md) wraps hosted Fynd for same-chain exact-input swaps.
+It uses WDK accounts for approvals, signing, submission and status.
 
 ```bash
 pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd run typecheck

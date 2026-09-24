@@ -58,8 +58,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
   #approvalTimeoutMs
   #api
   /**
-   * The broad WDK constructor signature permits protocol registration; chainId is
-   * required and checked at runtime. FyndConfig is the strict configuration type.
+   * WDK registration needs optional constructor parameters. chainId remains required
+   * at runtime; FyndConfig provides the strict configuration type.
    * @param {WalletAccount} [account] @param {Partial<FyndConfig>} [config]
    */
   constructor (account, config = {}) {
@@ -86,8 +86,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
   }
 
   /**
-   * Non-binding quote. Additional field networkFeeComplete says whether all network
-   * cost components could be estimated. Fees are estimates even when complete.
+   * Non-binding quote. networkFeeComplete reports whether estimates cover every
+   * network cost. All fees remain estimates.
    * @param {SwidgeOptions} options
    * @returns {Promise<import('@tetherto/wdk-wallet/protocols').SwidgeQuote & {networkFeeComplete: boolean}>}
    */
@@ -127,7 +127,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
         stage = approvalAmount === 0n ? 'allowance reset' : 'approval'
         submissionUnknown = true
         const submitted = await account.approve({ token: prepared.request.tokenIn, spender: this.#chain.router, amount: approvalAmount })
-        // Capture the hash before touching optional fee fields or waiting for inclusion.
+        // Record the hash before fee parsing or receipt lookup can fail.
         if (!isHexString(submitted.hash, 32)) throw new ValueError('WDK returned an invalid approval hash.')
         transactions.push({ hash: submitted.hash, chain: this.#chain.id, type: 'approval' })
         submissionUnknown = false
@@ -150,7 +150,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
       if (!isHexString(submitted.hash, 32)) throw new ValueError('WDK returned an invalid swap hash.')
       transactions.push({ hash: submitted.hash, chain: this.#chain.id, type: 'source' })
       submissionUnknown = false
-      // Confirmed approval fees belong to the result, not the refreshed swap estimate.
+      // Add confirmed approval fees once, after refreshing the swap estimate.
       prepared.network.amount += spent
       prepared.network.estimated ||= spent > 0n
       const result = this.#resultQuote(prepared)
@@ -274,8 +274,8 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
   }
 
   /**
-   * WDK's published estimator cannot simulate future approvals or Base L1 fees.
-   * Keep indicative quotes useful, but never treat an incomplete estimate as a cap check.
+   * The pinned WDK estimator cannot simulate future approvals or estimate Base L1
+   * fees. Incomplete estimates cannot enforce caps.
    * @param {import('./fynd-api.js').EncodedQuote} quote
    * @param {{to:string,data:string,value:bigint}} transaction
    * @param {string} tokenIn

@@ -68,9 +68,7 @@ TYCHO_API_KEY=<key> ./scripts/run-all-examples.sh
 
 ## WDK adapter
 
-`wdk-swidge/` is a separate hosted API adapter, implemented in ESM JavaScript with JSDoc
-declarations generated into `types/`. Tests live in `tests/*.test.js`. Its wire parser is
-hand-maintained: update mapping and fixtures when the API changes; OpenAPI codegen does not
-update it. See its [README](../../clients/typescript/wdk-swidge/README.md) for scoped checks
-and runtime prerequisites, and [compatibility](../../clients/typescript/wdk-swidge/docs/compatibility.md)
-for the published WDK contract and release limitations.
+`wdk-swidge/` uses ESM JavaScript, JSDoc declarations in `types/`, and tests in `tests/*.test.js`.
+Update its API parser and fixtures manually when the API changes; OpenAPI codegen does not.
+See [usage and checks](../../clients/typescript/wdk-swidge/README.md) and
+[compatibility](../../clients/typescript/wdk-swidge/docs/compatibility.md).

@@ -3,7 +3,7 @@
 
 import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
 
-/** A failed execution with enough progress to reconcile before trying again. */
+/** Execution failure with transaction progress for reconciliation. */
 export class FyndExecutionError extends SwidgeError {
   /**
    * @param {string} stage

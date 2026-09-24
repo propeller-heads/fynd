@@ -71,7 +71,7 @@ function address (value, field) {
   return value.toLowerCase()
 }
 
-/** A single-request hosted API client. Signing and submission belong to WDK. */
+/** Hosted Fynd API client. WDK signs and submits transactions. */
 export class FyndApi {
   #baseUrl
   #apiKey
@@ -240,8 +240,8 @@ export class FyndApi {
         body: body === undefined ? undefined : JSON.stringify(body),
         redirect: 'error', signal: controller.signal
       })
-      // Read the body under the same deadline. Never reflect provider text or fetch causes:
-      // either can contain the API key, proxy credentials or request details.
+      // Body reads share the deadline. Omit provider text and fetch causes, which
+      // can expose API keys, proxy credentials or request details.
       const text = await response.text()
       if (Date.now() >= deadline) {
         throw new ProviderError('Fynd request timed out.', { reason: ProviderErrorReason.REQUEST_TIMEOUT })

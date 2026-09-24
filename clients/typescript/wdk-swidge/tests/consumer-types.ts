@@ -15,9 +15,8 @@ const withFull: ISwidgeProtocol = new Fynd(full, config)
 const wdk = new WDK(seed)
 wdk.registerProtocol('ethereum', 'fynd', Fynd, config)
 
-// Upstream EVM beta.19/core beta.18 resolve different nominal WalletManager._seed
-// declarations even without importing Fynd. Runtime registration is tested separately.
-// Remove this known-failure assertion when the compatibility gate is resolved.
+// EVM beta.19/core beta.18 have incompatible private WalletManager._seed types.
+// Remove this assertion after the upstream fix. Runtime registration has separate tests.
 // @ts-expect-error Upstream EVM wallet registration has incompatible private _seed types.
 wdk.registerWallet('ethereum', Wallet, { chainId: 1 })
 void protocol

@@ -5,8 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { Interface, MaxUint256, ZeroAddress } from 'ethers'
 import { CHAINS, normalizeToken, validateTransaction } from '../src/router.js'
 
-// Independently declared from the deployed ABI, rather than imported from the
-// validator: changing a validator selector must not silently change the fixtures.
+// Declare the deployed ABI independently so selector changes cannot alter fixtures.
 const abi = new Interface([
   'function singleSwap(uint256 amountIn,address tokenIn,address tokenOut,uint256 expectedAmountOut,uint256 minAmountOut,address receiver,(uint32,address,uint256,uint256,bytes) clientFeeParams,bytes swaps)',
   'function sequentialSwap(uint256 amountIn,address tokenIn,address tokenOut,uint256 expectedAmountOut,uint256 minAmountOut,address receiver,(uint32,address,uint256,uint256,bytes) clientFeeParams,bytes swaps)',
