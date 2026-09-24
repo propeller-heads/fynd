@@ -375,7 +375,7 @@ fn log_outcome(quote: &OrderQuote, outcome: &'static str, reason: &str) -> &'sta
 }
 
 /// Records the outcome of one simulated quote, and on success how far the simulated amount landed
-/// from what the quote promised.
+/// from what the quote promised, and the gas the quote estimated next to the gas the call used.
 ///
 /// A revert and a failure are counted apart because they call for different work: a revert means
 /// the route the solver priced does not execute, while a failure means the simulation itself did
@@ -385,7 +385,7 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
     let pool = quote.worker_pool().to_string();
     let algorithm = quote.algorithm().to_string();
     let outcome = match attempt {
-        SimulationAttempt::Success { amount_out, .. } => {
+        SimulationAttempt::Success { amount_out, gas_used } => {
             if let Some(deviation) = deviation_bps(quote, amount_out) {
                 histogram!(
                     "quote_simulation_deviation_bps",
@@ -394,6 +394,7 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
                 )
                 .record(deviation);
             }
+            record_gas(quote, *gas_used, &pool, &algorithm);
             "success"
         }
         SimulationAttempt::Reverted { reason } => log_outcome(quote, "reverted", reason),
@@ -406,6 +407,27 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
         "algorithm" => algorithm
     )
     .increment(1);
+}
+
+/// Records the gas the quote estimated and the gas the simulated call used, as absolute values.
+///
+/// Both are recorded for the same successful simulations only, so the two series compare like
+/// for like. A reverted or failed call has no gas figure to set against the estimate.
+fn record_gas(quote: &OrderQuote, gas_used: u64, pool: &str, algorithm: &str) {
+    if let Some(gas_estimate) = quote.gas_estimate().to_f64() {
+        histogram!(
+            "quote_simulation_gas_estimate",
+            "pool" => pool.to_string(),
+            "algorithm" => algorithm.to_string()
+        )
+        .record(gas_estimate);
+    }
+    histogram!(
+        "quote_simulation_gas_used",
+        "pool" => pool.to_string(),
+        "algorithm" => algorithm.to_string()
+    )
+    .record(gas_used as f64);
 }
 
 fn failure(reason: &str) -> SimulationAttempt {

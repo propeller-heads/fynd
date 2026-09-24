@@ -35,6 +35,7 @@ use tycho_simulation::{
         protocols::{
             bebop::{client_builder::BebopClientBuilder, state::BebopState},
             hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
+            metric::{client_builder::MetricClientBuilder, state::MetricState},
         },
         stream::RFQStreamBuilder,
     },
@@ -44,6 +45,7 @@ use tycho_simulation::{
 };
 
 use super::DataFeedError;
+use crate::fallback::FALLBACK_PREFIX;
 
 /// Opts a protocol into streaming its exclusive pools, e.g. `exclusive:ekubo_v3`.
 ///
@@ -57,15 +59,6 @@ const EXCLUSIVE_CAPABLE_PROTOCOLS: &[&str] = &["ekubo_v3"];
 /// Marks a `--protocols` entry served from the Titan pAMM price level stream rather than from
 /// Tycho, e.g. `pricelevelstream:fermiswap`.
 const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
-
-/// Marks a component whose swaps execute through Titan's PropAMMRouter rather than against the
-/// venue directly, e.g. `propammfallback:fermiswap`.
-///
-/// tycho-simulation gives a venue on the router's on-chain whitelist this family instead of
-/// [`PRICE_LEVEL_STREAM_PREFIX`], so one `pricelevelstream:{venue}` entry can bring in components
-/// under either prefix depending on the whitelist. Fynd never requests this family: it names the
-/// venue, and the stream decides which of the two labels its components carry.
-const PROPAMM_FALLBACK_PREFIX: &str = "propammfallback:";
 
 /// Marks a `--protocols` entry served from an RFQ client rather than from Tycho, e.g.
 /// `rfq:bebop`.
@@ -125,6 +118,12 @@ fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
 /// elsewhere.
 const PRICE_LEVEL_STREAM_CHAIN: Chain = Chain::Ethereum;
 
+/// The chains Metric's executor is deployed on.
+///
+/// Tracks tycho-execution's `executor_addresses.json`. A Metric leg on any other chain would price
+/// from the RFQ stream and then fail to encode, so the entry is rejected at registration instead.
+const METRIC_CHAINS: &[Chain] = &[Chain::Base, Chain::Robinhood];
+
 /// Whether a `--protocols` entry names a Tycho protocol system.
 ///
 /// The RFQ clients and the pAMM price level stream each connect to their own endpoint, so their
@@ -146,9 +145,9 @@ pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
 ///
 /// Most entries name their own label. An `exclusive:{system}` entry selects the system's
 /// exclusive-liquidity stream variant, and the prefix is stripped before registration, so its
-/// components arrive under the bare system name. A `pricelevelstream:{venue}` entry names the venue
-/// to stream, and its components arrive labelled `propammfallback:{venue}` when that venue is on
-/// the PropAMMRouter whitelist, so both prefixes answer for the same entry.
+/// components arrive under the bare system name. A `pricelevelstream:{pamm}` entry names the pAMM
+/// to stream, and its components arrive labelled `fallback:{pamm}`: the stream serves every venue
+/// through the `TychoFallbackRouter`, so both prefixes answer for the same entry.
 pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     let entry = entry
         .strip_prefix(EXCLUSIVE_PREFIX)
@@ -158,7 +157,7 @@ pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     }
     match (
         entry.strip_prefix(PRICE_LEVEL_STREAM_PREFIX),
-        protocol_system.strip_prefix(PROPAMM_FALLBACK_PREFIX),
+        protocol_system.strip_prefix(FALLBACK_PREFIX),
     ) {
         (Some(requested_venue), Some(streamed_venue)) => requested_venue == streamed_venue,
         _ => false,
@@ -493,6 +492,28 @@ pub(crate) fn register_rfq(
                 rfq_stream_builder = rfq_stream_builder
                     .add_client::<HashflowState>("hashflow", Box::new(hashflow_client));
             }
+            "rfq:metric" => {
+                if !METRIC_CHAINS.contains(&chain) {
+                    return Err(DataFeedError::Config(format!(
+                        "{protocol} is only deployed on {}, but this feed runs on {chain}",
+                        METRIC_CHAINS
+                            .iter()
+                            .map(|chain| chain.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                let api_key = get_env("METRIC_API_KEY")?;
+                info!("Adding {protocol} RFQ client...");
+                let metric_client = MetricClientBuilder::new(chain)
+                    .tokens(rfq_tokens.clone())
+                    .tvl_threshold(min_tvl)
+                    .api_key(Some(api_key))
+                    .build()
+                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
+                rfq_stream_builder =
+                    rfq_stream_builder.add_client::<MetricState>("metric", Box::new(metric_client));
+            }
             p if p.starts_with(RFQ_PREFIX) => {
                 warn!("Skipping unknown RFQ protocol: {}", p);
             }
@@ -688,6 +709,22 @@ mod tests {
         )
     }
 
+    fn register_rfq_entries(
+        chain: Chain,
+        entries: &[&str],
+    ) -> Result<RFQStreamBuilder, DataFeedError> {
+        register_rfq(
+            RFQStreamBuilder::new(),
+            chain,
+            1.0,
+            &entries
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>(),
+            std::collections::HashSet::new(),
+        )
+    }
+
     fn price_level_stream(
         chain: Chain,
         entries: &[&str],
@@ -858,18 +895,18 @@ mod tests {
             "pricelevelstream:fermiswap",
             "pricelevelstream:fermiswap"
         ));
-        // The whitelisted venue arrives under the router's family for the same entry.
-        assert!(matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:fermiswap"));
+        // The venue arrives under the fallback router's family for the same entry.
+        assert!(matches_streamed_system("pricelevelstream:fermiswap", "fallback:fermiswap"));
         // The prefix is stripped before registration, so the components carry the bare system.
         assert!(matches_streamed_system("exclusive:ekubo_v3", "ekubo_v3"));
     }
 
     #[test]
     fn test_matches_streamed_system_rejects_another_venue() {
-        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "propammfallback:kipseli"));
+        assert!(!matches_streamed_system("pricelevelstream:fermiswap", "fallback:kipseli"));
         assert!(!matches_streamed_system("pricelevelstream:fermiswap", "vm:fermiswap"));
-        assert!(!matches_streamed_system("uniswap_v3", "propammfallback:fermiswap"));
-        assert!(!matches_streamed_system("vm:fermiswap", "propammfallback:fermiswap"));
+        assert!(!matches_streamed_system("uniswap_v3", "fallback:fermiswap"));
+        assert!(!matches_streamed_system("vm:fermiswap", "fallback:fermiswap"));
         assert!(!matches_streamed_system("exclusive:ekubo_v3", "ekubo_v2"));
     }
 
@@ -936,6 +973,39 @@ mod tests {
         let Ok(None) = price_level_stream(Chain::Base, &["uniswap_v3"]) else {
             panic!("expected chains without a `pricelevelstream:` entry to be left alone");
         };
+    }
+
+    #[test]
+    fn test_metric_sources_serve_disjoint_chains() {
+        assert!(
+            !METRIC_CHAINS.contains(&PRICE_LEVEL_STREAM_CHAIN),
+            "a chain served both ways would stream the same Metric inventory twice"
+        );
+    }
+
+    #[test]
+    fn test_register_rfq_metric_off_supported_chains() {
+        let Err(err) = register_rfq_entries(Chain::Ethereum, &["rfq:metric"]) else {
+            panic!("expected rfq:metric to be rejected where Metric has no executor");
+        };
+        assert!(
+            err.to_string()
+                .contains("only deployed on base, robinhood"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn test_register_rfq_metric_requires_api_key() {
+        env::remove_var("METRIC_API_KEY");
+        let Err(err) = register_rfq_entries(Chain::Base, &["rfq:metric"]) else {
+            panic!("expected rfq:metric to require METRIC_API_KEY");
+        };
+        assert!(
+            err.to_string()
+                .contains("METRIC_API_KEY"),
+            "got {err}"
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ BEBOP_USER="${BEBOP_USER:-}"
 BEBOP_KEY="${BEBOP_KEY:-}"
 HASHFLOW_USER="${HASHFLOW_USER:-}"
 HASHFLOW_KEY="${HASHFLOW_KEY:-}"
+METRIC_API_KEY="${METRIC_API_KEY:-}"
 VOLUME_SIZE="${VOLUME_SIZE:-60}" # GB, needs space for Rust toolchain + build
 KEY_NAME="bench-remote-$$"
 SG_NAME="bench-remote-sg-$$"
@@ -236,6 +237,7 @@ cd ${REMOTE_DIR}
 RPC_URL="${RPC_URL}" \\
 BEBOP_USER="${BEBOP_USER}" BEBOP_KEY="${BEBOP_KEY}" \\
 HASHFLOW_USER="${HASHFLOW_USER}" HASHFLOW_KEY="${HASHFLOW_KEY}" \\
+METRIC_API_KEY="${METRIC_API_KEY}" \\
 RUST_LOG=info cargo run -p fynd-benchmark --release -- scale \\
     --base-config "${POOL_CONFIG}" \\
     --worker-counts "${WORKER_COUNTS}" \\

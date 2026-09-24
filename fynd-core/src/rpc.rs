@@ -1,9 +1,8 @@
 //! `eth_call` plumbing shared by the background tasks that read contract state.
 //!
-//! Both fee fetchers — the router's `FeeCalculator` rates and the PropAMMRouter's Uniswap V3 fee
-//! tiers — read view functions over HTTP and decode the result with the same three steps. The
-//! helpers here return the failure as a message so each caller can attach the method name it was
-//! calling and keep its own error type.
+//! `encoding::fee_fetcher` reads the router's `FeeCalculator` rates as view functions over HTTP
+//! and decodes the result in three steps. The helpers here return the failure as a message so
+//! each caller can attach the method name it was calling and keep its own error type.
 
 use alloy::{
     network::Ethereum,

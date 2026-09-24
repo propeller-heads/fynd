@@ -27,12 +27,30 @@ pub struct SolveTask {
     response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
     created_at: Instant,
+    /// When the router stops waiting for this task's answer.
+    ///
+    /// The router's clock starts when the request arrives, before the task is queued, so this
+    /// bounds the queue wait and the solve together. A worker reads it to leave an answer nobody
+    /// waits for unsolved, and to keep the solve inside what remains of it.
+    deadline: Instant,
 }
 
 impl SolveTask {
     /// Creates a new solve task with default parameters (base Tycho state).
-    pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
-        Self { id, order, params: SolveParams::default(), response_tx, created_at: Instant::now() }
+    pub fn new(
+        id: TaskId,
+        order: Order,
+        response_tx: oneshot::Sender<SolveResult>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            id,
+            order,
+            params: SolveParams::default(),
+            response_tx,
+            created_at: Instant::now(),
+            deadline,
+        }
     }
 
     /// Attaches solve parameters to this task.
@@ -61,6 +79,11 @@ impl SolveTask {
         self.created_at.elapsed()
     }
 
+    /// Returns when the router stops waiting for this task's answer.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
     /// Sends the result back to the requester.
     /// Consumes self because oneshot::Sender can only be used once.
     pub fn respond(self, result: SolveResult) {
@@ -76,32 +99,28 @@ impl SolveTask {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteRejection {
-    /// The route has a `propammfallback:` leg, and the PropAMMRouter's fee tiers have not been
-    /// read yet. Transient: the tiers arrive on a timer, and a solve before the first read drops
-    /// every pAMM route.
-    PammFeeTiersUnread,
-    /// The route has a `propammfallback:` leg whose fee tier has no Uniswap V3 pool to fall back
-    /// on, so the amount the leg would deliver on a fallback cannot be known.
-    PammFallbackPoolMissing,
-    /// The route has a `propammfallback:` leg whose Uniswap V3 fallback exists but could not be
-    /// simulated.
-    PammFallbackUnpriceable,
-    /// The request excludes the Uniswap V3 pool used by a pAMM fallback.
-    PammFallbackExcluded,
+    /// The route has a `fallback:` leg whose pair has no fallback pool in this market, so the
+    /// amount the leg would deliver on a fallback cannot be known.
+    FallbackPoolMissing,
+    /// The route has a `fallback:` leg whose fallback pool exists but could not be run: no
+    /// candidate simulated, or none carried the data the router needs.
+    FallbackNotSimulatable,
+    /// The route has a `fallback:` leg whose every candidate fallback pool the request excludes,
+    /// so no fallback may be selected for it.
+    FallbackExcluded,
 }
 
 impl std::fmt::Display for RouteRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PammFallbackExcluded => {
-                write!(f, "pAMM route dropped: request excludes its fallback pool")
+            Self::FallbackExcluded => {
+                write!(f, "pAMM route dropped: request excludes every fallback pool for the pair")
             }
-            Self::PammFeeTiersUnread => write!(f, "pAMM route dropped: fee tiers not read yet"),
-            Self::PammFallbackPoolMissing => {
-                write!(f, "pAMM route dropped: no Uniswap V3 pool at the fee tier")
+            Self::FallbackPoolMissing => {
+                write!(f, "pAMM route dropped: no fallback pool for the pair")
             }
-            Self::PammFallbackUnpriceable => {
-                write!(f, "pAMM route dropped: the Uniswap V3 fallback could not be simulated")
+            Self::FallbackNotSimulatable => {
+                write!(f, "pAMM route dropped: the fallback could not be run")
             }
         }
     }
@@ -255,11 +274,57 @@ impl SolveError {
     pub fn market_data_stale(age_ms: u64) -> Self {
         Self::MarketDataStale { age_ms }
     }
+
+    /// Short, stable label for this failure, used as a metric label and in the comparison log.
+    ///
+    /// Lives on the error rather than beside one of its callers because both the router and the
+    /// worker pool label the same failures, and the two are sibling modules.
+    ///
+    /// Matched exhaustively even though [`SolveError`] is `#[non_exhaustive]`: that attribute only
+    /// forces a wildcard outside the defining crate, so listing every variant here means a new one
+    /// fails to compile rather than silently joining a catch-all.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            SolveError::Timeout { .. } => "timeout",
+            SolveError::NoRouteFound { .. } => "no_route",
+            SolveError::RouteRejected { .. } => "route_rejected",
+            SolveError::InsufficientLiquidity { .. } => "insufficient_liquidity",
+            SolveError::QueueFull => "queue_full",
+            SolveError::Internal(_) => "internal",
+            SolveError::InvalidWorkerPools(_) => "invalid_worker_pools",
+            SolveError::PriceCheckFailed { .. } => "price_check_failed",
+            SolveError::AlgorithmError(_) => "algorithm_error",
+            SolveError::MarketDataStale { .. } => "market_data_stale",
+            SolveError::InvalidOrder(_) => "invalid_order",
+            SolveError::NotReady(_) => "not_ready",
+            SolveError::ComputationFailed(_) => "computation_failed",
+            SolveError::FailedEncoding(_) => "encoding_failed",
+            SolveError::EncodingUnavailable(_) => "encoding_unavailable",
+            SolveError::MaxGasExceeded => "max_gas_exceeded",
+            SolveError::MissingData(_) => "missing_data",
+            SolveError::SimulationFailed(_) => "simulation_failed",
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case(SolveError::Timeout { elapsed_ms: 7 }, "timeout")]
+    #[case(SolveError::NoRouteFound { order_id: "o1".to_string(), reason: None }, "no_route")]
+    #[case(SolveError::QueueFull, "queue_full")]
+    #[case(SolveError::MaxGasExceeded, "max_gas_exceeded")]
+    #[case(SolveError::AlgorithmError("boom".to_string()), "algorithm_error")]
+    #[case(SolveError::MissingData("gas".to_string()), "missing_data")]
+    #[case(SolveError::SimulationFailed("revert".to_string()), "simulation_failed")]
+    #[case(SolveError::NotReady("derived".to_string()), "not_ready")]
+    fn test_solve_error_label(#[case] error: SolveError, #[case] expected: &str) {
+        assert_eq!(error.label(), expected);
+    }
 
     #[test]
     fn test_new_solve_error_variants_display() {

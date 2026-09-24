@@ -3442,7 +3442,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3482,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-bench-harness"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3504,7 +3504,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "alloy",
  "bytes",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3588,7 +3588,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3613,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3663,7 +3663,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3698,7 +3698,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4147,7 +4147,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5714,7 +5714,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5752,7 +5752,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -5912,7 +5912,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.107.1"
+version = "0.108.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -7951,9 +7951,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.413.0"
+version = "0.423.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb6916646d93ccc88e801d102fd38232184c78b8690b7ee548821e385d50abdb"
+checksum = "b9d2b40f351d3d6ea82e46544ddbcff9050e795a3aa7fc99a2c83a0a416bd480"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7981,9 +7981,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.413.0"
+version = "0.423.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "774e63e69677b35ddd25b977bda25da3d336785c96609c35a708863cedbecfe7"
+checksum = "ef11a3b588410eba043e5b2afa11868c99c1d8940446b90a10b5acf351c0278a"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8010,9 +8010,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.413.0"
+version = "0.423.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49ec0fb481a49306f6eb84a1c1d9d9059883ff23b7ea65b8ed6e37c9195159d0"
+checksum = "19e2015824a9ebfadfcd77a74b8e72029b82d264d8dc0fafaea5dd43853020ca"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8032,9 +8032,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.413.0"
+version = "0.423.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe7bb4fae0baf2b6ed44d80699e1d88076a46cacc75cf7c651a3a4f609745980"
+checksum = "48d8746474d9bc872e3a9d5ed28da8f2835ddc0ac659fa04ce5e44939929c680"
 dependencies = [
  "alloy",
  "chrono",
@@ -8046,6 +8046,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "strum",
+ "strum_macros",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -8054,9 +8056,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.413.0"
+version = "0.423.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c64373d21bf03055d00df8112b1114032c454a9c4568271704031ae85691a05c"
+checksum = "9e673c929b1ea38023e3b16e05e4aaa7b23ad0e5e0b56af1d969de62a4c9a520"
 dependencies = [
  "alloy",
  "alloy-chains",
