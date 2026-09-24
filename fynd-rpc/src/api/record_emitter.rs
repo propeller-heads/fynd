@@ -5,6 +5,8 @@
 //! dropped and counted. Dropping the incoming record rather than evicting an older one leaves the
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 
+use std::num::NonZeroUsize;
+
 use metrics::counter;
 use tokio::sync::mpsc::{self, error::TrySendError};
 
@@ -20,12 +22,12 @@ impl RecordEmitter {
     /// Creates the queue, returning the emitter the handler holds and the receiver the sending
     /// task drains. The queue holds `capacity` records; one arriving at a full queue is dropped.
     ///
-    /// # Panics
-    ///
-    /// Panics when `capacity` is zero.
+    /// The capacity is a [`NonZeroUsize`] because a queue of zero has no room for anything: it
+    /// would drop every record, so a misread config would silence the whole feed rather than fail
+    /// where it was read.
     #[must_use]
-    pub fn new(capacity: usize) -> (Self, mpsc::Receiver<QuoteRecord>) {
-        let (sender, receiver) = mpsc::channel(capacity);
+    pub fn new(capacity: NonZeroUsize) -> (Self, mpsc::Receiver<QuoteRecord>) {
+        let (sender, receiver) = mpsc::channel(capacity.get());
         (Self { sender }, receiver)
     }
 
@@ -62,6 +64,11 @@ mod tests {
 
     use super::*;
     use crate::api::{middleware::ClientInfo, record::RequestRecord};
+
+    /// A queue capacity, as the tests write it.
+    fn queue_of(capacity: usize) -> NonZeroUsize {
+        NonZeroUsize::new(capacity).expect("a test never asks for an empty queue")
+    }
 
     /// A record carrying `amount` as its single order's input, so a test can tell records apart.
     fn record(amount: u64) -> QuoteRecord {
@@ -117,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_emit_queues_record() {
-        let (emitter, mut receiver) = RecordEmitter::new(4);
+        let (emitter, mut receiver) = RecordEmitter::new(queue_of(4));
 
         let drops = drops_by_reason(|| emitter.emit(record(1)));
 
@@ -135,7 +142,7 @@ mod tests {
     /// A full queue drops what arrives and keeps what it holds, so the store gets a clean prefix.
     #[test]
     fn test_emit_drops_incoming_record_when_queue_is_full() {
-        let (emitter, mut receiver) = RecordEmitter::new(1);
+        let (emitter, mut receiver) = RecordEmitter::new(queue_of(1));
         emitter.emit(record(1));
 
         let drops = drops_by_reason(|| emitter.emit(record(2)));
@@ -154,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_emit_counts_drops_once_the_sending_task_is_gone() {
-        let (emitter, receiver) = RecordEmitter::new(1);
+        let (emitter, receiver) = RecordEmitter::new(queue_of(1));
         drop(receiver);
 
         let drops = drops_by_reason(|| emitter.emit(record(1)));
@@ -166,7 +173,7 @@ mod tests {
     /// collector outage. The bound is loose — a blocking send would not return at all.
     #[test]
     fn test_emit_into_full_queue_returns_immediately() {
-        let (emitter, _receiver) = RecordEmitter::new(1);
+        let (emitter, _receiver) = RecordEmitter::new(queue_of(1));
         emitter.emit(record(1));
         let records: Vec<QuoteRecord> = (0..1_000).map(record).collect();
 

@@ -725,7 +725,8 @@ mod tests {
     /// return.
     #[actix_web::test]
     async fn test_quote_answers_with_a_full_record_queue() {
-        let (emitter, mut receiver) = RecordEmitter::new(1);
+        let (emitter, mut receiver) =
+            RecordEmitter::new(std::num::NonZeroUsize::new(1).expect("one is not zero"));
         let without_queue = quote_statuses(make_test_state(), 1).await;
 
         let with_full_queue = tokio::time::timeout(
