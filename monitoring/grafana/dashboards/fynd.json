@@ -292,15 +292,21 @@
     },
     {
       "id": 12,
-      "title": "Solve Duration by Pool (p95, successful)",
+      "title": "Solve Duration by Pool (p95)",
+      "description": "Solve is the search alone; task is pickup to response, so it also holds the wait for derived-data readiness. The gap between the two lines is that wait.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_task_duration_seconds_bucket{outcome=\"success\"}[1m])))",
-          "legendFormat": "{{pool}}",
+          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_solve_duration_seconds_bucket[1m])))",
+          "legendFormat": "solve: {{pool}}",
           "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, pool) (rate(worker_pool_task_duration_seconds_bucket{outcome=\"success\"}[1m])))",
+          "legendFormat": "task: {{pool}}",
+          "refId": "B"
         }
       ],
       "fieldConfig": {

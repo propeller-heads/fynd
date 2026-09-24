@@ -145,6 +145,23 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
         .set(queue_depth as f64);
 }
 
+/// Records successful worker-side quote latency after pickup, excluding queue wait: everything
+/// from taking the order to handing the quote back, so the algorithm's solve plus route
+/// validation, pAMM fallback pricing, price-impact calculation and quote construction. Unlike
+/// `worker_router_solve_duration_seconds`, which times the router racing every pool and so
+/// belongs to no single pool, this is attributable per pool.
+///
+/// Successful quotes only: a pool that exhausts its timeout returns before this point, and a
+/// task the router has already abandoned never reaches it. Those are in
+/// `worker_pool_task_duration_seconds`, which also carries the readiness wait this excludes.
+/// Read as a pair, the two separate a slow search from a long wait to start one; read alone,
+/// this histogram shows a saturated pool as an idle one.
+fn record_quote_duration(pool_name: &str, quote_duration: Duration) {
+    // The metric keeps its established external name for dashboard compatibility.
+    metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
+        .record(quote_duration.as_secs_f64());
+}
+
 /// Records how long a task held its worker, from pickup to response, under the outcome it
 /// reached: `success`, or the [`SolveError::label`] of the failure.
 ///
@@ -152,9 +169,9 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
 /// derived-data readiness. What this measures is worker occupancy, and a task blocked waiting to
 /// become ready occupies its worker exactly as one that is solving.
 ///
-/// Every outcome is recorded. The metric this replaced took successful quotes only, which left
-/// a saturated pool looking idle: the failing case was absent from the one histogram that would
-/// have shown it.
+/// Every outcome is recorded, which is what `worker_pool_solve_duration_seconds` beside it
+/// cannot do: a pool that fails its work is absent from that histogram, so a saturated pool
+/// reads there as an idle one.
 ///
 /// `rate(worker_pool_task_duration_seconds_sum[..]) / workers` is therefore the share of worker
 /// slots that are occupied, and not the share of a CPU that is busy. The two differ: a worker
@@ -622,9 +639,10 @@ where
             }
         };
 
-        // Occupancy is timed by the caller, which also sees the failing outcomes this point
-        // never reaches; here the elapsed time only fills in the quote's own solve_time_ms.
+        // The solve alone. Occupancy is timed by the caller, which also sees the failing
+        // outcomes this point never reaches.
         let quote_duration = start_time.elapsed();
+        record_quote_duration(&self.pool_name, quote_duration);
 
         Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
     }
@@ -2406,6 +2424,23 @@ mod tests {
         };
         assert_eq!(samples.len(), 1, "{name} recorded {} samples", samples.len());
         (labels.clone(), samples[0].into_inner())
+    }
+
+    #[test]
+    fn test_quote_duration_metric_recorded() {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_quote_duration("test_pool", std::time::Duration::from_millis(120));
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_solve_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string()]);
+        assert!((seconds - 0.120).abs() < 1e-9);
     }
 
     #[rstest]
