@@ -404,6 +404,16 @@ enum PassSlot {
     Deferred,
 }
 
+/// Which tokens a pass that is going to run may attempt. Both scopes are capped by
+/// `max_tokens_per_pass`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PassScope {
+    /// Every candidate in the market, ranked.
+    Whole,
+    /// Only the tokens that components brought this block.
+    ArrivalsOnly,
+}
+
 /// What a pass knows about the tokens it is about to attempt, which decides their order.
 ///
 /// A snapshot, not a borrow of the computation's state: `select_pass_tokens` stays a plain
@@ -444,11 +454,12 @@ impl PassPriority {
 ///
 /// Rank, in order: arrived, then the tokens a change points at and the ones with no price,
 /// longest-unattempted first within each rank, so a cap smaller than the candidates rotates over
-/// them instead of starving the tail.
+/// them instead of starving the tail. `PassScope::ArrivalsOnly` offers the arrived tokens only.
 fn select_pass_tokens(
     universe: &FxHashSet<Address>,
     changed: Option<&FxHashSet<Address>>,
     priority: &PassPriority,
+    scope: PassScope,
     max_tokens: usize,
 ) -> Vec<Address> {
     const ARRIVED: u8 = 0;
@@ -458,6 +469,12 @@ fn select_pass_tokens(
     for token in universe {
         if priority.arrived.contains(token) {
             ranked.push((ARRIVED, 0, token.clone()));
+            continue;
+        }
+        // A pass the interval did not grant carries the arrivals and nothing else. Leaving the
+        // rest of the market out here rather than relying on the rank to keep them under the
+        // cap is what makes an arrival that is not in the universe cost nothing.
+        if scope == PassScope::ArrivalsOnly {
             continue;
         }
         // The rank orders by the pass that last *attempted* the token, not the pass that last
@@ -655,6 +672,7 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         changed: Option<&FxHashSet<Address>>,
         priority: &PassPriority,
+        scope: PassScope,
         max_tokens: usize,
     ) -> Result<PricingPassOutcome, ComputationError> {
         let (topology, block) = {
@@ -667,7 +685,7 @@ impl TokenGasPriceComputation {
         };
 
         let universe = self.tokens_to_price(&topology);
-        let ordered = select_pass_tokens(&universe, changed, priority, max_tokens);
+        let ordered = select_pass_tokens(&universe, changed, priority, scope, max_tokens);
         // Nothing to attempt: every token either has a price that no change points at, or is
         // already stamped and ranked behind one. Returning before the graph is built keeps a
         // quiet block from cloning the topology and walking a subgraph toward an empty target
@@ -787,7 +805,7 @@ impl TokenGasPriceComputation {
         market: &MarketData,
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
-        slot: PassSlot,
+        scope: PassScope,
     ) -> Result<Option<ComputationOutput<TokenGasPrices>>, ComputationError> {
         // The dependency map holds one `path_components` set per priced token, so cloning it to
         // change a handful of entries is this pass's dominant cost on a large market. Read it by
@@ -836,13 +854,6 @@ impl TokenGasPriceComputation {
         // No early return on an empty change set. The pass is capped, and its spare ranks go to
         // the tokens that have gone longest without a price — including any that have none at
         // all, which no change would ever point at.
-        // A pass earned by an arrival prices those tokens and stops there. `Deferred` cannot
-        // reach this far, and sizing it the same way costs nothing if it ever does.
-        let max_tokens = match slot {
-            PassSlot::Due => self.max_tokens_per_pass,
-            PassSlot::ArrivalsOnly | PassSlot::Deferred => priority.arrived.len(),
-        };
-
         debug!(
             affected_tokens = tokens_to_recompute.len(),
             new_tokens,
@@ -850,8 +861,18 @@ impl TokenGasPriceComputation {
             "incremental token price recomputation"
         );
 
+        // Every pass is capped, whatever earned it. A Tycho protocol resync reports that
+        // protocol's whole pool set as new on one block, and lag recovery coalesces the
+        // arrivals of every drained event into one change set, so the size of an arrivals pass
+        // is not bounded by anything the feed is willing to promise.
         let solved = self
-            .solve_token_prices(market, Some(&tokens_to_recompute), &priority, max_tokens)
+            .solve_token_prices(
+                market,
+                Some(&tokens_to_recompute),
+                &priority,
+                scope,
+                self.max_tokens_per_pass,
+            )
             .await?;
 
         let mut result = existing_prices;
@@ -928,18 +949,25 @@ impl DerivedComputation for TokenGasPriceComputation {
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // A component arriving earns a pass inside the interval, but only for the tokens it
         // carries; a full recompute earns a whole one, having nothing stored to serve instead.
-        let slot = self.claim_pass(!changed.added.is_empty(), changed.is_full_recompute);
-        if slot == PassSlot::Deferred {
-            let stored = {
-                let store_guard = store.read().await;
-                store_guard.token_prices().cloned()
-            };
-            // Nothing stored means nothing to serve, so the interval cannot defer this block.
-            if let Some(prices) = stored {
+        let scope = match self.claim_pass(!changed.added.is_empty(), changed.is_full_recompute) {
+            PassSlot::Due => PassScope::Whole,
+            PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
+            PassSlot::Deferred => {
+                let stored = {
+                    let store_guard = store.read().await;
+                    store_guard.token_prices().cloned()
+                };
+                // Nothing stored means nothing to serve, so the interval cannot defer this
+                // block: seeding runs instead.
+                let Some(prices) = stored else {
+                    return self
+                        .seed_all_prices(market, store)
+                        .await;
+                };
                 Span::current().record("updated_token_prices", prices.len());
                 return Ok(ComputationOutput::with_failures(prices, Vec::new()));
             }
-        }
+        };
 
         // Startup and lag recovery have nothing stored to select from, so they offer every token
         // to the pass. So does a block whose selection finds nothing stored. Every other block
@@ -947,7 +975,7 @@ impl DerivedComputation for TokenGasPriceComputation {
         // since its tokens are what the selection ranks first.
         if !changed.is_full_recompute {
             if let Some(result) = self
-                .update_prices(market, store, changed, slot)
+                .update_prices(market, store, changed, scope)
                 .await?
             {
                 return Ok(result);
@@ -988,7 +1016,7 @@ impl TokenGasPriceComputation {
         // Capping it would report a pod ready with a fraction of the market priced and leave the
         // rest to fill over the following passes. `pass_budget` still bounds it.
         let solved = self
-            .solve_token_prices(market, None, &priority, usize::MAX)
+            .solve_token_prices(market, None, &priority, PassScope::Whole, usize::MAX)
             .await?;
 
         let mut token_prices_with_deps = TokenPricesWithDeps::default();
@@ -1539,7 +1567,8 @@ mod tests {
             .into_iter()
             .collect();
 
-        let ordered = select_pass_tokens(&universe, Some(&changed), &priority, usize::MAX);
+        let ordered =
+            select_pass_tokens(&universe, Some(&changed), &priority, PassScope::Whole, usize::MAX);
 
         assert_eq!(
             ordered,
@@ -1568,7 +1597,7 @@ mod tests {
                 .collect(),
         };
 
-        let ordered = select_pass_tokens(&universe, None, &priority, 2);
+        let ordered = select_pass_tokens(&universe, None, &priority, PassScope::Whole, 2);
 
         assert_eq!(ordered, vec![unpriced, stale], "the cap keeps the two highest ranks");
     }
@@ -1653,6 +1682,65 @@ mod tests {
         assert!(
             (ratio(&output.data[&ccc.address]) - 5000.0).abs() < 1e-6,
             "an arriving token is priced although the interval has not elapsed"
+        );
+    }
+
+    /// An arrivals pass is capped like any other.
+    ///
+    /// A Tycho protocol resync reports that protocol's whole pool set as new on one block, and
+    /// lag recovery coalesces the arrivals of every drained event into one change set, so
+    /// "one pass per arriving token" is not a bound.
+    #[tokio::test]
+    async fn test_an_arrivals_pass_is_capped() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let arriving = [token(2, "BBB"), token(3, "CCC"), token(4, "DDD")];
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600))
+                .with_max_tokens_per_pass(2);
+        let store = DerivedData::new_shared();
+        let seeded = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+
+        let mut added = FxHashMap::default();
+        {
+            let mut guard = market.write().await;
+            for arrival in &arriving {
+                let id = format!("eth_{}", arrival.symbol.to_lowercase());
+                guard.upsert_tokens([arrival.clone()]);
+                guard.upsert_components([component(&id, &[eth.clone(), arrival.clone()])]);
+                guard.update_states([(
+                    id.clone(),
+                    Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
+                )]);
+                added.insert(id, vec![eth.address.clone(), arrival.address.clone()]);
+            }
+        }
+
+        let output = computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+
+        let priced = arriving
+            .iter()
+            .filter(|arrival| {
+                output
+                    .data
+                    .contains_key(&arrival.address)
+            })
+            .count();
+        assert_eq!(
+            priced, 2,
+            "three components arrive inside the interval and the cap of two holds; the third              waits for the next pass"
         );
     }
 
