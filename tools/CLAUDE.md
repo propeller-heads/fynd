@@ -52,13 +52,14 @@ See [`docs/guides/swap-cli.md`](../docs/guides/swap-cli.md) for usage instructio
 
 ## record-market
 
-Captures live Tycho `Update` messages for a configured duration, plus the chain gas price, into a
-zstd-compressed `MarketRecording` fixture, then replays the recording through the full solving
-pipeline (`Solver::from_recording`, `test-utils` feature) to generate `expected_outputs.json` for
-the integration tests in `fynd-core/tests/integration/`.
+Records the raw Tycho feed messages for a configured duration, plus the token list and the chain
+gas price, into a zstd-compressed `MarketRecording` fixture. It then replays the recording through
+the full solving pipeline (`Solver::from_recording`, `test-utils` feature) to generate
+`expected_outputs.json` for the integration tests in `fynd-core/tests/integration/`.
 
-Shared fixture types live in the `fynd-test-fixtures` crate. Worker pool configuration comes from
-the production `worker_pools.toml`; its SHA-256 is stored in the recording metadata so tests can
-detect drift. VM-backed protocol states (e.g. `vm:*` components) cannot be serialized and are skipped.
+Shared fixture types live in the `fynd-test-fixtures` crate; the `MarketRecording` module doc says
+why a recording stores messages and how replay decodes them. Expected outputs are solved with the
+integration tests' own pool config, `fynd-core/tests/integration/worker_pools.toml`, so the
+baseline matches what the tests run; its SHA-256 is stored in the recording metadata.
 
 See [`tools/record-market/README.md`](record-market/README.md) for usage.

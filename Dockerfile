@@ -33,6 +33,7 @@ RUN mkdir -p src fynd-core/src bench-harness/src bench-harness/benches fynd-rpc/
     echo "" > bench-harness/src/lib.rs && \
     echo "fn main() {}" > bench-harness/benches/algorithm_bench.rs && \
     echo "fn main() {}" > bench-harness/benches/profile.rs && \
+    echo "fn main() {}" > bench-harness/benches/derived.rs && \
     echo "fn main() {}" > src/main.rs && \
     echo "" > src/lib.rs && \
     echo "" > fynd-core/src/lib.rs && \
@@ -65,6 +66,7 @@ RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
     echo "" > bench-harness/src/lib.rs && \
     echo "fn main() {}" > bench-harness/benches/algorithm_bench.rs && \
     echo "fn main() {}" > bench-harness/benches/profile.rs && \
+    echo "fn main() {}" > bench-harness/benches/derived.rs && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
     echo "fn main() {}" > tools/record-market/src/main.rs && \

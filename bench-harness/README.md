@@ -7,6 +7,7 @@ and two analysis scripts read what they wrote.
 |---|---|---|
 | benchmark | `src/bench.rs` | Runs several configs over many orders and writes a report |
 | profiler | `src/profile.rs` | Runs one config over a few orders on one thread, writes nothing |
+| derived timings | `src/derived.rs` | Times the derived computations on a recording, block by block |
 | viewer | `viewer/index.html` | Reads the reports in a browser |
 | analysis | `analysis/bench-analyze.py` | Breaks one run down by order size and route shape |
 | analysis | `analysis/bench-setdiff.py` | Per lost order, the pools the winner used and we did not |
@@ -22,14 +23,9 @@ an order seen in the viewer can be profiled by its id.
 | needs the network | no | yes, plus a Tycho API key |
 | reproducible | yes — every offline run replays the same block | no — each run is its own block |
 | comparable with | every other offline run | only the configs inside that same run |
-| VM-backed pools | **missing** | present |
 
-That last row is the reason live exists. `MarketRecording` cannot serialize VM-backed states, and
-drops them silently. In the current fixture that means every Uniswap v4 (384), Balancer (42), Curve
-(3) and Maverick (1) pool is a component with no state, so nothing can route through it — along
-with about two thirds of Uniswap v3. A live capture never serializes, so they are all there.
-
-The trade is reproducibility. An offline run is the same market every time, which is what makes a
+Both markets hold the same pool states (see `MarketRecording` in `test-fixtures/src/recording.rs`);
+they differ in reproducibility. An offline run is the same market every time, which is what makes a
 change measurable against last week. A live run is whatever the chain was doing at that block. The
 viewer keeps the two apart in its run picker for exactly that reason.
 
@@ -37,7 +33,7 @@ viewer keeps the two apart in its run picker for exactly that reason.
 
 **The market fixture**, for offline runs, is in Git LFS at
 `fynd-core/tests/fixtures/market_recording.json.zst`. Run `git lfs pull` if it is a small text file
-instead of 771 KB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
+instead of about 5 MB of compressed JSON. Live runs do not read it; they need `TYCHO_URL` and
 `TYCHO_API_KEY` instead, and `RPC_URL` to price gas at the chain's rate.
 
 **The order dataset** is `aggregator_trades_50k_1k_usd.json` in the repository root. It is
@@ -327,6 +323,16 @@ It runs one solver thread on purpose, so there is a single thread to read. Every
 At the end it prints the ten slowest solves with their ids, so the usual loop is a wide run to find
 a slow order, then `--order <id>` to profile just that one.
 
+## Timing the derived computations
+
+```bash
+./scripts/derived-bench.sh --recording path/to/market_recording.json.zst --repeats 5
+```
+
+Replays a recording from `tools/record-market` and prints the time and output size of the spot
+price, token price and pool depth computations: a full recompute on the snapshot, then one
+incremental run for each later block. It runs under samply unless you pass `--no-record`.
+
 ## Changing what is measured
 
 ### Add a configuration
@@ -402,6 +408,7 @@ The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::f
 is what every run goes through.
 
 Because they parse their own arguments, they cannot answer nextest's `--list`. CI and `check.sh`
-exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile)'`) rather than
-setting `test = false` in `Cargo.toml`, which would also drop them from
-`cargo clippy --all-targets` and leave this code unlinted.
+exclude them by name
+(`-E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'`) rather than
+setting `test = false` in `Cargo.toml`, which would also drop them from `cargo clippy --all-targets`
+and leave this code unlinted.

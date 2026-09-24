@@ -220,3 +220,9 @@ wiremock = "0.6"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+# Optimise dependencies in debug and test builds. Pool simulation (tycho-simulation's tick math) is
+# far too slow unoptimised: on the recorded fixture the integration tests waited about two minutes
+# for derived data. The workspace's own code keeps the debug settings.
+[profile.dev.package."*"]
+opt-level = 2

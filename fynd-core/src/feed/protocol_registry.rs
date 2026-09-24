@@ -246,12 +246,13 @@ impl fmt::Display for ProtocolSpec {
     }
 }
 
-/// Register DEX protocol decoders for test tooling (record-market).
+/// Registers the production protocol decoders on a [`ProtocolStreamBuilder`] for test tooling
+/// (the bench-harness live capture).
 ///
-/// Wrapper over `register_exchanges` so the recorder builds the same protocol stream as
-/// production without exposing the crate-private `DataFeedError`.
+/// Wrapper over `register_exchanges` that returns the error as a `String`, so the crate-private
+/// `DataFeedError` stays private.
 #[cfg(feature = "test-utils")]
-pub fn register_exchanges_for_recording(
+pub fn register_exchanges_for_live_capture(
     builder: ProtocolStreamBuilder,
     tvl_filter: ComponentFilter,
     entries: &[String],
@@ -298,165 +299,129 @@ pub(crate) fn register_exchanges(
     entries: &[String],
 ) -> Result<ProtocolStreamBuilder, DataFeedError> {
     for protocol in parse_protocols(entries)? {
-        match protocol.system.as_str() {
-            "uniswap_v2" => {
-                builder =
-                    builder.exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None);
-            }
-            "sushiswap_v2" => {
-                builder =
-                    builder.exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None);
-            }
-            "pancakeswap_v2" => {
-                builder = builder.exchange::<PancakeswapV2State>(
-                    "pancakeswap_v2",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "uniswap_v3" => {
-                builder =
-                    builder.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None);
-            }
-            "sushiswap_v3" => {
-                builder =
-                    builder.exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None);
-            }
-            "robinswap_v3" => {
-                builder =
-                    builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None);
-            }
-            "ramses_v3" => {
-                builder = builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None);
-            }
-            "pancakeswap_v3" => {
-                builder =
-                    builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None);
-            }
-            "vm:balancer_v2" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:balancer_v2",
-                    tvl_filter.clone(),
-                    Some(balancer_v2_pool_filter),
-                );
-            }
-            "uniswap_v4" => {
-                builder =
-                    builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None);
-            }
-            "ekubo_v2" => {
-                builder = builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None);
-            }
-            "vm:curve" => {
-                // The hybrid CurveState with tycho-simulation's own curve_filter, which drops
-                // the components CurveState cannot quote correctly (oracle/rate-bearing/rebasing
-                // coins) — the source of the overestimation that forced the temporary
-                // full-EVM fallback (see #318); fixed upstream in tycho-simulation 0.338.0.
-                builder = builder.exchange::<CurveState>(
-                    "vm:curve",
-                    tvl_filter.clone(),
-                    Some(curve_filter),
-                );
-            }
-            "uniswap_v4_hooks" => {
-                builder = builder.exchange::<UniswapV4State>(
-                    "uniswap_v4_hooks",
-                    tvl_filter.clone(),
-                    Some(uniswap_v4_hook_filter),
-                );
-            }
-            "vm:maverick_v2" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:maverick_v2",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "vm:bopamm" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:bopamm",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "vm:fermiswap" => {
-                builder = builder.exchange::<EVMPoolState<PreCachedDB>>(
-                    "vm:fermiswap",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "fluid_v1" => {
-                builder = builder.exchange::<FluidV1>(
-                    "fluid_v1",
-                    tvl_filter.clone(),
-                    Some(fluid_v1_paused_pools_filter),
-                );
-            }
-            "aerodrome_v1" => {
-                builder =
-                    builder.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None);
-            }
-            "aerodrome_slipstreams" => {
-                builder = builder.exchange::<AerodromeSlipstreamsState>(
-                    "aerodrome_slipstreams",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "erc4626" => {
-                builder = builder.exchange::<ERC4626State>(
-                    "erc4626",
-                    tvl_filter.clone(),
-                    Some(erc4626_filter),
-                );
-            }
-            "velodrome_slipstreams" => {
-                builder = builder.exchange::<AerodromeSlipstreamsState>(
-                    "velodrome_slipstreams",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "up_v3" => {
-                // Up is a Slipstream fork: its pools carry the same `tick_spacing` and
-                // `default_fee` static attributes Aerodrome's decoder reads.
-                builder = builder.exchange::<AerodromeSlipstreamsState>(
-                    "up_v3",
-                    tvl_filter.clone(),
-                    None,
-                );
-            }
-            "ekubo_v3" => {
-                // SignedExclusiveSwap pools need a controller signature per swap, so they are
-                // only streamed when the deployment explicitly opts in.
-                let filter = if protocol.exclusive {
-                    info!("Including exclusive liquidity for ekubo_v3");
-                    ekubo_v3_extension_filter_with_signed_exclusive_swap
-                } else {
-                    ekubo_v3_extension_filter
-                };
-                builder =
-                    builder.exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(filter));
-            }
-            "quickswap_v2" => {
-                builder =
-                    builder.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None);
-            }
-            "lunarbase" => {
-                builder = builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None);
-            }
-            p if !is_tycho_system(p) => {
-                // Handled by register_rfq and open_price_level_stream, which stream from their
-                // own endpoints rather than from Tycho.
-                continue;
-            }
-            _ => {
-                warn!("Skipping unknown protocol: {}", protocol);
-            }
+        if !is_tycho_system(&protocol.system) {
+            // Handled by register_rfq and open_price_level_stream, which stream from their
+            // own endpoints rather than from Tycho.
+            continue;
         }
+        builder = match register_exchange(builder, &protocol, &tvl_filter) {
+            Registration::Registered(registered) => registered,
+            Registration::NoDecoder(unchanged) => {
+                warn!("Skipping unknown protocol: {}", protocol);
+                unchanged
+            }
+        };
     }
     Ok(builder)
+}
+
+/// What [`register_exchange`] did with one protocol system.
+enum Registration {
+    /// fynd has a decoder for the system, and the builder now carries it.
+    Registered(ProtocolStreamBuilder),
+    /// fynd has no decoder for the system; the builder is unchanged.
+    NoDecoder(ProtocolStreamBuilder),
+}
+
+/// Registers the decoder for one Tycho protocol system.
+fn register_exchange(
+    builder: ProtocolStreamBuilder,
+    protocol: &ProtocolSpec,
+    tvl_filter: &ComponentFilter,
+) -> Registration {
+    let registered = match protocol.system.as_str() {
+        "uniswap_v2" => builder.exchange::<UniswapV2State>("uniswap_v2", tvl_filter.clone(), None),
+        "sushiswap_v2" => {
+            builder.exchange::<UniswapV2State>("sushiswap_v2", tvl_filter.clone(), None)
+        }
+        "pancakeswap_v2" => {
+            builder.exchange::<PancakeswapV2State>("pancakeswap_v2", tvl_filter.clone(), None)
+        }
+        "uniswap_v3" => builder.exchange::<UniswapV3State>("uniswap_v3", tvl_filter.clone(), None),
+        "sushiswap_v3" => {
+            builder.exchange::<UniswapV3State>("sushiswap_v3", tvl_filter.clone(), None)
+        }
+        "robinswap_v3" => {
+            builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
+        }
+        "ramses_v3" => builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None),
+        "pancakeswap_v3" => {
+            builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
+        }
+        "vm:balancer_v2" => builder.exchange::<EVMPoolState<PreCachedDB>>(
+            "vm:balancer_v2",
+            tvl_filter.clone(),
+            Some(balancer_v2_pool_filter),
+        ),
+        "uniswap_v4" => builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None),
+        "ekubo_v2" => builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None),
+        "vm:curve" => {
+            // The hybrid CurveState with tycho-simulation's own curve_filter, which drops
+            // the components CurveState cannot quote correctly (oracle/rate-bearing/rebasing
+            // coins) — the source of the overestimation that forced the temporary
+            // full-EVM fallback (see #318); fixed upstream in tycho-simulation 0.338.0.
+            builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
+        }
+        "uniswap_v4_hooks" => builder.exchange::<UniswapV4State>(
+            "uniswap_v4_hooks",
+            tvl_filter.clone(),
+            Some(uniswap_v4_hook_filter),
+        ),
+        "vm:maverick_v2" => builder.exchange::<EVMPoolState<PreCachedDB>>(
+            "vm:maverick_v2",
+            tvl_filter.clone(),
+            None,
+        ),
+        "vm:bopamm" => {
+            builder.exchange::<EVMPoolState<PreCachedDB>>("vm:bopamm", tvl_filter.clone(), None)
+        }
+        "vm:fermiswap" => {
+            builder.exchange::<EVMPoolState<PreCachedDB>>("vm:fermiswap", tvl_filter.clone(), None)
+        }
+        "fluid_v1" => builder.exchange::<FluidV1>(
+            "fluid_v1",
+            tvl_filter.clone(),
+            Some(fluid_v1_paused_pools_filter),
+        ),
+        "aerodrome_v1" => {
+            builder.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None)
+        }
+        "aerodrome_slipstreams" => builder.exchange::<AerodromeSlipstreamsState>(
+            "aerodrome_slipstreams",
+            tvl_filter.clone(),
+            None,
+        ),
+        "erc4626" => {
+            builder.exchange::<ERC4626State>("erc4626", tvl_filter.clone(), Some(erc4626_filter))
+        }
+        "velodrome_slipstreams" => builder.exchange::<AerodromeSlipstreamsState>(
+            "velodrome_slipstreams",
+            tvl_filter.clone(),
+            None,
+        ),
+        "up_v3" => {
+            // Up is a Slipstream fork: its pools carry the same `tick_spacing` and
+            // `default_fee` static attributes Aerodrome's decoder reads.
+            builder.exchange::<AerodromeSlipstreamsState>("up_v3", tvl_filter.clone(), None)
+        }
+        "ekubo_v3" => {
+            // SignedExclusiveSwap pools need a controller signature per swap, so they are
+            // only streamed when the deployment explicitly opts in.
+            let filter = if protocol.exclusive {
+                info!("Including exclusive liquidity for ekubo_v3");
+                ekubo_v3_extension_filter_with_signed_exclusive_swap
+            } else {
+                ekubo_v3_extension_filter
+            };
+            builder.exchange::<EkuboV3State>("ekubo_v3", tvl_filter.clone(), Some(filter))
+        }
+        "quickswap_v2" => {
+            builder.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
+        }
+        "lunarbase" => builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None),
+        _ => return Registration::NoDecoder(builder),
+    };
+    Registration::Registered(registered)
 }
 
 pub(crate) fn register_rfq(
@@ -582,12 +547,167 @@ pub(crate) fn open_price_level_stream(
     Ok(Some(builder.build()))
 }
 
+/// The raw Tycho messages [`open_recording_stream`] hands out.
+#[cfg(feature = "test-utils")]
+pub type RecordedMessages = tokio::sync::mpsc::Receiver<
+    Result<
+        tycho_simulation::tycho_client::feed::FeedMessage,
+        tycho_simulation::tycho_client::feed::BlockSynchronizerError,
+    >,
+>;
+
+/// Opens the raw Tycho stream a market recording stores.
+///
+/// Subscribes to every Tycho protocol system in `entries` that fynd has a decoder for, so a
+/// recording holds only what [`decode_recorded_messages`] can decode, and applies the component
+/// blocklist `ProtocolStreamBuilder` applies. A system with no decoder is logged once and left
+/// out. The stream hands out raw messages because a decoded state is not always serializable.
+///
+/// # Errors
+///
+/// Fails when the protocol list is invalid, names no system fynd decodes, or the stream cannot
+/// start.
+#[cfg(feature = "test-utils")]
+pub async fn open_recording_stream(
+    tycho_url: &str,
+    chain: Chain,
+    auth_key: String,
+    tvl_filter: ComponentFilter,
+    entries: &[String],
+) -> Result<(tokio::task::JoinHandle<()>, RecordedMessages), String> {
+    use tycho_simulation::{tycho_client::stream::TychoStreamBuilder, utils::default_blocklist};
+
+    let systems = select_decodable_systems(chain, entries).map_err(|e| e.to_string())?;
+    if systems.is_empty() {
+        return Err(format!("no protocol system in {entries:?} has a decoder"));
+    }
+    let mut stream_builder = TychoStreamBuilder::new(tycho_url, chain)
+        .blocklisted_ids(default_blocklist())
+        .auth_key(Some(auth_key));
+    for system in &systems {
+        stream_builder = stream_builder.exchange(system, tvl_filter.clone());
+    }
+    stream_builder
+        .build()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Selects the Tycho protocol systems in `entries` that `register_exchanges` has a decoder for.
+///
+/// Strips the `exclusive:` prefix and drops RFQ and price level stream entries, which Tycho does
+/// not serve. Logs each system with no decoder.
+#[cfg(feature = "test-utils")]
+fn select_decodable_systems(
+    chain: Chain,
+    entries: &[String],
+) -> Result<Vec<String>, DataFeedError> {
+    let mut systems = Vec::new();
+    for protocol in parse_protocols(entries)? {
+        if !is_tycho_system(&protocol.system) {
+            continue;
+        }
+        // Registration on a builder that never connects is how to ask for a decoder: the match
+        // in `register_exchange` is the one list of what fynd decodes.
+        let probe = ProtocolStreamBuilder::new("probe", chain);
+        match register_exchange(probe, &protocol, &ComponentFilter::with_tvl_range(0.0, 0.0)) {
+            Registration::Registered(_) => systems.push(protocol.system),
+            Registration::NoDecoder(_) => {
+                warn!(system = %protocol.system, "no decoder for this protocol system; not recorded")
+            }
+        }
+    }
+    Ok(systems)
+}
+
+/// Decodes raw Tycho feed messages into the [`Update`]s a live feed would produce from them.
+///
+/// The decoder is configured as `TychoFeed` configures it: the same exchanges and filters through
+/// `register_exchanges`, state decode failures skipped, and tokens under `min_token_quality`
+/// ignored. Like the live stream, the first update also carries the chain's native wrapper
+/// component.
+///
+/// All messages are decoded before the call returns. The decoder writes contract storage into
+/// tycho-simulation's process-wide `SHARED_TYCHO_DB`, which holds one block, so afterwards it holds
+/// the last message's storage. Pools that read that storage at simulation time (VM-backed and
+/// Uniswap v4 hook pools) then simulate every update against the last block. A caller that applies
+/// every update before it solves, as `Solver::from_recording` does, is consistent; a caller that
+/// measures block by block is not, for those pools.
+///
+/// Replay installs no state-override providers. A live feed installs the Titan provider for
+/// `vm:fermiswap` and `vm:bopamm`, so replay quotes those pools from their Tycho state only.
+///
+/// # Errors
+///
+/// Fails when the protocol list is invalid, the hook handlers cannot be set up, or a message
+/// does not decode (e.g. it carries no block).
+#[cfg(feature = "test-utils")]
+pub async fn decode_recorded_messages(
+    chain: Chain,
+    protocols: &[String],
+    min_token_quality: u32,
+    tokens: impl IntoIterator<Item = Token>,
+    messages: impl IntoIterator<Item = tycho_simulation::tycho_client::feed::FeedMessage>,
+) -> Result<Vec<Update>, String> {
+    use tycho_simulation::evm::protocol::{
+        native_wrapper::state::NativeWrapperState,
+        uniswap_v4::hooks::hook_handler_creator::initialize_hook_handlers,
+    };
+
+    initialize_hook_handlers().map_err(|e| format!("cannot set up the hook handlers: {e:?}"))?;
+    // Decoding never reads the `ComponentFilter`; only a live subscription uses it.
+    let builder = register_exchanges(
+        ProtocolStreamBuilder::new("replay", chain),
+        ComponentFilter::with_tvl_range(0.0, 0.0),
+        protocols,
+    )
+    .map_err(|e| e.to_string())?
+    .skip_state_decode_failures(true)
+    .min_token_quality(min_token_quality)
+    .set_tokens(
+        tokens
+            .into_iter()
+            .map(|token| (token.address.clone(), token))
+            .collect(),
+    )
+    .await;
+    let decoder = builder.get_decoder();
+
+    let mut updates = Vec::new();
+    for message in messages {
+        let block = message
+            .state_msgs
+            .values()
+            .next()
+            .map_or_else(|| "unknown".to_string(), |state_msg| state_msg.header.number.to_string());
+        let update = decoder
+            .decode(&message)
+            .await
+            .map_err(|e| format!("cannot decode the message for block {block}: {e}"))?;
+        updates.push(update);
+    }
+
+    if let (Some(first), Some(native_wrapper)) =
+        (updates.first_mut(), NativeWrapperState::new(chain))
+    {
+        let component = native_wrapper.component();
+        let id = component.id.to_string();
+        first
+            .new_pairs
+            .insert(id.clone(), component);
+        first
+            .states
+            .insert(id, Box::new(native_wrapper));
+    }
+    Ok(updates)
+}
+
 /// Opens the pAMM price level stream for test tooling (the benchmark's live capture).
 ///
 /// Wrapper over `open_price_level_stream` so the capture serves the same venues as
 /// production without exposing the crate-private `DataFeedError`.
 #[cfg(feature = "test-utils")]
-pub fn open_price_level_stream_for_recording(
+pub fn open_price_level_stream_for_live_capture(
     chain: Chain,
     protocols: &[String],
     tokens: &HashMap<Bytes, Token>,
@@ -1018,5 +1138,81 @@ mod tests {
                 .contains("serves ethereum only"),
             "got {err}"
         );
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn test_select_decodable_systems() {
+        let entries: Vec<String> = [
+            "uniswap_v3",
+            "exclusive:ekubo_v3",
+            "rfq:bebop",
+            "pricelevelstream:fermiswap",
+            "rocketpool",
+        ]
+        .map(String::from)
+        .to_vec();
+
+        let systems = select_decodable_systems(Chain::Ethereum, &entries).expect("valid entries");
+
+        // The prefix is stripped, the non-Tycho entries are dropped, and rocketpool has no
+        // decoder in fynd.
+        assert_eq!(systems, ["uniswap_v3", "ekubo_v3"]);
+    }
+
+    #[cfg(feature = "test-utils")]
+    mod decode_recorded_messages {
+        use std::collections::HashMap as StdHashMap;
+
+        use tycho_simulation::tycho_client::feed::{
+            synchronizer::StateSyncMessage, BlockHeader, FeedMessage,
+        };
+
+        use super::{super::decode_recorded_messages, *};
+
+        fn empty_block(number: u64) -> FeedMessage {
+            let header = BlockHeader { number, ..Default::default() };
+            FeedMessage {
+                state_msgs: StdHashMap::from([(
+                    "uniswap_v2".to_string(),
+                    StateSyncMessage { header, ..Default::default() },
+                )]),
+                sync_states: StdHashMap::new(),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_native_wrapper_first_update() {
+            let updates = decode_recorded_messages(
+                Chain::Ethereum,
+                &["uniswap_v2".to_string()],
+                100,
+                Vec::new(),
+                vec![empty_block(1), empty_block(2)],
+            )
+            .await
+            .expect("empty blocks decode");
+
+            assert_eq!(updates.len(), 2);
+            assert_eq!(updates[0].block_number_or_timestamp, 1);
+            assert_eq!(updates[0].new_pairs.len(), 1, "the native wrapper, like a live stream");
+            assert_eq!(updates[0].states.len(), 1);
+            assert!(updates[1].new_pairs.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_message_without_block() {
+            let error = decode_recorded_messages(
+                Chain::Ethereum,
+                &["uniswap_v2".to_string()],
+                100,
+                Vec::new(),
+                vec![FeedMessage { state_msgs: StdHashMap::new(), sync_states: StdHashMap::new() }],
+            )
+            .await
+            .expect_err("a message with no block cannot decode");
+
+            assert!(error.contains("cannot decode"), "{error}");
+        }
     }
 }

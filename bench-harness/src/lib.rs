@@ -19,6 +19,7 @@
 //! built-in gets. `README.md` has the manifest, the bench target and the command line.
 
 pub mod bench;
+pub mod derived;
 pub(crate) mod live;
 pub mod profile;
 pub(crate) mod trades;
@@ -521,7 +522,7 @@ pub(crate) async fn build_market(flags: MarketFlags) -> Result<Market, String> {
             let fixture = flags
                 .fixture
                 .unwrap_or_else(default_fixture_path);
-            Ok(load_market(&fixture))
+            Ok(load_market(&fixture).await)
         }
         MarketMode::Live => live::capture_market(&flags.into_options()?).await,
     }
@@ -678,9 +679,10 @@ pub(crate) struct Market {
 ///
 /// # Panics
 ///
-/// If the file cannot be read or does not hold a market. A run cannot go on without one, and the
-/// message names the path so a Git LFS pointer file is easy to tell from a missing one.
-pub(crate) fn load_market(fixture: &Path) -> Market {
+/// If the file cannot be read, does not hold a market, or its messages do not decode. A run cannot
+/// go on without a market, and the message names the path so a Git LFS pointer file is easy to
+/// tell from a missing one.
+pub(crate) async fn load_market(fixture: &Path) -> Market {
     let recording = read_recording(fixture).unwrap_or_else(|error| {
         panic!(
             "{} is not a market recording: {error}. Point --fixture at a copy of \
@@ -688,6 +690,10 @@ pub(crate) fn load_market(fixture: &Path) -> Market {
             fixture.display()
         )
     });
+    let updates = recording
+        .decode_updates()
+        .await
+        .unwrap_or_else(|error| panic!("{}: {error:#}", fixture.display()));
     Market {
         chain: fynd_core::types::parse_chain(&recording.metadata.chain).unwrap_or_else(|error| {
             panic!(
@@ -704,7 +710,7 @@ pub(crate) fn load_market(fixture: &Path) -> Market {
             recorded_at_secs: recording.metadata.recorded_at_secs,
             chain_name: recording.metadata.chain.clone(),
         },
-        updates: recording.updates,
+        updates,
     }
 }
 

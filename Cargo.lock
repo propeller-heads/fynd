@@ -5924,7 +5924,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
- "tokio-stream",
  "tracing",
  "tracing-subscriber 0.3.23",
  "tycho-simulation",

@@ -28,8 +28,12 @@ impl TestHarness {
             .metadata
             .gas_price_as_biguint();
         let pools = load_pools();
+        let updates = recording
+            .decode_updates()
+            .await
+            .expect("failed to decode market recording fixture");
 
-        let solver = Solver::from_recording(chain, recording.updates, pools, gas_price)
+        let solver = Solver::from_recording(chain, updates, pools, gas_price)
             .await
             .expect("failed to build solver from recording");
 

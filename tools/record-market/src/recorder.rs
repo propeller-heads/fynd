@@ -1,12 +1,13 @@
 use std::time::{Duration, Instant};
 
-use fynd_rpc::protocols::fetch_protocol_systems;
-use fynd_test_fixtures::{MarketRecording, RecordingMetadata};
-use tokio_stream::StreamExt;
+use fynd_core::feed::protocol_registry::open_recording_stream;
+use fynd_rpc::protocols::resolve_protocols;
+use fynd_test_fixtures::{MarketRecording, RecordingMetadata, SCHEMA_VERSION};
 use tycho_simulation::{
-    evm::stream::ProtocolStreamBuilder, protocol::models::Update,
-    tycho_client::feed::component_tracker::ComponentFilter, tycho_common::models::Chain,
-    tycho_core::traits::FeePriceGetter, tycho_ethereum::rpc::EthereumRpcClient,
+    tycho_client::feed::{component_tracker::ComponentFilter, dto},
+    tycho_common::models::Chain,
+    tycho_core::traits::FeePriceGetter,
+    tycho_ethereum::rpc::EthereumRpcClient,
     utils::load_all_tokens,
 };
 
@@ -14,7 +15,7 @@ pub struct RecordingOptions {
     pub tycho_url: String,
     pub tycho_api_key: String,
     pub duration_secs: u64,
-    pub protocols: Option<Vec<String>>,
+    pub protocols: Vec<String>,
     pub min_tvl: f64,
     pub min_token_quality: i32,
     pub traded_n_days_ago: u64,
@@ -24,24 +25,17 @@ pub struct RecordingOptions {
     pub chain_name: String,
 }
 
-/// Connect to Tycho, capture raw Update messages for the configured
-/// duration, and return a MarketRecording.
+/// Connects to Tycho, records the raw feed messages for the configured duration, and returns a
+/// [`MarketRecording`].
 pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketRecording> {
     let chain = opts.chain;
 
-    let protocols = match &opts.protocols {
-        Some(p) if !p.is_empty() => {
-            tracing::info!(protocols = ?p, "using explicit protocol list");
-            p.clone()
-        }
-        _ => {
-            let discovered =
-                fetch_protocol_systems(&opts.tycho_url, Some(&opts.tycho_api_key), true, chain)
-                    .await?;
-            tracing::info!(count = discovered.len(), ?discovered, "discovered protocols");
-            discovered
-        }
-    };
+    // `fynd serve --protocols` also uses `resolve_protocols`, so `native_onchain`, `all_onchain`
+    // and `exclude:` entries record the market a solver streams.
+    let protocols =
+        resolve_protocols(&opts.tycho_url, Some(&opts.tycho_api_key), true, chain, &opts.protocols)
+            .await?;
+    tracing::info!(count = protocols.len(), ?protocols, "resolved protocols");
 
     let all_tokens = load_all_tokens(
         &opts.tycho_url,
@@ -70,24 +64,17 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
     };
 
     let tvl_filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
-    let builder = ProtocolStreamBuilder::new(&opts.tycho_url, chain);
-
-    let builder = fynd_core::feed::protocol_registry::register_exchanges_for_recording(
-        builder, tvl_filter, &protocols,
+    let (stream_handle, mut stream) = open_recording_stream(
+        &opts.tycho_url,
+        chain,
+        opts.tycho_api_key.clone(),
+        tvl_filter,
+        &protocols,
     )
-    .map_err(|e| anyhow::anyhow!("failed to register exchanges: {e}"))?;
+    .await
+    .map_err(|e| anyhow::anyhow!("cannot open the Tycho stream: {e}"))?;
 
-    let mut stream = Box::pin(
-        builder
-            .auth_key(Some(opts.tycho_api_key.clone()))
-            .skip_state_decode_failures(true)
-            .set_tokens(all_tokens)
-            .await
-            .build()
-            .await?,
-    );
-
-    let mut updates: Vec<Update> = Vec::new();
+    let mut messages: Vec<dto::FeedMessage> = Vec::new();
     let start = Instant::now();
     let deadline = start + Duration::from_secs(opts.duration_secs);
 
@@ -95,17 +82,33 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
 
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, stream.next()).await {
-            Ok(Some(Ok(update))) => {
+        match tokio::time::timeout(remaining, stream.recv()).await {
+            Ok(Some(Ok(message))) => {
+                let block = message
+                    .state_msgs
+                    .values()
+                    .next()
+                    .map(|state_msg| state_msg.header.number);
                 tracing::debug!(
-                    block = update.block_number_or_timestamp,
-                    new_pairs = update.new_pairs.len(),
-                    states = update.states.len(),
-                    "captured update"
+                    ?block,
+                    protocol_count = message.state_msgs.len(),
+                    "recorded message"
                 );
-                updates.push(update);
+                messages.push(message.into());
             }
-            Ok(Some(Err(e))) => tracing::warn!("stream error (continuing): {e}"),
+            Ok(Some(Err(error))) => {
+                // The synchronizer ends the stream after an error. The messages before it are a
+                // complete prefix of the market, so they are kept.
+                if messages.is_empty() {
+                    anyhow::bail!("the Tycho stream failed before its first message: {error}");
+                }
+                tracing::warn!(
+                    messages = messages.len(),
+                    %error,
+                    "the Tycho stream failed; keeping the messages recorded so far"
+                );
+                break;
+            }
             Ok(None) => {
                 tracing::info!("stream ended");
                 break;
@@ -117,10 +120,11 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
         }
     }
 
+    stream_handle.abort();
     let actual_duration = start.elapsed().as_secs();
-    tracing::info!(updates = updates.len(), actual_duration, "recording complete");
+    tracing::info!(messages = messages.len(), actual_duration, "recording complete");
 
-    let pools_toml = include_str!("../../../worker_pools.toml");
+    let pools_toml = include_str!("../../../fynd-core/tests/integration/worker_pools.toml");
     let worker_pools_hash = fynd_test_fixtures::recording::sha256_hex(pools_toml.as_bytes());
 
     Ok(MarketRecording {
@@ -138,9 +142,10 @@ pub async fn record_market(opts: &RecordingOptions) -> anyhow::Result<MarketReco
             traded_n_days_ago: Some(opts.traded_n_days_ago),
             gas_price_wei,
             worker_pools_hash: Some(worker_pools_hash),
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
         },
-        updates,
+        tokens: all_tokens.into_values().collect(),
+        messages,
     })
 }
 

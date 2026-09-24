@@ -178,6 +178,17 @@ impl ComputationManagerConfig {
     pub fn depth_slippage_threshold(&self) -> f64 {
         self.depth_slippage_threshold
     }
+
+    /// Builds the token price computation this configuration describes.
+    pub(crate) fn build_token_price_computation(&self) -> TokenGasPriceComputation {
+        let token_prices = TokenGasPriceComputation::default()
+            .with_max_hops(self.max_hop)
+            .with_gas_token(self.gas_token.clone());
+        match self.pricing_pass_budget {
+            Some(pass_budget) => token_prices.with_pass_budget(pass_budget),
+            None => token_prices,
+        }
+    }
 }
 
 impl Default for ComputationManagerConfig {
@@ -227,14 +238,8 @@ impl ComputationManager {
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
-        let mut token_prices = TokenGasPriceComputation::default()
-            .with_max_hops(config.max_hop)
-            .with_gas_token(config.gas_token);
-        if let Some(pass_budget) = config.pricing_pass_budget {
-            token_prices = token_prices.with_pass_budget(pass_budget);
-        }
-        manager.register(token_prices)?;
-        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
+        manager.register(config.build_token_price_computation())?;
+        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold())?)?;
         Ok((manager, event_rx))
     }
 
