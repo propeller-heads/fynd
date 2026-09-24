@@ -33,9 +33,15 @@ WDK's legacy scalar fee adds unlike token denominations. Use Swidge's itemized f
 
 The npm scope, publisher and [private security contact](../SECURITY.md) remain unset. Tether Generic Implementation Requirements were inaccessible. Tether confirmation remains open for exact-input scope, account binding, fee estimates/caps, legacy fees, original-hash status and discovery semantics. Full conformance is unverified.
 
+## Router contract
+
+Addresses and ABI follow `tycho-execution 0.423.0`: [deployments](https://github.com/propeller-heads/tycho/blob/8be328bfc02c6f46cf39f60ef8b31cbb5d1b0d39/crates/tycho-execution/config/router_addresses.json), [TychoRouterV3](https://github.com/propeller-heads/tycho/blob/8be328bfc02c6f46cf39f60ef8b31cbb5d1b0d39/crates/tycho-execution/contracts/src/TychoRouterV3.sol).
+
+Approvals target the pinned router. Validation checks outer arguments and rejects unknown selectors; nested routes depend on Fynd and router/executor behavior. A zero client-fee receiver disables deadline enforcement, so these quotes have no on-chain expiry. Local account fixtures do not test live Tycho settlement.
+
 ## Upgrades
 
 - **WDK:** review published account methods, chain population, approvals, receipts, errors and Swidge types. Check class identity, direct account construction and registration in a fresh packed consumer.
 - **Fynd:** compare deployed responses with parser fixtures, including slippage, fee arithmetic, gas units, experimental token discovery and timeout/error handling. Gas-adjusted output is not paid gas.
-- **Router:** follow the [deployment and ABI checks](router-verification.md). Update constants, validator and fixtures together.
+- **Router:** compare deployed code, ABI and funding/fee behavior against the pinned sources. Update constants, validator and fixtures together.
 - **Package:** rebuild declarations; test exports, cap boundaries, approvals, partial failures, status and discovery. Run Node and actual Bare checks, audit dependencies and inspect the pack for secrets. Record changed contracts in the changelog. Keep local-fixture results separate from hosted-chain settlement evidence.

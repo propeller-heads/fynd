@@ -120,9 +120,4 @@ pnpm --dir clients/typescript --filter @kayibal/fynd-client run test
 [WDK Swidge](typescript/wdk-swidge/README.md) wraps hosted Fynd for same-chain exact-input swaps.
 It uses WDK accounts for approvals, signing, submission and status.
 
-```bash
-pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd run typecheck
-pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd run lint
-pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd run test
-pnpm --dir clients/typescript --filter wdk-protocol-swidge-fynd run build
-```
+Use the adapter's [development commands](typescript/wdk-swidge/README.md#development).

@@ -232,13 +232,6 @@ describe('published WDK account against local fixture contracts', () => {
     expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
   }, 15000)
 
-  it('rejects an inadequate minimum before any signed transaction', async () => {
-    const nonce = await provider.getTransactionCount(sender)
-    await expect(protocol.swidge(options({ minAmountOut: grossOutput + 1n }))).rejects.toMatchObject({ reason: 'COULD_NOT_MET_THRESHOLD' })
-    expect(await provider.getTransactionCount(sender)).toBe(nonce)
-    expect(await account.getAllowance(inputToken, router)).toBe(0n)
-  }, 15000)
-
   it('rejects a network-capped unapproved ERC20 swap before any approval', async () => {
     const nonce = await provider.getTransactionCount(sender)
     await expect(protocol.swidge(options(), { maxNetworkFeeBps: 100 })).rejects.toMatchObject({

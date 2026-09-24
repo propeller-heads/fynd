@@ -14,4 +14,4 @@ Include package/WDK versions, chain, public transaction hashes and a minimal rep
 - Preserve transaction hashes and reconcile uncertain RPC submissions before retrying. Earlier approvals survive later failures.
 - Avoid logging request configuration or upstream error causes. The library adds no logging or telemetry.
 
-Read the [fee and settlement limits](docs/compatibility.md) and [router trust boundaries](docs/router-verification.md).
+Read the [fee limits](README.md#fees-and-failures) and [router trust boundaries](docs/compatibility.md#router-contract).

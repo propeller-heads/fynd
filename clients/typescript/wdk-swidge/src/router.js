@@ -7,7 +7,7 @@ import { getAddress, Interface, ZeroAddress } from 'ethers'
 /** @typedef {{ id: number, router: string, nativeSymbol: string }} Chain */
 
 // Addresses: tycho-execution 0.423.0, config/router_addresses.json.
-// Verification and upgrades: docs/router-verification.md.
+// Source and upgrades: docs/compatibility.md#router-contract.
 export const CHAINS = Object.freeze({
   ethereum: Object.freeze({ id: 1, router: '0x1644d2477f809cc2c71bccfd6dc9497e3f83210d', nativeSymbol: 'ETH' }),
   base: Object.freeze({ id: 8453, router: '0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67', nativeSymbol: 'ETH' })

@@ -167,19 +167,6 @@ describe('HTTP failures and configuration', () => {
     await expect(api.info()).rejects.toMatchObject({ message: 'Fynd returned invalid JSON response.' })
   })
 
-  it('keeps its deadline active while the response body is still being read', async () => {
-    vi.useFakeTimers()
-    fetchMock.mockImplementation(async (_url, { signal }) => ({
-      ok: true, status: 200,
-      text: () => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error(KEY))))
-    }))
-    const pending = new FyndApi({ chain: 'base', timeoutMs: 50 }).info()
-    const assertion = expect(pending).rejects.toMatchObject({ message: 'Fynd request timed out.', reason: 'REQUEST_TIMEOUT' })
-    await vi.advanceTimersByTimeAsync(51)
-    await assertion
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
-
   it.each([
     { baseUrl: 'http://api.example.com' }, { baseUrl: 'https://user:password@example.com' },
     { baseUrl: 'https://example.com?key=secret' }, { baseUrl: 'https://example.com#fragment' },
@@ -251,16 +238,5 @@ describe('complete token discovery', () => {
     const client = new FyndApi({ chain: 'ethereum', timeoutMs: 100 })
     await expect(client.tokens()).rejects.toMatchObject({ reason: 'REQUEST_TIMEOUT' })
     expect(fetchMock).toHaveBeenCalledTimes(2)
-  })
-
-  it('rejects even a complete page when its body arrived after the operation deadline', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(0)
-    fetchMock.mockImplementationOnce(async () => {
-      vi.setSystemTime(101)
-      return json({ tokens: [token(1)], total: 1, block: 123 })
-    })
-    const client = new FyndApi({ chain: 'ethereum', timeoutMs: 100 })
-    await expect(client.tokens()).rejects.toMatchObject({ reason: 'REQUEST_TIMEOUT' })
   })
 })

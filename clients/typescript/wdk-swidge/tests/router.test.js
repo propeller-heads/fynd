@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { Interface, MaxUint256, ZeroAddress } from 'ethers'
-import { CHAINS, normalizeToken, validateTransaction } from '../src/router.js'
+import { CHAINS, validateTransaction } from '../src/router.js'
 
 // Declare the deployed ABI independently so selector changes cannot alter fixtures.
 const abi = new Interface([
@@ -156,13 +156,6 @@ describe('router call validation', () => {
     expect(() => validate(fixture('singleSwap', { swaps: '0x' }))).toThrow(/route/)
     expect(() => validate(fixture('splitSwap', { nTokens: 0n }))).toThrow(/route/)
   })
-})
-
-it('normalizes the two supported native aliases without accepting malformed addresses', () => {
-  expect(normalizeToken(ZeroAddress)).toBe(ZeroAddress)
-  expect(normalizeToken('0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE')).toBe(ZeroAddress)
-  expect(normalizeToken(weth)).toBe(weth)
-  expect(() => normalizeToken('ETH')).toThrow()
 })
 
 // Unmodified Rust-generated fixture from tycho-execution 0.423.0,

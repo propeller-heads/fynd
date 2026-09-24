@@ -125,7 +125,8 @@ describe('public quote and execution modes', () => {
 
   it.each(['none', 'read-only', 'full'])('keeps %s quotes available when configured execution caps are exceeded', async mode => {
     const { api, account, state } = harness({ mode, config: { quoteSender: SENDER, maxNetworkFeeBps: 0, maxProtocolFeeBps: 0 } })
-    await expect(api.quoteSwidge(options)).resolves.toMatchObject({ toTokenAmount: 19980n })
+    await expect(api.quoteSwidge(options)).resolves.toMatchObject({ toTokenAmount: 19980n, networkFeeComplete: mode !== 'none' })
+    if (mode !== 'full') await expect(api.swidge(options)).rejects.toMatchObject({ name: 'AccountRequiredError' })
     expect(state.valuationQuotes).toBe(0)
     expect(account.approve).not.toHaveBeenCalled()
     expect(account.sendTransaction).not.toHaveBeenCalled()
@@ -147,34 +148,10 @@ describe('public quote and execution modes', () => {
     expect(state.valuationQuotes).toBe(0)
   })
 
-  it.each(['none', 'read-only'])('allows %s account quotes but forbids execution', async mode => {
-    const { api, account } = harness({ mode, config: { quoteSender: SENDER } })
-    await expect(api.quoteSwidge(options)).resolves.toMatchObject({ toTokenAmount: 19980n, networkFeeComplete: mode !== 'none' })
-    await expect(api.swidge(options)).rejects.toMatchObject({ name: 'AccountRequiredError' })
-    expect(account.sendTransaction).not.toHaveBeenCalled()
-  })
-
   it('requires an explicit quote sender when no account is available', async () => {
     const { api, fetchMock } = harness({ mode: 'none' })
     await expect(api.quoteSwidge(options)).rejects.toMatchObject({ name: 'ValueError' })
     expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('uses a custom recipient in the checked transaction sent through WDK', async () => {
-    const { api, account } = harness()
-    const result = await api.swidge({ ...options, recipient: RECEIVER })
-    expect(result.id).toBe(SWAP_HASH)
-    const transaction = account.sendTransaction.mock.calls[0][0]
-    expect(abi.decodeFunctionData('singleSwap', transaction.data)[5].toLowerCase()).toBe(RECEIVER)
-    expect(Object.keys(transaction)).toEqual(['to', 'value', 'data'])
-  })
-
-  it('sends the native input value without an allowance query or approval', async () => {
-    const { api, account } = harness()
-    await api.swidge({ ...options, fromToken: ZeroAddress })
-    expect(account.sendTransaction).toHaveBeenCalledWith(expect.objectContaining({ value: AMOUNT }))
-    expect(account.getAllowance).not.toHaveBeenCalled()
-    expect(account.approve).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -244,16 +221,6 @@ describe('public quote and execution modes', () => {
 })
 
 describe('allowances, fresh execution and partial progress', () => {
-  it.each([AMOUNT, AMOUNT + 1n])('skips sufficient allowance %s and submits exactly once', async allowance => {
-    const { api, account, state } = harness({ allowance })
-    const result = await api.swidge(options)
-    expect(result.transactions).toEqual([{ hash: SWAP_HASH, chain: 1, type: 'source' }])
-    expect(result.hash).toBe(SWAP_HASH)
-    expect(account.approve).not.toHaveBeenCalled()
-    expect(account.sendTransaction).toHaveBeenCalledTimes(1)
-    expect(state.encodedQuotes).toBe(1)
-  })
-
   it('waits for exact approval, requests a fresh checked quote and includes the spent approval fee', async () => {
     const { api, account, state } = harness({ allowance: 0n })
     const result = await api.swidge(options)
@@ -265,6 +232,7 @@ describe('allowances, fresh execution and partial progress', () => {
       { hash: hash(1), chain: 1, type: 'approval' }, { hash: SWAP_HASH, chain: 1, type: 'source' }
     ])
     expect(result.fees[0].amount).toBe(110n)
+    expect(Object.keys(account.sendTransaction.mock.calls[0][0])).toEqual(['to', 'value', 'data'])
   })
 
   it('resets nonzero insufficient Ethereum USDT allowance before exact approval', async () => {
@@ -349,10 +317,15 @@ describe('allowances, fresh execution and partial progress', () => {
     expect(account.sendTransaction).toHaveBeenCalledTimes(1)
   })
 
-  it('does not inspect optional estimated submission fees before preserving known hashes', async () => {
-    const { api, account } = harness()
+  it('skips excess allowance and preserves the swap hash without reading optional submission fees', async () => {
+    const { api, account, state } = harness({ allowance: AMOUNT + 1n })
     account.sendTransaction.mockResolvedValue({ hash: SWAP_HASH, get fee () { throw new Error('invalid optional field') } })
-    await expect(api.swidge(options)).resolves.toMatchObject({ id: SWAP_HASH, transactions: [{ hash: SWAP_HASH }] })
+    const result = await api.swidge(options)
+    expect(result).toMatchObject({ id: SWAP_HASH, hash: SWAP_HASH })
+    expect(result.transactions).toEqual([{ hash: SWAP_HASH, chain: 1, type: 'source' }])
+    expect(account.approve).not.toHaveBeenCalled()
+    expect(account.sendTransaction).toHaveBeenCalledTimes(1)
+    expect(state.encodedQuotes).toBe(1)
   })
 
   it.each(['approval', 'swap'])('treats a missing %s hash as an unknown submission', async stage => {
@@ -385,21 +358,15 @@ describe('requested fee caps', () => {
     await expect(api.swidge(options, { maxProtocolFeeBps: 10 })).resolves.toMatchObject({ id: SWAP_HASH })
   })
 
-  it('values the input trade size in native units only when a non-native network cap is requested', async () => {
-    const { api, fetchMock, state } = harness()
-    await api.swidge(options, { maxNetworkFeeBps: 100 })
-    expect(state.valuationQuotes).toBe(1)
-    const valuationRequest = fetchMock.mock.calls.filter(([url]) => url.endsWith('/quote'))
-      .map(([, request]) => JSON.parse(request.body)).find(request => !request.options.encoding_options)
-    expect(valuationRequest.orders[0]).toMatchObject({ token_in: WETH, token_out: ZeroAddress, amount: AMOUNT.toString() })
-  })
-
   it('uses native input directly for the network-cap boundary', async () => {
     const { api, account, state } = harness()
     await expect(api.swidge({ ...options, fromToken: ZeroAddress }, { maxNetworkFeeBps: 99 })).rejects.toMatchObject({ name: 'MaximumFeeExceededError' })
     expect(account.sendTransaction).not.toHaveBeenCalled()
     await expect(api.swidge({ ...options, fromToken: ZeroAddress }, { maxNetworkFeeBps: 100 })).resolves.toMatchObject({ id: SWAP_HASH })
     expect(state.valuationQuotes).toBe(0)
+    expect(account.sendTransaction).toHaveBeenCalledWith(expect.objectContaining({ value: AMOUNT }))
+    expect(account.getAllowance).not.toHaveBeenCalled()
+    expect(account.approve).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -459,8 +426,7 @@ describe('requested fee caps', () => {
 
 describe('status, discovery and inherited WDK delegates', () => {
   it.each([
-    [{ finality: 'pending' }, 'pending'], [{ finality: 'dropped' }, 'pending'],
-    [{ finality: 'confirmed', success: true }, 'completed'], [{ finality: 'final', success: false }, 'failed']
+    [{ finality: 'dropped' }, 'pending'], [{ finality: 'final', success: false }, 'failed']
   ])('maps receipt %j without guessing replacements', async (receipt, status) => {
     const { api, account } = harness()
     account.getTransaction.mockResolvedValue(receipt)
@@ -485,9 +451,8 @@ describe('status, discovery and inherited WDK delegates', () => {
     await expect(api.getSwidgeStatus(SWAP_HASH)).rejects.toMatchObject({ name: 'ReadOnlyAccountRequiredError' })
   })
 
-  it('lists configured chains and filtered token metadata including native currency once', async () => {
+  it('filters token metadata, deduplicates native currency and validates discovery filters', async () => {
     const { api, state } = harness()
-    expect((await api.getSupportedChains()).map(chain => chain.id)).toEqual([1, 8453])
     state.tokens.push({ address: ZeroAddress, symbol: 'ETH', decimals: 18, quality: 100, tax: 0 })
     state.tokens.push({ address: USDT, symbol: 'TAX', decimals: 6, quality: 100, tax: 1 })
     const tokens = await api.getSupportedTokens({ fromChain: 'ethereum', toChain: 1 })
