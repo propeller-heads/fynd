@@ -646,19 +646,19 @@ impl FyndBuilder {
     /// Sets how many tokens one token-pricing pass may attempt.
     ///
     /// A pass ranks its candidates and attempts this many. Tokens it leaves out keep their
-    /// previous price and rank first in the next pass, so a cap smaller than the candidates
-    /// rotates over them rather than starving part of the set.
-    pub fn pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+    /// previous price and rank first in the next pass, so a cap smaller than the candidate set
+    /// rotates over it rather than starving part of it.
+    pub fn set_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
         self.pricing_max_tokens_per_pass = Some(max_tokens);
         self
     }
 
-    /// Sets the shortest time between two token-pricing passes.
+    /// Sets how long after a token-pricing pass starts the next one may start.
     ///
     /// The cap bounds what one pass costs; this bounds how often one runs. A block inside the
-    /// interval serves the stored prices, unless a component arrived or the manager asked for a
-    /// full recompute.
-    pub fn pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+    /// interval serves the stored prices, unless a component brought a token with no price or
+    /// the manager asked for a full recompute.
+    pub fn set_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_min_pass_interval = Some(interval);
         self
     }

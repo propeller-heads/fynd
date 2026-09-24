@@ -1,89 +1,105 @@
-//! Computes token prices relative to a gas token (e.g., ETH).
+//! Computes token prices relative to the gas token.
 //!
-//! Runs once per block, in the background chain of derived computations — never on the quoting
-//! path. Quotes read whatever the last completed run stored, so prices lag the chain head by at
-//! most the block or two a run is in flight. A token that cannot be priced is absent from the
-//! map: bought but unsellable is reported as a failed item, unreachable is only counted.
+//! `ComputationManager` calls `compute` in the background after market component changes. Quote
+//! requests read stored prices without waiting. Prices can remain unchanged across market events.
 //!
 //! # Algorithm
 //!
-//! Routes are found with the same Bellman-Ford algorithm the solvers use to answer quotes, so a
-//! price reflects what a trade would actually get, slippage and fees included. Each token is
-//! bought with a fixed amount of gas token and sold back, and its price is the mean of the buy
-//! price and the sell price — fees and slippage in, gas out, per the next paragraph. The mean's
-//! round-trip bias is one-sided: it only ever understates a token's value, negligibly for deep
-//! pairs and heavily for thin ones. A geometric mean would be exact under symmetric loss, but it
-//! is irrational and prices are exact fractions.
+//! A pricing pass attempts to calculate prices for selected tokens. A route is a sequence of swaps
+//! through market components, such as pools. Pricing uses the same Bellman-Ford algorithm as
+//! quotes.
 //!
-//! The algorithm runs with gas-aware scoring off. Off is what keeps this non-circular: gas-aware
-//! scoring converts a route's gas into output-token terms, which needs the prices this computation
-//! produces. Nothing here reads derived data, so token prices depend on no other computation.
+//! Each pass simulates buying selected tokens with `probe_amount` of the gas token, then selling
+//! the bought amounts back. Both simulations include swap fees and slippage: the effect of trade
+//! size on the exchange rate. Gas-aware scoring needs the prices being calculated, so pricing
+//! disables gas-aware scoring. Pricing needs no output from another derived computation.
+//!
+//! `price_token` stores the arithmetic mean of two rates as an exact fraction. Both rates express
+//! token units per gas token unit. The buy rate divides the bought amount by `probe_amount`; the
+//! sell rate divides the bought amount by the gas token amount returned. The mean understates the
+//! token's value in gas, with greater bias for larger round-trip losses. The geometric mean would
+//! be exact for equal losses in both directions, but an exact fraction cannot always represent it.
+//!
+//! A token dependency is a component whose changes can require a new price. `path_components`
+//! includes possible sell routes and chosen buy and sell routes, so alternative routes can trigger
+//! updates. `update_prices` removes the price and dependencies when an attempted token has no
+//! price.
 //!
 //! # Cost
 //!
-//! Buying is cheap: one pass over the graph finds the buy route to every token at once. Selling
-//! dominates: each token needs its own relaxation, because each sell starts from a different
-//! amount and slippage makes routes amount-dependent. All of it — the buy pass and every sell —
-//! runs against one market snapshot taken when the pass starts, so both legs of every price and
-//! the block the result is stored under agree. Token prices run in the same stage as spot prices
-//! and a stage's outputs are stored once every computation in it returns, so a slow pass delays
-//! that block's spot prices as well as its component depths and the start of the next block's
-//! computations. A deadline over the sell loop, where nearly all of a pass's time goes, bounds
-//! that delay: tokens it cuts off keep their previous price and stay visible to invalidation.
-//! The deadline is a backstop, not what sizes a pass. The next section says what does, and why
-//! the set of tokens a change points at cannot.
+//! Each pass uses one market snapshot and one buy search for all selected tokens. Each token needs
+//! a separate sell search because slippage makes route choice depend on the bought amount. Sell
+//! searches account for most of the work.
+//!
+//! Token prices and spot prices run in the same stage: a group of derived computations that run
+//! together. The manager waits for the stage before storing outputs. Slow pricing therefore delays
+//! spot price storage, component depth computation, and processing of the next market event.
+//!
+//! `pass_budget` starts after snapshot creation and the buy search. The sell loop checks the
+//! deadline before each token but does not interrupt a sell search already in progress.
 //!
 //! # Why the pass is capped, spaced and rotated
 //!
-//! "Only the tokens a change affects" does not bound anything on a dense market. Every route
-//! ends at the gas token, the gas token's own pools are the ones that trade every block, and
-//! `path_components` names every candidate route rather than only the chosen one. The changed
-//! set therefore intersects almost every stored dependency set. Measured on Base at `min-tvl 1`
-//! on 2026-09-23: 46 consecutive incremental passes selected 2126 to 2134 tokens out of 2130,
-//! and pricing ran at a 97.8% duty cycle, indistinguishable from re-pricing everything.
+//! Many sell routes share components near the gas token. Dependencies also include alternative
+//! routes. Selecting tokens from changed dependencies alone therefore does not reliably limit
+//! work. Measured on Base at `min-tvl 1` on 2026-09-23: 46 consecutive selections took 2126 to
+//! 2134 tokens of 2130, and pricing ran at a 97.8% duty cycle.
 //!
-//! So a pass is sized by `max_tokens_per_pass`, and `pass_budget` is only a backstop against one
-//! pathological token. The cap has to be what sizes it: the market snapshot is pruned toward the
-//! tokens the pass will attempt, so the set is fixed before any solving starts, and a deadline
-//! cannot shape a set it only ever interrupts.
+//! `max_tokens_per_pass` caps every pass by count. `solve_token_prices` selects tokens before
+//! building the snapshot around routes toward those tokens. A time limit cannot select that set.
 //!
-//! A token is a candidate when a change points at it, when a component carrying it arrived, or
-//! when it has no price. Attempted in that order, longest-unpriced first within the last group:
+//! ## Which tokens a pass attempts
 //!
-//! 1. Tokens of components that arrived this block. A new component is in no stored dependency set,
-//!    so nothing else would point at the tokens whose routes it may have just improved, and a token
-//!    it introduces cannot be quoted until it has a price.
-//! 2. Tokens with no price yet. This rank is what a selection built from stored dependencies cannot
-//!    express: an unpriced token is in no dependency set, so no change would ever name it. Without
-//!    it a capped first pass leaves the rest of the market unpriced for as long as the process runs
-//!    — 97 tokens of 2211 on the Base run that found this.
-//! 3. Tokens a change points at, longest-unpriced first. This is what makes a cap smaller than the
-//!    candidate set safe: it rotates the tail forward instead of re-pricing one head.
+//! A candidate is a market token that qualifies for selection. The gas token never qualifies. In a
+//! normal update, a token qualifies if an added component contains the token, the token has no
+//! stored price, or a stored dependency changes. Unpriced tokens remain eligible because no stored
+//! dependency can trigger another attempt.
 //!
-//! A priced token that no change points at is not a candidate at all. Its stored dependency set
-//! already names every candidate route, so a rival pool becoming better does point at it.
+//! `select_pass_tokens` puts tokens from added components first, including priced tokens. Stored
+//! dependencies cannot include new components, and new tokens need prices before quoting can use
+//! those tokens. A token holds this rank until a pass attempts it, because the cap can cut the
+//! rank short and no stored dependency would name the new component afterwards. This priority does
+//! not cover other priced tokens that reach added components through further swaps. Those tokens
+//! still need a stored dependency change to qualify.
 //!
-//! Tokens the cap leaves out are reported exactly like ones the deadline cut off: they keep
-//! their price, their dependencies and their stamp, and they rank by that stamp next time.
+//! Passes have numbers. A token's stamp is the number of the pass that last attempted it, or zero
+//! if no pass attempted it. Both ranks order by smallest stamp first. Failed attempts update
+//! stamps, so failing tokens move behind older candidates. A token with no price has the stamp
+//! zero until a pass attempts it, so such a token comes before every token that has a price. This
+//! order spreads attempts when candidates remain eligible. A priced token excluded by the cap
+//! needs another dependency change to qualify again, unless it holds the rank of an added
+//! component.
 //!
-//! Seeding the whole market is therefore only needed when there is nothing stored to select
-//! from at all, which in practice means startup: `ChangedComponents::is_full_recompute` is
-//! never set outside tests, so seeding is reached through `update_prices` finding an empty
-//! store rather than through the flag. Nothing else gets it, including a topology change,
-//! because rank 1 covers what a topology change would once have been a full solve for. A seeding
-//! pass runs without the cap, bounded only by `pass_budget`: readiness flips as soon as anything
-//! is stored, so a capped one would report a pod ready with a fraction of the market priced.
+//! An unattempted token is a token skipped without a decision on whether a price exists. The cap,
+//! sell deadline, or a buy timeout before reaching the token can cause this. Unattempted tokens
+//! keep their previous prices, dependencies, and stamps.
 //!
-//! The cap bounds what one pass costs; `min_pass_interval` bounds how often one runs. Both are
-//! needed. The manager starts a computation per market event, and on Base that is several a
-//! second, so capping alone left pricing at a 94% duty cycle: passes 46 times cheaper, simply
-//! run 22 times more often. A block inside the interval serves the stored prices and does no
-//! pricing work.
+//! ## How often a pass runs
 //!
-//! Two things run a pass whatever the interval says. A full recompute has nothing stored to
-//! serve instead. A component arriving brings tokens that cannot be quoted at all until they
-//! are priced, so a newly listed token is priced on the block it appears rather than at the end
-//! of the interval.
+//! `min_pass_interval` spaces passes to limit repeated pricing work. A count cap alone can still
+//! allow passes to run almost continuously: on Base the cap alone left pricing at a 94% duty
+//! cycle, with passes 46 times cheaper that ran 22 times more often. A block has three outcomes:
+//!
+//! - With no previous interval, or after the interval expires, `start_pass` starts the interval
+//!   again. The pass selects up to `max_tokens_per_pass` candidates.
+//! - Before expiry, added components allow a pass for the tokens in those components that have no
+//!   price. Such a token cannot be quoted at all until a pass prices it. This pass also uses
+//!   `max_tokens_per_pass`, because the count of added components has no bound: a protocol resync
+//!   sends that protocol's whole pool set again. This pass does not start the interval again.
+//! - Before expiry, without such tokens, `compute` returns stored prices. If no price map exists,
+//!   `compute` proceeds to initialize prices.
+//!
+//! ## Initializing prices
+//!
+//! Seeding rebuilds the price and dependency maps with `seed_all_prices`. When `update_prices`
+//! finds either map missing, `update_prices` returns `None`, and `compute` seeds prices. This path
+//! initializes prices at startup. Adding a component alone does not require seeding.
+//!
+//! `ChangedComponents::is_full_recompute` also forces seeding and starts the interval again. Only
+//! tests set it. `seed_all_prices` selects every market token except the gas token without a count
+//! cap. `derived_data_ready` does not require every token to have a price. A cap could therefore
+//! leave tokens unattempted at readiness even with time left for more work. Seeding avoids that
+//! cap, but the sell deadline, failures, and timeouts can still leave tokens without prices.
 
 use std::{
     sync::{Arc, Mutex, MutexGuard},
@@ -188,8 +204,9 @@ impl<'a> PricingPass<'a> {
 
     /// Prices every token the budget allows, one sell relaxation each — the pass's dominant
     /// cost. Pure CPU work: callers run it on a blocking thread.
-    /// `tokens_to_price` is an order, not a set: the caller puts the tokens that must not be
-    /// dropped by the deadline at the front.
+    /// The order of `tokens_to_price` decides what a cut-short pass prices: the loop attempts
+    /// the tokens in the order given and stops at the deadline, so the caller puts the tokens
+    /// that must not be dropped at the front.
     fn sell_loop(&mut self, tokens_to_price: Vec<Address>, block: u64) -> PricingPassOutcome {
         let deadline = Instant::now() + self.computation.pass_budget;
         let mut prices = FxHashMap::default();
@@ -365,7 +382,9 @@ pub struct TokenGasPriceComputation {
     pass_budget: Duration,
     /// Most tokens one pass attempts. This is what bounds a pass; see `select_pass_tokens`.
     max_tokens_per_pass: usize,
-    /// Shortest time between two passes. The cap bounds what one pass costs; this bounds how
+    /// How long after a pass starts the next one may start. It is a lower bound on the gap
+    /// between two passes, not a schedule: a pass runs when this time has elapsed *and* the
+    /// market gives it something to price. The cap bounds what one pass costs; this bounds how
     /// often one runs. See the module's "Why the pass is capped, spaced and rotated" section.
     min_pass_interval: Duration,
     /// Everything the schedule of a pass is decided from: when to run one, and which tokens
@@ -398,12 +417,13 @@ struct PassState {
 /// How much of a pass the interval allows right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PassSlot {
-    /// The interval has elapsed. A pass of up to `max_tokens_per_pass` runs and restarts it.
+    /// The interval has elapsed. A pass over every candidate runs and starts the interval
+    /// again.
     Due,
     /// Inside the interval, but a component arrived. Only the tokens it carries that have no
-    /// price are priced, and the interval is left running: a chain that lists a pool on most
-    /// blocks would otherwise turn every block into a full pass and the interval would bound
-    /// nothing.
+    /// price are priced, and the interval keeps running: a chain that lists a pool on most
+    /// blocks would otherwise price a full rank of candidates on most blocks, and the interval
+    /// would bound nothing.
     ArrivalsOnly,
     /// Inside the interval with nothing that cannot wait for it.
     Deferred,
@@ -521,7 +541,7 @@ fn select_pass_tokens(
 /// from holding the derived chain, so it stays generous.
 const DEFAULT_PASS_BUDGET: Duration = Duration::from_secs(30);
 
-/// Default shortest time between two passes.
+/// Default time a pass waits for the pass before it.
 ///
 /// A capped pass costs about 0.6s on Base at `min-tvl 1`, and the manager starts another as soon
 /// as one ends, so the cap alone left pricing at a 94% duty cycle. Two seconds puts that near
@@ -580,7 +600,8 @@ impl TokenGasPriceComputation {
         Self { max_tokens_per_pass, ..self }
     }
 
-    /// Sets the shortest time between two passes. `Duration::ZERO` runs one per block.
+    /// Sets how long after a pass starts the next one may start. `Duration::ZERO` lets a pass
+    /// run on every market event.
     pub fn with_min_pass_interval(self, min_pass_interval: Duration) -> Self {
         Self { min_pass_interval, ..self }
     }
@@ -596,13 +617,13 @@ impl TokenGasPriceComputation {
         }
     }
 
-    /// Returns how much of a pass may run now, and restarts the interval for a whole one.
+    /// Says how much of a pass may run now, and starts the interval again for a whole one.
     ///
     /// `must_solve` runs a whole pass whatever the interval says, for a caller that has nothing
     /// stored to serve instead. `arrivals` only earns the tokens that arrived: those cannot be
-    /// quoted until they are priced, but pricing them is not a reason to restart the interval or
-    /// to re-rank the rest of the market.
-    fn claim_pass(&self, arrivals: bool, must_solve: bool) -> PassSlot {
+    /// quoted until they are priced, but pricing them is not a reason to start the interval
+    /// again or to rank the rest of the market again.
+    fn start_pass(&self, arrivals: bool, must_solve: bool) -> PassSlot {
         let mut state = self.lock_pass_state();
         let now = Instant::now();
         let due = state
@@ -641,8 +662,8 @@ impl TokenGasPriceComputation {
     }
 
     /// Takes the number of the pass that just ran, stamps every token it attempted, drops the
-    /// attempted tokens from the arrived rank, and forgets the ones the market no longer holds
-    /// so neither set can grow without bound.
+    /// attempted tokens from the arrived rank, and forgets the tokens that left the market so
+    /// neither set can grow without bound.
     ///
     /// Attempted means selected and not carried: a token the cap or the deadline left out comes
     /// back as unattempted and keeps whatever stamp it had. Priced and failed tokens are stamped
@@ -819,12 +840,12 @@ impl TokenGasPriceComputation {
             .collect()
     }
 
-    /// Offers the pass the tokens a change could have moved, ranked so the budget cuts the
-    /// least valuable last.
+    /// Offers the pass the tokens a change could have moved, ranked so the cap cuts the least
+    /// valuable last.
     ///
-    /// The selection is not a bound — on a dense market it is almost every priced token, for
-    /// the reason the module doc gives. `max_tokens_per_pass` is the bound, and the rank
-    /// decides who gets under it.
+    /// The selection is not a bound. On a dense market it is almost every priced token, for the
+    /// reason the module doc gives. `max_tokens_per_pass` is the bound, and the rank decides
+    /// which tokens get under it.
     ///
     /// `Ok(None)` when there is nothing stored to select from, so seeding is needed.
     async fn update_prices(
@@ -953,80 +974,7 @@ impl TokenGasPriceComputation {
 
         Ok(Some(ComputationOutput::with_failures(result, solved.failed_items)))
     }
-}
 
-#[async_trait]
-impl DerivedComputation for TokenGasPriceComputation {
-    type Output = TokenGasPrices;
-
-    const ID: ComputationId = "token_prices";
-
-    fn requirements(&self) -> ComputationRequirements {
-        // Reads no derived data, so no other computation has to precede this one.
-        ComputationRequirements::none()
-    }
-
-    fn persist(
-        store: &mut DerivedData,
-        output: ComputationOutput<Self::Output>,
-        block: u64,
-        is_full_recompute: bool,
-    ) {
-        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
-    }
-
-    #[instrument(
-        level = "debug",
-        skip_all,
-        fields(computation_id = Self::ID, updated_token_prices)
-    )]
-    async fn compute(
-        &self,
-        market: &MarketData,
-        store: &SharedDerivedDataRef,
-        changed: &ChangedComponents,
-    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        // A component arriving earns a pass inside the interval, but only for the tokens it
-        // carries; a full recompute earns a whole one, having nothing stored to serve instead.
-        let scope = match self.claim_pass(!changed.added.is_empty(), changed.is_full_recompute) {
-            PassSlot::Due => PassScope::Whole,
-            PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
-            PassSlot::Deferred => {
-                let stored = {
-                    let store_guard = store.read().await;
-                    store_guard.token_prices().cloned()
-                };
-                // Nothing stored means nothing to serve, so the interval cannot defer this
-                // block: seeding runs instead.
-                let Some(prices) = stored else {
-                    return self
-                        .seed_all_prices(market, store)
-                        .await;
-                };
-                Span::current().record("updated_token_prices", prices.len());
-                return Ok(ComputationOutput::with_failures(prices, Vec::new()));
-            }
-        };
-
-        // Startup and lag recovery have nothing stored to select from, so they offer every token
-        // to the pass. So does a block whose selection finds nothing stored. Every other block
-        // selects, and the cap bounds what the pass gets through — a topology change included,
-        // since its tokens are what the selection ranks first.
-        if !changed.is_full_recompute {
-            if let Some(result) = self
-                .update_prices(market, store, changed, scope)
-                .await?
-            {
-                return Ok(result);
-            }
-        }
-
-        self.seed_all_prices(market, store)
-            .await
-    }
-}
-
-impl TokenGasPriceComputation {
     /// Prices the whole market and writes the stored set from scratch.
     ///
     /// Runs only when there is nothing stored to select from, which in practice means startup.
@@ -1103,6 +1051,77 @@ impl TokenGasPriceComputation {
         Span::current().record("updated_token_prices", token_prices.len());
 
         Ok(ComputationOutput::with_failures(token_prices, solved.failed_items))
+    }
+}
+
+#[async_trait]
+impl DerivedComputation for TokenGasPriceComputation {
+    type Output = TokenGasPrices;
+
+    const ID: ComputationId = "token_prices";
+
+    fn requirements(&self) -> ComputationRequirements {
+        // Reads no derived data, so no other computation has to precede this one.
+        ComputationRequirements::none()
+    }
+
+    fn persist(
+        store: &mut DerivedData,
+        output: ComputationOutput<Self::Output>,
+        block: u64,
+        is_full_recompute: bool,
+    ) {
+        store.set_token_prices(output.data, output.failed_items, block, is_full_recompute);
+    }
+
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(computation_id = Self::ID, updated_token_prices)
+    )]
+    async fn compute(
+        &self,
+        market: &MarketData,
+        store: &SharedDerivedDataRef,
+        changed: &ChangedComponents,
+    ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        // A component arriving earns a pass inside the interval, but only for the tokens it
+        // carries; a full recompute earns a whole one, having nothing stored to serve instead.
+        let scope = match self.start_pass(!changed.added.is_empty(), changed.is_full_recompute) {
+            PassSlot::Due => PassScope::Whole,
+            PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
+            PassSlot::Deferred => {
+                let stored = {
+                    let store_guard = store.read().await;
+                    store_guard.token_prices().cloned()
+                };
+                // Nothing stored means nothing to serve, so the interval cannot defer this
+                // block: seeding runs instead.
+                let Some(prices) = stored else {
+                    return self
+                        .seed_all_prices(market, store)
+                        .await;
+                };
+                Span::current().record("updated_token_prices", prices.len());
+                return Ok(ComputationOutput::with_failures(prices, Vec::new()));
+            }
+        };
+
+        // Startup and lag recovery have nothing stored to select from, so they offer every token
+        // to the pass. So does a block whose selection finds nothing stored. Every other block
+        // selects, and the cap bounds what the pass gets through, whatever the block brought:
+        // the tokens of an added component are ranked first, not exempted from the cap.
+        if !changed.is_full_recompute {
+            if let Some(result) = self
+                .update_prices(market, store, changed, scope)
+                .await?
+            {
+                return Ok(result);
+            }
+        }
+
+        self.seed_all_prices(market, store)
+            .await
     }
 }
 
@@ -1426,8 +1445,8 @@ mod tests {
 
     /// An arrival re-prices the tokens it carries and nothing else.
     ///
-    /// Any add or remove used to force a full solve, so both tokens here would pick up the
-    /// moved market. Only the arrived component's token does now.
+    /// The market moves under both tokens here. Only the token of the arrived component is a
+    /// candidate, so only that token picks the move up.
     #[tokio::test]
     async fn test_arrived_component_reprices_only_its_own_tokens() {
         use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
@@ -1945,26 +1964,26 @@ mod tests {
             .with_min_pass_interval(Duration::from_millis(400));
 
         assert_eq!(
-            computation.claim_pass(false, false),
+            computation.start_pass(false, false),
             PassSlot::Due,
             "the first pass is due, nothing has run"
         );
         assert_eq!(
-            computation.claim_pass(false, false),
+            computation.start_pass(false, false),
             PassSlot::Deferred,
             "a block straight after one inside the interval waits"
         );
 
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(
-            computation.claim_pass(true, false),
+            computation.start_pass(true, false),
             PassSlot::ArrivalsOnly,
             "an arrival inside the interval earns a pass for its own tokens"
         );
 
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
-            computation.claim_pass(false, false),
+            computation.start_pass(false, false),
             PassSlot::Due,
             "450ms after the only whole pass the interval has elapsed, so the arrival in the \
              middle of it did not restart it"
@@ -1978,10 +1997,10 @@ mod tests {
         let computation = TokenGasPriceComputation::new(eth, 1, BigUint::from(PROBE_AMOUNT))
             .with_min_pass_interval(Duration::from_secs(3600));
 
-        assert_eq!(computation.claim_pass(false, false), PassSlot::Due);
-        assert_eq!(computation.claim_pass(false, false), PassSlot::Deferred);
+        assert_eq!(computation.start_pass(false, false), PassSlot::Due);
+        assert_eq!(computation.start_pass(false, false), PassSlot::Deferred);
         assert_eq!(
-            computation.claim_pass(false, true),
+            computation.start_pass(false, true),
             PassSlot::Due,
             "a full recompute has nothing to serve instead, so it runs a whole pass"
         );

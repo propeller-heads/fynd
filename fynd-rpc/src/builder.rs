@@ -203,19 +203,19 @@ impl FyndRPCBuilder {
 
     /// Sets how many tokens one token-pricing pass may attempt. Leaving this unset keeps the
     /// computation's default.
-    pub fn pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+    pub fn set_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .pricing_max_tokens_per_pass(max_tokens);
+            .set_pricing_max_tokens_per_pass(max_tokens);
         self
     }
 
-    /// Sets the shortest time between two token-pricing passes. Leaving this unset keeps the
-    /// computation's default.
-    pub fn pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+    /// Sets how long after a token-pricing pass starts the next one may start. Leaving this
+    /// unset keeps the computation's default.
+    pub fn set_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
         self.fynd_builder = self
             .fynd_builder
-            .pricing_min_pass_interval(interval);
+            .set_pricing_min_pass_interval(interval);
         self
     }
 

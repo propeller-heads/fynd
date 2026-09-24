@@ -130,8 +130,8 @@ pub struct ComputationManagerConfig {
     /// Overrides how many tokens one token-pricing pass may attempt; `None` keeps the
     /// computation's default.
     pricing_max_tokens_per_pass: Option<usize>,
-    /// Overrides the shortest time between two token-pricing passes; `None` keeps the
-    /// computation's default.
+    /// Overrides how long after a token-pricing pass starts the next one may start; `None`
+    /// keeps the computation's default.
     pricing_min_pass_interval: Option<Duration>,
 }
 
@@ -165,7 +165,7 @@ impl ComputationManagerConfig {
         self
     }
 
-    /// Overrides the shortest time between two token-pricing passes.
+    /// Overrides how long after a token-pricing pass starts the next one may start.
     pub fn with_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_min_pass_interval = Some(interval);
         self
