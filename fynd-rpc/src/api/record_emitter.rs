@@ -40,13 +40,13 @@ impl RecordEmitter {
     }
 }
 
-/// Counts one record this pod will not store, under `records_dropped_total{reason}`.
+/// Counts one record this pod will not store, under `quote_records_dropped_total{reason}`.
 ///
 /// The reasons: `queue_full` when the queue had no room for it, `sink_closed` when the sending
 /// task is gone, and `sink_timeout` / `sink_rejected` when that task could not hand it to the
 /// collector.
 pub(crate) fn record_drop(reason: &'static str) {
-    counter!("records_dropped_total", "reason" => reason).increment(1);
+    counter!("quote_records_dropped_total", "reason" => reason).increment(1);
 }
 
 #[cfg(test)]
@@ -91,7 +91,7 @@ mod tests {
             .to_string()
     }
 
-    /// Runs `f` against a local recorder and returns the `records_dropped_total` counts by reason.
+    /// Runs `f` against a local recorder and returns the drop counts by reason.
     fn drops_by_reason(f: impl FnOnce()) -> Vec<(String, u64)> {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -100,7 +100,7 @@ mod tests {
             .snapshot()
             .into_vec()
             .into_iter()
-            .filter(|(key, _, _, _)| key.key().name() == "records_dropped_total")
+            .filter(|(key, _, _, _)| key.key().name() == "quote_records_dropped_total")
             .map(|(key, _, _, value)| {
                 let reason = key
                     .key()
