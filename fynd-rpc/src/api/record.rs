@@ -13,8 +13,8 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use fynd_core::{
-    types::BlockInfo, EncodingOptions, ExclusiveAccess, OrderQuote, Quote, QuoteRequest,
-    SolveError, Swap, UserTransferType,
+    types::BlockInfo, ClientFeeParams, EncodingOptions, ExclusiveAccess, OrderQuote, Quote,
+    QuoteRequest, SolveError, Swap, UserTransferType,
 };
 use serde::{Serialize, Serializer};
 use serde_with::{serde_as, DisplayFromStr};
@@ -170,13 +170,17 @@ impl RequestRecord {
 }
 
 /// The encoding options that shape the transaction but not the route. Permits, signatures and
-/// client fee params stay out.
+/// the fee receiver stay out.
 #[derive(Debug, Serialize)]
 struct EncodingRecord {
     /// Decimal fraction, for example `0.005`.
     slippage: String,
     /// Wire name, for example `transfer_from`.
     transfer_type: &'static str,
+    /// The fee the client asked the router to take from the output, in basis points. A fee the
+    /// solve did not account for shows up as a route that reverts, so a reader needs the number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_fee_bps: Option<u16>,
 }
 
 impl EncodingRecord {
@@ -184,6 +188,9 @@ impl EncodingRecord {
         Self {
             slippage: options.slippage().to_string(),
             transfer_type: transfer_type_name(options.transfer_type()),
+            client_fee_bps: options
+                .client_fee_params()
+                .map(ClientFeeParams::bps),
         }
     }
 }
@@ -488,7 +495,7 @@ mod tests {
         expect(&request["orders"][0], &["token_in", "token_out", "amount", "side"]);
         expect(&request["options"], &["timeout_ms", "min_responses", "max_gas", "route_filter"]);
         expect(&request["options"]["route_filter"], &["exclude_pools"]);
-        expect(&request["encoding"], &["slippage", "transfer_type"]);
+        expect(&request["encoding"], &["slippage", "transfer_type", "client_fee_bps"]);
         let outcome = &value["outcome"];
         expect(
             outcome,
@@ -543,10 +550,12 @@ mod tests {
             "permit",
             "calldata",
             "transaction",
-            "fee",
+            "client_fee_params",
+            "fee_breakdown",
             "\"id\"",
             "cccccccc",
             "77777777",
+            "eeeeeeee",
         ] {
             assert!(!json.contains(needle), "{needle} leaked; json was: {json}");
         }
@@ -568,7 +577,7 @@ mod tests {
         assert_eq!(value["request"]["exclusive_access"], true);
         assert_eq!(
             value["request"]["encoding"],
-            json!({ "slippage": "0.005", "transfer_type": "transfer_from" })
+            json!({ "slippage": "0.005", "transfer_type": "transfer_from", "client_fee_bps": 100 })
         );
 
         let outcome = &value["outcome"];
