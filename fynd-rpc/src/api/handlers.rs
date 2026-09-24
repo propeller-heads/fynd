@@ -23,7 +23,6 @@ use crate::api::{
     exclusive_access,
     middleware::ClientInfo,
     record::{self, QuoteRecord, RequestRecord},
-    record_emitter::RecordEmitter,
     request_capture::{log_request_capture, log_slow_solve, SLOW_SOLVE_THRESHOLD_MS},
 };
 
@@ -108,7 +107,10 @@ pub async fn quote(
     };
     let client = ClientInfo::from_request(&http_request);
     let record = QuoteRecord::build(request_record, &result, state.chain(), client, head);
-    log_quote_outcome(record, state.record_emitter());
+    log_quote_outcome(&record);
+    if let Some(emitter) = state.record_emitter() {
+        emitter.emit(record);
+    }
 
     let dto_quote: dto::Quote = result?.into();
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -134,33 +136,26 @@ pub fn validate_quote_request(
     Ok(core_request)
 }
 
-/// Hands the finished record to `emitter`, then emits the failure-capture and slow-solve log
-/// lines for it.
+/// Emits the failure-capture and slow-solve log lines for a finished quote.
 ///
 /// Both lines read the request and the outcome off `record`, so they cannot disagree with what
-/// the collector receives — the copies they need are taken before the record moves into the
-/// queue, where it is dropped and counted when the queue is full. Neither step waits on
-/// anything: serialization happens on a detached task carrying the current span, so it never
-/// adds latency to the response. Successful, fast quotes log nothing.
+/// the collector receives. Serialization happens on a detached task carrying the current span,
+/// so it never adds latency to the response. Successful, fast quotes log nothing.
 ///
 /// # Panics
 ///
 /// Spawns the detached task with [`actix_web::rt::spawn`], which panics when called outside a
 /// running Actix system. Callers must invoke this from an Actix worker (i.e. inside a handler).
-pub fn log_quote_outcome(record: QuoteRecord, emitter: Option<&RecordEmitter>) {
+pub fn log_quote_outcome(record: &QuoteRecord) {
     let is_failure = record.is_failure();
     let slow_solve_time_ms = record.slow_solve_time_ms();
-    // Taken while the record is still here, and only for a quote that logs, so the copies are
-    // never wasted.
-    let logged = (is_failure || slow_solve_time_ms.is_some())
-        .then(|| (record.replay().clone(), record.log_outcome()));
-    if let Some(emitter) = emitter {
-        emitter.emit(record);
-    }
-    let Some((capture, outcome)) = logged else {
+    if !is_failure && slow_solve_time_ms.is_none() {
         return;
-    };
+    }
+    // Past the guard: this quote logs, so the copies below are not wasted.
+    let capture = record.replay().clone();
     let num_orders = capture.num_orders();
+    let outcome = record.log_outcome();
     let span = tracing::Span::current();
     actix_web::rt::spawn(async move {
         span.in_scope(|| {
