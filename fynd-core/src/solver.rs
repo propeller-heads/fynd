@@ -511,6 +511,10 @@ pub struct FyndBuilder {
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     tycho_subscription_buffer_size: Option<usize>,
+    /// Shortest time between two full token-pricing passes; `None` keeps the computation's
+    /// default.
+    pricing_max_tokens_per_pass: Option<usize>,
+    pricing_min_pass_interval: Option<Duration>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -548,6 +552,8 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
+            pricing_max_tokens_per_pass: None,
+            pricing_min_pass_interval: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -634,6 +640,26 @@ impl FyndBuilder {
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
         self.tycho_subscription_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets how many tokens one token-pricing pass may attempt.
+    ///
+    /// A pass ranks its candidates and attempts this many. Tokens it leaves out keep their
+    /// previous price and rank first in the next pass, so a cap smaller than the candidate set
+    /// rotates over it rather than starving part of it.
+    pub fn set_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+        self.pricing_max_tokens_per_pass = Some(max_tokens);
+        self
+    }
+
+    /// Sets how long after a token-pricing pass starts the next one may start.
+    ///
+    /// The cap bounds what one pass costs; this bounds how often one runs. A block inside the
+    /// interval serves the stored prices, unless a component brought a token with no price or
+    /// the manager asked for a full recompute.
+    pub fn set_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_min_pass_interval = Some(interval);
         self
     }
 
@@ -892,10 +918,16 @@ impl FyndBuilder {
                 .iter()
                 .map(PoolEntry::max_hops),
         );
-        let computation_config = ComputationManagerConfig::new()
+        let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
         let (computation_manager, _) =
@@ -1484,10 +1516,13 @@ impl Solver {
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
-            // Replay tests assert exact priced-token counts against a deterministic recording;
-            // an effectively unbounded budget keeps a starved CI machine from cutting the
-            // pricing pass short and failing the count.
-            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60));
+            // Replay tests assert exact priced-token counts against a deterministic recording, so
+            // neither bound on a pricing pass may apply: an effectively unbounded budget keeps a
+            // starved CI machine from cutting a pass short, and an unbounded cap keeps a pass
+            // from deferring tokens to a later one that the replay never runs.
+            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60))
+            .with_pricing_max_tokens_per_pass(usize::MAX)
+            .with_pricing_min_pass_interval(Duration::ZERO);
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;

@@ -202,7 +202,8 @@ pub async fn time_derived_computations(settings: &DerivedBenchSettings, updates:
                 updated: updated_components,
                 is_full_recompute: false,
             };
-            if !changed.is_topology_change() && changed.updated.is_empty() {
+            if changed.added.is_empty() && changed.removed.is_empty() && changed.updated.is_empty()
+            {
                 continue;
             }
             let block = read_current_block(&market).await;

@@ -201,6 +201,24 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets how many tokens one token-pricing pass may attempt. Leaving this unset keeps the
+    /// computation's default.
+    pub fn set_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .set_pricing_max_tokens_per_pass(max_tokens);
+        self
+    }
+
+    /// Sets how long after a token-pricing pass starts the next one may start. Leaving this
+    /// unset keeps the computation's default.
+    pub fn set_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .set_pricing_min_pass_interval(interval);
+        self
+    }
+
     /// Overrides the default encoder with a custom one.
     pub fn encoder(mut self, encoder: Encoder) -> Self {
         self.fynd_builder = self.fynd_builder.encoder(encoder);

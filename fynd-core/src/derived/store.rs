@@ -275,9 +275,24 @@ impl DerivedData {
         self.token_prices_deps = Some(ComputedValue { data: prices, block });
     }
 
-    /// Clears token prices with dependencies.
-    pub fn clear_token_prices_deps(&mut self) {
-        self.token_prices_deps = None;
+    /// Edits the stored dependency map in place and stamps it with `block`.
+    ///
+    /// Returns `false` when nothing is stored yet, in which case `edit` never runs.
+    ///
+    /// The incremental pricing pass changes a handful of entries in a map that holds one
+    /// `path_components` set per priced token. Replacing the map would clone every one of those
+    /// sets to change a few of them, which on a large market is the pass's dominant cost.
+    pub fn edit_token_prices_deps(
+        &mut self,
+        block: u64,
+        edit: impl FnOnce(&mut TokenPricesWithDeps),
+    ) -> bool {
+        let Some(stored) = self.token_prices_deps.as_mut() else {
+            return false;
+        };
+        edit(&mut stored.data);
+        stored.block = block;
+        true
     }
 
     // -------------------------------------------------------------------------

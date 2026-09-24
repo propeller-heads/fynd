@@ -184,6 +184,9 @@ pub struct ComputationOutput<T> {
 }
 
 impl<T> ComputationOutput<T> {
+    /// Only computations that cannot report per-item failures use this, and the ones that
+    /// ship all can, so it is reachable from tests alone.
+    #[cfg(test)]
     pub fn success(data: T) -> Self {
         Self { data, failed_items: vec![] }
     }

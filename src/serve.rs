@@ -366,6 +366,12 @@ async fn setup_solver(
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }
+    if let Some(max_tokens) = args.pricing_max_tokens_per_pass {
+        builder = builder.set_pricing_max_tokens_per_pass(max_tokens);
+    }
+    if let Some(ms) = args.pricing_min_pass_interval_ms {
+        builder = builder.set_pricing_min_pass_interval(Duration::from_millis(ms));
+    }
     builder = builder.price_guard_enabled(args.enable_price_guard);
     builder = builder.simulation_enabled(args.enable_simulation);
     let watermark = args
