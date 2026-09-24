@@ -40,6 +40,11 @@ pub struct ClientInfo {
     labels: ClientLabels,
 }
 
+/// Longest header value a record keeps. `User-Identity` and `X-User-Plan` come from the
+/// authenticating proxy, but `User-Agent` is whatever the caller sent, and a record is not the
+/// place to store a kilobyte of it.
+const MAX_CLIENT_VALUE_CHARS: usize = 128;
+
 impl ClientInfo {
     /// Reads the proxy-injected headers.
     #[must_use]
@@ -47,7 +52,12 @@ impl ClientInfo {
         let raw = |name: &str, absent: &str| {
             headers.get(name).map_or_else(
                 || absent.to_string(),
-                |value| String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                |value| {
+                    String::from_utf8_lossy(value.as_bytes())
+                        .chars()
+                        .take(MAX_CLIENT_VALUE_CHARS)
+                        .collect()
+                },
             )
         };
         let user_identity = match raw("user-identity", "unknown") {
@@ -374,6 +384,19 @@ mod tests {
         assert_eq!(info.labels().user_identity, "Relay---FOMO");
         assert_eq!(info.labels().user_plan, "invalid");
         assert_eq!(info.labels().client_version, "other");
+    }
+
+    #[test]
+    fn test_client_info_caps_value_length() {
+        let mut headers = HeaderMap::new();
+        let long_agent = "x".repeat(MAX_CLIENT_VALUE_CHARS + 50);
+        headers.insert(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_str(&long_agent).unwrap(),
+        );
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_version.chars().count(), MAX_CLIENT_VALUE_CHARS);
     }
 
     #[test]
