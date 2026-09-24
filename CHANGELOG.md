@@ -1,4 +1,25 @@
 
+## [0.109.0](https://github.com/propeller-heads/fynd/compare/0.108.0...0.109.0) (2026-09-24)
+
+### Features
+
+* **rpc:** build a QuoteRecord for every answered quote ([666bcae](https://github.com/propeller-heads/fynd/commit/666bcaed27a5a0075c7a77434643455ecd58e59e))
+* **core:** keep the solve-only metric beside task occupancy ([7330cac](https://github.com/propeller-heads/fynd/commit/7330cac04f6ea169ac816d066fa265d635819d85))
+* **core:** record every task outcome and where worker time goes ([ce68211](https://github.com/propeller-heads/fynd/commit/ce68211877143a8ecbd823ed06efd630842b1145))
+* **core:** record estimated and simulated gas as metrics ([bf16633](https://github.com/propeller-heads/fynd/commit/bf16633d762ef6616b12cb9d666f3a95a94d1a85))
+* **core:** add the rfq:metric RFQ protocol ([9413336](https://github.com/propeller-heads/fynd/commit/9413336576e570d62ac8958b8d7a70040d08592a))
+* **rpc:** queue quote records in a bounded drop-newest queue ([48708a5](https://github.com/propeller-heads/fynd/commit/48708a5ee2213a107db867b1bbf7733529c6c82c))
+* **rpc:** record the client fee a quote was asked to take ([6de5abd](https://github.com/propeller-heads/fynd/commit/6de5abdfab82b1697c674fa49b686f99f510bb68))
+* **rpc:** record the block a quote priced against ([5291bfd](https://github.com/propeller-heads/fynd/commit/5291bfdb23c43e0a1bdd0feb322cf3d319bed0c5))
+
+### Bug Fixes
+
+* **core:** record worker time only where it delays a task ([3446f4b](https://github.com/propeller-heads/fynd/commit/3446f4b0d453e91c152667ff8cac2f1e103d83c8))
+* **core:** report the time a request ran before the router timeout ([8195651](https://github.com/propeller-heads/fynd/commit/81956513a3462925c3ed55d155102fe8630e3061))
+* **core:** do not solve a task the router stopped waiting for ([9931a22](https://github.com/propeller-heads/fynd/commit/9931a2242df6d2b9ea48b478865b923aa39cc7f3))
+* **rpc:** cap the client header values a quote record keeps ([4ba902e](https://github.com/propeller-heads/fynd/commit/4ba902e328fc43d8f3effd33f22b1200923ba2f9))
+
+
 ## [0.108.0](https://github.com/propeller-heads/fynd/compare/0.107.1...0.108.0) (2026-09-23)
 
 ### Features
