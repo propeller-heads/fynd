@@ -5,6 +5,7 @@
 //! dropped and counted. Dropping the incoming record rather than evicting an older one leaves the
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 
+#[cfg(test)]
 use std::num::NonZeroUsize;
 
 use metrics::counter;
@@ -14,7 +15,7 @@ use crate::api::record::QuoteRecord;
 
 /// The quote handler's end of the record queue.
 #[derive(Clone, Debug)]
-pub struct RecordEmitter {
+pub(crate) struct RecordEmitter {
     sender: mpsc::Sender<QuoteRecord>,
 }
 
@@ -25,15 +26,18 @@ impl RecordEmitter {
     /// The capacity is a [`NonZeroUsize`] because a queue of zero has no room for anything: it
     /// would drop every record, so a misread config would silence the whole feed rather than fail
     /// where it was read.
+    // Only the tests build a queue so far: the server passes no emitter until the task that
+    // drains it exists (ENG-6352), which is also what will construct it.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(capacity: NonZeroUsize) -> (Self, mpsc::Receiver<QuoteRecord>) {
+    pub(crate) fn new(capacity: NonZeroUsize) -> (Self, mpsc::Receiver<QuoteRecord>) {
         let (sender, receiver) = mpsc::channel(capacity.get());
         (Self { sender }, receiver)
     }
 
     /// Queues `record`, or drops it and counts the drop. Called on the response path, so it only
     /// ever moves the record into the queue — nothing it does waits on the sending task.
-    pub fn emit(&self, record: QuoteRecord) {
+    pub(crate) fn emit(&self, record: QuoteRecord) {
         match self.sender.try_send(record) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => record_drop("queue_full"),

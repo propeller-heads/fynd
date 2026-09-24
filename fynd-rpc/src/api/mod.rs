@@ -20,7 +20,7 @@ pub mod prices;
 /// The quote record every answered `/v1/quote` produces for the collector.
 pub mod record;
 /// The bounded queue carrying those records to the task that sends them.
-pub mod record_emitter;
+pub(crate) mod record_emitter;
 /// Builds re-issuable, signature-free representation of a quote request for replay logging.
 pub mod request_capture;
 #[cfg(feature = "experimental")]
@@ -318,7 +318,7 @@ impl AppState {
 
     /// Returns the record queue the quote handler feeds, when this instance emits records.
     #[must_use]
-    pub fn record_emitter(&self) -> Option<&RecordEmitter> {
+    pub(crate) fn record_emitter(&self) -> Option<&RecordEmitter> {
         self.record_emitter.as_ref()
     }
 }
