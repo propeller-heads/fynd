@@ -509,6 +509,21 @@ fn test_record_outcome_success() {
             if values.len() == 1 && (values[0].into_inner() - -10.0).abs() < 1e-9),
         "{deviation:?}"
     );
+
+    for (metric, expected) in
+        [("quote_simulation_gas_estimate", 50_000.0), ("quote_simulation_gas_used", 120_000.0)]
+    {
+        let (_, labels, gas) = recorded
+            .iter()
+            .find(|(name, ..)| name == metric)
+            .unwrap_or_else(|| panic!("a successful simulation records {metric}"));
+        assert!(labels.contains(&"algorithm=test_algorithm".to_string()), "{labels:?}");
+        assert!(
+            matches!(gas, metrics_util::debugging::DebugValue::Histogram(values)
+                if values.len() == 1 && values[0].into_inner() == expected),
+            "{metric}: {gas:?}"
+        );
+    }
 }
 
 #[test]
@@ -533,6 +548,12 @@ fn test_record_outcome_reverted() {
             .iter()
             .any(|(name, ..)| name == "quote_simulation_deviation_bps"),
         "a call that returned no amount has no deviation to record"
+    );
+    assert!(
+        !recorded
+            .iter()
+            .any(|(name, ..)| name.starts_with("quote_simulation_gas_")),
+        "a reverted call has no gas to compare against the estimate"
     );
 }
 
