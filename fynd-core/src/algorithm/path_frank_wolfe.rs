@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
+use rustc_hash::FxHashSet;
 use tracing::debug;
 use tycho_simulation::tycho_core::models::Address;
 
@@ -31,6 +32,7 @@ use super::{
 use crate::{
     algorithm::request::SolveRequest,
     derived::computation::ComputationRequirements,
+    feed::market_maker::MarketMaker,
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{quote::Order, OrderSide, Route, RouteResult},
 };
@@ -216,9 +218,22 @@ impl PathFrankWolfeAlgorithm {
             Default::default(),
         );
 
-        let result =
-            self.inner
-                .find_single_route(ctx, &probe_order, FindRouteOptions { overrides })?;
+        // The candidate may not fill against a maker the paths already in the split fill against.
+        let blocked_market_makers: FxHashSet<MarketMaker> = current_allocations
+            .iter()
+            .flat_map(|alloc| alloc.hops.iter())
+            .filter_map(|hop| {
+                ctx.market_data
+                    .market_maker(&hop.descriptor.component_id)
+                    .cloned()
+            })
+            .collect();
+
+        let result = self.inner.find_single_route(
+            ctx,
+            &probe_order,
+            FindRouteOptions { overrides, blocked_market_makers },
+        )?;
 
         let route = result.route();
         let tokens = route.tokens();
@@ -1911,5 +1926,59 @@ mod tests {
             "timed-out result ({timeout_swaps} swaps) should use fewer paths \
              than generous result ({generous_swaps} swaps)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_split_with_one_market_maker_on_two_pools() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+
+        let cp = |reserve: u64| -> Box<dyn ProtocolSim> {
+            Box::new(ConstantProductSim {
+                reserve_0: BigUint::from(reserve),
+                reserve_1: BigUint::from(reserve),
+                gas: 50_000,
+            })
+        };
+
+        let (market, graph_manager) = setup_market_unweighted(vec![
+            ("P1", &token_a, &token_b, cp(100_000)),
+            ("P2", &token_a, &token_b, cp(80_000)),
+            ("P3", &token_a, &token_b, cp(60_000)),
+        ]);
+        {
+            let mut state = market.write().await;
+            state.set_market_maker("P1", MarketMaker::from("mm1"));
+            state.set_market_maker("P2", MarketMaker::from("mm1"));
+        }
+
+        let algo = pfw_algo_with_config(
+            2,
+            PathFrankWolfeConfig {
+                max_paths: 5,
+                max_probe: 0.5,
+                min_split: 0.01,
+                line_search_evals: 16,
+            },
+        );
+        let derived = derived_with_token_prices(&[&token_a, &token_b]);
+        let ord = order(&token_a, &token_b, 30_000, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(
+                SolveRequest::new(graph_manager.graph(), market, &ord).with_derived(derived),
+            )
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .route()
+            .swaps()
+            .iter()
+            .map(|s| s.component_id())
+            .collect();
+        assert!(ids.contains(&"P1"), "the best pool is taken first: {ids:?}");
+        assert!(ids.contains(&"P3"), "the split moves past the maker's second pool: {ids:?}");
+        assert!(!ids.contains(&"P2"), "P2 is quoted by the maker P1 fills against: {ids:?}");
     }
 }

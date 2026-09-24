@@ -52,7 +52,10 @@ use crate::{
         computation::ComputationRequirements,
         types::{SpotPrices, TokenGasPrices},
     },
-    feed::market_data::{MarketData, MarketState},
+    feed::{
+        market_data::{MarketData, MarketState},
+        market_maker::MarketMaker,
+    },
     graph::{petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, Route, RouteExclusions, RouteResult, Swap},
 };
@@ -153,6 +156,9 @@ pub(crate) struct FindRouteOptions {
     /// Component state overrides: degrade or zero-gas specific components without modifying market
     /// data.
     pub(crate) overrides: MarketOverrides,
+    /// Market makers the route may not fill against. PFW sets them to the makers of the paths
+    /// already in its split.
+    pub(crate) blocked_market_makers: FxHashSet<MarketMaker>,
 }
 
 /// Output of the SPFA relaxation pass: per-node best-path arrays.
@@ -429,7 +435,7 @@ impl BellmanFordAlgorithm {
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
     ) -> ReachOutcome {
-        let spfa = self.run_spfa(ctx, amount_in, &MarketOverrides::default(), Instant::now());
+        let spfa = self.run_spfa(ctx, amount_in, &FindRouteOptions::default(), Instant::now());
 
         let mut reached = FxHashMap::default();
         let mut dropped = 0usize;
@@ -499,7 +505,7 @@ impl BellmanFordAlgorithm {
             "context endpoints do not match the order's token pair"
         );
 
-        let spfa = self.run_spfa(ctx, order.amount(), &opts.overrides, start);
+        let spfa = self.run_spfa(ctx, order.amount(), &opts, start);
 
         let out_idx = token_out_node.index();
         if spfa.amount[out_idx].is_zero() {
@@ -572,9 +578,11 @@ impl BellmanFordAlgorithm {
         &self,
         ctx: &BellmanFordContext,
         amount_in: &BigUint,
-        overrides: &MarketOverrides,
+        opts: &FindRouteOptions,
         start: Instant,
     ) -> SPFAResult {
+        let overrides = &opts.overrides;
+        let market_makers = ctx.market_data.market_makers();
         // amount[node] = best gross output reachable at that node.
         // edge_gas[node] = gas for the edge that last improved amount[node].
         // cumul_gas[node] = total gas along the best path to this node.
@@ -630,7 +638,18 @@ impl BellmanFordAlgorithm {
                     let v_idx = v.index();
 
                     // Single predecessor walk: skip if target token or component already in path
-                    if Self::path_has_conflict(u, *v, component_id, &predecessor) {
+                    // or its market maker is.
+                    if Self::path_has_conflict(u, *v, component_id, &predecessor, market_makers) {
+                        continue;
+                    }
+                    // A maker another path of the split fills against is not offered here.
+                    if market_makers
+                        .get(component_id)
+                        .is_some_and(|maker| {
+                            opts.blocked_market_makers
+                                .contains(maker)
+                        })
+                    {
                         continue;
                     }
 
@@ -910,12 +929,15 @@ impl BellmanFordAlgorithm {
 
     /// Checks whether the target node or component conflicts with the existing path to `from`.
     /// Walks the predecessor chain once, checking both conditions simultaneously.
+    /// A component whose market maker is already on the path conflicts as well.
     pub(crate) fn path_has_conflict(
         from: NodeIndex,
         target_node: NodeIndex,
         target_component: &ComponentId,
         predecessor: &[Option<(NodeIndex, ComponentId)>],
+        market_makers: &FxHashMap<ComponentId, MarketMaker>,
     ) -> bool {
+        let target_market_maker = market_makers.get(target_component);
         let mut current = from;
         loop {
             if current == target_node {
@@ -924,6 +946,11 @@ impl BellmanFordAlgorithm {
             match &predecessor[current.index()] {
                 Some((prev, cid)) => {
                     if cid == target_component {
+                        return true;
+                    }
+                    if target_market_maker.is_some() &&
+                        market_makers.get(cid) == target_market_maker
+                    {
                         return true;
                     }
                     current = *prev;
@@ -2558,20 +2585,23 @@ mod tests {
             NodeIndex::new(2),
             NodeIndex::new(0),
             &"any".into(),
-            &pred
+            &pred,
+            &FxHashMap::default(),
         ));
         assert!(!BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"any".into(),
-            &pred
+            &pred,
+            &FxHashMap::default(),
         ));
         // Self-check: node 2 is itself in the "path from 2"
         assert!(BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(2),
             &"any".into(),
-            &pred
+            &pred,
+            &FxHashMap::default(),
         ));
 
         // Component conflicts: component_a and component_b are used, component_c is not
@@ -2579,20 +2609,69 @@ mod tests {
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"component_a".into(),
-            &pred
+            &pred,
+            &FxHashMap::default(),
         ));
         assert!(BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"component_b".into(),
-            &pred
+            &pred,
+            &FxHashMap::default(),
         ));
         assert!(!BellmanFordAlgorithm::path_has_conflict(
             NodeIndex::new(2),
             NodeIndex::new(3),
             &"component_c".into(),
-            &pred
+            &pred,
+            &FxHashMap::default(),
         ));
+    }
+
+    #[test]
+    fn test_path_has_conflict_with_market_maker() {
+        // Path: 0 -[component_a]-> 1 -[component_b]-> 2
+        let mut pred: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; 4];
+        pred[1] = Some((NodeIndex::new(0), "component_a".into()));
+        pred[2] = Some((NodeIndex::new(1), "component_b".into()));
+        let market_makers: FxHashMap<ComponentId, MarketMaker> = [
+            ("component_a".to_string(), MarketMaker::from("mm1")),
+            ("component_c".to_string(), MarketMaker::from("mm1")),
+            ("component_d".to_string(), MarketMaker::from("mm2")),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(
+            BellmanFordAlgorithm::path_has_conflict(
+                NodeIndex::new(2),
+                NodeIndex::new(3),
+                &"component_c".into(),
+                &pred,
+                &market_makers,
+            ),
+            "component_c is quoted by the maker behind component_a"
+        );
+        assert!(
+            !BellmanFordAlgorithm::path_has_conflict(
+                NodeIndex::new(2),
+                NodeIndex::new(3),
+                &"component_d".into(),
+                &pred,
+                &market_makers,
+            ),
+            "component_d is quoted by a maker the path has not filled against"
+        );
+        assert!(
+            !BellmanFordAlgorithm::path_has_conflict(
+                NodeIndex::new(2),
+                NodeIndex::new(3),
+                &"component_e".into(),
+                &pred,
+                &market_makers,
+            ),
+            "a component with no named maker conflicts with components only"
+        );
     }
 
     #[tokio::test]
@@ -2621,6 +2700,7 @@ mod tests {
         let opts = FindRouteOptions {
             overrides: MarketOverrides::empty()
                 .with_override("component_ab".to_string(), Box::new(MockProtocolSim::new(1.0))),
+            ..Default::default()
         };
         let overridden = algo
             .find_single_route(&ctx, &ord, opts)
@@ -2654,7 +2734,11 @@ mod tests {
             .find_single_route(&ctx, &ord, FindRouteOptions::default())
             .unwrap();
         let with_empty = algo
-            .find_single_route(&ctx, &ord, FindRouteOptions { overrides: MarketOverrides::empty() })
+            .find_single_route(
+                &ctx,
+                &ord,
+                FindRouteOptions { overrides: MarketOverrides::empty(), ..Default::default() },
+            )
             .unwrap();
 
         assert_eq!(
@@ -2662,5 +2746,46 @@ mod tests {
             with_empty.route().swaps()[0].amount_out()
         );
         assert_eq!(with_default.route().swaps()[0].amount_out(), &BigUint::from(2000u64));
+    }
+
+    #[tokio::test]
+    async fn test_route_with_one_market_maker_on_both_hops() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let c = token(0x03, "C");
+        let (market, manager) = setup_market_bf(vec![
+            ("ab_rfq", &a, &b, MockProtocolSim::new(3.0)),
+            ("ab_amm", &a, &b, MockProtocolSim::new(2.0)),
+            ("bc_rfq", &b, &c, MockProtocolSim::new(3.0)),
+            ("bc_amm", &b, &c, MockProtocolSim::new(2.0)),
+        ]);
+        {
+            let mut state = market.write().await;
+            state.set_market_maker("ab_rfq", MarketMaker::from("mm1"));
+            state.set_market_maker("bc_rfq", MarketMaker::from("mm1"));
+        }
+        let algo = bf_algorithm(2, 1000);
+        let ord = order(&a, &c, 100, OrderSide::Sell);
+
+        let result = algo
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord))
+            .await
+            .unwrap();
+
+        let ids: Vec<&str> = result
+            .route()
+            .swaps()
+            .iter()
+            .map(|swap| swap.component_id())
+            .collect();
+        assert!(
+            !(ids.contains(&"ab_rfq") && ids.contains(&"bc_rfq")),
+            "both hops filled against mm1: {ids:?}"
+        );
+        assert_eq!(
+            result.route().swaps()[1].amount_out(),
+            &BigUint::from(600u64),
+            "3x on one hop and 2x on the other, never 9x"
+        );
     }
 }

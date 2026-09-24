@@ -25,6 +25,7 @@ use tracing::trace;
 
 use crate::{
     algorithm::{most_liquid::DepthAndPrice, swap_cache::SwapResult},
+    feed::market_maker::MarketMaker,
     graph::{EdgeData, TokenPath, TopologyGraph, INLINE_EDGES},
     types::{ComponentId, RouteExclusions},
 };
@@ -182,22 +183,34 @@ impl PairWinners {
 /// caller can reach whatever it hung on [`LegPools::data`]. Returning `None` from it withholds the
 /// pool.
 ///
+/// A pool whose market maker (`market_makers`, keyed by component) an earlier leg filled against
+/// is withheld like a pool the path already crossed.
+///
 /// `Err` when some leg has no pool that can trade what reached it.
 pub(crate) fn simulate_token_path<'g, D, T>(
     legs: &[LegPools<'g, D, T>],
     amount_in: &BigUint,
     winners: &mut PairWinners,
+    market_makers: &FxHashMap<ComponentId, MarketMaker>,
     mut simulate: impl FnMut(&LegPools<'g, D, T>, &BigUint, &'g ComponentId) -> Option<PoolQuote>,
 ) -> Result<WalkedPath, FailedLegIx> {
     let mut amount = amount_in.clone();
     let mut gas = BigUint::ZERO;
     let mut hops: SmallVec<[HopResult; INLINE_EDGES]> = SmallVec::new();
     let mut crossed: SmallVec<[&'g ComponentId; INLINE_EDGES]> = SmallVec::new();
+    let mut crossed_market_makers: SmallVec<[&MarketMaker; INLINE_EDGES]> = SmallVec::new();
 
     for (leg_ix, leg) in legs.iter().enumerate() {
         let at_amount = amount.clone();
         let simulate_pool = |component_id: &'g ComponentId| simulate(leg, &at_amount, component_id);
+        let untouched = |component_id: &ComponentId| {
+            !crossed.contains(&component_id) &&
+                !market_makers
+                    .get(component_id)
+                    .is_some_and(|maker| crossed_market_makers.contains(&maker))
+        };
 
+        // A pool whose market maker an earlier leg filled against counts as crossed.
         // A pool this path already crossed cannot be offered again. Where that bites, the pool is
         // picked here and the remembered winner is left alone in both directions: what it holds was
         // chosen over every pool, and the best of a narrowed field is not the answer the next path
@@ -205,10 +218,9 @@ pub(crate) fn simulate_token_path<'g, D, T>(
         let narrowed = leg
             .pools
             .iter()
-            .any(|edge| crossed.contains(&&edge.component_id));
+            .any(|edge| !untouched(&edge.component_id));
         let hop_result = if narrowed {
-            best_paying_pool(leg.pools, |id| !crossed.contains(&id), simulate_pool)
-                .map(|(hop, _)| hop)
+            best_paying_pool(leg.pools, untouched, simulate_pool).map(|(hop, _)| hop)
         } else {
             winners.choose_pool_for_pair(leg.pair, leg.pools, simulate_pool)
         };
@@ -221,6 +233,9 @@ pub(crate) fn simulate_token_path<'g, D, T>(
             .get(hop_result.pool_ix)
             .expect("the chosen pool came from this leg's own list");
         crossed.push(&chosen.component_id);
+        if let Some(maker) = market_makers.get(&chosen.component_id) {
+            crossed_market_makers.push(maker);
+        }
 
         gas += &hop_result.gas;
         amount = hop_result.amount_out.clone();
@@ -550,6 +565,7 @@ mod tests {
                 &legs,
                 &BigUint::from(100u64),
                 &mut winners,
+                &FxHashMap::default(),
                 |_, amount, id| {
                     let multiplier = if id == "pool1" { 5u64 } else { 2u64 };
                     let out = amount * BigUint::from(multiplier);
@@ -590,9 +606,13 @@ mod tests {
                 })
             };
 
-            simulate_token_path(&legs, &BigUint::from(100u64), &mut winners, |_, amount, id| {
-                quote(amount, if id == "pool1" { 5 } else { 2 })
-            })
+            simulate_token_path(
+                &legs,
+                &BigUint::from(100u64),
+                &mut winners,
+                &FxHashMap::default(),
+                |_, amount, id| quote(amount, if id == "pool1" { 5 } else { 2 }),
+            )
             .ok()
             .expect("both legs have a pool left to trade");
 
@@ -623,6 +643,7 @@ mod tests {
                 &legs,
                 &BigUint::from(100u64),
                 &mut winners,
+                &FxHashMap::default(),
                 |leg, amount, _| {
                     (leg.pair.0 == NodeIndex::new(0)).then(|| {
                         let out = amount * BigUint::from(2u64);
@@ -637,6 +658,58 @@ mod tests {
             .expect("the second leg has no pool that trades");
 
             assert_eq!(failed.0, 1);
+        }
+
+        #[test]
+        fn test_market_maker_already_crossed() {
+            let first =
+                vec![EdgeData::<()>::new("a0".to_string()), EdgeData::new("a1".to_string())];
+            let second =
+                vec![EdgeData::<()>::new("b0".to_string()), EdgeData::new("b1".to_string())];
+            let legs = vec![
+                LegPools {
+                    pair: (NodeIndex::new(0), NodeIndex::new(1)),
+                    pools: first.as_slice(),
+                    data: (),
+                },
+                LegPools {
+                    pair: (NodeIndex::new(1), NodeIndex::new(2)),
+                    pools: second.as_slice(),
+                    data: (),
+                },
+            ];
+            let market_makers: FxHashMap<ComponentId, MarketMaker> = [
+                ("a1".to_string(), MarketMaker::from("mm1")),
+                ("b1".to_string(), MarketMaker::from("mm1")),
+            ]
+            .into_iter()
+            .collect();
+            let mut winners = PairWinners::new(true);
+
+            let walked = simulate_token_path(
+                &legs,
+                &BigUint::from(100u64),
+                &mut winners,
+                &market_makers,
+                |_, amount, id| {
+                    let multiplier = if id.ends_with('1') { 5u64 } else { 2u64 };
+                    let out = amount * BigUint::from(multiplier);
+                    Some(PoolQuote {
+                        paid: SwapResult { amount_out: out.clone(), gas: BigUint::from(10u64) },
+                        net: BigInt::from(out),
+                    })
+                },
+            )
+            .ok()
+            .expect("both legs have a pool left to trade");
+
+            let chosen: Vec<usize> = walked
+                .hops
+                .iter()
+                .map(|hop| hop.pool_ix)
+                .collect();
+            assert_eq!(chosen, vec![1, 0], "the second leg cannot fill against mm1 again");
+            assert_eq!(walked.amount_out, BigUint::from(1000u64), "100 * 5 through a1, then * 2");
         }
     }
 }

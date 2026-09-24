@@ -29,7 +29,10 @@ use tycho_simulation::{
 };
 
 use crate::{
-    feed::component_filter::protocol_matches,
+    feed::{
+        component_filter::protocol_matches,
+        market_maker::{market_maker_of, MarketMaker},
+    },
     types::{BlockInfo, ComponentId, RouteExclusionFilter, RouteExclusions},
 };
 
@@ -403,6 +406,8 @@ pub struct MarketState {
     /// excludes a protocol names that system's pools without scanning the component map, and so
     /// the metrics sampler can count them without one either.
     components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
+    /// The market maker behind each RFQ component whose venue names one.
+    market_makers: FxHashMap<ComponentId, MarketMaker>,
     /// Changes only when a component is added or removed, not when its state changes.
     component_generation: u64,
 }
@@ -444,8 +449,26 @@ impl MarketState {
             protocol_sync_status: FxHashMap::default(),
             last_updated: None,
             components_by_protocol: FxHashMap::default(),
+            market_makers: FxHashMap::default(),
             component_generation: 0,
         }
+    }
+
+    /// The market maker quoting this component, when its venue names one.
+    pub fn market_maker(&self, component_id: &str) -> Option<&MarketMaker> {
+        self.market_makers.get(component_id)
+    }
+
+    /// Every component whose venue names its market maker.
+    pub fn market_makers(&self) -> &FxHashMap<ComponentId, MarketMaker> {
+        &self.market_makers
+    }
+
+    /// Names the market maker behind a component, for tests whose mock states name none.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_market_maker(&mut self, component_id: &str, market_maker: MarketMaker) {
+        self.market_makers
+            .insert(component_id.to_string(), market_maker);
     }
 
     /// Returns the label identifying the block or overlay this state was produced from.
@@ -611,15 +634,21 @@ impl MarketState {
                 }
             }
             self.simulation_states.remove(id);
+            self.market_makers.remove(id);
         }
     }
 
     /// Updates a component's state.
+    /// Records the component's market maker when the state names one.
     pub fn update_states(
         &mut self,
         states: impl IntoIterator<Item = (ComponentId, Box<dyn ProtocolSim>)>,
     ) {
         for (id, state) in states {
+            if let Some(market_maker) = market_maker_of(state.as_ref()) {
+                self.market_makers
+                    .insert(id.clone(), market_maker);
+            }
             self.simulation_states.insert(id, state);
         }
     }
@@ -651,6 +680,7 @@ impl MarketState {
         // them once each rather than per component that mentions them.
         let mut token_addresses: FxHashSet<&Address> =
             FxHashSet::with_capacity_and_hasher(component_ids.len() * 2, rustc_hash::FxBuildHasher);
+        let mut market_makers = FxHashMap::default();
 
         for &id in component_ids {
             if let Some(component) = self.components.get(id) {
@@ -661,6 +691,9 @@ impl MarketState {
             // states, and a component can be announced a block before its first state arrives.
             if let Some(state) = self.simulation_states.get(id) {
                 simulation_states.insert(id.clone(), state.clone_box());
+            }
+            if let Some(market_maker) = self.market_makers.get(id) {
+                market_makers.insert(id.clone(), market_maker.clone());
             }
         }
 
@@ -683,6 +716,7 @@ impl MarketState {
             protocol_sync_status: FxHashMap::default(), // Not needed for simulation
             last_updated: self.last_updated.clone(),
             components_by_protocol,
+            market_makers,
             component_generation: self.component_generation,
         }
     }
@@ -696,6 +730,8 @@ impl MarketState {
         self.simulation_states
             .extend(other.simulation_states);
         self.tokens.extend(other.tokens);
+        self.market_makers
+            .extend(other.market_makers);
     }
 }
 
@@ -1327,5 +1363,32 @@ mod tests {
             2,
             "tokens are not removed with their components"
         );
+    }
+
+    #[test]
+    fn test_market_maker_lifecycle() {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let mut market = MarketState::new();
+        market.upsert_components([
+            component("rfq_ab", &[a.clone(), b.clone()]),
+            component("amm_ab", &[a.clone(), b.clone()]),
+        ]);
+        market.upsert_tokens([a, b]);
+        market.set_market_maker("rfq_ab", MarketMaker::from("mm1"));
+        market.update_states([
+            ("rfq_ab".to_string(), Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>),
+            ("amm_ab".to_string(), Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>),
+        ]);
+        assert_eq!(market.market_maker("rfq_ab"), Some(&MarketMaker::from("mm1")));
+        assert_eq!(market.market_maker("amm_ab"), None);
+
+        let rfq_ab = "rfq_ab".to_string();
+        let subset = market.extract_subset(&[&rfq_ab].into_iter().collect());
+        assert_eq!(subset.market_maker("rfq_ab"), Some(&MarketMaker::from("mm1")));
+
+        market.remove_components([&rfq_ab]);
+        assert_eq!(market.market_maker("rfq_ab"), None);
+        assert!(market.market_makers().is_empty());
     }
 }

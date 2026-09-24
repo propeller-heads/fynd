@@ -161,6 +161,13 @@ on the chains `METRIC_CHAINS` names (executing through `MetricExecutor`). `METRI
 `PRICE_LEVEL_STREAM_CHAIN` are disjoint, so no deployment can stream the same Metric inventory
 twice.
 
+A solution fills against a named market maker at most once (`feed/market_maker.rs` says why).
+`market_maker_of` reads the name off the simulation state; only Hashflow names one. Each
+algorithm checks it beside its check that one pool is not taken twice:
+`BellmanFordAlgorithm::path_has_conflict` (and `FindRouteOptions::blocked_market_makers` for a PFW
+split), `simulate_token_path` in `path_scoring.rs` for MostLiquid, and
+`WaterFillAlgorithm::select_disjoint` / `drop_repeated_market_makers` for WaterFill.
+
 Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
 is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The
 stream is Ethereum-only (`PRICE_LEVEL_STREAM_CHAIN` tracks upstream's venue set, which carries no

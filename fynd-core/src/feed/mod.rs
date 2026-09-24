@@ -12,6 +12,8 @@ pub mod exclusivity;
 pub(crate) mod gas;
 /// Shared market data store (`MarketState`, `MarketData`).
 pub mod market_data;
+/// The market maker behind an RFQ component, where the venue names one.
+pub mod market_maker;
 /// Background sampler exporting per-protocol market metrics.
 pub(crate) mod metrics_sampler;
 /// Protocol system registry: maps protocol names to their Tycho identifiers.

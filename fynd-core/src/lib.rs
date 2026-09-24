@@ -67,7 +67,7 @@ pub use algorithm::{
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
-pub use feed::{events::MarketEvent, market_data::StateLabel};
+pub use feed::{events::MarketEvent, market_data::StateLabel, market_maker::MarketMaker};
 pub use price_guard::{
     config::PriceGuardConfig,
     provider::{ExternalPrice, PriceProvider, PriceProviderError},

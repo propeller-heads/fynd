@@ -72,7 +72,10 @@ use crate::{
         },
     },
     derived::{computation::ComputationRequirements, types::TokenGasPrices},
-    feed::market_data::{MarketDataView, MarketState},
+    feed::{
+        market_data::{MarketDataView, MarketState},
+        market_maker::MarketMaker,
+    },
     graph::{EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph, TopologyGraphManager},
     types::{ComponentId, Order, RouteResult},
     AlgorithmError,
@@ -182,11 +185,18 @@ impl WaterFillAlgorithm {
     /// Picks up to `max_paths` paths that share no component, so their outputs can be summed
     /// without re-simulating — two paths through the same component compete for its liquidity,
     /// so their separate outputs would not add up.
+    /// Paths that share a market maker (`market_makers`, keyed by component) are kept apart the
+    /// same way.
     ///
     /// Walks `ranked` best first and keeps a path only if none of its components are already used
     /// by a kept path, skipping it otherwise. Returns the kept paths' indices into `ranked`.
-    fn select_disjoint(ranked: &[Path<DepthAndPrice>], max_paths: usize) -> Vec<usize> {
+    fn select_disjoint(
+        ranked: &[Path<DepthAndPrice>],
+        max_paths: usize,
+        market_makers: &FxHashMap<ComponentId, MarketMaker>,
+    ) -> Vec<usize> {
         let mut visited_components: FxHashSet<&ComponentId> = FxHashSet::default();
+        let mut visited_market_makers: FxHashSet<&MarketMaker> = FxHashSet::default();
         let mut selected = Vec::new();
         for (idx, path) in ranked.iter().enumerate() {
             let path_components: Vec<&ComponentId> = path
@@ -200,15 +210,42 @@ impl WaterFillAlgorithm {
             {
                 continue;
             }
+            if paths::market_makers_on(path, market_makers)
+                .any(|maker| visited_market_makers.contains(maker))
+            {
+                continue;
+            }
             for c in path_components {
                 visited_components.insert(c);
             }
+            visited_market_makers.extend(paths::market_makers_on(path, market_makers));
             selected.push(idx);
             if selected.len() >= max_paths {
                 break;
             }
         }
         selected
+    }
+
+    /// `candidates` without the paths that fill against a market maker an earlier candidate
+    /// fills against. Fill-and-spill lets its paths share a pool, but not a maker.
+    fn drop_repeated_market_makers(
+        ranked: &[Path<DepthAndPrice>],
+        candidates: Vec<usize>,
+        market_makers: &FxHashMap<ComponentId, MarketMaker>,
+    ) -> Vec<usize> {
+        let mut taken: FxHashSet<&MarketMaker> = FxHashSet::default();
+        let mut kept = Vec::with_capacity(candidates.len());
+        for idx in candidates {
+            if paths::market_makers_on(&ranked[idx], market_makers)
+                .any(|maker| taken.contains(maker))
+            {
+                continue;
+            }
+            taken.extend(paths::market_makers_on(&ranked[idx], market_makers));
+            kept.push(idx);
+        }
+        kept
     }
 
     /// Shared setup: enumerate + rank candidates, simulate at full amount, pick the best single
@@ -290,6 +327,10 @@ impl WaterFillAlgorithm {
         let market_state = market_view.extract_subset_with_overlay(&component_ids);
         let gas_price = paths::fetch_gas_price(&market_state)?;
         drop(market_view);
+        // A route that fills against one market maker twice is not ranked.
+        joined_paths.retain(|path| {
+            !paths::fills_one_market_maker_twice(path, market_state.market_makers())
+        });
 
         let amount_in = order.amount().clone();
         // Holds the candidates in enumeration order to start with; ranking reorders them below.
@@ -482,7 +523,8 @@ impl Algorithm for WaterFillAlgorithm {
         // split and the refined split, so run it once. It is cheap and always finishes, so
         // a tight timeout cannot cut it off while leaving the single path — a winning split
         // is never lost to the clock.
-        let disjoint = Self::select_disjoint(&input.ordered, self.max_paths);
+        let disjoint =
+            Self::select_disjoint(&input.ordered, self.max_paths, input.market.market_makers());
         let coarse = (disjoint.len() >= 2)
             .then(|| self.disjoint_waterfill(&input, &disjoint, COARSE_CHUNKS, true))
             .flatten();
@@ -921,9 +963,10 @@ impl WaterFillAlgorithm {
             .len()
             .min(SHARED_FULL_PATHS))
             .collect();
+        let market_makers = input.market.market_makers();
         let first_chunk = input.order.amount() / COARSE_CHUNKS;
         if first_chunk.is_zero() {
-            return candidates;
+            return Self::drop_repeated_market_makers(&input.ordered, candidates, market_makers);
         }
         let mut marginal: Vec<(usize, BigInt)> = Vec::new();
         for (idx, path) in input
@@ -964,7 +1007,7 @@ impl WaterFillAlgorithm {
                 break;
             }
         }
-        candidates
+        Self::drop_repeated_market_makers(&input.ordered, candidates, market_makers)
     }
 
     /// Coarse set-selection then fine allocation with shared-component fill-and-spill.
@@ -2137,6 +2180,39 @@ mod tests {
         assert!(
             anchors.contains(&Address::from([0u8; 20])),
             "native-ETH sentinel should always be anchored",
+        );
+    }
+
+    #[test]
+    fn test_select_disjoint_with_shared_market_maker() {
+        let a = addr(0x0A);
+        let b = addr(0x0B);
+        let x = EdgeData::<DepthAndPrice>::new("x".to_string());
+        let y = EdgeData::<DepthAndPrice>::new("y".to_string());
+        let z = EdgeData::<DepthAndPrice>::new("z".to_string());
+        let ranked: Vec<Path<DepthAndPrice>> = [&x, &y, &z]
+            .into_iter()
+            .map(|edge| {
+                let mut path = Path::new();
+                path.add_hop(&a, edge, &b);
+                path
+            })
+            .collect();
+        let market_makers: FxHashMap<ComponentId, MarketMaker> = [
+            ("x".to_string(), MarketMaker::from("mm1")),
+            ("y".to_string(), MarketMaker::from("mm1")),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(WaterFillAlgorithm::select_disjoint(&ranked, 3, &market_makers), vec![0, 2]);
+        assert_eq!(
+            WaterFillAlgorithm::select_disjoint(&ranked, 3, &FxHashMap::default()),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            WaterFillAlgorithm::drop_repeated_market_makers(&ranked, vec![1, 0, 2], &market_makers),
+            vec![1, 2]
         );
     }
 }
