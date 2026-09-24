@@ -400,9 +400,10 @@ struct PassState {
 enum PassSlot {
     /// The interval has elapsed. A pass of up to `max_tokens_per_pass` runs and restarts it.
     Due,
-    /// Inside the interval, but a component arrived. Only the tokens it carries are priced, and
-    /// the interval is left running: a chain that lists a pool on most blocks would otherwise
-    /// turn every block into a full pass and the interval would bound nothing.
+    /// Inside the interval, but a component arrived. Only the tokens it carries that have no
+    /// price are priced, and the interval is left running: a chain that lists a pool on most
+    /// blocks would otherwise turn every block into a full pass and the interval would bound
+    /// nothing.
     ArrivalsOnly,
     /// Inside the interval with nothing that cannot wait for it.
     Deferred,
@@ -414,7 +415,7 @@ enum PassSlot {
 enum PassScope {
     /// Every candidate in the market, ranked.
     Whole,
-    /// Only the tokens that components brought this block.
+    /// Only the tokens that components brought and that have no price yet.
     ArrivalsOnly,
 }
 
@@ -435,6 +436,13 @@ pub(crate) struct PassPriority {
 }
 
 impl PassPriority {
+    /// Drops the arrived tokens that already have a price.
+    fn keep_unpriced_arrivals(&mut self) {
+        let priced = &self.priced;
+        self.arrived
+            .retain(|token| !priced.contains(token));
+    }
+
     /// The pass that last attempted `token`, or zero for one no pass has reached yet.
     fn stamp(&self, token: &Address) -> u64 {
         self.last_attempted
@@ -829,7 +837,7 @@ impl TokenGasPriceComputation {
         // The dependency map holds one `path_components` set per priced token, so cloning it to
         // change a handful of entries is this pass's dominant cost on a large market. Read it by
         // reference here, and edit the stored map in place further down.
-        let (tokens_to_recompute, new_tokens, priority, existing_prices) = {
+        let (tokens_to_recompute, new_tokens, mut priority, existing_prices) = {
             let store_guard = store.read().await;
             let Some(existing_deps) = store_guard.token_prices_deps() else {
                 return Ok(None);
@@ -869,6 +877,18 @@ impl TokenGasPriceComputation {
             let priority = self.pass_priority(arrived, priced);
             (tokens_to_recompute, new_tokens, priority, existing_prices)
         };
+
+        // Only a token with no price breaks the interval. Such a token cannot be quoted at all
+        // until it is priced. A new pool for a token that already has a price can only improve
+        // that price, and the token keeps the arrived rank until a pass attempts it, so the
+        // next whole pass takes it: worth a pass, not worth one of its own.
+        if scope == PassScope::ArrivalsOnly {
+            priority.keep_unpriced_arrivals();
+            if priority.arrived.is_empty() {
+                Span::current().record("updated_token_prices", existing_prices.len());
+                return Ok(Some(ComputationOutput::with_failures(existing_prices, Vec::new())));
+            }
+        }
 
         // No early return on an empty change set. The pass is capped, and its spare ranks go to
         // the tokens that have gone longest without a price — including any that have none at
@@ -1733,6 +1753,50 @@ mod tests {
         assert!(
             (ratio(&output.data[&ccc.address]) - 5000.0).abs() < 1e-6,
             "an arriving token is priced although the interval has not elapsed"
+        );
+    }
+
+    /// A new pool for a token that already has a price does not break the interval.
+    ///
+    /// It can improve that token's price, which the next whole pass does. Running a pass for it
+    /// on the block it arrives would let a chain that lists pools on most blocks set the pace.
+    #[tokio::test]
+    async fn test_a_pool_for_a_priced_token_waits_for_the_interval() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        let seeded = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+
+        let mut added = FxHashMap::default();
+        {
+            let mut guard = market.write().await;
+            guard.upsert_components([component("eth_aaa_2", &[eth.clone(), aaa.clone()])]);
+            guard.update_states([(
+                "eth_aaa_2".to_string(),
+                Box::new(MockProtocolSim::new(9000.0)) as Box<dyn ProtocolSim>,
+            )]);
+            added.insert("eth_aaa_2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
+        }
+
+        let output = computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            (ratio(&output.data[&aaa.address]) - 2000.0).abs() < 1e-6,
+            "AAA has a price already, so its new pool runs no pass inside the interval"
         );
     }
 
