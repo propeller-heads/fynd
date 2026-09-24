@@ -1,7 +1,7 @@
 # TypeScript Client (`@kayibal/fynd-client`)
 
 TypeScript client for the Fynd RPC API. Lives in `clients/typescript/` as a pnpm workspace with
-three packages: `client`, `examples/tutorial`, and `examples/swap-client-fee`.
+four packages: `client`, `examples/tutorial`, `examples/swap-client-fee`, and `wdk-swidge`.
 
 ## Workspace Structure
 
@@ -65,3 +65,12 @@ TYCHO_API_KEY=<key> ./scripts/run-all-examples.sh
 - Colocated test files (`*.test.ts` next to source)
 - `autogen.ts` and `schema.d.ts` in `client/src/` are auto-generated — do not edit manually
 - When adding/changing RPC endpoints, update: Rust types → OpenAPI spec → regenerate `autogen.ts`/`schema.d.ts` → update client mapping
+
+## WDK adapter
+
+`wdk-swidge/` is a separate hosted API adapter, implemented in ESM JavaScript with JSDoc
+declarations generated into `types/`. Tests live in `tests/*.test.js`. Its wire parser is
+hand-maintained: update mapping and fixtures when the API changes; OpenAPI codegen does not
+update it. See its [README](../../clients/typescript/wdk-swidge/README.md) for scoped checks
+and runtime prerequisites, and [compatibility](../../clients/typescript/wdk-swidge/docs/compatibility.md)
+for the published WDK contract and release limitations.

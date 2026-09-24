@@ -39,6 +39,10 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 |---|---|---|
 | Rust | `clients/rust/` | `fynd-client` (Cargo workspace member) |
 | TypeScript | `clients/typescript/` | `@kayibal/fynd-client` (pnpm workspace) |
+| WDK Swidge | `clients/typescript/wdk-swidge/` | `wdk-protocol-swidge-fynd` (private alpha) |
+
+The [WDK adapter](../clients/typescript/wdk-swidge/README.md) wraps the hosted API; WDK owns
+approval, signing, broadcast and status. It is separate from FyndClient's signing flow.
 
 ### [Tools](../tools/CLAUDE.md)
 

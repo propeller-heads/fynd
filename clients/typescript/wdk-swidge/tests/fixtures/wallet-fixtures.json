@@ -1,0 +1,297 @@
+{
+  "compiler": "0.8.33+commit.64118f21.Emscripten.clang",
+  "compilerIntegrity": "sha512-qPdHuAeg+DccqYz4Mq4grc7lOdgLA8wB8meCrMHcVXj70noKZhfAMzOCcOD/4RODZnn+sV3V6fWEyUkeVaBPVQ==",
+  "sourceSha256": "0ea982378a1544a23912e743633e1dddf96cb7123986f1e0f2b2ae03026e42de",
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 200
+    },
+    "viaIR": true,
+    "evmVersion": "cancun",
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.deployedBytecode.object"
+        ]
+      }
+    }
+  },
+  "contracts": {
+    "FixtureRouter": {
+      "abi": [
+        {
+          "anonymous": false,
+          "inputs": [
+            {
+              "indexed": false,
+              "internalType": "address",
+              "name": "sender",
+              "type": "address"
+            },
+            {
+              "indexed": false,
+              "internalType": "address",
+              "name": "recipient",
+              "type": "address"
+            },
+            {
+              "indexed": false,
+              "internalType": "address",
+              "name": "tokenIn",
+              "type": "address"
+            },
+            {
+              "indexed": false,
+              "internalType": "address",
+              "name": "tokenOut",
+              "type": "address"
+            },
+            {
+              "indexed": false,
+              "internalType": "uint256",
+              "name": "amountIn",
+              "type": "uint256"
+            },
+            {
+              "indexed": false,
+              "internalType": "uint256",
+              "name": "amountOut",
+              "type": "uint256"
+            }
+          ],
+          "name": "Settled",
+          "type": "event"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "uint256",
+              "name": "amountIn",
+              "type": "uint256"
+            },
+            {
+              "internalType": "address",
+              "name": "tokenIn",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "tokenOut",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "expectedAmountOut",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint256",
+              "name": "minAmountOut",
+              "type": "uint256"
+            },
+            {
+              "internalType": "address",
+              "name": "receiver",
+              "type": "address"
+            },
+            {
+              "components": [
+                {
+                  "internalType": "uint32",
+                  "name": "clientFeeBps",
+                  "type": "uint32"
+                },
+                {
+                  "internalType": "address",
+                  "name": "clientFeeReceiver",
+                  "type": "address"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "maxClientContribution",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "deadline",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "bytes",
+                  "name": "clientSignature",
+                  "type": "bytes"
+                }
+              ],
+              "internalType": "struct FixtureRouter.ClientFeeParams",
+              "name": "",
+              "type": "tuple"
+            },
+            {
+              "internalType": "bytes",
+              "name": "route",
+              "type": "bytes"
+            }
+          ],
+          "name": "singleSwap",
+          "outputs": [
+            {
+              "internalType": "uint256",
+              "name": "amountOut",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "payable",
+          "type": "function"
+        }
+      ],
+      "runtime": "0x6080806040526004361015610012575f80fd5b5f905f3560e01c630c1a0ee714610027575f80fd5b6101003660031901126102ae57600435916024356001600160a01b038116908190036102ae576044356001600160a01b03811692908390036102ae5760a4356001600160a01b03811691906084358382036102ae5760c43567ffffffffffffffff81116102ae5760a09060031990360301126102ae5760e43567ffffffffffffffff81116102ae57366023820112156102ae57806004013567ffffffffffffffff81116102ae5781013660248201116102ae57602090829003126102ae5760240135968815158061040e575b80610405575b156103d55750861061039f5773eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee84036102e6578634036102b2575b73eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee850361022a578180808881945af1903d15610224573d9067ffffffffffffffff8211610210576040519161017b601f8201601f191660200184610419565b825260203d92013e5b156101db576020947f29dccaf8a4346834e0ebcd2ebd16e3829e3734e13c14aa1fdc858c9d5631a60b9360c0935b60405193338552888501526040840152606083015260808201528360a0820152a1604051908152f35b60405162461bcd60e51b815260206004820152600d60248201526c1b985d1a5d99481bdd5d1c1d5d609a1b6044820152606490fd5b634e487b7160e01b81526041600452602490fd5b50610184565b5050829194923b156102ae57604051926340c10f1960e01b84528160048501528460248501525f8460448183875af19283156102a3576020967f29dccaf8a4346834e0ebcd2ebd16e3829e3734e13c14aa1fdc858c9d5631a60b9560c095610293575b506101b2565b5f61029d91610419565b5f61028d565b6040513d5f823e3d90fd5b5f80fd5b60405162461bcd60e51b815260206004820152600c60248201526b6e61746976652076616c756560a01b6044820152606490fd5b34610367576040516323b872dd60e01b8152336004820152306024820152604481018890526020816064815f895af19081156102a3575f9161032c575b50610128575f80fd5b90506020813d60201161035f575b8161034760209383610419565b810103126102ae575180151581036102ae575f610323565b3d915061033a565b60405162461bcd60e51b815260206004820152601060248201526f756e65787065637465642076616c756560801b6044820152606490fd5b60405162461bcd60e51b815260206004820152600e60248201526d1b5a5b9a5b5d5b481bdd5d1c1d5d60921b6044820152606490fd5b62461bcd60e51b815260206004820152600b60248201526a1e995c9bc8185b5bdd5b9d60aa1b6044820152606490fd5b508115156100f9565b5060643515156100f3565b90601f8019910116810190811067ffffffffffffffff82111761043b57604052565b634e487b7160e01b5f52604160045260245ffdfea26469706673582212203373a0558b900814ada29c67aeddbf4fed2ee0968c5c9d11ba7fd680f23931b164736f6c63430008210033"
+    },
+    "FixtureToken": {
+      "abi": [
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "",
+              "type": "address"
+            }
+          ],
+          "name": "allowance",
+          "outputs": [
+            {
+              "internalType": "uint256",
+              "name": "",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "view",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "spender",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "value",
+              "type": "uint256"
+            }
+          ],
+          "name": "approve",
+          "outputs": [
+            {
+              "internalType": "bool",
+              "name": "",
+              "type": "bool"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "",
+              "type": "address"
+            }
+          ],
+          "name": "balanceOf",
+          "outputs": [
+            {
+              "internalType": "uint256",
+              "name": "",
+              "type": "uint256"
+            }
+          ],
+          "stateMutability": "view",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "recipient",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "value",
+              "type": "uint256"
+            }
+          ],
+          "name": "mint",
+          "outputs": [],
+          "stateMutability": "nonpayable",
+          "type": "function"
+        },
+        {
+          "inputs": [],
+          "name": "requireReset",
+          "outputs": [
+            {
+              "internalType": "bool",
+              "name": "",
+              "type": "bool"
+            }
+          ],
+          "stateMutability": "view",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "bool",
+              "name": "enabled",
+              "type": "bool"
+            }
+          ],
+          "name": "setRequireReset",
+          "outputs": [],
+          "stateMutability": "nonpayable",
+          "type": "function"
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "owner",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "recipient",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "value",
+              "type": "uint256"
+            }
+          ],
+          "name": "transferFrom",
+          "outputs": [
+            {
+              "internalType": "bool",
+              "name": "",
+              "type": "bool"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function"
+        }
+      ],
+      "runtime": "0x60806040526004361015610011575f80fd5b5f3560e01c8063095ea7b3146102c957806323b872dd1461018057806340c10f191461014357806370a082311461010c5780637a4690f9146100dc57806386321f30146100ba5763dd62ed3e14610066575f80fd5b346100b65760403660031901126100b65761007f61038e565b6100876103a4565b6001600160a01b039182165f908152600160209081526040808320949093168252928352819020549051908152f35b5f80fd5b346100b6575f3660031901126100b657602060ff600254166040519015158152f35b346100b65760203660031901126100b6576004358015158091036100b65760ff8019600254169116176002555f80f35b346100b65760203660031901126100b6576001600160a01b0361012d61038e565b165f525f602052602060405f2054604051908152f35b346100b65760403660031901126100b6576001600160a01b0361016461038e565b165f525f60205260405f2061017c60243582546103db565b9055005b346100b65760603660031901126100b65761019961038e565b6101a16103a4565b6001600160a01b039091165f818152600160209081526040808320338452909152902054604435929190831161028b57805f525f6020528260405f20541061024f57805f52600160205260405f2060018060a01b0333165f5260205260405f2061020c8482546103ba565b90555f525f60205260405f206102238382546103ba565b905560018060a01b03165f525f60205261024260405f209182546103db565b9055602060405160018152f35b60405162461bcd60e51b8152602060048201526014602482015273696e73756666696369656e742062616c616e636560601b6044820152606490fd5b60405162461bcd60e51b8152602060048201526016602482015275696e73756666696369656e7420616c6c6f77616e636560501b6044820152606490fd5b346100b65760403660031901126100b6576102e261038e565b6024359060ff60025416158015610386575b8015610360575b1561032a57335f52600160205260405f209060018060a01b03165f5260205260405f2055602060405160018152f35b60405162461bcd60e51b815260206004820152600e60248201526d1c995cd95d081c995c5d5a5c995960921b6044820152606490fd5b50335f52600160205260405f2060018060a01b0382165f5260205260405f2054156102fb565b5081156102f4565b600435906001600160a01b03821682036100b657565b602435906001600160a01b03821682036100b657565b919082039182116103c757565b634e487b7160e01b5f52601160045260245ffd5b919082018092116103c75756fea26469706673582212202298d646ee37c18024310ac6b3aaaa879ce1aeb912c4a7feb12d654748f8220764736f6c63430008210033"
+    }
+  }
+}
