@@ -22,15 +22,8 @@ use actix_web::{
 use metrics::{counter, histogram};
 use serde::Serialize;
 
-/// Who made a request, in both forms the server needs.
-///
-/// Prometheus needs bounded, slugified label values or series cardinality grows without limit.
-/// The quote record needs what the client actually sent, so a reader can join a record against
-/// whatever the authenticating proxy calls that client. The `Serialize` impl writes the sent
-/// values: this is the record's `client` block.
-///
-/// An absent header still falls back to `unknown` / `none` on both sides, so a record can tell
-/// a client that sent nothing from one that sent an empty value.
+/// Who made a request: the proxy-injected client headers as sent, capped at
+/// `MAX_CLIENT_VALUE_CHARS`, plus the bounded labels the metrics use for the same client.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientInfo {
     user_identity: String,

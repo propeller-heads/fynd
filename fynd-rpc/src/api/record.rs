@@ -45,6 +45,8 @@ pub struct QuoteRecord {
     #[serde(serialize_with = "rfc3339_micros")]
     served_at: DateTime<Utc>,
     schema_version: u16,
+    /// The header values as the proxy sent them, not the slugified metric labels, so a reader can
+    /// join a record against the proxy's own client names.
     client: ClientInfo,
     request: RequestRecord,
     outcome: OutcomeRecord,
@@ -93,9 +95,10 @@ impl QuoteRecord {
 
     /// The solve time when it crossed the slow-solve threshold, which is what gets logged.
     pub(crate) fn slow_solve_time_ms(&self) -> Option<u64> {
-        self.outcome
-            .solve_time_ms
-            .filter(|solve_time_ms| *solve_time_ms > SLOW_SOLVE_THRESHOLD_MS)
+        match self.outcome.solve_time_ms {
+            Some(solve_time_ms) if solve_time_ms > SLOW_SOLVE_THRESHOLD_MS => Some(solve_time_ms),
+            Some(_) | None => None,
+        }
     }
 
     /// The log line's view of the outcome, built from the record so the two cannot disagree.
