@@ -176,7 +176,7 @@ fn record_quote_duration(pool_name: &str, quote_duration: Duration) {
 /// `rate(worker_pool_task_duration_seconds_sum[..]) / workers` is therefore the share of worker
 /// slots that are occupied, and not the share of a CPU that is busy. The two differ: a worker
 /// waiting on the market lock is occupied, because it cannot take the next task, and burns no
-/// CPU while it waits. Read this against `worker_pool_arm_duration_seconds` to see what the
+/// CPU while it waits. Read this against `worker_pool_activity_duration_seconds` to see what
 /// remaining time went to, and against container CPU to see how much of either was work.
 fn record_task_duration(pool_name: &str, duration: Duration, outcome: &'static str) {
     metrics::histogram!(
@@ -206,26 +206,32 @@ fn task_budget(pool_timeout: Duration, deadline: Instant, now: Instant) -> Optio
     Some(pool_timeout.min(remaining))
 }
 
-/// Records time the worker spent in one of the arms that compete with task pickup.
+/// Records time the worker spent on something other than a solve task.
 ///
 /// The worker's `select!` is `biased` with market events and derived-data events ahead of the
-/// task queue, so this time is what a task waits behind. It is otherwise unattributable: queue
-/// wait shows that a task waited, and nothing shows what it waited for.
+/// task queue, so a task in the queue waits behind whatever this records. That wait is otherwise
+/// unattributable: `worker_pool_queue_wait_seconds` shows that a task waited, and nothing shows
+/// what it waited for.
 ///
-/// `arm` partitions that time and the values are mutually exclusive, so they sum without
-/// double-counting: `market_event` is a pass through `process_event`, `graph_init` is a full
-/// rebuild, which the lagged branch runs *instead of* `process_event`, and `derived_event` is
-/// the derived-data arm.
+/// Recorded at the call sites in the worker loop rather than inside the functions themselves,
+/// because only the loop knows whether the work delays a task. [`Worker::initialize_graph`] also
+/// runs at startup and, once, from inside [`Worker::quote`]: neither competes with task pickup,
+/// and the second is already counted by `worker_pool_task_duration_seconds`.
+///
+/// `activity` partitions the time and the values are mutually exclusive, so they sum without
+/// double-counting: `market_event` is a pass through [`Worker::process_event`], `graph_init` is
+/// the full rebuild the lagged branch runs *instead of* it, and `derived_event` is the
+/// derived-data arm.
 ///
 /// Wall time, which is the right measure of what a task waits behind: each worker owns its
-/// thread and a single-threaded runtime, so nothing else runs while an arm is held. It is not a
-/// measure of work, because an arm that blocks on the market or derived lock is counted in full
+/// thread and a single-threaded runtime, so nothing else runs while the worker is here. It is
+/// not a measure of work, because time blocked on the market or derived lock is counted in full
 /// and spends no CPU.
-fn record_worker_arm_duration(pool_name: &str, duration: Duration, arm: &'static str) {
+fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity: &'static str) {
     metrics::histogram!(
-        "worker_pool_arm_duration_seconds",
+        "worker_pool_activity_duration_seconds",
         "pool" => pool_name.to_string(),
-        "arm" => arm
+        "activity" => activity
     )
     .record(duration.as_secs_f64());
 }
@@ -373,7 +379,6 @@ where
     /// three things together, from one read: the graph, the fallback pool index, and which pAMMs
     /// the graph holds and which it left out.
     pub async fn initialize_graph(&mut self) {
-        let started = Instant::now();
         let topology = {
             // One read: the index and the topology must describe the same market, or a pAMM whose
             // fallback pool arrived between the two reads stays out until the next rebuild.
@@ -394,12 +399,10 @@ where
         self.graph_manager
             .initialize_graph(&topology);
         self.initialized = true;
-        record_worker_arm_duration(&self.pool_name, started.elapsed(), "graph_init");
     }
 
     /// Applies one market event to the graph, with the pAMM admission rule run over it first.
     pub async fn process_event(&mut self, event: MarketEvent) {
-        let started = Instant::now();
         let market_data = self.market_data.clone();
         let event = {
             let market = market_data.read().await;
@@ -425,7 +428,6 @@ where
                 }
             }
         }
-        record_worker_arm_duration(&self.pool_name, started.elapsed(), "market_event");
     }
 
     /// Returns a quote for an order, optionally solved against a named state overlay.
@@ -756,9 +758,17 @@ where
 
                 // Process market events
                 event_result = event_rx.recv() => {
+                    // Timed here rather than inside the two calls: this is the point at which
+                    // the work holds the worker away from the task queue.
+                    let activity_started = Instant::now();
                     match event_result {
                         Ok(event) => {
                             self.process_event(event).await;
+                            record_worker_activity_duration(
+                                &self.pool_name,
+                                activity_started.elapsed(),
+                                "market_event",
+                            );
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!(self.worker_id, "event receiver closed, shutting down");
@@ -773,13 +783,18 @@ where
                             );
                             // Reinitialize the graph from the current market state to recover from the missed events.
                             self.initialize_graph().await;
+                            record_worker_activity_duration(
+                                &self.pool_name,
+                                activity_started.elapsed(),
+                                "graph_init",
+                            );
                         }
                     }
                 }
 
                 // Process derived data events (component depths, token prices)
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
-                    let arm_started = Instant::now();
+                    let activity_started = Instant::now();
                     match derived_result {
                         Ok(event) => {
                             // Always update tracker with every event
@@ -826,9 +841,9 @@ where
                             );
                         }
                     }
-                    record_worker_arm_duration(
+                    record_worker_activity_duration(
                         &self.pool_name,
-                        arm_started.elapsed(),
+                        activity_started.elapsed(),
                         "derived_event",
                     );
                 }
@@ -2494,24 +2509,29 @@ mod tests {
         );
     }
 
-    /// The three arms partition the worker's non-solving time, so each must carry its own label
-    /// and none may be recorded under another's name.
+    /// The three activities partition the worker's non-solving time, so each must carry its own
+    /// label and none may be recorded under another's name.
     #[rstest]
     #[case("market_event")]
     #[case("graph_init")]
     #[case("derived_event")]
-    fn test_worker_arm_duration_recorded(#[case] arm: &'static str) {
+    fn test_worker_activity_duration_recorded(#[case] activity: &'static str) {
         use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
-            record_worker_arm_duration("test_pool", std::time::Duration::from_micros(250), arm);
+            record_worker_activity_duration(
+                "test_pool",
+                std::time::Duration::from_micros(250),
+                activity,
+            );
         });
 
         let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
-        let (labels, seconds) = one_histogram_sample(&recorded, "worker_pool_arm_duration_seconds");
-        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("arm={arm}")]);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_activity_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("activity={activity}")]);
         assert!((seconds - 0.000_25).abs() < 1e-12);
     }
 

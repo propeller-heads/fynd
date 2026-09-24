@@ -342,14 +342,14 @@
     {
       "id": 18,
       "title": "Worker Time Attribution",
-      "description": "Where each worker's second goes. The select! is biased with event arms ahead of task pickup, so time in an arm is time tasks spend queued. The three arms are disjoint and sum.",
+      "description": "Where each worker's second goes. The select! is biased with the event arms ahead of task pickup, so time in an activity is time tasks spend queued. The three activities are disjoint and sum.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 64 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (arm) (rate(worker_pool_arm_duration_seconds_sum[1m]))",
-          "legendFormat": "event: {{arm}}",
+          "expr": "sum by (activity) (rate(worker_pool_activity_duration_seconds_sum[1m]))",
+          "legendFormat": "event: {{activity}}",
           "refId": "A"
         },
         {
