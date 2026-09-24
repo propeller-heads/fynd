@@ -239,12 +239,13 @@ impl fmt::Display for ProtocolSpec {
     }
 }
 
-/// Register DEX protocol decoders for test tooling (record-market).
+/// Registers the production protocol decoders on a [`ProtocolStreamBuilder`] for test tooling
+/// (the bench-harness live capture).
 ///
-/// Wrapper over `register_exchanges` so the recorder builds the same protocol stream as
-/// production without exposing the crate-private `DataFeedError`.
+/// Wrapper over `register_exchanges` that returns the error as a `String`, so the crate-private
+/// `DataFeedError` stays private.
 #[cfg(feature = "test-utils")]
-pub fn register_exchanges_for_recording(
+pub fn register_exchanges_for_live_capture(
     builder: ProtocolStreamBuilder,
     tvl_filter: ComponentFilter,
     entries: &[String],

@@ -17,7 +17,7 @@ use std::{
 
 use fynd_core::feed::protocol_registry::{
     matches_streamed_system, open_price_level_stream_for_recording,
-    register_exchanges_for_recording, ProtocolSpec,
+    register_exchanges_for_live_capture, ProtocolSpec,
 };
 use num_bigint::BigUint;
 use tokio::sync::watch;
@@ -227,7 +227,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     steps.done("token list in");
 
     let filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
-    let builder = register_exchanges_for_recording(
+    let builder = register_exchanges_for_live_capture(
         ProtocolStreamBuilder::new(&opts.tycho_host, opts.chain),
         filter,
         &protocols,
