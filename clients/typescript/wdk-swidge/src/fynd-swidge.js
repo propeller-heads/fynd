@@ -30,7 +30,7 @@ import { FyndExecutionError } from './errors.js'
  */
 /**
  * @typedef {FeeCaps & {
- *   chainId: 1 | 8453,
+ *   chainId: import('./router.js').Chain['id'],
  *   apiKey?: string,
  *   baseUrl?: string,
  *   quoteSender?: string,
@@ -51,7 +51,6 @@ function hasEvmAllowance (account) {
 export default class FyndSwidgeProtocol extends SwidgeProtocol {
   /** @type {EvmAccount | undefined} */
   #account
-  /** @type {'ethereum' | 'base'} */
   #chainName
   #chain
   #settings
@@ -66,14 +65,12 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
     const caps = { maxNetworkFeeBps: config?.maxNetworkFeeBps, maxProtocolFeeBps: config?.maxProtocolFeeBps }
     if (account) super(account, caps)
     else super(undefined, caps)
-    if (!config || (config.chainId !== 1 && config.chainId !== 8453)) {
-      throw new ValueError('chainId must be 1 (Ethereum) or 8453 (Base).')
-    }
+    const supported = Object.entries(CHAINS).find(([, chain]) => chain.id === config?.chainId)
+    if (!supported) throw new ValueError('chainId must be a supported Fynd chain ID.')
     if (account && !hasEvmAllowance(account)) throw new ValueError('A WDK EVM account with public allowance support is required.')
     this.#account = account
-    /** @type {'ethereum' | 'base'} */
-    this.#chainName = config.chainId === 1 ? 'ethereum' : 'base'
-    this.#chain = CHAINS[this.#chainName]
+    this.#chainName = supported[0]
+    this.#chain = supported[1]
     this.#settings = Object.freeze({ ...caps, quoteSender: config.quoteSender })
     this.#approvalTimeoutMs = config.approvalTimeoutMs ?? 180000
     if (!Number.isSafeInteger(this.#approvalTimeoutMs) || this.#approvalTimeoutMs <= 0) {
@@ -177,7 +174,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
 
   /** @returns {Promise<import('@tetherto/wdk-wallet/protocols').SwidgeSupportedChain[]>} */
   async getSupportedChains () {
-    return Object.entries(CHAINS).map(([name, chain]) => ({ id: chain.id, name: name === 'ethereum' ? 'Ethereum' : 'Base', type: 'evm', nativeToken: chain.nativeSymbol }))
+    return Object.values(CHAINS).map(chain => ({ id: chain.id, name: chain.name, type: 'evm', nativeToken: chain.nativeSymbol }))
   }
 
   /** @param {import('@tetherto/wdk-wallet/protocols').SwidgeSupportedTokensOptions} [options]
@@ -269,8 +266,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
   }
 
   /**
-   * The pinned WDK estimator cannot simulate future approvals or estimate Base L1
-   * fees. Incomplete estimates cannot enforce caps.
+   * Complete estimates are verified only on Ethereum, without future approvals.
    * @param {import('./fynd-api.js').EncodedQuote} quote
    * @param {{to:string,data:string,value:bigint}} transaction
    * @param {string} tokenIn
@@ -313,7 +309,7 @@ export default class FyndSwidgeProtocol extends SwidgeProtocol {
         type: 'network', amount: network.amount, token: NATIVE, chain: this.#chain.id, included: false,
         description: network.complete
           ? 'Estimated network cost for all transactions; not a settlement guarantee.'
-          : 'Partial network estimate; may omit transaction costs, including Base L1 fees.'
+          : 'Partial network estimate; may omit transaction costs and chain-specific fees.'
       })
     }
     return {

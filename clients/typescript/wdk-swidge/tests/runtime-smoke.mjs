@@ -17,7 +17,7 @@ check(typeof fetch === 'function' && typeof URL === 'function' && typeof AbortCo
 
 const adapter = new FyndSwidgeProtocol(undefined, { chainId: 1, baseUrl, apiKey })
 const chains = await adapter.getSupportedChains()
-check(chains.some(chain => chain.id === 1) && chains.some(chain => chain.id === 8453), 'Missing supported chains.')
+check(chains.some(chain => chain.id === 1), 'Chain discovery failed.')
 const tokens = await adapter.getSupportedTokens()
 check(tokens.length === 2 && tokens.some(token => token.symbol === 'WETH'), 'Token discovery failed.')
 

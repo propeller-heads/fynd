@@ -5,6 +5,9 @@ import Wallet, { WalletAccountEvm, WalletAccountReadOnlyEvm } from '@tetherto/wd
 import Fynd, { FyndSwidgeProtocol, type FyndConfig, type ISwidgeProtocol } from '../index.js'
 
 const config: FyndConfig = { chainId: 1, quoteSender: '0x1111111111111111111111111111111111111111' }
+for (const chainId of [1, 8453, 42161, 56, 137, 130, 4663] as const) new Fynd(undefined, { ...config, chainId })
+// @ts-expect-error The hosted API does not support this chain.
+new Fynd(undefined, { chainId: 2 })
 const protocol: ISwidgeProtocol = new Fynd(undefined, config)
 const named: ISwidgeProtocol = new FyndSwidgeProtocol(undefined, config)
 const seed = 'test test test test test test test test test test test junk'

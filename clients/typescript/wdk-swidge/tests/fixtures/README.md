@@ -1,10 +1,10 @@
 # Local WDK account fixtures
 
-`wdk-account.test.js` starts an ephemeral Anvil chain (ID 1) and mock Fynd HTTP server on loopback. Published WDK packages handle registration, signing, approvals, broadcast, waits and status. Tests use no wallet-method mocks or private WDK fields.
+`wdk-account.test.js` starts an ephemeral Anvil chain and mock Fynd HTTP server on loopback. A native-input swap matrix checks WDK registration, signing, broadcast and status with all seven supported chain IDs. Ethereum cases cover approvals and failures. Tests use no wallet-method mocks or private WDK fields.
 
 `WalletFixtures.sol` provides a permissionlessly mintable token with optional USDT-style resets. Its router accepts `singleSwap` but interprets route bytes as a fixed output amount. Anvil installs that runtime at the pinned router address on the local chain only. The mnemonic and balances are public development fixtures.
 
-Tests cover recipients, native input/output, approval refresh/reset, partial progress and pending/reverted receipts. They do not establish live DEX settlement, liquidity or production gas costs.
+Tests cover recipients, native input/output, approval refresh/reset, partial progress and pending/reverted receipts. The chain matrix uses local fixtures, not each network's execution or fee rules; it does not establish live DEX settlement, RPC compatibility or production gas costs.
 
 Run from the package directory with Anvil on `PATH`, or set `ANVIL_BIN`:
 

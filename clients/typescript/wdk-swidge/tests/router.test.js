@@ -48,9 +48,9 @@ describe('router call validation', () => {
     expect(validate(test)).toEqual(test.quote.transaction)
   })
 
-  it('uses the Base router only for Base', () => {
-    const test = fixture('singleSwap', {}, CHAINS.base)
-    expect(validate(test).to).toBe(CHAINS.base.router)
+  it.each(Object.values(CHAINS).filter(chain => chain.id !== 1))('uses the $name router only on its chain', chain => {
+    const test = fixture('singleSwap', {}, chain)
+    expect(validate(test).to).toBe(chain.router)
     expect(() => validateTransaction(test.quote, test.request, CHAINS.ethereum)).toThrow(/router/)
   })
 

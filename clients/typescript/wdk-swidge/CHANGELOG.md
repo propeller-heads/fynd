@@ -3,6 +3,6 @@
 
 ## 0.1.0-alpha.0 (unreleased)
 
-- Add hosted Fynd swaps for WDK on Ethereum and Base: quotes, exact-input execution, status and token discovery.
+- Add quotes, exact-input execution, status and token discovery for all seven hosted Fynd chains.
 - Validate router calls and caller limits; preserve transaction progress after failures.
 - Add Node/Bare support, declarations, tests and usage docs.

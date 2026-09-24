@@ -17,7 +17,6 @@ const fixtures = JSON.parse(readFileSync(new URL('./fixtures/wallet-fixtures.jso
 const fixtureSource = readFileSync(new URL('./fixtures/WalletFixtures.sol', import.meta.url))
 const routerAbi = new Interface(fixtures.contracts.FixtureRouter.abi)
 const tokenAbi = new Interface(fixtures.contracts.FixtureToken.abi)
-const router = CHAINS.ethereum.router
 const inputToken = '0x000000000000000000000000000000000000a100'
 const outputToken = '0x000000000000000000000000000000000000a200'
 const usdt = '0xdac17f958d2ee523a2206206994597c13d831ec7'
@@ -28,8 +27,11 @@ const mnemonic = 'test test test test test test test test test test test junk'
 const inputAmount = 10n ** 16n
 const grossOutput = 1_000_000n
 
-let anvil, provider, mockApi, baseUrl, snapshot, wdk, account, protocol, sender
+let anvil, provider, rpcUrl, mockApi, baseUrl, snapshot, wdk, account, protocol, sender
 let quoteCalls, nextMinimum
+let chainName = 'ethereum'
+let chainId = 1
+let router = CHAINS.ethereum.router
 
 async function listen (server) {
   server.listen(0, '127.0.0.1')
@@ -39,11 +41,11 @@ async function listen (server) {
 
 async function handleApi (request, response) {
   response.setHeader('Content-Type', 'application/json')
-  if (request.url === '/v1/ethereum/info') {
-    response.end(JSON.stringify({ chain_id: 1, router_address: router, version: 'test-fixture' }))
+  if (request.url === `/v1/${chainName}/info`) {
+    response.end(JSON.stringify({ chain_id: chainId, router_address: router, version: 'test-fixture' }))
     return
   }
-  if (request.url !== '/v1/ethereum/quote') {
+  if (request.url !== `/v1/${chainName}/quote`) {
     response.writeHead(404).end('{}')
     return
   }
@@ -81,6 +83,24 @@ async function handleApi (request, response) {
   }] }))
 }
 
+async function selectChain (name, id) {
+  wdk?.dispose()
+  await provider.send('anvil_setChainId', [id])
+  provider.destroy()
+  provider = new JsonRpcProvider(rpcUrl, id, { staticNetwork: true, cacheTimeout: -1 })
+  chainName = name
+  chainId = id
+  router = CHAINS[name].router
+  await provider.send('anvil_setCode', [router, fixtures.contracts.FixtureRouter.runtime])
+  await provider.send('anvil_setBalance', [router, toBeHex(10n ** 20n)])
+  wdk = new WDK(mnemonic)
+    .registerWallet(name, WalletManagerEvm, { provider, chainId: id })
+    .registerProtocol(name, 'fynd', FyndSwidgeProtocol, { chainId: id, baseUrl, approvalTimeoutMs: 10000 })
+  account = await wdk.getAccount(name, 0)
+  sender = await account.getAddress()
+  protocol = account.getSwidgeProtocol('fynd')
+}
+
 beforeAll(async () => {
   expect(createHash('sha256').update(fixtureSource).digest('hex')).toBe(fixtures.sourceSha256)
   const binary = process.env.ANVIL_BIN ?? 'anvil'
@@ -88,7 +108,7 @@ beforeAll(async () => {
   const reservation = createServer()
   const port = await listen(reservation)
   await new Promise(resolve => reservation.close(resolve))
-  const rpcUrl = `http://127.0.0.1:${port}`
+  rpcUrl = `http://127.0.0.1:${port}`
   anvil = spawn(binary, ['--host', '127.0.0.1', '--port', String(port), '--chain-id', '1', '--hardfork', 'cancun', '--accounts', '3'], { stdio: 'ignore' })
   let startError
   anvil.once('error', error => { startError = error })
@@ -119,12 +139,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   quoteCalls = []
   nextMinimum = (_count, minimum) => minimum
-  wdk = new WDK(mnemonic)
-    .registerWallet('ethereum', WalletManagerEvm, { provider, chainId: 1 })
-    .registerProtocol('ethereum', 'fynd', FyndSwidgeProtocol, { chainId: 1, baseUrl, approvalTimeoutMs: 10000 })
-  account = await wdk.getAccount('ethereum', 0)
-  sender = await account.getAddress()
-  protocol = account.getSwidgeProtocol('fynd')
+  await selectChain('ethereum', 1)
   const setupSigner = await provider.getSigner(1)
   for (const token of [inputToken, usdt]) {
     await (await new Contract(token, tokenAbi, setupSigner).mint(sender, inputAmount * 10n)).wait()
@@ -133,6 +148,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   wdk?.dispose()
+  wdk = undefined
   if (provider && snapshot) {
     await provider.send('anvil_setAutomine', [true])
     await provider.send('evm_revert', [snapshot])
@@ -185,12 +201,21 @@ describe('published WDK account against local fixture contracts', () => {
     expect(result.networkFeeComplete).toBe(true)
   }, 15000)
 
-  it('executes native input without approval and sends the exact input value', async () => {
+  it.each(Object.entries(CHAINS))('registers, signs, submits and reads a native-input swap on %s', async (name, { id }) => {
+    await selectChain(name, id)
+    expect(protocol).toBeInstanceOf(FyndSwidgeProtocol)
     const result = await protocol.swidge(options({ fromToken: ZeroAddress }))
-    expect(result.transactions.map(tx => tx.type)).toEqual(['source'])
+    expect(result.transactions).toEqual([{ hash: result.hash, chain: id, type: 'source' }])
     await wait(result.hash)
-    expect((await provider.getTransaction(result.hash)).value).toBe(inputAmount)
+    const submitted = await provider.getTransaction(result.hash)
+    expect(submitted.chainId).toBe(BigInt(id))
+    expect(submitted.value).toBe(inputAmount)
+    expect(submitted.from.toLowerCase()).toBe(sender.toLowerCase())
+    expect(submitted.to.toLowerCase()).toBe(router)
     expect(await new Contract(outputToken, tokenAbi, provider).balanceOf(recipient)).toBe(grossOutput)
+    expect(await protocol.getSwidgeStatus(result.hash)).toEqual({
+      status: 'completed', transactions: [{ hash: result.hash, chain: id, type: 'source' }]
+    })
   }, 15000)
 
   it('delivers native output to a custom recipient', async () => {

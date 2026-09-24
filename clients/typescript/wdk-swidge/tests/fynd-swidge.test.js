@@ -18,13 +18,19 @@ const AMOUNT = 10000n
 const options = { fromToken: WETH, toToken: USDC, fromTokenAmount: AMOUNT }
 const hash = n => `0x${n.toString(16).padStart(64, '0')}`
 const SWAP_HASH = hash(100)
+const HOSTED_CHAINS = [
+  [1, 'ethereum', 'Ethereum', 'ETH'], [8453, 'base', 'Base', 'ETH'],
+  [42161, 'arbitrum', 'Arbitrum', 'ETH'], [56, 'bsc', 'BNB Smart Chain', 'BNB'],
+  [137, 'polygon', 'Polygon', 'POL'], [130, 'unichain', 'Unichain', 'ETH'],
+  [4663, 'robinhood', 'Robinhood Chain', 'ETH']
+]
 // Independent outer ABI fixture, matching tycho-execution 0.423.0's deployed router.
 const abi = new Interface([
   'function singleSwap(uint256 amountIn,address tokenIn,address tokenOut,uint256 expectedAmountOut,uint256 minAmountOut,address receiver,(uint32,address,uint256,uint256,bytes) clientFeeParams,bytes swaps)'
 ])
 
 function harness ({ chainId = 1, allowance = AMOUNT, config = {}, mode = 'full' } = {}) {
-  const chain = chainId === 1 ? CHAINS.ethereum : CHAINS.base
+  const chain = Object.values(CHAINS).find(chain => chain.id === chainId)
   const state = {
     allowance, encodedQuotes: 0, valuationQuotes: 0,
     grossOutput: 20000n, routerFee: 20n, minimum: 19881n, valuation: AMOUNT,
@@ -89,6 +95,26 @@ function harness ({ chainId = 1, allowance = AMOUNT, config = {}, mode = 'full' 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('public quote and execution modes', () => {
+  it('lists every officially supported hosted chain with its native currency', async () => {
+    const { api } = harness()
+    expect(await api.getSupportedChains()).toEqual(HOSTED_CHAINS.map(([id, _slug, name, nativeToken]) => ({ id, name, type: 'evm', nativeToken })))
+  })
+
+  it.each(HOSTED_CHAINS)('routes quotes, approvals, status and discovery on chain %i (%s)', async (chainId, slug, _name, symbol) => {
+    const { api, account, fetchMock } = harness({ chainId, allowance: 0n })
+    await expect(api.quoteSwidge({ ...options, toChain: String(chainId) })).resolves.toMatchObject({ networkFeeComplete: false })
+    const result = await api.swidge({ ...options, toChain: slug })
+    expect(result.transactions).toEqual([
+      { hash: hash(1), chain: chainId, type: 'approval' }, { hash: SWAP_HASH, chain: chainId, type: 'source' }
+    ])
+    expect(result.fees.every(fee => fee.chain === chainId)).toBe(true)
+    expect(account.approve).toHaveBeenCalledExactlyOnceWith({ token: WETH, spender: CHAINS[slug].router, amount: AMOUNT })
+    await expect(api.getSwidgeStatus(SWAP_HASH, { fromChain: chainId, toChain: slug })).resolves.toMatchObject({ status: 'completed', transactions: [{ chain: chainId }] })
+    const tokens = await api.getSupportedTokens({ fromChain: String(chainId), toChain: slug })
+    expect(tokens[0]).toMatchObject({ token: ZeroAddress, symbol, chain: chainId, decimals: 18 })
+    expect(fetchMock.mock.calls.every(([url]) => new URL(url).pathname.startsWith(`/v1/${slug}/`))).toBe(true)
+  })
+
   it.each([
     { chainId: 2 }, { chainId: '1' }, { chainId: undefined },
     { maxProtocolFeeBps: -1 }, { maxNetworkFeeBps: 1.5 }, { maxNetworkFeeBps: null },
@@ -434,8 +460,8 @@ describe('requested fee caps', () => {
     expect(result.fees[0]).toMatchObject({ token: USDC, amount: 20n })
   })
 
-  it('fails closed for Base network caps when L1 data cost is not covered', async () => {
-    const { api, account } = harness({ chainId: 8453 })
+  it.each(HOSTED_CHAINS.filter(([id]) => id !== 1))('rejects unverified network caps on chain %i (%s)', async (chainId) => {
+    const { api, account } = harness({ chainId })
     await expect(api.swidge(options, { maxNetworkFeeBps: 10000 })).rejects.toMatchObject({ reason: 'FEE_ESTIMATE_UNAVAILABLE' })
     expect(account.sendTransaction).not.toHaveBeenCalled()
     await expect(api.quoteSwidge(options)).resolves.toMatchObject({ networkFeeComplete: false })

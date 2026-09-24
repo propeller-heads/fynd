@@ -76,7 +76,7 @@ export class FyndApi {
   #timeoutMs
 
   /**
-   * @param {{baseUrl?: string, apiKey?: string, chain: 'ethereum' | 'base', timeoutMs?: number}} config
+   * @param {{baseUrl?: string, apiKey?: string, chain: string, timeoutMs?: number}} config
    */
   constructor ({ baseUrl = 'https://fynd-api.propellerheads.xyz', apiKey, chain, timeoutMs = 10000 }) {
     let url

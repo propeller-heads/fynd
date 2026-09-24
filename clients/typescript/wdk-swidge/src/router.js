@@ -5,13 +5,18 @@ import { SwidgeError } from '@tetherto/wdk-wallet/protocols'
 import { getAddress, Interface, ZeroAddress } from 'ethers'
 import { token } from './amounts.js'
 
-/** @typedef {{ id: number, router: string, nativeSymbol: string }} Chain */
+/** @typedef {(typeof CHAINS)[keyof typeof CHAINS]} Chain */
 
 // Addresses: tycho-execution 0.423.0, config/router_addresses.json.
 // Source and upgrades: docs/compatibility.md#router-contract.
 export const CHAINS = Object.freeze({
-  ethereum: Object.freeze({ id: 1, router: '0x1644d2477f809cc2c71bccfd6dc9497e3f83210d', nativeSymbol: 'ETH' }),
-  base: Object.freeze({ id: 8453, router: '0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67', nativeSymbol: 'ETH' })
+  ethereum: Object.freeze({ id: 1, name: 'Ethereum', router: '0x1644d2477f809cc2c71bccfd6dc9497e3f83210d', nativeSymbol: 'ETH' }),
+  base: Object.freeze({ id: 8453, name: 'Base', router: '0xaba5b53b03eafad1c5fc8bd5fc765fc85bb3de67', nativeSymbol: 'ETH' }),
+  arbitrum: Object.freeze({ id: 42161, name: 'Arbitrum', router: '0x924f147c50ea59f5180a26031a8b65b2aa1e81cd', nativeSymbol: 'ETH' }),
+  bsc: Object.freeze({ id: 56, name: 'BNB Smart Chain', router: '0x7f3d12bbafb8955e51b3ab9588b34c8ad95bda4e', nativeSymbol: 'BNB' }),
+  polygon: Object.freeze({ id: 137, name: 'Polygon', router: '0xbd4e6011f03355c2a377fd9af939322a7d0a1bc1', nativeSymbol: 'POL' }),
+  unichain: Object.freeze({ id: 130, name: 'Unichain', router: '0xcba5574597ad00ea250fd106dab4fc7461949635', nativeSymbol: 'ETH' }),
+  robinhood: Object.freeze({ id: 4663, name: 'Robinhood Chain', router: '0x09215a470bd585e59eb3f4b612fbd2678131ff9e', nativeSymbol: 'ETH' })
 })
 
 const ROUTER_NATIVE = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'

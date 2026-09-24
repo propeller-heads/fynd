@@ -3,7 +3,21 @@
 
 [![Powered by WDK](https://img.shields.io/badge/Powered_by-WDK-26A17B)](https://docs.wdk.tether.io/)
 
-Same-chain, exact-input swaps on Ethereum (`1`) and Base (`8453`) through the hosted Fynd API. Fynd supplies routes and calldata; WDK handles approvals, signing, broadcast and transaction lookup.
+Same-chain, exact-input swaps through the hosted Fynd API. Fynd supplies routes and calldata; WDK handles approvals, signing, broadcast and transaction lookup.
+
+## Supported chains
+
+Matches the [hosted API's chain list](https://github.com/propeller-heads/fynd/blob/main/docs/get-started/hosted-api.md#supported-chains) as of September 24, 2026. New chains require an adapter release.
+
+| Chain | ID | API slug | Native token |
+| --- | ---: | --- | --- |
+| Ethereum | 1 | `ethereum` | ETH |
+| Base | 8453 | `base` | ETH |
+| Arbitrum | 42161 | `arbitrum` | ETH |
+| BNB Smart Chain | 56 | `bsc` | BNB |
+| Polygon | 137 | `polygon` | POL |
+| Unichain | 130 | `unichain` | ETH |
+| Robinhood Chain | 4663 | `robinhood` | ETH |
 
 ## Install
 
@@ -20,9 +34,9 @@ cp .env.example .env
 
 | Option | Meaning |
 | --- | --- |
-| `chainId` | Required numeric `1` or `8453`. |
+| `chainId` | Required numeric ID from the table above. |
 | `apiKey` | Raw `Authorization` value, without `Bearer`; required for direct hosted access. |
-| `baseUrl` | Defaults to `https://fynd-api.propellerheads.xyz`; appends `/v1/ethereum` or `/v1/base`. |
+| `baseUrl` | Defaults to `https://fynd-api.propellerheads.xyz`; appends `/v1/{chain}` using the configured chain's slug. |
 | `quoteSender` | Nonzero address required for quotes without an account. Account address takes precedence. |
 | `timeoutMs` | Default `10000`; includes response bodies and the entire token-pagination request. |
 | `approvalTimeoutMs` | Default `180000`; confirmation deadline per approval. |
@@ -48,7 +62,7 @@ const required = name => {
   return process.env[name]
 }
 const chainId = Number(process.env.CHAIN_ID ?? '1')
-const walletName = chainId === 1 ? 'ethereum' : 'base'
+const walletName = 'evm'
 const wdk = new WDK(required('WDK_SEED_PHRASE'))
   .registerWallet(walletName, WalletManagerEvm, {
     provider: required('RPC_URL'), chainId
@@ -111,12 +125,12 @@ Keep `.env` local. Production wallets should use their existing custody flow for
 | `quoteSwidge(options)` | Non-binding quote; validates minimum/slippage without applying fee caps. |
 | `swidge(options, config?)` | Approves if needed, refreshes after approval, broadcasts one swap and returns `id`, `hash`, `transactions` and quoted amounts/fees. |
 | `getSwidgeStatus(id, options?)` | Original-hash lookup through a full or read-only account. |
-| `getSupportedChains()` | Static Ethereum/Base list. |
-| `getSupportedTokens(options?)` | Complete, block-consistent metadata: quality 100/tax 0 tokens plus native ETH. `fromToken` filtering is unsupported. |
+| `getSupportedChains()` | The supported chains above. |
+| `getSupportedTokens(options?)` | Complete, block-consistent metadata: quality 100/tax 0 tokens plus the native token. `fromToken` filtering is unsupported. |
 
-Swap options require `fromToken`, `toToken` and `fromTokenAmount`. Optional: `recipient` (sender by default), `slippage` (default `0.005`, or 0.5%), `minAmountOut` and matching `toChain`. Chain hints accept the numeric ID, decimal string or `ethereum`/`base`; status/token filters must also match.
+Swap options require `fromToken`, `toToken` and `fromTokenAmount`. Optional: `recipient` (sender by default), `slippage` (default `0.005`, or 0.5%), `minAmountOut` and matching `toChain`. Chain hints accept the numeric ID, decimal string or API slug; status/token filters must also match.
 
-Amounts use token base-unit `bigint` values or safe integers. Native ETH uses `0x0000000000000000000000000000000000000000` or the all-`e` sentinel; wrapped ETH is an ERC-20. Exact-output, cross-chain, same-token swaps, `refundAddress`, fee-on-transfer and rebasing tokens are unsupported.
+Amounts use token base-unit `bigint` values or safe integers. Native ETH/BNB/POL uses `0x0000000000000000000000000000000000000000` or the all-`e` sentinel; wrapped native tokens are ERC-20s. Exact-output, cross-chain, same-token swaps, `refundAddress`, fee-on-transfer and rebasing tokens are unsupported.
 
 Quotes return net `toTokenAmount`, executable `toTokenAmountMin`, itemized `fees`, `networkFeeComplete` and optional decimal `priceImpact`. Minimum/slippage checks reject unsuitable calldata; they do not change it. Slippage uses Fynd's reported net output and rounding, not an independent market price. Execution fetches a fresh quote, so set an absolute `minAmountOut` when needed.
 
@@ -126,7 +140,7 @@ Token discovery requires Fynd's experimental `/tokens` endpoint. Changed paginat
 
 Network fees use native-token units. Router fees use output-token units and already reduce net output. Never sum unlike tokens. No integrator fee is requested; positive slippage can increase the settled router fee.
 
-`networkFeeComplete` is true only with an Ethereum account, no required approval and a successful WDK swap estimate. Base excludes unverified rollup costs. Fynd gas × gas price is an indicative fallback; an omitted network fee means unknown cost, not zero.
+`networkFeeComplete` is true only with an Ethereum account, no required approval and a successful WDK swap estimate. Complete fee estimates are unverified on other chains, including additional rollup costs. Fynd gas × gas price is an indicative fallback; an omitted network fee means unknown cost, not zero.
 
 Caps apply only to execution and constrain estimates. The protocol cap compares quoted router fee/gross output. A network cap requires Ethereum, no approval and a successful WDK swap estimate; it compares cost with native input or an ERC-20→native valuation quote. Otherwise it rejects before any write. Per-call caps override constructor values; `undefined` inherits, and zero remains active.
 
