@@ -18,11 +18,11 @@ use rustc_hash::FxHashMap;
 use tycho_simulation::tycho_common::models::Address;
 
 /// Tokens in the snapshot, one node each.
-const TOKENS: usize = 1688;
+const TOKENS: usize = 1985;
 /// Directed token pairs, one edge each — two per pair of tokens that trade.
-const EDGES: usize = 4026;
+const EDGES: usize = 4798;
 /// Components in the snapshot, spread across those edges.
-const COMPONENTS: usize = 2377;
+const COMPONENTS: usize = 2785;
 
 const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
 const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
@@ -37,9 +37,13 @@ fn recorded_topology() -> FxHashMap<ComponentId, Vec<Address>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/market_recording.json.zst");
     let recording = read_recording(&path).expect("market recording fixture");
+    let updates = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(recording.decode_updates())
+        .expect("market recording fixture decodes");
 
     let mut topology = FxHashMap::default();
-    for update in recording.updates {
+    for update in updates {
         for (component_id, component) in update.new_pairs {
             topology.insert(
                 component_id,
@@ -130,23 +134,23 @@ fn test_busy_pairs_hold_every_pool_that_trades_them() {
         graph
             .pools_between(node(USDC), node(USDT))
             .len(),
-        15
+        13
     );
     assert_eq!(
         graph
             .pools_between(node(USDC), node(WETH))
             .len(),
-        12
+        11
     );
     assert_eq!(
         graph
             .pools_between(node(WETH), node(USDT))
             .len(),
-        10
+        9
     );
 
     // And WETH reaches its neighbours once each, not once per pool.
-    assert_eq!(graph.neighbors(node(WETH)).count(), 1285);
+    assert_eq!(graph.neighbors(node(WETH)).count(), 1424);
 }
 
 #[test]

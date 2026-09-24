@@ -15,6 +15,9 @@ pub mod internal;
 pub mod primitives;
 /// Public API types: `Order`, `Quote`, `Route`, `Swap`, `QuoteRequest`, etc.
 pub mod quote;
+#[cfg(any(test, feature = "test-utils"))]
+/// Builders for assembling quote types in tests, here and in dependent crates.
+pub mod test_utils;
 
 // Re-export constants
 pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};

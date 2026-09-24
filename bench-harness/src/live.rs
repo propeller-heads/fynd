@@ -6,9 +6,8 @@
 //! (spot prices, depths, token gas prices) is computed locally from whatever state is present, not
 //! streamed.
 //!
-//! Nothing is serialized, which is the point. `MarketRecording` drops states it cannot write --
-//! every Uniswap v4, Balancer, Curve and Maverick pool in the recorded fixture is a component with
-//! no state, and so unroutable. Captured live they are all there.
+//! Both market modes hold the same pool states (see `fynd_test_fixtures::MarketRecording`). Live
+//! gives a new block on every run; offline gives the same block every time.
 
 use std::{
     collections::HashMap,
@@ -17,8 +16,8 @@ use std::{
 };
 
 use fynd_core::feed::protocol_registry::{
-    matches_streamed_system, open_price_level_stream_for_recording,
-    register_exchanges_for_recording, ProtocolSpec,
+    matches_streamed_system, open_price_level_stream_for_live_capture,
+    register_exchanges_for_live_capture, ProtocolSpec,
 };
 use num_bigint::BigUint;
 use tokio::sync::watch;
@@ -228,7 +227,7 @@ pub async fn capture_market(opts: &LiveOptions) -> Result<Market, String> {
     steps.done("token list in");
 
     let filter = ComponentFilter::with_tvl_range(opts.min_tvl, opts.min_tvl);
-    let builder = register_exchanges_for_recording(
+    let builder = register_exchanges_for_live_capture(
         ProtocolStreamBuilder::new(&opts.tycho_host, opts.chain),
         filter,
         &protocols,
@@ -411,7 +410,7 @@ async fn capture_price_levels(
     tokens: &HashMap<Bytes, Token>,
     timeout_secs: u64,
 ) -> Result<Option<Update>, String> {
-    let Some(stream) = open_price_level_stream_for_recording(chain, protocols, tokens)? else {
+    let Some(stream) = open_price_level_stream_for_live_capture(chain, protocols, tokens)? else {
         return Ok(None);
     };
     let mut stream = Box::pin(stream);

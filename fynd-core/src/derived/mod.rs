@@ -49,6 +49,8 @@
 //! }
 //! ```
 
+#[cfg(feature = "test-utils")]
+pub mod bench;
 pub(crate) mod computation;
 pub(crate) mod computations;
 pub(crate) mod error;

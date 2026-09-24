@@ -1422,9 +1422,8 @@ impl Solver {
     /// Solver behaves identically to a live one — call [`wait_until_ready`](Self::wait_until_ready)
     /// then [`quote`](Self::quote).
     ///
-    /// VM-backed protocol states that couldn't be serialized will be absent from
-    /// the recording. Components without states will still be registered but
-    /// won't contribute to routing.
+    /// The solver registers components whose state failed to decode, but does not route through
+    /// them.
     ///
     /// Requires the `test-utils` feature.
     #[cfg(feature = "test-utils")]
