@@ -518,6 +518,15 @@ pub(crate) fn open_price_level_stream(
     Ok(Some(builder.build()))
 }
 
+/// The raw Tycho messages [`open_recording_stream`] hands out.
+#[cfg(feature = "test-utils")]
+pub type RecordedMessages = tokio::sync::mpsc::Receiver<
+    Result<
+        tycho_simulation::tycho_client::feed::FeedMessage,
+        tycho_simulation::tycho_client::feed::BlockSynchronizerError,
+    >,
+>;
+
 /// Opens the raw Tycho stream a market recording stores.
 ///
 /// Subscribes to every Tycho protocol system in `entries` that fynd has a decoder for, so a
@@ -536,18 +545,7 @@ pub async fn open_recording_stream(
     auth_key: String,
     tvl_filter: ComponentFilter,
     entries: &[String],
-) -> Result<
-    (
-        tokio::task::JoinHandle<()>,
-        tokio::sync::mpsc::Receiver<
-            Result<
-                tycho_simulation::tycho_client::feed::FeedMessage,
-                tycho_simulation::tycho_client::feed::BlockSynchronizerError,
-            >,
-        >,
-    ),
-    String,
-> {
+) -> Result<(tokio::task::JoinHandle<()>, RecordedMessages), String> {
     use tycho_simulation::{tycho_client::stream::TychoStreamBuilder, utils::default_blocklist};
 
     let systems = select_decodable_systems(chain, entries).map_err(|e| e.to_string())?;
@@ -680,7 +678,7 @@ pub async fn decode_recorded_messages(
 /// Wrapper over `open_price_level_stream` so the capture serves the same venues as
 /// production without exposing the crate-private `DataFeedError`.
 #[cfg(feature = "test-utils")]
-pub fn open_price_level_stream_for_recording(
+pub fn open_price_level_stream_for_live_capture(
     chain: Chain,
     protocols: &[String],
     tokens: &HashMap<Bytes, Token>,

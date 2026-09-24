@@ -130,7 +130,8 @@ pub fn write_recording(recording: &MarketRecording, path: &Path) -> anyhow::Resu
 /// [`SCHEMA_VERSION`]. A version 1 file holds decoded states, which version 2 replaces; record it
 /// again with tools/record-market.
 pub fn read_recording(path: &Path) -> anyhow::Result<MarketRecording> {
-    /// The version alone, so an old file is refused before its body is parsed as this format.
+    /// The version alone, read only when the file does not parse, so the error names an old
+    /// version and not the first field that changed.
     #[derive(Deserialize)]
     struct VersionOnly {
         metadata: MetadataVersion,
@@ -143,9 +144,20 @@ pub fn read_recording(path: &Path) -> anyhow::Result<MarketRecording> {
 
     let compressed = std::fs::read(path)?;
     let decompressed = zstd::decode_all(compressed.as_slice())?;
-    let schema_version = serde_json::from_slice::<VersionOnly>(&decompressed)?
-        .metadata
-        .schema_version;
+    let recording = match serde_json::from_slice::<MarketRecording>(&decompressed) {
+        Ok(recording) => recording,
+        Err(error) => {
+            if let Ok(version) = serde_json::from_slice::<VersionOnly>(&decompressed) {
+                ensure_schema_version(path, version.metadata.schema_version)?;
+            }
+            return Err(error.into());
+        }
+    };
+    ensure_schema_version(path, recording.metadata.schema_version)?;
+    Ok(recording)
+}
+
+fn ensure_schema_version(path: &Path, schema_version: u32) -> anyhow::Result<()> {
     if schema_version != SCHEMA_VERSION {
         anyhow::bail!(
             "{} is recording schema version {schema_version}, but this build reads version \
@@ -153,7 +165,7 @@ pub fn read_recording(path: &Path) -> anyhow::Result<MarketRecording> {
             path.display()
         );
     }
-    Ok(serde_json::from_slice(&decompressed)?)
+    Ok(())
 }
 
 /// Compute SHA-256 hex digest of a byte slice.

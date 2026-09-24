@@ -16,7 +16,7 @@ use std::{
 };
 
 use fynd_core::feed::protocol_registry::{
-    matches_streamed_system, open_price_level_stream_for_recording,
+    matches_streamed_system, open_price_level_stream_for_live_capture,
     register_exchanges_for_live_capture, ProtocolSpec,
 };
 use num_bigint::BigUint;
@@ -410,7 +410,7 @@ async fn capture_price_levels(
     tokens: &HashMap<Bytes, Token>,
     timeout_secs: u64,
 ) -> Result<Option<Update>, String> {
-    let Some(stream) = open_price_level_stream_for_recording(chain, protocols, tokens)? else {
+    let Some(stream) = open_price_level_stream_for_live_capture(chain, protocols, tokens)? else {
         return Ok(None);
     };
     let mut stream = Box::pin(stream);

@@ -408,7 +408,7 @@ The crate turns on `fynd-core`'s `test-utils` feature itself, because `Solver::f
 is what every run goes through.
 
 Because they parse their own arguments, they cannot answer nextest's `--list`. CI and `check.sh`
-exclude them by name (`-E 'not binary(algorithm_bench) and not binary(profile) and not
-binary(derived)'`) rather than
-setting `test = false` in `Cargo.toml`, which would also drop them from
-`cargo clippy --all-targets` and leave this code unlinted.
+exclude them by name
+(`-E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'`) rather than
+setting `test = false` in `Cargo.toml`, which would also drop them from `cargo clippy --all-targets`
+and leave this code unlinted.

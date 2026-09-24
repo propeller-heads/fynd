@@ -189,17 +189,6 @@ impl ComputationManagerConfig {
             None => token_prices,
         }
     }
-
-    /// Builds the pool depth computation this configuration describes.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidConfiguration` if the slippage threshold is not in (0, 1).
-    pub(crate) fn build_pool_depth_computation(
-        &self,
-    ) -> Result<ComponentDepthComputation, ComputationError> {
-        ComponentDepthComputation::new(self.depth_slippage_threshold)
-    }
 }
 
 impl Default for ComputationManagerConfig {
@@ -250,7 +239,7 @@ impl ComputationManager {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
         manager.register(config.build_token_price_computation())?;
-        manager.register(config.build_pool_depth_computation()?)?;
+        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold())?)?;
         Ok((manager, event_rx))
     }
 

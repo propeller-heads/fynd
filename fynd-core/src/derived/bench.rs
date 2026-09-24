@@ -6,9 +6,6 @@
 //! computations incrementally on the components that update changed. The market and the store
 //! carry over between blocks, as they do under `ComputationManager`. Computations run one at a
 //! time, pool depths after the spot prices they read, so each time is for that computation alone.
-//!
-//! The `derived` bench target in `fynd-bench-harness` reads a recording and calls it;
-//! `./scripts/derived-bench.sh` runs that target under samply.
 
 use std::time::{Duration, Instant};
 
@@ -72,8 +69,7 @@ impl TimedComputations {
         Self {
             spot_prices: SpotPriceComputation::new(),
             token_prices: config.build_token_price_computation(),
-            pool_depths: config
-                .build_pool_depth_computation()
+            pool_depths: ComponentDepthComputation::new(config.depth_slippage_threshold())
                 .expect("the default depth slippage threshold is valid"),
         }
     }
@@ -206,7 +202,7 @@ pub async fn time_derived_computations(settings: &DerivedBenchSettings, updates:
                 updated: updated_components,
                 is_full_recompute: false,
             };
-            if changed.all_changed_ids().is_empty() {
+            if !changed.is_topology_change() && changed.updated.is_empty() {
                 continue;
             }
             let block = read_current_block(&market).await;

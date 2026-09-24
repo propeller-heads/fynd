@@ -10,7 +10,7 @@
 #
 # Options:
 #   --recording PATH      Market recording to replay, relative to the current directory
-#                         (default: recordings/native_tvl1_2026-09-24/market_recording.json.zst
+#                         (default: fynd-core/tests/fixtures/market_recording.json.zst
 #                         in the repository)
 #   --repeats N           Replay the whole recording N times in one process (default: 1),
 #                         so samply collects more samples
@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-RECORDING="$REPO_ROOT/recordings/native_tvl1_2026-09-24/market_recording.json.zst"
+RECORDING="$REPO_ROOT/fynd-core/tests/fixtures/market_recording.json.zst"
 RECORD=1
 REPEATS=1
 
