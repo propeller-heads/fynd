@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
     // integration tests will read.
     let recording = fynd_test_fixtures::read_recording(&recording_path)?;
 
-    let pools_toml = include_str!("../../../worker_pools.toml");
+    let pools_toml = include_str!("../../../fynd-core/tests/integration/worker_pools.toml");
     let pairs_path =
         PathBuf::from(format!("fynd-core/tests/fixtures/pairs/{}.json", recording.metadata.chain));
     let pairs_json = std::fs::read_to_string(&pairs_path).map_err(|e| {

@@ -58,8 +58,8 @@ the full solving pipeline (`Solver::from_recording`, `test-utils` feature) to ge
 `expected_outputs.json` for the integration tests in `fynd-core/tests/integration/`.
 
 Shared fixture types live in the `fynd-test-fixtures` crate; the `MarketRecording` module doc says
-why a recording stores messages and how replay decodes them. Worker pool configuration comes from
-the production `worker_pools.toml`; its SHA-256 is stored in the recording metadata so tests can
-detect drift.
+why a recording stores messages and how replay decodes them. Expected outputs are solved with the
+integration tests' own pool config, `fynd-core/tests/integration/worker_pools.toml`, so the
+baseline matches what the tests run; its SHA-256 is stored in the recording metadata.
 
 See [`tools/record-market/README.md`](record-market/README.md) for usage.
