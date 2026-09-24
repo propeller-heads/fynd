@@ -1,4 +1,26 @@
 
+## [0.110.0](https://github.com/propeller-heads/fynd/compare/0.109.1...0.110.0) (2026-09-24)
+
+### Features
+
+* **token-prices:** space the pricing passes ([d4a8bde](https://github.com/propeller-heads/fynd/commit/d4a8bde5db91efa314fbe9fbde589a352ddc8a05))
+* **token-prices:** space full passes and price new tokens immediately ([ccef01d](https://github.com/propeller-heads/fynd/commit/ccef01d62068ccf020133d04aef68ba5412ac162))
+
+### Bug Fixes
+
+* **token-prices:** cap the pass and keep unpriced tokens reachable ([ad90378](https://github.com/propeller-heads/fynd/commit/ad903780da3e57b954a7bf6f93af51152cda575e))
+* **token-prices:** bound and rotate the pricing pass ([f0fbd82](https://github.com/propeller-heads/fynd/commit/f0fbd8230ea218cf3ff7b613460d0292cef4abea))
+* **token-prices:** correct interval docs and edit deps in place ([e181b5d](https://github.com/propeller-heads/fynd/commit/e181b5d675e8761f045de72e78f14afa25ae242a))
+* **token-prices:** break the interval only for a token with no price ([a00cb02](https://github.com/propeller-heads/fynd/commit/a00cb023a9b82b29f3252afb609d1879e7f825e3))
+* **token-prices:** hold an arrival until a pass attempts it ([1636440](https://github.com/propeller-heads/fynd/commit/163644011a166204a8170596e5e6639444afcbe2))
+* **token-prices:** price a new token before a token that has one ([bd19760](https://github.com/propeller-heads/fynd/commit/bd197607d974b30909a432332d8cbc6b16f471ae))
+* **token-prices:** cap the pass that an arrival earns ([91906c5](https://github.com/propeller-heads/fynd/commit/91906c50b9ecdd40dd2c5f459d2a563d2c71ae05))
+* **token-prices:** rotate the tokens that cannot be priced ([a57a1b8](https://github.com/propeller-heads/fynd/commit/a57a1b8006955e11145471fd0fdd2b9eba1afb4a))
+* **token-prices:** solve the market fully at start ([3b28935](https://github.com/propeller-heads/fynd/commit/3b28935e543edf80a8ae575061a36f4d6ef0619f))
+* **token-prices:** run a full pass only after a topology change ([8d384ec](https://github.com/propeller-heads/fynd/commit/8d384ec64049030b2e4668f2b0e7a77f0e49d64d))
+* **token-prices:** protect unpriced tokens on the full pass too ([5c1fe48](https://github.com/propeller-heads/fynd/commit/5c1fe48c16b9f8a4df409cc9cc93a243a39dda7f))
+
+
 ## [0.109.1](https://github.com/propeller-heads/fynd/compare/0.108.0...0.109.1) (2026-09-24)
 
 ### Features
