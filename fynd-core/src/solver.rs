@@ -402,7 +402,40 @@ enum PoolEntry {
     Custom(CustomPoolEntry),
 }
 
+/// Names the worker pools whose solve budget the router deadline will cut short.
+///
+/// The router starts its deadline when the request arrives and stops waiting when it expires, so
+/// a pool budget above it is only reachable for a request that raises its own `timeout_ms`. A
+/// budget equal to the deadline is honoured in full and is not reported.
+///
+/// Separated from the warning it feeds so the rule can be tested without building a solver.
+fn pools_over_router_timeout<'a>(
+    pools: impl IntoIterator<Item = (&'a str, Duration)>,
+    router_timeout: Duration,
+) -> Vec<(&'a str, Duration)> {
+    pools
+        .into_iter()
+        .filter(|(_, timeout)| *timeout > router_timeout)
+        .collect()
+}
+
 impl PoolEntry {
+    /// Returns the name this worker pool is configured under.
+    fn name(&self) -> &str {
+        match self {
+            PoolEntry::BuiltIn { name, .. } => name,
+            PoolEntry::Custom(custom) => &custom.name,
+        }
+    }
+
+    /// Returns the solve budget configured for this worker pool.
+    fn timeout(&self) -> Duration {
+        match self {
+            PoolEntry::BuiltIn { timeout_ms, .. } => Duration::from_millis(*timeout_ms),
+            PoolEntry::Custom(custom) => Duration::from_millis(custom.timeout_ms),
+        }
+    }
+
     /// Returns the configured liquidity scope for this worker pool.
     fn liquidity_scope(&self) -> Option<LiquidityScope> {
         match self {
@@ -797,6 +830,24 @@ impl FyndBuilder {
             .all(|p| p.liquidity_scope() == Some(LiquidityScope::IncludeExclusive))
         {
             return Err(SolverBuildError::NoPublicPool);
+        }
+
+        // Warned rather than refused: the shipped worker_pools.toml carries a budget above the
+        // service's router default, so refusing here would stop a deployment that works today.
+        for (name, timeout) in pools_over_router_timeout(
+            self.pools
+                .iter()
+                .map(|pool| (pool.name(), pool.timeout())),
+            self.router_timeout,
+        ) {
+            tracing::warn!(
+                pool = name,
+                pool_timeout_ms = timeout.as_millis() as u64,
+                router_timeout_ms = self.router_timeout.as_millis() as u64,
+                "worker pool solve budget is longer than the router deadline; the router stops \
+                 waiting first, so the extra budget is only reachable for a request that raises \
+                 its own timeout_ms"
+            );
         }
 
         // Add built-in providers if none were explicitly registered.
@@ -1724,5 +1775,26 @@ mod tests {
         .build();
 
         assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
+    }
+
+    /// A pool budget above the router deadline cannot take effect for a request that does not
+    /// raise its own `timeout_ms`: the router stops waiting first.
+    #[test]
+    fn test_pools_over_router_timeout_names_the_offenders() {
+        let over = pools_over_router_timeout(
+            [("deep", Duration::from_millis(1000)), ("shallow", Duration::from_millis(50))],
+            Duration::from_millis(100),
+        );
+        assert_eq!(over, vec![("deep", Duration::from_millis(1000))]);
+    }
+
+    /// A budget equal to the router deadline is honoured in full, so it is not reported.
+    #[test]
+    fn test_pool_budget_equal_to_the_router_timeout_is_not_reported() {
+        let over = pools_over_router_timeout(
+            [("exact", Duration::from_millis(100))],
+            Duration::from_millis(100),
+        );
+        assert!(over.is_empty());
     }
 }

@@ -151,12 +151,89 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
 /// `worker_router_solve_duration_seconds`, which times the router racing every pool and so
 /// belongs to no single pool, this is attributable per pool.
 ///
-/// Successful quotes only: a pool that exhausts its timeout returns before this point and is
-/// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
+/// Successful quotes only: a pool that exhausts its timeout returns before this point, and a
+/// task the router has already abandoned never reaches it. Those are in
+/// `worker_pool_task_duration_seconds`, which also carries the readiness wait this excludes.
+/// Read as a pair, the two separate a slow search from a long wait to start one; read alone,
+/// this histogram shows a saturated pool as an idle one.
 fn record_quote_duration(pool_name: &str, quote_duration: Duration) {
     // The metric keeps its established external name for dashboard compatibility.
     metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
         .record(quote_duration.as_secs_f64());
+}
+
+/// Records how long a task held its worker, from pickup to response, under the outcome it
+/// reached: `success`, or the [`SolveError::label`] of the failure.
+///
+/// Spans the whole task rather than the algorithm's solve alone, so it also covers the wait for
+/// derived-data readiness. What this measures is worker occupancy, and a task blocked waiting to
+/// become ready occupies its worker exactly as one that is solving.
+///
+/// Every outcome is recorded, which is what `worker_pool_solve_duration_seconds` beside it
+/// cannot do: a pool that fails its work is absent from that histogram, so a saturated pool
+/// reads there as an idle one.
+///
+/// `rate(worker_pool_task_duration_seconds_sum[..]) / workers` is therefore the share of worker
+/// slots that are occupied, and not the share of a CPU that is busy. The two differ: a worker
+/// waiting on the market lock is occupied, because it cannot take the next task, and burns no
+/// CPU while it waits. Read this against `worker_pool_activity_duration_seconds` to see what
+/// remaining time went to, and against container CPU to see how much of either was work.
+fn record_task_duration(pool_name: &str, duration: Duration, outcome: &'static str) {
+    metrics::histogram!(
+        "worker_pool_task_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "outcome" => outcome
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// How long this task may run, or `None` when the router has already given up on it.
+///
+/// The router starts its deadline when the request arrives, before the task is queued, and
+/// abandons every pool that has not answered by then. Two things follow, and this is both of
+/// them. A task picked up after the deadline has no reader left, so solving it only takes a
+/// worker away from a task that still has one. A task picked up before the deadline may run
+/// until the earlier of its pool budget and what remains of the deadline.
+///
+/// Taking the smaller of the two is what lets the pool budget stay meaningful: a caller that
+/// raises `timeout_ms` moves the deadline out and gets the deeper search it asked for, and a
+/// caller that does not is never promised a budget the router will cut short.
+fn task_budget(pool_timeout: Duration, deadline: Instant, now: Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(now)?;
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(pool_timeout.min(remaining))
+}
+
+/// Records time the worker spent on something other than a solve task.
+///
+/// The worker's `select!` is `biased` with market events and derived-data events ahead of the
+/// task queue, so a task in the queue waits behind whatever this records. That wait is otherwise
+/// unattributable: `worker_pool_queue_wait_seconds` shows that a task waited, and nothing shows
+/// what it waited for.
+///
+/// Recorded at the call sites in the worker loop rather than inside the functions themselves,
+/// because only the loop knows whether the work delays a task. [`Worker::initialize_graph`] also
+/// runs at startup and, once, from inside [`Worker::quote`]: neither competes with task pickup,
+/// and the second is already counted by `worker_pool_task_duration_seconds`.
+///
+/// `activity` partitions the time and the values are mutually exclusive, so they sum without
+/// double-counting: `market_event` is a pass through [`Worker::process_event`], `graph_init` is
+/// the full rebuild the lagged branch runs *instead of* it, and `derived_event` is the
+/// derived-data arm.
+///
+/// Wall time, which is the right measure of what a task waits behind: each worker owns its
+/// thread and a single-threaded runtime, so nothing else runs while the worker is here. It is
+/// not a measure of work, because time blocked on the market or derived lock is counted in full
+/// and spends no CPU.
+fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity: &'static str) {
+    metrics::histogram!(
+        "worker_pool_activity_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "activity" => activity
+    )
+    .record(duration.as_secs_f64());
 }
 
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
@@ -564,6 +641,8 @@ where
             }
         };
 
+        // The solve alone. Occupancy is timed by the caller, which also sees the failing
+        // outcomes this point never reaches.
         let quote_duration = start_time.elapsed();
         record_quote_duration(&self.pool_name, quote_duration);
 
@@ -679,9 +758,17 @@ where
 
                 // Process market events
                 event_result = event_rx.recv() => {
+                    // Timed here rather than inside the two calls: this is the point at which
+                    // the work holds the worker away from the task queue.
+                    let activity_started = Instant::now();
                     match event_result {
                         Ok(event) => {
                             self.process_event(event).await;
+                            record_worker_activity_duration(
+                                &self.pool_name,
+                                activity_started.elapsed(),
+                                "market_event",
+                            );
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!(self.worker_id, "event receiver closed, shutting down");
@@ -696,12 +783,18 @@ where
                             );
                             // Reinitialize the graph from the current market state to recover from the missed events.
                             self.initialize_graph().await;
+                            record_worker_activity_duration(
+                                &self.pool_name,
+                                activity_started.elapsed(),
+                                "graph_init",
+                            );
                         }
                     }
                 }
 
                 // Process derived data events (component depths, token prices)
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
+                    let activity_started = Instant::now();
                     match derived_result {
                         Ok(event) => {
                             // Always update tracker with every event
@@ -748,6 +841,11 @@ where
                             );
                         }
                     }
+                    record_worker_activity_duration(
+                        &self.pool_name,
+                        activity_started.elapsed(),
+                        "derived_event",
+                    );
                 }
 
                 // Get next solve task
@@ -755,21 +853,48 @@ where
                     match task.ok() {
                         Some(task) => {
                             let task_id = task.id();
+                            // Occupancy starts at pickup and runs to the response, so it covers
+                            // the readiness wait as well as the solve.
+                            let started = Instant::now();
                             record_task_pickup_metrics(
                                 &self.pool_name,
                                 task.wait_time(),
                                 task_rx.len(),
                             );
 
-                            // Wait for derived data readiness before solving
-                            // Use algorithm timeout as the max wait time
-                            if let Err(e) = self.wait_until_ready(self.algorithm.timeout()).await {
+                            // The router gives up at its own deadline and reads no answer after
+                            // it. Solving anyway takes this worker away from a task that still
+                            // has a reader, which lengthens the queue and pushes the next task
+                            // past its deadline too.
+                            let Some(budget) =
+                                task_budget(self.algorithm.timeout(), task.deadline(), started)
+                            else {
+                                debug!(
+                                    self.worker_id,
+                                    task_id = %task_id,
+                                    waited_ms = task.wait_time().as_millis() as u64,
+                                    "task passed its deadline in the queue; not solving"
+                                );
+                                record_task_duration(
+                                    &self.pool_name,
+                                    started.elapsed(),
+                                    "abandoned",
+                                );
+                                let waited_ms = task.wait_time().as_millis() as u64;
+                                task.respond(Err(SolveError::timeout(waited_ms)));
+                                continue;
+                            };
+
+                            // Wait for derived data readiness before solving, bounded by what
+                            // remains of the deadline as well as by the pool's own budget.
+                            if let Err(e) = self.wait_until_ready(budget).await {
                                 warn!(
                                     self.worker_id,
                                     task_id = %task_id,
                                     error = %e,
                                     "not ready to solve"
                                 );
+                                record_task_duration(&self.pool_name, started.elapsed(), e.label());
                                 task.respond(Err(e));
                                 continue;
                             }
@@ -780,6 +905,12 @@ where
                                 let order = task.order();
                                 self.quote(order, params).await
                             };
+
+                            let outcome = match &result {
+                                Ok(_) => "success",
+                                Err(e) => e.label(),
+                            };
+                            record_task_duration(&self.pool_name, started.elapsed(), outcome);
 
                             // Send response. The specific failure cause is already logged in
                             // `quote()` and returned to the caller, so we don't re-log here.
@@ -2292,9 +2423,27 @@ mod tests {
         assert!(depth_seen, "queue depth gauge not recorded");
     }
 
+    /// One sample of `name` in `recorded`, as (labels, seconds).
+    fn one_histogram_sample(
+        recorded: &[crate::tests::metrics::Recorded],
+        name: &str,
+    ) -> (Vec<String>, f64) {
+        use metrics_util::debugging::DebugValue;
+
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(recorded_name, _, _)| recorded_name == name)
+            .unwrap_or_else(|| panic!("{name} not recorded"));
+        let DebugValue::Histogram(samples) = value else {
+            panic!("expected histogram, got {value:?}");
+        };
+        assert_eq!(samples.len(), 1, "{name} recorded {} samples", samples.len());
+        (labels.clone(), samples[0].into_inner())
+    }
+
     #[test]
     fn test_quote_duration_metric_recorded() {
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+        use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -2302,25 +2451,88 @@ mod tests {
             record_quote_duration("test_pool", std::time::Duration::from_millis(120));
         });
 
-        let mut quote_duration_seen = false;
-        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
-            let key = key.key();
-            if key.name() != "worker_pool_solve_duration_seconds" {
-                continue;
-            }
-            let pool_label = key
-                .labels()
-                .find(|label| label.key() == "pool")
-                .map(|label| label.value().to_string());
-            assert_eq!(pool_label.as_deref(), Some("test_pool"));
-            let DebugValue::Histogram(samples) = value else {
-                panic!("expected histogram, got {value:?}");
-            };
-            assert_eq!(samples.len(), 1);
-            assert!((samples[0].into_inner() - 0.120).abs() < 1e-9);
-            quote_duration_seen = true;
-        }
-        assert!(quote_duration_seen, "quote duration histogram not recorded");
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_solve_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string()]);
+        assert!((seconds - 0.120).abs() < 1e-9);
+    }
+
+    #[rstest]
+    #[case("success")]
+    #[case("timeout")]
+    #[case("not_ready")]
+    fn test_task_duration_recorded_for_every_outcome(#[case] outcome: &'static str) {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_task_duration("test_pool", std::time::Duration::from_millis(120), outcome);
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_task_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("outcome={outcome}")]);
+        assert!((seconds - 0.120).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_expired_task_has_no_budget() {
+        let now = Instant::now();
+        let deadline = now - Duration::from_millis(1);
+        assert_eq!(task_budget(Duration::from_millis(1000), deadline, now), None);
+    }
+
+    /// The router gives up at its own deadline, so a budget past it buys nothing: the pool would
+    /// keep searching for an answer no caller is still waiting for.
+    #[test]
+    fn test_budget_is_capped_by_the_router_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+        assert_eq!(
+            task_budget(Duration::from_millis(1000), deadline, now),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    /// A caller that raises its own timeout gets the deeper search it asked for, bounded by the
+    /// pool's configured budget rather than by the router default.
+    #[test]
+    fn test_budget_keeps_the_pool_limit_when_the_deadline_is_further_out() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(5000);
+        assert_eq!(
+            task_budget(Duration::from_millis(1000), deadline, now),
+            Some(Duration::from_millis(1000))
+        );
+    }
+
+    /// The three activities partition the worker's non-solving time, so each must carry its own
+    /// label and none may be recorded under another's name.
+    #[rstest]
+    #[case("market_event")]
+    #[case("graph_init")]
+    #[case("derived_event")]
+    fn test_worker_activity_duration_recorded(#[case] activity: &'static str) {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_worker_activity_duration(
+                "test_pool",
+                std::time::Duration::from_micros(250),
+                activity,
+            );
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_activity_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("activity={activity}")]);
+        assert!((seconds - 0.000_25).abs() < 1e-12);
     }
 
     #[test]

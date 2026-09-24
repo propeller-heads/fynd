@@ -187,7 +187,7 @@ fn log_failure(order: &Order, worker_pool: &str, error: &SolveError, coverage: O
         order_side_label(order.side()),
         order.amount(),
         worker_pool,
-        solver_error_label(error),
+        error.label(),
         solve_time_ms,
         coverage.ranked_candidates,
         coverage.responders,
@@ -195,7 +195,7 @@ fn log_failure(order: &Order, worker_pool: &str, error: &SolveError, coverage: O
 }
 
 /// Short, stable label for a quote status, sharing the comparison log's lowercase vocabulary
-/// with [`solver_error_label`].
+/// with [`SolveError::label`].
 fn quote_status_label(status: QuoteStatus) -> &'static str {
     match status {
         QuoteStatus::Success => "success",
@@ -216,34 +216,6 @@ fn quote_status_label(status: QuoteStatus) -> &'static str {
 fn order_side_label(side: OrderSide) -> &'static str {
     match side {
         OrderSide::Sell => "sell",
-    }
-}
-
-/// Short, stable label for a solver failure, used as a metric label and in the comparison log.
-///
-/// Matched exhaustively even though [`SolveError`] is `#[non_exhaustive]`: that attribute only
-/// forces a wildcard outside the defining crate, so listing every variant here means a new one
-/// fails to compile rather than silently joining a catch-all.
-pub(super) fn solver_error_label(error: &SolveError) -> &'static str {
-    match error {
-        SolveError::Timeout { .. } => "timeout",
-        SolveError::NoRouteFound { .. } => "no_route",
-        SolveError::RouteRejected { .. } => "route_rejected",
-        SolveError::InsufficientLiquidity { .. } => "insufficient_liquidity",
-        SolveError::QueueFull => "queue_full",
-        SolveError::Internal(_) => "internal",
-        SolveError::InvalidWorkerPools(_) => "invalid_worker_pools",
-        SolveError::PriceCheckFailed { .. } => "price_check_failed",
-        SolveError::AlgorithmError(_) => "algorithm_error",
-        SolveError::MarketDataStale { .. } => "market_data_stale",
-        SolveError::InvalidOrder(_) => "invalid_order",
-        SolveError::NotReady(_) => "not_ready",
-        SolveError::ComputationFailed(_) => "computation_failed",
-        SolveError::FailedEncoding(_) => "encoding_failed",
-        SolveError::EncodingUnavailable(_) => "encoding_unavailable",
-        SolveError::MaxGasExceeded => "max_gas_exceeded",
-        SolveError::MissingData(_) => "missing_data",
-        SolveError::SimulationFailed(_) => "simulation_failed",
     }
 }
 
@@ -729,19 +701,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case(SolveError::Timeout { elapsed_ms: 7 }, "timeout")]
-    #[case(SolveError::NoRouteFound { order_id: "o1".to_string(), reason: None }, "no_route")]
-    #[case(SolveError::QueueFull, "queue_full")]
-    #[case(SolveError::MaxGasExceeded, "max_gas_exceeded")]
-    #[case(SolveError::AlgorithmError("boom".to_string()), "algorithm_error")]
-    #[case(SolveError::MissingData("gas".to_string()), "missing_data")]
-    #[case(SolveError::SimulationFailed("revert".to_string()), "simulation_failed")]
-    #[case(SolveError::NotReady("derived".to_string()), "not_ready")]
-    fn test_solver_error_label(#[case] error: SolveError, #[case] expected: &str) {
-        assert_eq!(solver_error_label(&error), expected);
-    }
-
-    #[rstest]
     #[case(QuoteStatus::Success, "success")]
     #[case(QuoteStatus::NoRouteFound, "no_route")]
     #[case(QuoteStatus::Timeout, "timeout")]
@@ -758,14 +717,11 @@ mod tests {
     fn test_status_vocabularies_agree() {
         assert_eq!(
             quote_status_label(QuoteStatus::Timeout),
-            solver_error_label(&SolveError::Timeout { elapsed_ms: 1 })
+            SolveError::Timeout { elapsed_ms: 1 }.label()
         );
         assert_eq!(
             quote_status_label(QuoteStatus::NoRouteFound),
-            solver_error_label(&SolveError::NoRouteFound {
-                order_id: "o1".to_string(),
-                reason: None
-            })
+            SolveError::NoRouteFound { order_id: "o1".to_string(), reason: None }.label()
         );
     }
 }

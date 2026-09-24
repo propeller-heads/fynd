@@ -27,12 +27,30 @@ pub struct SolveTask {
     response_tx: oneshot::Sender<SolveResult>,
     /// When this task was created.
     created_at: Instant,
+    /// When the router stops waiting for this task's answer.
+    ///
+    /// The router's clock starts when the request arrives, before the task is queued, so this
+    /// bounds the queue wait and the solve together. A worker reads it to leave an answer nobody
+    /// waits for unsolved, and to keep the solve inside what remains of it.
+    deadline: Instant,
 }
 
 impl SolveTask {
     /// Creates a new solve task with default parameters (base Tycho state).
-    pub fn new(id: TaskId, order: Order, response_tx: oneshot::Sender<SolveResult>) -> Self {
-        Self { id, order, params: SolveParams::default(), response_tx, created_at: Instant::now() }
+    pub fn new(
+        id: TaskId,
+        order: Order,
+        response_tx: oneshot::Sender<SolveResult>,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            id,
+            order,
+            params: SolveParams::default(),
+            response_tx,
+            created_at: Instant::now(),
+            deadline,
+        }
     }
 
     /// Attaches solve parameters to this task.
@@ -59,6 +77,11 @@ impl SolveTask {
     /// Returns how long this task has been waiting.
     pub fn wait_time(&self) -> std::time::Duration {
         self.created_at.elapsed()
+    }
+
+    /// Returns when the router stops waiting for this task's answer.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
     }
 
     /// Sends the result back to the requester.
@@ -251,11 +274,57 @@ impl SolveError {
     pub fn market_data_stale(age_ms: u64) -> Self {
         Self::MarketDataStale { age_ms }
     }
+
+    /// Short, stable label for this failure, used as a metric label and in the comparison log.
+    ///
+    /// Lives on the error rather than beside one of its callers because both the router and the
+    /// worker pool label the same failures, and the two are sibling modules.
+    ///
+    /// Matched exhaustively even though [`SolveError`] is `#[non_exhaustive]`: that attribute only
+    /// forces a wildcard outside the defining crate, so listing every variant here means a new one
+    /// fails to compile rather than silently joining a catch-all.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            SolveError::Timeout { .. } => "timeout",
+            SolveError::NoRouteFound { .. } => "no_route",
+            SolveError::RouteRejected { .. } => "route_rejected",
+            SolveError::InsufficientLiquidity { .. } => "insufficient_liquidity",
+            SolveError::QueueFull => "queue_full",
+            SolveError::Internal(_) => "internal",
+            SolveError::InvalidWorkerPools(_) => "invalid_worker_pools",
+            SolveError::PriceCheckFailed { .. } => "price_check_failed",
+            SolveError::AlgorithmError(_) => "algorithm_error",
+            SolveError::MarketDataStale { .. } => "market_data_stale",
+            SolveError::InvalidOrder(_) => "invalid_order",
+            SolveError::NotReady(_) => "not_ready",
+            SolveError::ComputationFailed(_) => "computation_failed",
+            SolveError::FailedEncoding(_) => "encoding_failed",
+            SolveError::EncodingUnavailable(_) => "encoding_unavailable",
+            SolveError::MaxGasExceeded => "max_gas_exceeded",
+            SolveError::MissingData(_) => "missing_data",
+            SolveError::SimulationFailed(_) => "simulation_failed",
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case(SolveError::Timeout { elapsed_ms: 7 }, "timeout")]
+    #[case(SolveError::NoRouteFound { order_id: "o1".to_string(), reason: None }, "no_route")]
+    #[case(SolveError::QueueFull, "queue_full")]
+    #[case(SolveError::MaxGasExceeded, "max_gas_exceeded")]
+    #[case(SolveError::AlgorithmError("boom".to_string()), "algorithm_error")]
+    #[case(SolveError::MissingData("gas".to_string()), "missing_data")]
+    #[case(SolveError::SimulationFailed("revert".to_string()), "simulation_failed")]
+    #[case(SolveError::NotReady("derived".to_string()), "not_ready")]
+    fn test_solve_error_label(#[case] error: SolveError, #[case] expected: &str) {
+        assert_eq!(error.label(), expected);
+    }
 
     #[test]
     fn test_new_solve_error_variants_display() {

@@ -36,7 +36,7 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use instrumentation::{record_quote_comparison, solver_error_label};
+use instrumentation::record_quote_comparison;
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
@@ -670,7 +670,7 @@ impl WorkerPoolRouter {
 
                 async move {
                     let result = queue
-                        .enqueue(order_clone, task_params)
+                        .enqueue(order_clone, task_params, deadline)
                         .await;
                     (worker_pool_name, result)
                 }
@@ -697,9 +697,10 @@ impl WorkerPoolRouter {
 
                 // Timeout reached
                 _ = tokio::time::sleep_until(deadline_instant) => {
-                    // Mark all remaining worker pools as timed out
-                    let elapsed_ms = deadline.saturating_duration_since(Instant::now())
-                        .as_millis() as u64;
+                    // Mark all remaining worker pools as timed out. Measured forward from the
+                    // request's start: `sleep_until` returns only once the deadline has passed,
+                    // so a subtraction from the deadline saturates to zero every time.
+                    let elapsed_ms = start_time.elapsed().as_millis() as u64;
                     for worker_pool_name in remaining_worker_pools.drain() {
                         failed_solvers.push((
                             worker_pool_name,
@@ -787,7 +788,7 @@ impl WorkerPoolRouter {
 
         // Record failures by worker pool and error type
         for (worker_pool_name, error) in &failed_solvers {
-            let error_type = solver_error_label(error);
+            let error_type = error.label();
             counter!("worker_router_solver_failures_total", "pool" => worker_pool_name.clone(), "error_type" => error_type).increment(1);
         }
 
@@ -2160,6 +2161,12 @@ mod tests {
             quote.orders()[0].status(),
             QuoteStatus::Timeout | QuoteStatus::NoRouteFound
         ));
+        // The cause reports how long the request ran, so it must be at least the router's own
+        // deadline. Reading it as the distance left to the deadline gives zero every time.
+        let Some(SolveError::Timeout { elapsed_ms }) = quote.orders()[0].no_route_cause() else {
+            panic!("expected a timeout cause, got {:?}", quote.orders()[0].no_route_cause())
+        };
+        assert!(*elapsed_ms >= 50, "timeout reported after {elapsed_ms}ms");
 
         drop(worker_router);
         worker.abort();
