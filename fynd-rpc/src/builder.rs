@@ -361,6 +361,9 @@ impl FyndRPCBuilder {
             chain,
             router_address,
             permit2_address,
+            // No queue until the task that drains it exists (ENG-6352); records are built and
+            // logged meanwhile, and nothing is emitted.
+            None,
             #[cfg(feature = "experimental")]
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]

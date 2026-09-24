@@ -108,6 +108,9 @@ pub async fn quote(
     let client = ClientInfo::from_request(&http_request);
     let record = QuoteRecord::build(request_record, &result, state.chain(), client, head);
     log_quote_outcome(&record);
+    if let Some(emitter) = state.record_emitter() {
+        emitter.emit(record);
+    }
 
     let dto_quote: dto::Quote = result?.into();
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -577,7 +580,7 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     use crate::api::tokens::{GraphTokenEntry, TokensCache};
-    use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
+    use crate::api::{dto::QuoteRequest, record_emitter::RecordEmitter, AppState, HealthTracker};
 
     // Nested so it doesn't inherit this module's unqualified `test` import above (actix-web
     // exports both a `test` module and a `#[test]` attribute macro at that path; the import
@@ -647,6 +650,10 @@ mod tests {
     }
 
     fn make_test_state() -> AppState {
+        make_test_state_with_emitter(None)
+    }
+
+    fn make_test_state_with_emitter(record_emitter: Option<RecordEmitter>) -> AppState {
         let market_data: MarketData = MarketData::new_shared();
         let derived_data: SharedDerivedDataRef =
             Arc::new(tokio::sync::RwLock::new(Default::default()));
@@ -670,6 +677,7 @@ mod tests {
             Chain::Ethereum,
             Some(router_address),
             permit2_address,
+            record_emitter,
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
@@ -677,6 +685,60 @@ mod tests {
             #[cfg(feature = "experimental")]
             market_data,
         )
+    }
+
+    /// Answers `requests` quotes against `state` and returns the status code of each.
+    async fn quote_statuses(state: AppState, requests: usize) -> Vec<u16> {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/quote", web::post().to(super::quote)),
+        )
+        .await;
+        let mut statuses = Vec::with_capacity(requests);
+        for _ in 0..requests {
+            let request = test::TestRequest::post()
+                .uri("/v1/quote")
+                .set_json(serde_json::json!({
+                    "orders": [{
+                        "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                        "token_out": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                        "amount": "1000000000000000000",
+                        "side": "sell",
+                        "sender": "0x000000000000000000000000000000000000dEaD"
+                    }]
+                }))
+                .to_request();
+            statuses.push(
+                test::call_service(&app, request)
+                    .await
+                    .status()
+                    .as_u16(),
+            );
+        }
+        statuses
+    }
+
+    /// A record queue with no room changes neither the answer nor how long it takes: the first
+    /// quote fills the one slot, the second finds it full and has its record dropped. The
+    /// timeout is what catches a queue that makes the handler wait — a blocking send would never
+    /// return.
+    #[actix_web::test]
+    async fn test_quote_answers_with_a_full_record_queue() {
+        let (emitter, mut receiver) =
+            RecordEmitter::new(std::num::NonZeroUsize::new(1).expect("one is not zero"));
+        let without_queue = quote_statuses(make_test_state(), 1).await;
+
+        let with_full_queue = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            quote_statuses(make_test_state_with_emitter(Some(emitter)), 2),
+        )
+        .await
+        .expect("both quotes answered");
+
+        assert_eq!(with_full_queue, vec![without_queue[0]; 2]);
+        assert!(receiver.try_recv().is_ok(), "the first quote's record was queued");
+        assert!(receiver.try_recv().is_err(), "the second quote's record was dropped");
     }
 
     #[cfg(feature = "experimental")]
