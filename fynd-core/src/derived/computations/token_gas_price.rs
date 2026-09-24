@@ -452,9 +452,11 @@ impl PassPriority {
 /// cannot express: an unpriced token is in no dependency set, so nothing would ever point at it
 /// and it would stay unpriced for as long as the process ran.
 ///
-/// Rank, in order: arrived, then the tokens a change points at and the ones with no price,
-/// longest-unattempted first within each rank, so a cap smaller than the candidates rotates over
-/// them instead of starving the tail. `PassScope::ArrivalsOnly` offers the arrived tokens only.
+/// Rank, in order: arrived, then the tokens a change points at and the ones with no price.
+/// Within a rank the token whose last attempt is oldest comes first, so a cap smaller than the
+/// candidates rotates over them instead of starving the tail, and a token that no pass has
+/// attempted yet comes before every token that has a price.
+/// `PassScope::ArrivalsOnly` offers the arrived tokens only.
 fn select_pass_tokens(
     universe: &FxHashSet<Address>,
     changed: Option<&FxHashSet<Address>>,
@@ -467,8 +469,17 @@ fn select_pass_tokens(
 
     let mut ranked: Vec<(u8, u64, Address)> = Vec::with_capacity(universe.len());
     for token in universe {
+        // Both ranks order by the pass that last *attempted* the token, not the pass that last
+        // priced it. A token that cannot be priced has no other stamp, and ordering it by a
+        // price it never got would sort it at zero for ever and hold a slot in every pass. On
+        // Base at `min-tvl 1` that was 47 of every 100 slots, re-failing the same tokens.
+        //
+        // Within the arrived rank the same key puts a token that has never been attempted, and
+        // so has no price, ahead of one that arrived with a price already. A token cannot be
+        // quoted at all until it has a price, and the cap can cut this rank short.
+        let stamp = priority.stamp(token);
         if priority.arrived.contains(token) {
-            ranked.push((ARRIVED, 0, token.clone()));
+            ranked.push((ARRIVED, stamp, token.clone()));
             continue;
         }
         // A pass the interval did not grant carries the arrivals and nothing else. Leaving the
@@ -477,11 +488,6 @@ fn select_pass_tokens(
         if scope == PassScope::ArrivalsOnly {
             continue;
         }
-        // The rank orders by the pass that last *attempted* the token, not the pass that last
-        // priced it. A token that cannot be priced has no other stamp, and ordering it by a
-        // price it never got would sort it at zero for ever and hold a slot in every pass. On
-        // Base at `min-tvl 1` that was 47 of every 100 slots, re-failing the same tokens.
-        let stamp = priority.stamp(token);
         // A priced token is offered only when a change points at it; an unpriced one always is.
         if !priority.priced.contains(token) || changed.is_none_or(|changed| changed.contains(token))
         {
@@ -1575,6 +1581,38 @@ mod tests {
             vec![arrived_token, unpriced, changed_token],
             "arrived first, then the unpriced, then what the change points at; a priced token \
              no change points at is not a candidate however stale it is"
+        );
+    }
+
+    /// A newly listed token cannot be quoted until it has a price, so it goes before an arrived
+    /// token that already has one. The cap can cut the arrived rank short, which is when the
+    /// order inside that rank decides which token waits.
+    #[test]
+    fn test_select_pass_tokens_ranks_unpriced_arrivals_first() {
+        let with_price = token(1, "AAA").address;
+        let without_price = token(2, "BBB").address;
+        let universe: FxHashSet<Address> = [with_price.clone(), without_price.clone()]
+            .into_iter()
+            .collect();
+        let priority = PassPriority {
+            arrived: [with_price.clone(), without_price.clone()]
+                .into_iter()
+                .collect(),
+            priced: [with_price.clone()]
+                .into_iter()
+                .collect(),
+            last_attempted: [(with_price.clone(), 7)]
+                .into_iter()
+                .collect(),
+        };
+
+        let ordered =
+            select_pass_tokens(&universe, None, &priority, PassScope::ArrivalsOnly, usize::MAX);
+
+        assert_eq!(
+            ordered,
+            vec![without_price, with_price],
+            "the arrival with no price is attempted first"
         );
     }
 
