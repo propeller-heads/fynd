@@ -34,7 +34,7 @@ use std::{
 
 use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
-pub use error::ApiError;
+pub use error::{ApiError, RequestValidationError};
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData, types::BlockInfo,
     worker_pool_router::WorkerPoolRouter,

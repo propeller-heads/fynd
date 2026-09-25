@@ -19,7 +19,7 @@ use crate::api::prices::{
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
     disable_slippage_taking,
-    error::ErrorResponse,
+    error::{ErrorResponse, RequestValidationError},
     exclusive_access,
     middleware::ClientInfo,
     record::{self, QuoteRecord, RequestRecord},
@@ -118,20 +118,34 @@ pub async fn quote(
 
 /// Validates a wire-format quote request and converts it to the core type.
 ///
-/// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`]. Take a
-/// [`RequestRecord::capture`] of the returned request before solving it, so the outcome can be
-/// recorded with [`QuoteRecord::build`] and logged with [`log_quote_outcome`].
+/// Take a [`RequestRecord::capture`] of the returned request before solving it, so the outcome
+/// can be recorded with [`QuoteRecord::build`] and logged with [`log_quote_outcome`].
+///
+/// # Errors
+///
+/// [`ApiError::InvalidRequest`] naming the rule the request broke: no orders, an order that fails
+/// [`fynd_core::Order::validate`], or encoding options that fail
+/// [`fynd_core::EncodingOptions::validate`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
     if request.orders().is_empty() {
-        return Err(ApiError::BadRequest("no orders provided".to_string()));
+        return Err(RequestValidationError::NoOrders.into());
     }
     let core_request: fynd_core::QuoteRequest = request.into();
     for order in core_request.orders() {
-        if let Err(e) = order.validate() {
-            return Err(ApiError::BadRequest(format!("invalid order {}: {}", order.id(), e)));
+        if let Err(source) = order.validate() {
+            let order_id = order.id().to_string();
+            return Err(RequestValidationError::InvalidOrder { order_id, source }.into());
         }
+    }
+    if let Some(encoding_options) = core_request
+        .options()
+        .encoding_options()
+    {
+        encoding_options
+            .validate()
+            .map_err(RequestValidationError::from)?;
     }
     Ok(core_request)
 }
@@ -588,7 +602,9 @@ mod tests {
     // the identical note in `docs.rs`.
     mod quote_pipeline {
 
-        use crate::api::{dto, handlers::validate_quote_request, ApiError};
+        use rstest::rstest;
+
+        use crate::api::{dto, handlers::validate_quote_request, ApiError, RequestValidationError};
 
         fn dto_request(orders: Vec<dto::Order>) -> dto::QuoteRequest {
             serde_json::from_value(serde_json::json!({
@@ -598,21 +614,121 @@ mod tests {
             .expect("valid request json")
         }
 
-        fn dto_order() -> dto::Order {
+        const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+        const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+        fn dto_order_for(token_in: &str, token_out: &str, amount: &str) -> dto::Order {
             serde_json::from_value(serde_json::json!({
-                "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-                "token_out": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-                "amount": "1000000000000000000",
+                "token_in": token_in,
+                "token_out": token_out,
+                "amount": amount,
                 "side": "sell",
                 "sender": "0x000000000000000000000000000000000000dEaD"
             }))
             .expect("valid order json")
         }
 
+        fn dto_order() -> dto::Order {
+            dto_order_for(WETH, USDC, "1000000000000000000")
+        }
+
+        /// A request for one valid order, encoded with `encoding_options`.
+        fn dto_request_encoded(encoding_options: serde_json::Value) -> dto::QuoteRequest {
+            serde_json::from_value(serde_json::json!({
+                "orders": [dto_order()],
+                "options": {"encoding_options": encoding_options}
+            }))
+            .expect("valid request json")
+        }
+
+        /// The code the request is rejected with.
+        fn rejection_code(request: dto::QuoteRequest) -> &'static str {
+            match validate_quote_request(request) {
+                Err(ApiError::InvalidRequest(err)) => err.code(),
+                other => panic!("expected an InvalidRequest rejection, got {other:?}"),
+            }
+        }
+
         #[test]
         fn test_validate_quote_request_rejects_empty_orders() {
-            let err = validate_quote_request(dto_request(vec![])).expect_err("empty orders");
-            assert!(matches!(err, ApiError::BadRequest(_)), "{err:?}");
+            assert_eq!(rejection_code(dto_request(vec![])), "NO_ORDERS");
+        }
+
+        #[test]
+        fn test_validate_quote_request_rejects_same_tokens() {
+            let request = dto_request(vec![dto_order_for(WETH, WETH, "1000")]);
+
+            assert_eq!(rejection_code(request), "SAME_TOKENS");
+        }
+
+        #[test]
+        fn test_validate_quote_request_rejects_zero_amount() {
+            let request = dto_request(vec![dto_order_for(WETH, USDC, "0")]);
+
+            assert_eq!(rejection_code(request), "ZERO_AMOUNT");
+        }
+
+        /// A batch with one bad order is rejected for that order, by id.
+        #[test]
+        fn test_validate_quote_request_names_the_failing_order() {
+            let request = dto_request(vec![dto_order(), dto_order_for(WETH, USDC, "0")]);
+            let core_request: fynd_core::QuoteRequest = request.clone().into();
+            let failing_id = core_request.orders()[1]
+                .id()
+                .to_string();
+
+            let err = validate_quote_request(request).expect_err("the second order is invalid");
+
+            let ApiError::InvalidRequest(RequestValidationError::InvalidOrder { order_id, .. }) =
+                err
+            else {
+                panic!("expected InvalidOrder, got {err:?}");
+            };
+            assert_eq!(order_id, failing_id);
+        }
+
+        #[rstest]
+        #[case::nan("NaN")]
+        #[case::negative("-0.01")]
+        #[case::above_one("1.5")]
+        #[case::infinite("inf")]
+        fn test_validate_quote_request_rejects_slippage(#[case] slippage: &str) {
+            let request = dto_request_encoded(serde_json::json!({"slippage": slippage}));
+
+            assert_eq!(rejection_code(request), "INVALID_SLIPPAGE");
+        }
+
+        #[test]
+        fn test_validate_quote_request_rejects_client_fee_above_100_percent() {
+            let request = dto_request_encoded(serde_json::json!({
+                "slippage": "0.005",
+                "client_fee_params": {
+                    "bps": 10_001,
+                    "receiver": "0x000000000000000000000000000000000000dEaD",
+                    "max_contribution": "0",
+                    "deadline": 1893456000,
+                    "signature": "0x"
+                }
+            }));
+
+            assert_eq!(rejection_code(request), "CLIENT_FEE_TOO_HIGH");
+        }
+
+        #[test]
+        fn test_validate_quote_request_accepts_valid_encoding_options() {
+            let request = dto_request_encoded(serde_json::json!({
+                "slippage": "0.005",
+                "client_fee_params": {
+                    "bps": 10_000,
+                    "receiver": "0x000000000000000000000000000000000000dEaD",
+                    "max_contribution": "0",
+                    "deadline": 1893456000,
+                    "signature": "0x"
+                }
+            }));
+
+            validate_quote_request(request)
+                .expect("a fee of 100% and a slippage of 0.5% are valid");
         }
 
         #[test]

@@ -211,7 +211,7 @@ The response contains the route, the expected `amount_out`, gas estimate, and th
 | `transaction` | `null` unless `encoding_options` is set. See step 4. |
 | `order_id` | Correlation ID for this quote. Not queryable after the fact. |
 
-One order per request is the supported path today. The `orders` array shape exists for future batch quoting; for now, send exactly one order.
+A request may carry up to 10 orders. Each order is solved, priced, and encoded independently and gets its own transaction; one order failing leaves the others untouched. The hosted API rejects a request with more than 10 orders with `400` and code `TOO_MANY_ORDERS`.
 
 ### 4. Encode and approve
 
@@ -512,7 +512,7 @@ The gateway returns your plan in the `X-User-Plan` response header on every auth
 
 | HTTP status | Meaning | Body format |
 | ---: | --- | --- |
-| 400 | Malformed request body, bad token address, or invalid `slippage` type | JSON: `{"error": "...", "code": "BAD_REQUEST"}` |
+| 400 | Malformed request body, bad token address, or a request that breaks a validation rule | JSON: `{"error": "...", "code": "..."}` — see [Validation codes](#validation-codes) |
 | 401 | Missing or invalid API key, or plan not recognized | Plain text: `Unauthorized` or `Missing authorization token` |
 | 403 | Your plan doesn't allow this service | Plain text: `Forbidden` |
 | 404 | Unknown chain path segment | JSON: `{"error": "unknown_chain", ...}` |
@@ -522,6 +522,19 @@ The gateway returns your plan in the `X-User-Plan` response header on every auth
 {% hint style="warning" %}
 **Error body formats differ by layer.** Gateway errors (401, 403, 429) return plain text; backend errors (400, 404, 5xx) return JSON. If your client assumes JSON on every non-2xx, it will throw a parse error on the auth and rate-limit paths you most need to handle. Parse defensively.
 {% endhint %}
+
+### Validation codes
+
+A `400` carries a `code` naming what to fix. `BAD_REQUEST` means the body did not parse (a bad token address, a `slippage` that is not a string). The rest are rules a well-formed request broke:
+
+| Code | Rule |
+| --- | --- |
+| `NO_ORDERS` | `orders` is empty |
+| `TOO_MANY_ORDERS` | `orders` holds more than 10 orders (see [Request a quote](#3-request-a-quote)) |
+| `SAME_TOKENS` | An order's `token_in` equals its `token_out` |
+| `ZERO_AMOUNT` | An order's `amount` is `0` |
+| `INVALID_SLIPPAGE` | `encoding_options.slippage` is not a number from `0` to `1` |
+| `CLIENT_FEE_TOO_HIGH` | `encoding_options.client_fee_params.bps` is above `10000` |
 
 A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — it means the solver ran but couldn't find a profitable route for the pair at the requested size. Check `/v1/{chain}/health` (`last_update_ms: 0` means the Tycho stream isn't delivering live state yet), try a different token pair or size, or confirm the tokens have [Tycho-indexed liquidity](https://docs.propellerheads.xyz/tycho) on that chain.
 

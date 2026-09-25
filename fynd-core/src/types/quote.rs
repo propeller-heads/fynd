@@ -34,8 +34,8 @@ use uuid::Uuid;
 
 use super::{internal::SolveError, primitives::ComponentId};
 use crate::{
-    algorithm::NoPathReason, feed::market_data::StateLabel, price_guard::config::PriceGuardConfig,
-    AlgorithmError,
+    algorithm::NoPathReason, encoding::router_fees::LEGACY_BPS_DENOMINATOR,
+    feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError,
 };
 
 // ============================================================================
@@ -706,6 +706,25 @@ impl EncodingOptions {
         self.disable_slippage_taking && self.client_fee_params.is_none()
     }
 
+    /// Validates the options a caller sets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `slippage` is not a number from 0 to 1
+    /// - the client fee is above 10,000 bps (100%)
+    pub fn validate(&self) -> Result<(), EncodingOptionsError> {
+        if !(0.0..=1.0).contains(&self.slippage) {
+            return Err(EncodingOptionsError::InvalidSlippage(self.slippage));
+        }
+        if let Some(params) = &self.client_fee_params {
+            if u64::from(params.bps()) > LEGACY_BPS_DENOMINATOR {
+                return Err(EncodingOptionsError::ClientFeeTooHigh { bps: params.bps() });
+            }
+        }
+        Ok(())
+    }
+
     /// Sets per-request price guard configuration.
     pub fn with_price_guard(mut self, config: PriceGuardConfig) -> Self {
         self.price_guard = config;
@@ -995,6 +1014,24 @@ pub enum OrderValidationError {
     /// The requested swap amount is zero.
     #[error("amount must be non-zero")]
     ZeroAmount,
+}
+
+/// Errors that can occur when validating [`EncodingOptions`].
+#[non_exhaustive]
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum EncodingOptionsError {
+    /// `slippage` is not a number from 0 to 1.
+    #[error("slippage must be a number from 0 to 1, got {0}")]
+    InvalidSlippage(f64),
+    /// The client fee is above 100%.
+    #[error(
+        "client fee of {bps} bps is above the maximum of {max} bps",
+        max = LEGACY_BPS_DENOMINATOR
+    )]
+    ClientFeeTooHigh {
+        /// The fee the request asked for.
+        bps: u16,
+    },
 }
 
 /// Internal wrapper used by workers when returning a solution.
@@ -3095,5 +3132,57 @@ mod tests {
         assert!(EncodingOptions::new(0.01)
             .with_simulation()
             .simulate());
+    }
+
+    #[rstest]
+    #[case::nan(f64::NAN)]
+    #[case::negative(-0.01)]
+    #[case::above_one(1.01)]
+    #[case::infinite(f64::INFINITY)]
+    fn test_encoding_options_validate_rejects_slippage(#[case] slippage: f64) {
+        let err = EncodingOptions::new(slippage)
+            .validate()
+            .expect_err("slippage outside 0 to 1 is rejected");
+
+        assert!(matches!(err, EncodingOptionsError::InvalidSlippage(_)), "{err:?}");
+    }
+
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::typical(0.005)]
+    #[case::one(1.0)]
+    fn test_encoding_options_validate_accepts_slippage(#[case] slippage: f64) {
+        EncodingOptions::new(slippage)
+            .validate()
+            .expect("slippage from 0 to 1 is accepted");
+    }
+
+    fn client_fee_params_with_bps(bps: u16) -> ClientFeeParams {
+        ClientFeeParams::new(bps, Bytes::from([0xAAu8; 20]), BigUint::ZERO, 1, Bytes::default())
+    }
+
+    #[rstest]
+    #[case::zero(0)]
+    #[case::whole_output(10_000)]
+    fn test_encoding_options_validate_accepts_client_fee(#[case] bps: u16) {
+        EncodingOptions::new(0.005)
+            .with_client_fee_params(client_fee_params_with_bps(bps))
+            .validate()
+            .expect("a fee up to 100% is accepted");
+    }
+
+    #[rstest]
+    #[case::just_above(10_001)]
+    #[case::max(u16::MAX)]
+    fn test_encoding_options_validate_rejects_client_fee(#[case] bps: u16) {
+        let err = EncodingOptions::new(0.005)
+            .with_client_fee_params(client_fee_params_with_bps(bps))
+            .validate()
+            .expect_err("a fee above 100% is rejected");
+
+        let EncodingOptionsError::ClientFeeTooHigh { bps: rejected } = err else {
+            panic!("expected ClientFeeTooHigh, got {err:?}");
+        };
+        assert_eq!(rejected, bps);
     }
 }

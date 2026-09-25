@@ -1,7 +1,7 @@
 //! API error types and error response handling.
 
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
-use fynd_core::SolveError;
+use fynd_core::{EncodingOptionsError, OrderValidationError, SolveError};
 pub use fynd_rpc_types::ErrorResponse;
 use tracing::warn;
 
@@ -12,6 +12,11 @@ pub enum ApiError {
     /// Invalid request format or parameters.
     #[error("bad request: {0}")]
     BadRequest(String),
+
+    /// A well-formed request that breaks a validation rule. Answers 400 like [`Self::BadRequest`],
+    /// with the rule's own code so a client can tell which field to fix.
+    #[error("invalid request: {0}")]
+    InvalidRequest(#[from] RequestValidationError),
 
     /// Solve operation failed.
     #[error("solve failed: {0}")]
@@ -36,6 +41,52 @@ pub enum ApiError {
         /// Milliseconds since the last successful market-data update.
         age_ms: u64,
     },
+}
+
+/// A rule a quote request broke before solving. Every variant has a stable code, see
+/// [`Self::code`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum RequestValidationError {
+    /// `orders` is empty.
+    #[error("no orders provided")]
+    NoOrders,
+    /// An order failed [`fynd_core::Order::validate`].
+    #[error("invalid order {order_id}: {source}")]
+    InvalidOrder {
+        /// The `id` of the order that failed.
+        order_id: String,
+        /// Why it failed.
+        source: OrderValidationError,
+    },
+    /// The encoding options failed [`fynd_core::EncodingOptions::validate`].
+    #[error("invalid encoding options: {0}")]
+    InvalidEncodingOptions(#[from] EncodingOptionsError),
+}
+
+impl RequestValidationError {
+    /// The stable machine-readable code the error response carries for this rule.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoOrders => "NO_ORDERS",
+            Self::InvalidOrder { source, .. } => match source {
+                OrderValidationError::SameTokens => "SAME_TOKENS",
+                OrderValidationError::ZeroAmount => "ZERO_AMOUNT",
+                other => {
+                    warn!(?other, "unhandled OrderValidationError variant");
+                    "INVALID_ORDER"
+                }
+            },
+            Self::InvalidEncodingOptions(source) => match source {
+                EncodingOptionsError::InvalidSlippage(_) => "INVALID_SLIPPAGE",
+                EncodingOptionsError::ClientFeeTooHigh { .. } => "CLIENT_FEE_TOO_HIGH",
+                other => {
+                    warn!(?other, "unhandled EncodingOptionsError variant");
+                    "INVALID_ENCODING_OPTIONS"
+                }
+            },
+        }
+    }
 }
 
 /// Maps a [`SolveError`] to its stable machine-readable code.
@@ -75,6 +126,7 @@ impl ResponseError for ApiError {
     fn status_code(&self) -> StatusCode {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::SolveFailed(e) => match e {
                 SolveError::QueueFull => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::Timeout { .. } => StatusCode::SERVICE_UNAVAILABLE,
@@ -93,6 +145,7 @@ impl ResponseError for ApiError {
     fn error_response(&self) -> HttpResponse {
         let code = match self {
             ApiError::BadRequest(_) => "BAD_REQUEST",
+            ApiError::InvalidRequest(e) => e.code(),
             ApiError::SolveFailed(e) => solve_error_code(e),
             ApiError::ServiceOverloaded => "SERVICE_OVERLOADED",
             ApiError::NotReady(_) => "NOT_READY",
@@ -115,11 +168,11 @@ impl From<serde_json::Error> for ApiError {
 #[cfg(test)]
 mod tests {
     use actix_web::{body::to_bytes, http::StatusCode, ResponseError};
-    use fynd_core::SolveError;
+    use fynd_core::{OrderValidationError, SolveError};
     use num_bigint::BigUint;
     use serde_json::Value;
 
-    use super::ApiError;
+    use super::{ApiError, RequestValidationError};
 
     async fn json_body(err: ApiError) -> (StatusCode, Value) {
         let status = err.status_code();
@@ -136,6 +189,18 @@ mod tests {
         let (status, body) = json_body(ApiError::BadRequest("missing field".into())).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["code"], "BAD_REQUEST");
+    }
+
+    /// The status is 400 and the code is the rule's own; the handler tests cover each rule's code.
+    #[actix_web::test]
+    async fn test_invalid_request() {
+        let err = RequestValidationError::InvalidOrder {
+            order_id: "o1".to_string(),
+            source: OrderValidationError::SameTokens,
+        };
+        let (status, body) = json_body(ApiError::InvalidRequest(err)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "SAME_TOKENS");
     }
 
     #[actix_web::test]

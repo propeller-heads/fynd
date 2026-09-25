@@ -9,7 +9,9 @@ use thiserror::Error;
 pub enum ErrorCode {
     /// The request was malformed or contained invalid parameters.
     ///
-    /// Server codes: `BAD_REQUEST`, `INVALID_ORDER`.
+    /// Server codes: `BAD_REQUEST` (the body does not parse), `INVALID_ORDER`, and the request
+    /// validation codes `NO_ORDERS`, `TOO_MANY_ORDERS`, `SAME_TOKENS`, `ZERO_AMOUNT`,
+    /// `INVALID_SLIPPAGE` and `CLIENT_FEE_TOO_HIGH`.
     BadRequest,
 
     /// No swap route exists between the requested token pair.
@@ -54,7 +56,14 @@ impl ErrorCode {
     /// Unknown codes are wrapped in [`ErrorCode::Unknown`] rather than panicking.
     pub fn from_server_code(code: &str) -> Self {
         match code {
-            "BAD_REQUEST" | "INVALID_ORDER" => Self::BadRequest,
+            "BAD_REQUEST" |
+            "INVALID_ORDER" |
+            "NO_ORDERS" |
+            "TOO_MANY_ORDERS" |
+            "SAME_TOKENS" |
+            "ZERO_AMOUNT" |
+            "INVALID_SLIPPAGE" |
+            "CLIENT_FEE_TOO_HIGH" => Self::BadRequest,
             "NO_ROUTE_FOUND" => Self::NoRouteFound,
             "INSUFFICIENT_LIQUIDITY" => Self::InsufficientLiquidity,
             "TIMEOUT" => Self::SolveTimeout,
@@ -163,6 +172,20 @@ mod tests {
         );
         assert_eq!(ErrorCode::from_server_code("STALE_DATA"), ErrorCode::ServiceUnavailable);
         assert_eq!(ErrorCode::from_server_code("NOT_READY"), ErrorCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn error_code_bad_request_for_validation_codes() {
+        for code in [
+            "NO_ORDERS",
+            "TOO_MANY_ORDERS",
+            "SAME_TOKENS",
+            "ZERO_AMOUNT",
+            "INVALID_SLIPPAGE",
+            "CLIENT_FEE_TOO_HIGH",
+        ] {
+            assert_eq!(ErrorCode::from_server_code(code), ErrorCode::BadRequest, "{code}");
+        }
     }
 
     #[test]

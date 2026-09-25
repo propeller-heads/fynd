@@ -52,6 +52,19 @@ describe('FyndError.fromWireError', () => {
     expect(err.message).toBe('bad input');
   });
 
+  it.each([
+    'NO_ORDERS',
+    'TOO_MANY_ORDERS',
+    'SAME_TOKENS',
+    'ZERO_AMOUNT',
+    'INVALID_SLIPPAGE',
+    'CLIENT_FEE_TOO_HIGH',
+  ])('maps validation code %s as a known, non-retryable code', (code) => {
+    const err = FyndError.fromWireError({ code, error: 'invalid request' });
+    expect(err.code).toBe(code);
+    expect(err.isRetryable()).toBe(false);
+  });
+
   it('maps NO_ROUTE_FOUND correctly', () => {
     const err = FyndError.fromWireError({ code: 'NO_ROUTE_FOUND', error: 'no route' });
     expect(err.code).toBe('NO_ROUTE_FOUND');
