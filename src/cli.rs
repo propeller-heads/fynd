@@ -183,7 +183,7 @@ pub struct ServeArgs {
     /// Root URL of the collector every answered quote's record is posted to, in batches, on
     /// `<url>/v1/records`. When unset, no records are queued and none are sent.
     #[arg(long, env)]
-    pub record_sink_url: Option<String>,
+    pub collector_url: Option<String>,
 
     /// Port for the Prometheus metrics HTTP server (requires `metrics` feature).
     #[cfg(feature = "metrics")]
@@ -230,7 +230,7 @@ mod cli_tests {
             "new_worker_pools.toml",
             "--hosted-swagger-url",
             "https://gateway.example.com",
-            "--record-sink-url",
+            "--collector-url",
             "http://collector.internal:8080",
         ])
         .expect("parse errored");
@@ -250,7 +250,7 @@ mod cli_tests {
         assert_eq!(args.worker_pools_config, PathBuf::from("new_worker_pools.toml"));
         assert_eq!(args.blocklist_config, None);
         assert_eq!(args.hosted_swagger_url, Some("https://gateway.example.com".to_string()));
-        assert_eq!(args.record_sink_url, Some("http://collector.internal:8080".to_string()));
+        assert_eq!(args.collector_url, Some("http://collector.internal:8080".to_string()));
     }
 
     #[test]
@@ -287,7 +287,7 @@ mod cli_tests {
         assert_eq!(args.worker_router_min_responses, 0);
         assert_eq!(args.blocklist_config, None);
         assert_eq!(args.hosted_swagger_url, None);
-        assert_eq!(args.record_sink_url, None);
+        assert_eq!(args.collector_url, None);
         assert!(!args.partial_blocks);
         #[cfg(feature = "metrics")]
         assert_eq!(args.metrics_port, METRICS_PORT);

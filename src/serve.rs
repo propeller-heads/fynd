@@ -345,7 +345,7 @@ async fn setup_solver(
                     .map(Duration::from_secs),
             )
             .hosted_swagger_url(args.hosted_swagger_url.clone())
-            .record_sink_url(args.record_sink_url.clone());
+            .collector_url(args.collector_url.clone());
 
     if args.disable_tls {
         builder = builder.disable_tls();

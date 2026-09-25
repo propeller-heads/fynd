@@ -116,7 +116,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
 | `FYND_HOSTED_SWAGGER_URL` | Server URL advertised by the hosted OpenAPI spec. When unset, the hosted Swagger UI (`/docs/hosted/`) is not served — only the self-hosted `/docs/` |
-| `RECORD_SINK_URL` | Root URL of the collector every answered quote's record is posted to (also `--record-sink-url`), in batches on `<url>/v1/records`. When unset, no record queue and no sending task are built and the pod records nothing |
+| `COLLECTOR_URL` | Root URL of the collector every answered quote's record is posted to (also `--collector-url`), in batches on `<url>/v1/records`. When unset, no record queue and no sending task are built and the pod records nothing |
 
 ### CLI Commands
 

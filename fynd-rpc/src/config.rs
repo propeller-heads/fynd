@@ -224,7 +224,7 @@ pub mod defaults {
     /// How long a batch waits for more records before it is sent as it stands.
     pub const RECORD_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
     /// How long one POST to the collector may take before its batch is dropped.
-    pub const RECORD_SINK_TIMEOUT: Duration = Duration::from_secs(2);
+    pub const RECORD_POST_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Returns the default public JSON-RPC URL for the given chain, used when none is provided.
     ///

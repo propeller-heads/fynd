@@ -15,7 +15,7 @@ use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Cha
 
 use crate::{
     api::{
-        configure_app, record_emitter::spawn_record_sink, AppState, HealthTracker,
+        configure_app, record_emitter::spawn_record_sender, AppState, HealthTracker,
         RouteConfigurator,
     },
     config::{defaults, PoolConfig},
@@ -37,7 +37,7 @@ pub struct FyndRPCBuilder {
     /// Collector the quote records are posted to. Unset by default: the collector is a service a
     /// deployment runs for itself, and shipping quote traffic off the pod is opt-in. Unset builds
     /// no record queue and no sending task.
-    record_sink_url: Option<String>,
+    collector_url: Option<String>,
     /// Caller routes registered before the defaults; see [`Self::configure_routes`].
     route_overrides: Option<RouteConfigurator>,
 }
@@ -80,7 +80,7 @@ impl FyndRPCBuilder {
             http_port: defaults::HTTP_PORT,
             gas_price_stale_threshold: None,
             hosted_swagger_url: None,
-            record_sink_url: None,
+            collector_url: None,
             route_overrides: None,
         })
     }
@@ -262,8 +262,8 @@ impl FyndRPCBuilder {
     ///
     /// Leaving it unset (the default) builds no record queue and starts no sending task, so the
     /// quote handler records nothing.
-    pub fn record_sink_url(mut self, url: Option<String>) -> Self {
-        self.record_sink_url = url;
+    pub fn collector_url(mut self, url: Option<String>) -> Self {
+        self.collector_url = url;
         self
     }
 
@@ -393,9 +393,9 @@ impl FyndRPCBuilder {
 
         // No collector configured, nothing built: no queue, no task, and a handler that records
         // nothing.
-        let (record_emitter, record_sink_handle) = match self.record_sink_url.as_deref() {
+        let (record_emitter, record_sender_handle) = match self.collector_url.as_deref() {
             Some(url) => {
-                let (emitter, handle) = spawn_record_sink(url)?;
+                let (emitter, handle) = spawn_record_sender(url)?;
                 (Some(emitter), Some(handle))
             }
             None => (None, None),
@@ -454,7 +454,7 @@ impl FyndRPCBuilder {
             router_fee_worker_handle: router_fee_handle,
             computation_manager_handle: computation_handle,
             computation_shutdown_tx,
-            record_sink_handle,
+            record_sender_handle,
         })
     }
 }
@@ -472,7 +472,7 @@ pub struct FyndRPC {
     computation_manager_handle: JoinHandle<()>,
     computation_shutdown_tx: tokio::sync::broadcast::Sender<()>,
     /// The task posting quote records, when a collector is configured.
-    record_sink_handle: Option<JoinHandle<()>>,
+    record_sender_handle: Option<JoinHandle<()>>,
 }
 
 impl FyndRPC {
@@ -493,7 +493,7 @@ impl FyndRPC {
             router_fee_worker_handle,
             mut computation_manager_handle,
             computation_shutdown_tx,
-            record_sink_handle,
+            record_sender_handle,
         } = self;
 
         info!("HTTP server started");
@@ -555,13 +555,13 @@ impl FyndRPC {
         // The senders die with the Actix app instances the stopped server dropped, so the task
         // sees a closed queue and posts its last batch. Waiting for that, rather than aborting,
         // is what keeps the final records; one POST's worth of time bounds the wait.
-        if let Some(handle) = record_sink_handle {
-            match tokio::time::timeout(defaults::RECORD_SINK_TIMEOUT, handle).await {
+        if let Some(handle) = record_sender_handle {
+            match tokio::time::timeout(defaults::RECORD_POST_TIMEOUT, handle).await {
                 Ok(Ok(())) => {}
                 // The task panicked, here or at any point since it started.
-                Ok(Err(error)) => error!(%error, "record sink task failed"),
+                Ok(Err(error)) => error!(%error, "record sender task failed"),
                 Err(_elapsed) => {
-                    warn!("record sink did not finish its last batch before shutdown")
+                    warn!("record sender did not finish its last batch before shutdown")
                 }
             }
         }

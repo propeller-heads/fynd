@@ -5,11 +5,11 @@
 //! dropped and counted. Dropping the incoming record rather than evicting an older one leaves the
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 //!
-//! [`spawn_record_sink`] builds the other end: a task that drains the queue, batches what it finds
-//! and POSTs each batch to `<record_sink_url>/v1/records`, zstd-compressed, at least once a second.
-//! A batch that times out or is refused is dropped and counted, never retried — the collector mints
-//! a record id per record on receipt, so a second attempt at a batch that did arrive stores every
-//! record in it twice, and nothing downstream can tell the copies apart.
+//! [`spawn_record_sender`] builds the other end: a task that drains the queue, batches what it
+//! finds and POSTs each batch to `<record_collector_url>/v1/records`, zstd-compressed, at least
+//! once a second. A batch that times out or is refused is dropped and counted, never retried — the
+//! collector mints a record id per record on receipt, so a second attempt at a batch that did
+//! arrive stores every record in it twice, and nothing downstream can tell the copies apart.
 
 use std::num::NonZeroUsize;
 
@@ -59,40 +59,41 @@ impl RecordEmitter {
 ///
 /// The reasons: `queue_full` when the queue had no room for them, `sender_stopped` when the task
 /// draining it is gone, `encode_failed` when they could not be turned into a request body,
-/// `sink_timeout` when the POST carrying them did not finish in time, `sink_rejected` when the
-/// collector turned them down, and `sink_unreachable` when the POST never got that far.
+/// `collector_timeout` when the POST carrying them did not finish in time, `collector_rejected`
+/// when the collector turned them down, and `collector_unreachable` when the POST never got that
+/// far.
 fn record_drop(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
 
-/// Builds the record queue and starts the task draining it into the collector at `sink_url`, the
-/// collector's root — the task appends the `/v1/records` path itself.
+/// Builds the record queue and starts the task draining it into the collector at `collector_url`,
+/// the collector's root — the task appends the `/v1/records` path itself.
 ///
 /// A deployment with no collector never calls this: it holds no emitter, and its handler records
 /// nothing.
 ///
 /// # Errors
 ///
-/// Returns an error when `sink_url` is not a URL, so a typo stops the pod at startup rather than
-/// silently dropping every record it serves.
+/// Returns an error when `collector_url` is not a URL, so a typo stops the pod at startup rather
+/// than silently dropping every record it serves.
 ///
 /// # Panics
 ///
 /// Spawns with [`tokio::spawn`], which panics when called outside a runtime.
-pub(crate) fn spawn_record_sink(sink_url: &str) -> Result<(RecordEmitter, JoinHandle<()>)> {
-    let sink = RecordSink::new(sink_url)?;
-    info!(url = %sink.records_url, "emitting quote records");
+pub(crate) fn spawn_record_sender(collector_url: &str) -> Result<(RecordEmitter, JoinHandle<()>)> {
+    let collector = Collector::new(collector_url)?;
+    info!(url = %collector.records_url, "emitting quote records");
     let (emitter, receiver) = RecordEmitter::new(defaults::RECORD_QUEUE_CAPACITY);
-    Ok((emitter, tokio::spawn(drain_into(sink, receiver))))
+    Ok((emitter, tokio::spawn(drain_into(collector, receiver))))
 }
 
-/// Drains `receiver` into `sink`, one batch at a time, until the queue closes.
+/// Drains `receiver` into `collector`, one batch at a time, until the queue closes.
 ///
 /// A batch is sent when it fills up or when [`RECORD_FLUSH_INTERVAL`](defaults::
 /// RECORD_FLUSH_INTERVAL) has passed since its first record, whichever comes first, so a quiet
 /// pod still ships what it has every second. Sending is sequential: while a POST is in flight the
 /// queue absorbs what the handler serves, and drops it once full.
-async fn drain_into(sink: RecordSink, mut receiver: mpsc::Receiver<QuoteRecord>) {
+async fn drain_into(collector: Collector, mut receiver: mpsc::Receiver<QuoteRecord>) {
     while let Some(first) = receiver.recv().await {
         let deadline = Instant::now() + defaults::RECORD_FLUSH_INTERVAL;
         let mut batch = Batch::default();
@@ -105,7 +106,7 @@ async fn drain_into(sink: RecordSink, mut receiver: mpsc::Receiver<QuoteRecord>)
                 Ok(None) | Err(_) => break,
             }
         }
-        sink.post(batch).await;
+        collector.post(batch).await;
     }
 }
 
@@ -151,21 +152,22 @@ impl Batch {
 }
 
 /// The collector endpoint, and the client that posts to it.
-struct RecordSink {
+struct Collector {
     client: reqwest::Client,
     records_url: String,
 }
 
-impl RecordSink {
-    /// Builds the sink for the collector rooted at `sink_url`, failing on a URL that is not one.
-    fn new(sink_url: &str) -> Result<Self> {
-        let records_url = format!("{}/v1/records", sink_url.trim_end_matches('/'));
+impl Collector {
+    /// Builds the client for the collector rooted at `collector_url`, failing on a URL that is not
+    /// one.
+    fn new(collector_url: &str) -> Result<Self> {
+        let records_url = format!("{}/v1/records", collector_url.trim_end_matches('/'));
         let parsed = reqwest::Url::parse(&records_url)
-            .with_context(|| format!("record sink URL is not a URL: {sink_url}"))?;
+            .with_context(|| format!("collector URL is not a URL: {collector_url}"))?;
         // `Url::parse` accepts `collector:8080`, reading the host as the scheme.
         anyhow::ensure!(
             matches!(parsed.scheme(), "http" | "https"),
-            "record sink URL must be http or https: {sink_url}"
+            "collector URL must be http or https: {collector_url}"
         );
         Ok(Self { client: reqwest::Client::new(), records_url })
     }
@@ -190,7 +192,7 @@ impl RecordSink {
             .post(&self.records_url)
             .header(CONTENT_TYPE, "application/json")
             .header(CONTENT_ENCODING, "zstd")
-            .timeout(defaults::RECORD_SINK_TIMEOUT)
+            .timeout(defaults::RECORD_POST_TIMEOUT)
             .body(body)
             .send()
             .await;
@@ -198,15 +200,15 @@ impl RecordSink {
             Ok(response) if response.status().is_success() => {}
             Ok(response) => {
                 warn!(status = %response.status(), records, "collector refused a batch of records");
-                record_drop("sink_rejected", records);
+                record_drop("collector_rejected", records);
             }
             Err(error) if error.is_timeout() => {
                 warn!(%error, records, "collector did not answer in time");
-                record_drop("sink_timeout", records);
+                record_drop("collector_timeout", records);
             }
             Err(error) => {
                 warn!(%error, records, "could not reach the collector");
-                record_drop("sink_unreachable", records);
+                record_drop("collector_unreachable", records);
             }
         }
     }
@@ -382,17 +384,17 @@ mod tests {
         serde_json::from_slice(&body).expect("body is the collector's JSON")
     }
 
-    /// Feeds `records` through a sink pointed at `server` and returns the drops it counted. The
+    /// Feeds `records` through a collector client pointed at `server` and returns the drops it
     /// emitter is dropped straight away, so the task ships one batch and stops instead of
     /// waiting out the flush interval.
     async fn drain_to(server: &wiremock::MockServer, records: u64) -> Vec<(String, u64)> {
-        let sink = RecordSink::new(&server.uri()).expect("the stub's URI is a URL");
+        let collector = Collector::new(&server.uri()).expect("the stub's URI is a URL");
         let (emitter, receiver) = RecordEmitter::new(queue_of(16));
         for amount in 1..=records {
             emitter.emit(record(amount));
         }
         drop(emitter);
-        drops_by_reason_async(drain_into(sink, receiver)).await
+        drops_by_reason_async(drain_into(collector, receiver)).await
     }
 
     /// [`drops_by_reason`] for a future: the local recorder is thread-local, and these tests run
@@ -410,9 +412,9 @@ mod tests {
         drops_of(snapshotter.snapshot().into_vec())
     }
 
-    /// Every record queued before the sink shuts down arrives, in one batch.
+    /// Every record queued before the sender shuts down arrives, in one batch.
     #[tokio::test]
-    async fn test_sink_posts_queued_records_in_one_batch() {
+    async fn test_collector_posts_queued_records_in_one_batch() {
         let server = stub_collector(202, Duration::ZERO).await;
 
         let drops = drain_to(&server, 3).await;
@@ -429,24 +431,24 @@ mod tests {
 
     /// A collector that does not answer in time costs the batch, counted apart from a refusal.
     #[tokio::test]
-    async fn test_sink_counts_a_timeout() {
+    async fn test_collector_counts_a_timeout() {
         let server =
-            stub_collector(202, defaults::RECORD_SINK_TIMEOUT + Duration::from_secs(1)).await;
+            stub_collector(202, defaults::RECORD_POST_TIMEOUT + Duration::from_secs(1)).await;
 
         let drops = drain_to(&server, 2).await;
 
-        assert_eq!(drops, vec![("sink_timeout".to_string(), 2)]);
+        assert_eq!(drops, vec![("collector_timeout".to_string(), 2)]);
     }
 
     /// A refused batch is dropped where it stands. Retrying it would duplicate every record in
     /// it, since the collector mints the ids.
     #[tokio::test]
-    async fn test_sink_counts_a_refusal() {
+    async fn test_collector_counts_a_refusal() {
         let server = stub_collector(400, Duration::ZERO).await;
 
         let drops = drain_to(&server, 2).await;
 
-        assert_eq!(drops, vec![("sink_rejected".to_string(), 2)]);
+        assert_eq!(drops, vec![("collector_rejected".to_string(), 2)]);
         assert_eq!(
             server
                 .received_requests()
@@ -460,30 +462,30 @@ mod tests {
 
     /// A collector that cannot be reached at all is counted apart from one that answered.
     #[tokio::test]
-    async fn test_sink_counts_an_unreachable_collector() {
+    async fn test_collector_counts_an_unreachable_collector() {
         // Port 1 is reserved and bound by nothing, so the connection fails outright.
-        let sink = RecordSink::new("http://127.0.0.1:1").expect("a URL");
+        let collector = Collector::new("http://127.0.0.1:1").expect("a URL");
         let (emitter, receiver) = RecordEmitter::new(queue_of(4));
         emitter.emit(record(1));
         drop(emitter);
 
-        let drops = drops_by_reason_async(drain_into(sink, receiver)).await;
+        let drops = drops_by_reason_async(drain_into(collector, receiver)).await;
 
-        assert_eq!(drops, vec![("sink_unreachable".to_string(), 1)]);
+        assert_eq!(drops, vec![("collector_unreachable".to_string(), 1)]);
     }
 
     #[tokio::test]
-    async fn test_sink_rejects_a_url_that_is_not_one() {
-        assert!(spawn_record_sink("collector.internal:8080").is_err());
+    async fn test_collector_rejects_a_url_that_is_not_one() {
+        assert!(spawn_record_sender("collector.internal:8080").is_err());
     }
 
     /// The path is appended to the collector's root, whether or not it ends in a slash.
     #[rstest::rstest]
     #[case("http://collector.internal:8080")]
     #[case("http://collector.internal:8080/")]
-    fn test_sink_url_names_the_records_endpoint(#[case] root: &str) {
-        let sink = RecordSink::new(root).expect("a URL");
-        assert_eq!(sink.records_url, "http://collector.internal:8080/v1/records");
+    fn test_collector_url_names_the_records_endpoint(#[case] root: &str) {
+        let collector = Collector::new(root).expect("a URL");
+        assert_eq!(collector.records_url, "http://collector.internal:8080/v1/records");
     }
 
     #[test]
