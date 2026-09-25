@@ -52,12 +52,9 @@ pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 pub struct TokenPriceEntry {
     /// The computed mid-price relative to gas token.
     pub price: Price,
-    /// Every component on any route the router could pick between the token and the gas token
-    /// within the hop budget, plus the two chosen routes' own.
+    /// The components of the routes that priced the token.
     ///
-    /// Used for invalidation: a state change on any of them re-prices the token, so a rival
-    /// pool becoming the better route is noticed even though the chosen routes never touched
-    /// it.
+    /// Used for invalidation: a state change on any of them re-prices the token.
     pub path_components: FxHashSet<ComponentId>,
 }
 
