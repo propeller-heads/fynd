@@ -100,12 +100,9 @@ async fn drain_into(sink: RecordSink, mut receiver: mpsc::Receiver<QuoteRecord>)
         while !batch.is_full() {
             match timeout_at(deadline, receiver.recv()).await {
                 Ok(Some(record)) => batch.push(&record),
-                // Every emitter is gone: ship what this batch holds, then stop.
-                Ok(None) => {
-                    sink.post(batch).await;
-                    return;
-                }
-                Err(_elapsed) => break,
+                // The flush interval passed, or every emitter is gone. Either way this batch
+                // travels as it stands; a closed queue then ends the outer loop too.
+                Ok(None) | Err(_) => break,
             }
         }
         sink.post(batch).await;
