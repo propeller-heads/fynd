@@ -1,4 +1,11 @@
 
+## [0.110.2](https://github.com/propeller-heads/fynd/compare/0.110.1...0.110.2) (2026-09-25)
+
+### Bug Fixes
+
+* **deps:** require tycho 0.427.0 for the Titan data host ([ff6f305](https://github.com/propeller-heads/fynd/commit/ff6f305eda8ead746b0bb9342fe89d8fdc078e27))
+
+
 ## [0.110.1](https://github.com/propeller-heads/fynd/compare/0.110.0...0.110.1) (2026-09-25)
 
 ### Features
