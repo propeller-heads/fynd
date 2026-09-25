@@ -218,8 +218,10 @@ pub mod defaults {
         NonZeroUsize::new(5_000).expect("5000 is not zero");
     /// Records one POST carries at most: about 2 MB of JSON, far less once compressed.
     pub const RECORD_BATCH_MAX_RECORDS: usize = 1_000;
-    /// Uncompressed JSON bytes one POST carries at most. Catches batches of unusually large
-    /// records, which the count above would let through. The collector's limit is 32 MiB.
+    /// Uncompressed JSON bytes after which a POST stops taking records. The batch is measured
+    /// after each one, so it can overshoot by a record — leave room for that below the
+    /// collector's 32 MiB limit, which the compressed body is measured against. Catches batches
+    /// of unusually large records, which the count above would let through.
     pub const RECORD_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// How long a batch waits for more records before it is sent as it stands.
     pub const RECORD_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
