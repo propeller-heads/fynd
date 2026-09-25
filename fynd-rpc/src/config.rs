@@ -199,6 +199,8 @@ mod tests {
 
 /// Default values for all `fynd-rpc` configuration parameters.
 pub mod defaults {
+    use std::{num::NonZeroUsize, time::Duration};
+
     // Re-export shared defaults from fynd-core as the single source of truth.
     pub use fynd_core::solver::defaults::{
         GAS_REFRESH_INTERVAL, MIN_TOKEN_QUALITY, RECONNECT_DELAY, ROUTER_MIN_RESPONSES,
@@ -209,6 +211,23 @@ pub mod defaults {
     pub const HTTP_HOST: &str = "0.0.0.0";
     /// Default HTTP port (`3000`).
     pub const HTTP_PORT: u16 = 3000;
+
+    /// Records the queue holds before it starts dropping. A record runs to about 2 KB, so this
+    /// is roughly 10 MB of memory.
+    pub const RECORD_QUEUE_CAPACITY: NonZeroUsize =
+        NonZeroUsize::new(5_000).expect("5000 is not zero");
+    /// Records one POST carries at most: about 2 MB of JSON, far less once compressed.
+    pub const RECORD_BATCH_MAX_RECORDS: usize = 1_000;
+    /// Uncompressed JSON bytes after which a POST stops taking records, an eighth of the 32 MiB
+    /// the collector accepts — it decompresses the body before measuring it, so this is the
+    /// figure that counts. The batch is measured after each record and can overshoot by one, and
+    /// that spare absorbs it. Catches batches of unusually large records, which the count above
+    /// would let through.
+    pub const RECORD_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+    /// How long a batch waits for more records before it is sent as it stands.
+    pub const RECORD_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+    /// How long one POST to the collector may take before its batch is dropped.
+    pub const RECORD_POST_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Returns the default public JSON-RPC URL for the given chain, used when none is provided.
     ///

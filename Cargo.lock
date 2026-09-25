@@ -3626,6 +3626,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "num_cpus",
+ "reqwest 0.12.28",
  "rstest",
  "rustc-hash",
  "serde",
@@ -3643,6 +3644,7 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid",
  "wiremock",
+ "zstd",
 ]
 
 [[package]]

@@ -344,7 +344,8 @@ async fn setup_solver(
                 args.gas_price_stale_threshold_secs
                     .map(Duration::from_secs),
             )
-            .hosted_swagger_url(args.hosted_swagger_url.clone());
+            .hosted_swagger_url(args.hosted_swagger_url.clone())
+            .collector_url(args.collector_url.clone());
 
     if args.disable_tls {
         builder = builder.disable_tls();
