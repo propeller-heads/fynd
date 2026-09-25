@@ -556,11 +556,13 @@ impl FyndRPC {
         // sees a closed queue and posts its last batch. Waiting for that, rather than aborting,
         // is what keeps the final records; one POST's worth of time bounds the wait.
         if let Some(handle) = record_sink_handle {
-            if tokio::time::timeout(defaults::RECORD_SINK_TIMEOUT, handle)
-                .await
-                .is_err()
-            {
-                warn!("record sink did not finish its last batch before shutdown");
+            match tokio::time::timeout(defaults::RECORD_SINK_TIMEOUT, handle).await {
+                Ok(Ok(())) => {}
+                // The task panicked, here or at any point since it started.
+                Ok(Err(error)) => error!(%error, "record sink task failed"),
+                Err(_elapsed) => {
+                    warn!("record sink did not finish its last batch before shutdown")
+                }
             }
         }
 
