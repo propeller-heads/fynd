@@ -1,7 +1,7 @@
 //! Component depth computation.
 //!
 //! Computes liquidity depths for all components using `query_pool_swap`, falling back to
-//! the generic Brent solver from tycho-simulation when the component doesn't implement it natively.
+//! `depth_search::search_depth` when the component doesn't implement it natively.
 //! Depth represents the maximum input amount before reaching the configured slippage
 //! threshold from the spot price.
 //!
@@ -18,7 +18,6 @@ use num_traits::Zero;
 use rustc_hash::FxHashSet;
 use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
-    evm::query_pool_swap::query_pool_swap,
     tycho_common::simulation::errors::SimulationError,
     tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
 };
@@ -30,7 +29,7 @@ use crate::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
             FailedItem, FailedItemError,
         },
-        computations::spot_price::SpotPriceComputation,
+        computations::{depth_search::search_depth, spot_price::SpotPriceComputation},
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
@@ -42,7 +41,7 @@ use crate::{
 
 /// Computes component depths for all components in all directions.
 ///
-/// For each component and token pair, uses `query_pool_swap` (with Brent solver fallback)
+/// For each component and token pair, uses `query_pool_swap` (with `search_depth` as fallback)
 /// to find the maximum input amount that results in at most the configured slippage
 /// from spot price.
 #[derive(Debug)]
@@ -276,24 +275,25 @@ impl DerivedComputation for ComponentDepthComputation {
                     },
                 );
 
+                let fallback_depth_search =
+                    || search_depth(sim_state, *spot_price, min_price, token_in, token_out);
                 let depth_result = match sim_state.query_pool_swap(&params) {
-                    Ok(swap) => Ok(swap),
+                    Ok(swap) => Ok(swap.amount_in().clone()),
                     Err(SimulationError::FatalError(msg))
                         if msg == "query_pool_swap not implemented" =>
                     {
-                        query_pool_swap(sim_state, &params)
+                        fallback_depth_search()
                     }
                     Err(SimulationError::InvalidInput(msg, _))
                         if msg.contains("does not support TradeLimitPrice") =>
                     {
-                        query_pool_swap(sim_state, &params)
+                        fallback_depth_search()
                     }
                     Err(e) => Err(e),
                 }
-                .map(|swap| swap.amount_in().clone())
                 .map_err(|e| {
                     ComputationError::SimulationFailed(format!(
-                        "query_pool_swap failed for {}/{}: {e}",
+                        "depth query failed for {}/{}: {e}",
                         token_in.address, token_out.address
                     ))
                 });
@@ -357,14 +357,13 @@ impl DerivedComputation for ComponentDepthComputation {
 mod tests {
     use rstest::rstest;
     use rustc_hash::FxHashMap;
-    use tycho_simulation::{
-        tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::token::Token,
-    };
+    use tycho_simulation::tycho_core::models::token::Token;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{
-            setup_market_weighted, token, token_with_decimals, MockProtocolSim,
+            setup_market_weighted, setup_market_weighted_boxed, token, token_with_decimals,
+            MockProtocolSim,
         },
         derived::{
             computation::FailedItemError,
@@ -535,221 +534,54 @@ mod tests {
         );
     }
 
-    /// Verify that Price construction in compute() correctly handles decimal scaling
-    /// across mixed-decimal token pairs (e.g. WETH(18)/USDC(6)).
-    ///
-    /// Uses the shared `query_pool_swap` function directly because UniV2's trait
-    /// method rejects TradeLimitPrice, but the shared function works with any
-    /// ProtocolSim via get_amount_out/spot_price.
-    #[rstest]
-    #[case::same_decimals(18, 18, 1000, 2000)]
-    #[case::high_to_low(18, 6, 1000, 2_000_000)]
-    #[case::low_to_high(6, 18, 2_000_000, 1000)]
-    #[case::small_difference(8, 18, 100, 2000)]
-    #[test]
-    fn test_decimal_scaling_with_real_univ2(
-        #[case] decimals_in: u32,
-        #[case] decimals_out: u32,
-        #[case] tokens_in_reserve: u64,
-        #[case] tokens_out_reserve: u64,
-    ) {
+    #[tokio::test]
+    async fn test_compute_depth_search_fallback() {
+        // UniswapV2's own `query_pool_swap` rejects `TradeLimitPrice`, so `compute` falls back to
+        // `search_depth` for both directions.
         use alloy::primitives::U256;
-        use tycho_simulation::evm::{
-            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        let weth = token_with_decimals(0x01, "WETH", 18);
+        let usdc = token_with_decimals(0x02, "USDC", 6);
+        let univ2 = UniswapV2State::new(
+            U256::from(5_000u64) * U256::from(10u64).pow(U256::from(18u64)),
+            U256::from(10_000_000u64) * U256::from(10u64).pow(U256::from(6u64)),
+        );
+        let (market, _) =
+            setup_market_weighted_boxed(vec![("component", &weth, &usdc, Box::new(univ2))]);
+        let derived = DerivedData::new_shared();
+        let changed = ChangedComponents {
+            added: FxHashMap::from_iter([(
+                "component".to_string(),
+                vec![weth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
         };
+        let spot_output = SpotPriceComputation::new()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("spot price computation should succeed");
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_output.data, vec![], 0, true);
 
-        let token_in = token_with_decimals(0x01, "IN", decimals_in);
-        let token_out = token_with_decimals(0x02, "OUT", decimals_out);
+        let output = ComponentDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("computation should succeed");
 
-        let reserve_in =
-            U256::from(tokens_in_reserve) * U256::from(10u64).pow(U256::from(decimals_in));
-        let reserve_out =
-            U256::from(tokens_out_reserve) * U256::from(10u64).pow(U256::from(decimals_out));
-        let univ2 = UniswapV2State::new(reserve_in, reserve_out);
-
-        let spot_price = univ2
-            .spot_price(&token_in, &token_out)
-            .expect("spot_price should succeed");
-
-        let slippage = 0.01;
-        let min_price = spot_price * (1.0 - slippage);
-
-        let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-        let numerator = BigUint::from((min_price * 10_f64.powi(18)) as u128);
-        let denominator = BigUint::from(10u64).pow((18 + decimal_diff) as u32);
-
-        let limit_price = Price::new(numerator, denominator);
-
-        let params = QueryPoolSwapParams::new(
-            token_in.clone(),
-            token_out.clone(),
-            SwapConstraint::TradeLimitPrice {
-                limit: limit_price,
-                tolerance: 0.0,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
-
-        let result = query_pool_swap(&univ2, &params);
-        assert!(
-            result.is_ok(),
-            "query_pool_swap should succeed for {decimals_in}/{decimals_out} decimals, \
-             got error: {:?}",
-            result.err()
-        );
-
-        let swap = result.unwrap();
-        assert!(
-            !swap.amount_in().is_zero(),
-            "amount_in should be non-zero for {decimals_in}/{decimals_out} decimals"
-        );
-
-        let post_swap_spot = swap
-            .new_state()
-            .spot_price(&token_in, &token_out)
-            .expect("post-swap spot_price should succeed");
-        let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
-        assert!(
-            price_impact <= slippage + 0.005,
-            "post-swap price impact {price_impact:.4} should be near slippage {slippage} \
-             for {decimals_in}/{decimals_out} decimals"
-        );
-    }
-
-    /// Exercises the Brent solver fallback path with realistic UniV2 component states to verify
-    /// it produces sensible depth values. This validates that the Price construction
-    /// approach in compute() is correct across a range of real-world token pairs.
-    ///
-    /// Three components covering the key decimal configurations encountered in production:
-    ///   - WETH/USDC: 18/6 decimals, ~$2000 price, ~$10M liquidity
-    ///   - WETH/WBTC: 18/8 decimals, ~15 price, ~$5M liquidity
-    ///   - USDC/USDT: 6/6 decimals, ~1 price, ~$50M liquidity
-    #[test]
-    fn test_brent_solver_with_realistic_components() {
-        use alloy::primitives::U256;
-        use tycho_simulation::evm::{
-            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
-        };
-
-        struct ComponentCase {
-            name: &'static str,
-            token_in: tycho_simulation::tycho_core::models::token::Token,
-            token_out: tycho_simulation::tycho_core::models::token::Token,
-            reserve_in_human: u64,
-            reserve_out_human: u64,
-        }
-
-        // WETH reserve ~5000 ETH, USDC reserve ~10M USDC  → ~$2000/ETH, ~$10M TVL
-        // WETH reserve ~333 ETH, WBTC reserve ~5000 WBTC  → ~15 WBTC/WETH, ~$5M TVL
-        // USDC reserve ~25M, USDT reserve ~25M            → ~1:1, ~$50M TVL
-        let cases = vec![
-            ComponentCase {
-                name: "WETH(18)/USDC(6)",
-                token_in: token_with_decimals(0x01, "WETH", 18),
-                token_out: token_with_decimals(0x02, "USDC", 6),
-                reserve_in_human: 5_000,
-                reserve_out_human: 10_000_000,
-            },
-            ComponentCase {
-                name: "WETH(18)/WBTC(8)",
-                token_in: token_with_decimals(0x01, "WETH", 18),
-                token_out: token_with_decimals(0x02, "WBTC", 8),
-                reserve_in_human: 5_000,
-                reserve_out_human: 333,
-            },
-            ComponentCase {
-                name: "USDC(6)/USDT(6)",
-                token_in: token_with_decimals(0x01, "USDC", 6),
-                token_out: token_with_decimals(0x02, "USDT", 6),
-                reserve_in_human: 25_000_000,
-                reserve_out_human: 25_000_000,
-            },
-        ];
-
-        let slippage = 0.01_f64;
-        const SCALE_EXP: i32 = 18;
-
-        for case in &cases {
-            let decimals_in = case.token_in.decimals;
-            let decimals_out = case.token_out.decimals;
-
-            let reserve_in =
-                U256::from(case.reserve_in_human) * U256::from(10u64).pow(U256::from(decimals_in));
-            let reserve_out = U256::from(case.reserve_out_human) *
-                U256::from(10u64).pow(U256::from(decimals_out));
-            let univ2 = UniswapV2State::new(reserve_in, reserve_out);
-
-            let spot_price = univ2
-                .spot_price(&case.token_in, &case.token_out)
-                .unwrap_or_else(|e| panic!("[{}] spot_price failed: {e}", case.name));
-
-            let min_price = spot_price * (1.0 - slippage);
-
-            let decimal_diff = decimals_in as i32 - decimals_out as i32;
-            let denominator_exp = SCALE_EXP + decimal_diff;
-            assert!(
-                denominator_exp >= 0,
-                "[{}] denominator_exp would be negative: {denominator_exp}",
-                case.name
-            );
-
-            let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-            let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-            let limit_price = Price::new(numerator, denominator);
-
-            let limit_price_f64 = min_price;
-
-            let params = QueryPoolSwapParams::new(
-                case.token_in.clone(),
-                case.token_out.clone(),
-                SwapConstraint::TradeLimitPrice {
-                    limit: limit_price,
-                    tolerance: 0.0,
-                    min_amount_in: None,
-                    max_amount_in: None,
-                },
-            );
-
-            let result = query_pool_swap(&univ2, &params)
-                .unwrap_or_else(|e| panic!("[{}] query_pool_swap failed: {e}", case.name));
-
-            let amount_in = result.amount_in();
-            assert!(!amount_in.is_zero(), "[{}] amount_in (depth) should be non-zero", case.name);
-
-            let post_swap_spot = result
-                .new_state()
-                .spot_price(&case.token_in, &case.token_out)
-                .unwrap_or_else(|e| panic!("[{}] post-swap spot_price failed: {e}", case.name));
-            let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
-
-            let amount_in_human = {
-                let raw: f64 = amount_in
-                    .to_string()
-                    .parse()
-                    .unwrap_or(0.0);
-                raw / 10_f64.powi(decimals_in as i32)
-            };
-
-            println!(
-                "[{}] spot_price={:.6}, limit_price={:.6}, amount_in={} ({:.4} human), \
-                 post_swap_spot={:.6}, price_impact={:.4}%",
-                case.name,
-                spot_price,
-                limit_price_f64,
-                amount_in,
-                amount_in_human,
-                post_swap_spot,
-                price_impact * 100.0
-            );
-
-            assert!(
-                price_impact <= slippage + 0.005,
-                "[{}] price impact {:.4}% exceeds slippage {:.4}% + tolerance",
-                case.name,
-                price_impact * 100.0,
-                slippage * 100.0
-            );
+        assert!(!output.has_failures(), "failed items: {:?}", output.failed_items);
+        for (token_in, token_out) in [(&weth, &usdc), (&usdc, &weth)] {
+            let key: ComponentDepthKey =
+                ("component".into(), token_in.address.clone(), token_out.address.clone());
+            let depth = output
+                .data
+                .get(&key)
+                .expect("the depth is stored");
+            assert!(!depth.is_zero(), "{} depth is zero", token_in.symbol);
         }
     }
 

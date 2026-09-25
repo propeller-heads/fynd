@@ -5,6 +5,7 @@
 //! when relevant market events occur.
 
 pub mod component_depth;
+mod depth_search;
 pub mod spot_price;
 pub mod token_gas_price;
 
