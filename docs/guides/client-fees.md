@@ -10,6 +10,8 @@ The integrator keeps 80% of the client fee. Fynd keeps 20%.
 
 Client fees are separate from [Fynd fees](router-fees.md), which still apply when no client fee is set.
 
+`bps` may be at most `10000` (100%); a higher value is rejected with `400` and code `CLIENT_FEE_TOO_HIGH`. The combined client and router fees must also leave a non-zero `min_amount_received`, which the encoder checks per quote.
+
 ## Fee breakdown with client fees
 
 Quotes with encoding include a `fee_breakdown` with the exact amounts.

@@ -5,6 +5,12 @@ type WireErrorResponse = components["schemas"]["ErrorResponse"];
 /** Error code returned by the Fynd server. Kept in sync with the server schema. */
 export type ServerErrorCode =
   | 'BAD_REQUEST'
+  | 'NO_ORDERS'
+  | 'TOO_MANY_ORDERS'
+  | 'SAME_TOKENS'
+  | 'ZERO_AMOUNT'
+  | 'INVALID_SLIPPAGE'
+  | 'CLIENT_FEE_TOO_HIGH'
   | 'NO_ROUTE_FOUND'
   | 'INSUFFICIENT_LIQUIDITY'
   | 'TIMEOUT'
@@ -25,6 +31,12 @@ export type ErrorCode = ServerErrorCode | ClientErrorCode;
 
 const KNOWN_SERVER_CODES = new Set([
   'BAD_REQUEST',
+  'NO_ORDERS',
+  'TOO_MANY_ORDERS',
+  'SAME_TOKENS',
+  'ZERO_AMOUNT',
+  'INVALID_SLIPPAGE',
+  'CLIENT_FEE_TOO_HIGH',
   'NO_ROUTE_FOUND',
   'INSUFFICIENT_LIQUIDITY',
   'TIMEOUT',

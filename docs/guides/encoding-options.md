@@ -62,6 +62,8 @@ Fynd computes `minAmountOut = quotedAmountOut * (1 - slippage)` and encodes it i
 If on-chain execution produces less than `minAmountOut`, the transaction reverts.
 
 Typical values are `0.005` (0.5%) for stablecoin pairs and `0.01` (1%) for volatile pairs.
+The value must be a number from `0` to `1`; anything else (`NaN`, a negative value, more than
+100%) is rejected with `400` and code `INVALID_SLIPPAGE`.
 
 The router rejects a `minAmountOut` of zero, so fees plus slippage may not eat the whole quoted
 output. Encoding fails with an error rather than returning calldata that would revert.
