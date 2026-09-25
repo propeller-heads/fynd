@@ -35,7 +35,7 @@ const DEFAULT_GAS_PRICE_WEI: u64 = 10_000_000_000;
 pub struct DerivedBenchSettings {
     /// The chain the updates come from; it selects the gas token.
     pub chain: Chain,
-    /// The hop limit for `token_prices`, the largest `max_hops` of any production pool.
+    /// The hop limit for `token_prices`, what production sets with `--pricing-max-hops`.
     pub pricing_max_hops: usize,
     /// The recorded gas price, or `None` for 10 gwei.
     pub gas_price_wei: Option<BigUint>,

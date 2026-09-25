@@ -21,9 +21,9 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     repeats: usize,
 
-    /// The hop limit for `token_prices`. The default is 2, the largest `max_hops` of any pool in
-    /// `worker_pools.toml`.
-    #[arg(long, default_value_t = 2)]
+    /// The hop limit for `token_prices`, as `fynd serve --pricing-max-hops` sets it. The default
+    /// is production's.
+    #[arg(long, default_value_t = fynd_core::solver::defaults::PRICING_MAX_HOPS)]
     pricing_max_hops: usize,
 
     /// Emit fynd-core's logs. `RUST_LOG` picks the filter, e.g.

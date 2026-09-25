@@ -201,6 +201,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets how far from the gas token the token pricing pass reaches. Leaving this unset keeps
+    /// the computation's default.
+    pub fn set_pricing_max_hops(mut self, max_hops: usize) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .set_pricing_max_hops(max_hops);
+        self
+    }
+
     /// Sets how many tokens one token-pricing pass may attempt. Leaving this unset keeps the
     /// computation's default.
     pub fn set_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {

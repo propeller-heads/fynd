@@ -89,6 +89,10 @@ pub mod defaults {
     pub const POOL_MIN_HOPS: usize = 1;
     /// Maximum number of hops allowed in a route.
     pub const POOL_MAX_HOPS: usize = 3;
+    /// Hop limit of the token pricing pass: how far from the gas token a token may sit and still
+    /// get a price. Independent of any pool's `max_hops`; a token a pool can route to but pricing
+    /// cannot reach is quoted gas-blind.
+    pub const PRICING_MAX_HOPS: usize = 2;
     /// Per-worker-pool solve timeout in milliseconds.
     pub const POOL_TIMEOUT_MS: u64 = 100;
     /// Limits each simulation RPC request so optional quote simulation cannot delay quotes.
@@ -125,17 +129,6 @@ fn default_max_hops() -> usize {
 
 fn default_algo_timeout_ms() -> u64 {
     defaults::POOL_TIMEOUT_MS
-}
-
-/// The token pricing pass's hop budget, from the configured pools' `max_hops` values.
-///
-/// Pricing must reach every token a quote can route to — a token within some pool's `max_hops`
-/// but beyond pricing's hop budget would be quoted gas-blind — so the budget follows the deepest
-/// configured pool rather than any constant.
-fn pricing_max_hops(pool_max_hops: impl Iterator<Item = usize>) -> usize {
-    pool_max_hops
-        .max()
-        .unwrap_or(defaults::POOL_MAX_HOPS)
 }
 
 fn parse_connector_tokens(
@@ -443,14 +436,6 @@ impl PoolEntry {
             PoolEntry::Custom(custom) => custom.liquidity_scope,
         }
     }
-
-    /// Returns the longest route this worker pool may build.
-    fn max_hops(&self) -> usize {
-        match self {
-            PoolEntry::BuiltIn { max_hops, .. } => *max_hops,
-            PoolEntry::Custom(custom) => custom.max_hops,
-        }
-    }
 }
 
 /// Worker pool entry backed by a custom [`Algorithm`] implementation.
@@ -511,6 +496,7 @@ pub struct FyndBuilder {
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     tycho_subscription_buffer_size: Option<usize>,
+    pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
     pricing_max_tokens_per_pass: Option<usize>,
@@ -552,6 +538,7 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
+            pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
@@ -640,6 +627,17 @@ impl FyndBuilder {
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
         self.tycho_subscription_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets how far from the gas token the token pricing pass reaches.
+    ///
+    /// A token within this many hops of the gas token gets a price; one beyond it is quoted
+    /// gas-blind even when a pool's `max_hops` can route to it. Each extra hop widens the walk
+    /// every pass makes, so this is set on its own rather than following the deepest pool
+    /// (default: [`defaults::PRICING_MAX_HOPS`]).
+    pub fn set_pricing_max_hops(mut self, max_hops: usize) -> Self {
+        self.pricing_max_hops = max_hops;
         self
     }
 
@@ -913,14 +911,9 @@ impl FyndBuilder {
         let market_event_tx = tycho_feed.event_sender();
 
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
-        let pricing_max_hops = pricing_max_hops(
-            self.pools
-                .iter()
-                .map(PoolEntry::max_hops),
-        );
         let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_max_hop(pricing_max_hops)
+            .with_max_hop(self.pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
         if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
             computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
@@ -1507,14 +1500,9 @@ impl Solver {
         }
 
         let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
-        let pricing_max_hops = pricing_max_hops(
-            pools
-                .values()
-                .map(|pool_cfg| pool_cfg.max_hops()),
-        );
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_max_hop(pricing_max_hops)
+            .with_max_hop(defaults::PRICING_MAX_HOPS)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
             // Replay tests assert exact priced-token counts against a deterministic recording, so
             // neither bound on a pricing pass may apply: an effectively unbounded budget keeps a
