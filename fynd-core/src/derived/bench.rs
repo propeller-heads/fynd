@@ -44,6 +44,21 @@ pub struct DerivedBenchSettings {
     pub pricing_max_hops: usize,
     /// The recorded gas price, or `None` for 10 gwei.
     pub gas_price_wei: Option<BigUint>,
+    /// Reads the heap of the process running the bench, or `None` to measure time only. The
+    /// global allocator lives in the binary, so the binary supplies this.
+    pub heap_probe: Option<HeapProbe>,
+}
+
+/// Returns the live heap now, and the peak since the previous call, and starts a new peak.
+pub type HeapProbe = fn() -> HeapSample;
+
+/// The heap of the process at one point of a replay.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeapSample {
+    /// Bytes allocated and not yet freed.
+    pub live_bytes: usize,
+    /// The largest `live_bytes` since the previous sample.
+    pub peak_bytes: usize,
 }
 
 /// What one computation cost on one block.
@@ -51,6 +66,9 @@ pub struct DerivedBenchSettings {
 pub struct ComputationRun {
     /// Wall-clock time of `compute`.
     pub elapsed: Duration,
+    /// The heap after the computation stored its output, and its peak while it ran. `None`
+    /// without a heap probe.
+    pub heap: Option<HeapSample>,
 }
 
 /// The computations to time, built as `ComputationManager::new` builds them.
@@ -58,6 +76,7 @@ struct TimedComputations {
     spot_prices: SpotPriceComputation,
     token_prices: TokenGasPriceComputation,
     pool_depths: ComponentDepthComputation,
+    heap_probe: Option<HeapProbe>,
 }
 
 /// What every computation on one block reads, and where it stores its output.
@@ -86,24 +105,26 @@ impl TimedComputations {
             token_prices: config.build_token_price_computation(),
             pool_depths: ComponentDepthComputation::new(config.depth_slippage_threshold())
                 .expect("the default depth slippage threshold is valid"),
+            heap_probe: settings.heap_probe,
         }
     }
 
     /// Runs every computation on one block, pool depths after the spot prices they read, and
     /// returns what each cost.
     async fn run_block(&self, run: &BlockRun<'_>) -> [(&'static str, ComputationRun); 3] {
+        let probe = self.heap_probe;
         [
             (
                 SpotPriceComputation::ID,
-                time_computation(&self.spot_prices, run, |out| out.len()).await,
+                time_computation(&self.spot_prices, run, probe, |out| out.len()).await,
             ),
             (
                 TokenGasPriceComputation::ID,
-                time_computation(&self.token_prices, run, |out| out.len()).await,
+                time_computation(&self.token_prices, run, probe, |out| out.len()).await,
             ),
             (
                 ComponentDepthComputation::ID,
-                time_computation(&self.pool_depths, run, |out| out.len()).await,
+                time_computation(&self.pool_depths, run, probe, |out| out.len()).await,
             ),
         ]
     }
@@ -116,6 +137,8 @@ pub struct DerivedBenchRuns {
     pub first_block: BTreeMap<&'static str, ComputationRun>,
     /// Computation id → its cost on each later block, in replay order.
     pub later_blocks: BTreeMap<&'static str, Vec<ComputationRun>>,
+    /// The heap after the snapshot replay, before any computation ran: the market alone.
+    pub market_heap: Option<HeapSample>,
 }
 
 /// The token prices and pool depths the store holds at one point of a replay, for comparing two
@@ -182,14 +205,17 @@ fn to_f64(value: &BigUint) -> f64 {
     value.to_f64().unwrap_or(f64::INFINITY)
 }
 
-/// Runs one computation, prints its time and output size, and persists the output so the next
-/// block's incremental run reads it.
+/// Runs one computation, prints its time, heap and output size, and persists the output so the
+/// next block's incremental run reads it.
 async fn time_computation<C: DerivedComputation>(
     computation: &C,
     run: &BlockRun<'_>,
+    heap_probe: Option<HeapProbe>,
     output_len: impl Fn(&C::Output) -> usize,
 ) -> ComputationRun {
     let block = run.block;
+    // Starts a new peak, so the sample after the computation holds its own peak.
+    let heap_before = heap_probe.map(|probe| probe());
     let start = Instant::now();
     let output = computation
         .compute(run.market, run.store, run.changed)
@@ -199,12 +225,28 @@ async fn time_computation<C: DerivedComputation>(
     let items = output_len(&output.data);
     let failed = output.failed_items.len();
     C::persist(&mut *run.store.write().await, output, block, run.changed.is_full_recompute);
+    let heap = heap_probe.map(|probe| probe());
+    let heap_text = match (heap_before, heap) {
+        (Some(before), Some(after)) => format!(
+            "  live {:>7.1} MB ({:+.1})  peak {:>7.1} MB (+{:.1})",
+            megabytes(after.live_bytes),
+            megabytes(after.live_bytes) - megabytes(before.live_bytes),
+            megabytes(after.peak_bytes),
+            megabytes(after.peak_bytes) - megabytes(before.live_bytes),
+        ),
+        _ => String::new(),
+    };
     println!(
-        "block {block} {:<17} {:>10.1} ms  items={items} failed={failed}",
+        "block {block} {:<17} {:>10.1} ms  items={items} failed={failed}{heap_text}",
         C::ID,
         elapsed.as_secs_f64() * 1000.0,
     );
-    ComputationRun { elapsed }
+    ComputationRun { elapsed, heap }
+}
+
+/// `bytes` in megabytes, for printing.
+pub fn megabytes(bytes: usize) -> f64 {
+    bytes as f64 / 1_000_000.0
 }
 
 /// Returns every market event the feed broadcast since the last call.
@@ -285,6 +327,11 @@ pub async fn time_derived_computations(
         "replayed the snapshot in {:.1} s: {components} components",
         start.elapsed().as_secs_f64()
     );
+
+    report.runs.market_heap = settings.heap_probe.map(|probe| probe());
+    if let Some(heap) = report.runs.market_heap {
+        println!("heap after the snapshot replay: live {:.1} MB", megabytes(heap.live_bytes));
+    }
 
     let full_recompute = ChangedComponents { is_full_recompute: true, ..Default::default() };
     let block = read_current_block(&market).await;

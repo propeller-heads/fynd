@@ -17,7 +17,8 @@ use std::{
 
 use clap::Parser;
 use fynd_core::derived::bench::{
-    time_derived_computations, DerivedBenchRuns, DerivedBenchSettings, ReplayValues,
+    megabytes, time_derived_computations, ComputationRun, DerivedBenchRuns, DerivedBenchSettings,
+    ReplayValues,
 };
 use fynd_test_fixtures::read_recording;
 
@@ -76,7 +77,7 @@ pub async fn run() -> Result<(), String> {
         .map_err(|error| format!("cannot read the recording at {path}: {error:#}"))?;
     let chain = fynd_core::types::parse_chain(&recording.metadata.chain)
         .map_err(|error| format!("{path}: {error}"))?;
-    let updates = recording
+    let mut updates = recording
         .decode_updates()
         .await
         .map_err(|error| format!("cannot decode the recording at {path}: {error:#}"))?;
@@ -92,11 +93,19 @@ pub async fn run() -> Result<(), String> {
         gas_price_wei: recording
             .metadata
             .gas_price_as_biguint(),
+        heap_probe: Some(crate::heap::sample),
     };
+    // The decoded updates hold everything the replay needs; the raw recording would only add to
+    // the heap the bench measures.
+    drop(recording);
     let mut last_report = None;
     for run in 1..=args.repeats {
         println!("run {run}/{}", args.repeats);
-        let report = time_derived_computations(&settings, updates.clone()).await;
+        // The last replay takes the updates instead of a copy, so no second copy of the market
+        // sits in the heap it measures.
+        let replayed =
+            if run == args.repeats { std::mem::take(&mut updates) } else { updates.clone() };
+        let report = time_derived_computations(&settings, replayed).await;
         print_summary(&report.runs);
         last_report = Some(report);
     }
@@ -114,6 +123,9 @@ pub async fn run() -> Result<(), String> {
 }
 
 fn print_summary(runs: &DerivedBenchRuns) {
+    if let Some(heap) = runs.market_heap {
+        println!("heap: market after the snapshot replay {:.1} MB", megabytes(heap.live_bytes));
+    }
     println!("summary: first block, then later blocks (count, mean, total)");
     for (id, first) in &runs.first_block {
         let later = runs
@@ -133,6 +145,36 @@ fn print_summary(runs: &DerivedBenchRuns) {
             later.len(),
             mean_ms,
             total.as_secs_f64() * 1000.0,
+        );
+    }
+    let Some(market) = runs.market_heap else {
+        return;
+    };
+    println!("heap above the market: live after the computation, peak while it ran (MB)");
+    for (id, first) in &runs.first_block {
+        let later = runs
+            .later_blocks
+            .get(id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let above_market = |bytes: usize| megabytes(bytes) - megabytes(market.live_bytes);
+        let first_heap = first.heap.unwrap_or_default();
+        let later_peak = later
+            .iter()
+            .filter_map(|run: &ComputationRun| run.heap)
+            .map(|heap| heap.peak_bytes)
+            .max()
+            .unwrap_or_default();
+        let last_live = later
+            .last()
+            .and_then(|run| run.heap)
+            .map_or(first_heap.live_bytes, |heap| heap.live_bytes);
+        println!(
+            "  {id:<14} first: live {:>8.1} peak {:>8.1} | later: max peak {:>8.1}, last live {:>8.1}",
+            above_market(first_heap.live_bytes),
+            above_market(first_heap.peak_bytes),
+            above_market(later_peak),
+            above_market(last_live),
         );
     }
 }
