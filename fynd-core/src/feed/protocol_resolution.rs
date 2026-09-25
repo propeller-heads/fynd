@@ -1,16 +1,20 @@
-//! Tycho protocol system discovery.
+//! Tycho protocol system discovery: turns a `--protocols` list into the protocol systems to
+//! stream.
 
 use std::collections::HashSet;
 
-use anyhow::{bail, Result};
-use fynd_core::feed::protocol_registry::{
-    is_tycho_system, parse_exclusion, ProtocolSpec, EXCLUDE_PREFIX,
-};
 use tracing::{info, warn};
 use tycho_simulation::{
     tycho_client::rpc::{HttpRPCClient, HttpRPCClientOptions, ProtocolSystemsParams, RPCClient},
     tycho_common::models::Chain,
 };
+
+use crate::feed::{
+    protocol_registry::{is_tycho_system, parse_exclusion, ProtocolSpec, EXCLUDE_PREFIX},
+    DataFeedError,
+};
+
+type Result<T> = std::result::Result<T, DataFeedError>;
 
 /// Expansion token: fetch every on-chain protocol system from Tycho.
 const ALL_ONCHAIN: &str = "all_onchain";
@@ -31,12 +35,14 @@ pub async fn fetch_protocol_systems(
     let rpc_url =
         if use_tls { format!("https://{tycho_url}") } else { format!("http://{tycho_url}") };
     let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
-    let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)?;
+    let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)
+        .map_err(|error| DataFeedError::TychoRpc(error.to_string()))?;
 
     let request = ProtocolSystemsParams::new(chain);
     let response = rpc_client
         .get_protocol_systems(request)
-        .await?;
+        .await
+        .map_err(|error| DataFeedError::TychoRpc(error.to_string()))?;
     let protocols = response
         .data()
         .protocol_systems()
@@ -121,7 +127,10 @@ pub async fn resolve_protocols(
     }
 
     if protocols.is_empty() {
-        bail!("no supported protocols found. Provide --protocols or check Tycho connectivity.");
+        return Err(DataFeedError::Config(
+            "no supported protocols found. Provide --protocols or check Tycho connectivity."
+                .to_string(),
+        ));
     }
     Ok(protocols
         .iter()
@@ -142,13 +151,18 @@ fn split_requested(entries: &[String]) -> Result<(Vec<ProtocolSpec>, Vec<String>
         }
         match parse_exclusion(entry) {
             Some(system) => {
-                let system = system?;
+                let system = system.map_err(|error| DataFeedError::Config(error.to_string()))?;
                 if system.is_empty() {
-                    bail!("'{entry}' names no protocol system to exclude");
+                    return Err(DataFeedError::Config(format!(
+                        "'{entry}' names no protocol system to exclude"
+                    )));
                 }
                 excluded.push(system);
             }
-            None => streamed.push(ProtocolSpec::parse(entry)?),
+            None => streamed.push(
+                ProtocolSpec::parse(entry)
+                    .map_err(|error| DataFeedError::Config(error.to_string()))?,
+            ),
         }
     }
     Ok((streamed, excluded))
@@ -158,10 +172,10 @@ fn split_requested(entries: &[String]) -> Result<(Vec<ProtocolSpec>, Vec<String>
 fn reject_requested_and_excluded(streamed: &[ProtocolSpec], excluded: &[String]) -> Result<()> {
     for protocol in streamed {
         if excluded.contains(&protocol.system) {
-            bail!(
+            return Err(DataFeedError::Config(format!(
                 "protocol '{}' is both requested and excluded with '{EXCLUDE_PREFIX}'",
                 protocol.system
-            );
+            )));
         }
     }
     Ok(())
