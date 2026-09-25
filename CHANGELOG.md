@@ -1,4 +1,20 @@
 
+## [0.110.1](https://github.com/propeller-heads/fynd/compare/0.110.0...0.110.1) (2026-09-25)
+
+### Features
+
+* **rpc:** count records the collector took, and prefix its env var ([ffce2c7](https://github.com/propeller-heads/fynd/commit/ffce2c71bd674c7271363daf892d9d7b9b3e160f))
+* **rpc:** post batched quote records to a collector ([c2d71d6](https://github.com/propeller-heads/fynd/commit/c2d71d63a0fe2f5bf68efbaef0685a590513b93e))
+* publish the test-fixtures, bench-harness and tools-common crates ([02425fa](https://github.com/propeller-heads/fynd/commit/02425fa1b1458be3fc8c435496199b565b5328eb))
+* **core:** make pricing depth independent of pool max_hops ([18cd8ac](https://github.com/propeller-heads/fynd/commit/18cd8ac81745aab9c412f16404366146a9526660))
+
+### Bug Fixes
+
+* **rpc:** count an unreachable collector apart from a refused batch ([79a4515](https://github.com/propeller-heads/fynd/commit/79a4515a81dea7d5cc2eaa7768819c6045884259))
+* **rpc:** log a record sink task that panicked ([1ca4932](https://github.com/propeller-heads/fynd/commit/1ca4932d47aa586249f66205158631cb9f849277))
+* **rpc:** count records lost before the POST as encode_failed ([8080c79](https://github.com/propeller-heads/fynd/commit/8080c79c425f6165fce1d35616e2ce40000f2cb7))
+
+
 ## [0.110.0](https://github.com/propeller-heads/fynd/compare/0.109.1...0.110.0) (2026-09-24)
 
 ### Features
