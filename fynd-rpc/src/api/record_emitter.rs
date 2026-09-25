@@ -98,8 +98,8 @@ pub(crate) fn spawn_record_sender(collector_url: &str) -> Result<(RecordEmitter,
 ///
 /// A batch is sent when it fills up or when [`RECORD_FLUSH_INTERVAL`](defaults::
 /// RECORD_FLUSH_INTERVAL) has passed since its first record, whichever comes first, so a quiet
-/// pod still ships what it has every second. Sending is sequential: while a POST is in flight the
-/// queue absorbs what the handler serves, and drops it once full.
+/// pod still ships what it has rather than holding it. Sending is sequential: while a POST is in
+/// flight the queue absorbs what the handler serves, and drops it once full.
 async fn drain_into(collector: Collector, mut receiver: mpsc::Receiver<QuoteRecord>) {
     while let Some(first) = receiver.recv().await {
         let deadline = Instant::now() + defaults::RECORD_FLUSH_INTERVAL;
@@ -179,7 +179,8 @@ impl Collector {
         Ok(Self { client: reqwest::Client::new(), records_url })
     }
 
-    /// Posts one batch, counting every record in it as dropped when it does not arrive.
+    /// Posts one batch, counting its records as sent when the collector takes them and as
+    /// dropped when it does not.
     async fn post(&self, batch: Batch) {
         let records = batch.len() as u64;
         if records == 0 {
