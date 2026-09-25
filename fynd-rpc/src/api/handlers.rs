@@ -4,7 +4,6 @@
 use std::{sync::Arc, time::Instant};
 
 use actix_web::{web, HttpRequest, HttpResponse};
-use fynd_core::SolveError;
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -20,12 +19,11 @@ use crate::api::prices::{
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
     disable_slippage_taking,
-    error::{solve_error_code, ErrorResponse},
+    error::ErrorResponse,
     exclusive_access,
-    request_capture::{
-        self, failure_reason_slug, log_request_capture, log_slow_solve, quote_status_code,
-        ReplayRequest, RequestOutcome,
-    },
+    middleware::ClientInfo,
+    record::{self, QuoteRecord, RequestRecord},
+    request_capture::{log_request_capture, log_slow_solve, SLOW_SOLVE_THRESHOLD_MS},
 };
 
 /// Configures API routes under the `/v1` namespace.
@@ -88,13 +86,31 @@ pub async fn quote(
         core_request,
         disable_slippage_taking::from_headers(http_request.headers()),
     );
-    let capture = ReplayRequest::capture(&core_request, access);
+    let request_record = RequestRecord::capture(&core_request, access);
 
     let result = state
         .worker_router()
         .quote(core_request, access)
         .await;
-    log_quote_outcome(capture, &result);
+    // Reading the head takes the market-data lock, so only a quote that priced nothing asks.
+    let head = match result
+        .as_ref()
+        .ok()
+        .and_then(record::priced_block)
+    {
+        Some(_) => None,
+        None => state
+            .health_tracker()
+            .tycho_head_status()
+            .await
+            .map(|status| status.head),
+    };
+    let client = ClientInfo::from_request(&http_request);
+    let record = QuoteRecord::build(request_record, &result, state.chain(), client, head);
+    log_quote_outcome(&record);
+    if let Some(emitter) = state.record_emitter() {
+        emitter.emit(record);
+    }
 
     let dto_quote: dto::Quote = result?.into();
     Ok(HttpResponse::Ok().json(dto_quote))
@@ -103,8 +119,8 @@ pub async fn quote(
 /// Validates a wire-format quote request and converts it to the core type.
 ///
 /// Rejects requests without orders and orders that fail [`fynd_core::Order::validate`]. Take a
-/// [`ReplayRequest::capture`] of the returned request if the outcome should be logged with
-/// [`log_quote_outcome`].
+/// [`RequestRecord::capture`] of the returned request before solving it, so the outcome can be
+/// recorded with [`QuoteRecord::build`] and logged with [`log_quote_outcome`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
@@ -122,58 +138,33 @@ pub fn validate_quote_request(
 
 /// Emits the failure-capture and slow-solve log lines for a finished quote.
 ///
-/// Serialization happens on a detached task carrying the current span, so it never adds latency
-/// to the response. Successful, fast quotes log nothing (see `RequestOutcome::is_failure`).
+/// Both lines read the request and the outcome off `record`, so they cannot disagree with what
+/// the collector receives. Serialization happens on a detached task carrying the current span,
+/// so it never adds latency to the response. Successful, fast quotes log nothing.
 ///
 /// # Panics
 ///
 /// Spawns the detached task with [`actix_web::rt::spawn`], which panics when called outside a
 /// running Actix system. Callers must invoke this from an Actix worker (i.e. inside a handler).
-pub fn log_quote_outcome(capture: ReplayRequest, result: &Result<fynd_core::Quote, SolveError>) {
-    let num_orders = capture.num_orders();
-    let outcome = match result {
-        Ok(core_quote) => RequestOutcome::Solved {
-            solve_time_ms: core_quote.solve_time_ms(),
-            order_statuses: core_quote
-                .orders()
-                .iter()
-                .map(|order_quote| quote_status_code(order_quote.status()))
-                .collect(),
-            failure_reasons: core_quote
-                .orders()
-                .iter()
-                .map(|order_quote| {
-                    failure_reason_slug(order_quote.status(), order_quote.no_route_cause())
-                })
-                .collect(),
-        },
-        Err(error) => RequestOutcome::Failed { code: solve_error_code(error) },
-    };
-    let slow_solve_time_ms = match &outcome {
-        RequestOutcome::Solved { solve_time_ms, .. }
-            if *solve_time_ms > request_capture::SLOW_SOLVE_THRESHOLD_MS =>
-        {
-            Some(*solve_time_ms)
-        }
-        RequestOutcome::Solved { .. } | RequestOutcome::Failed { .. } => None,
-    };
-    if !outcome.is_failure() && slow_solve_time_ms.is_none() {
+pub fn log_quote_outcome(record: &QuoteRecord) {
+    let is_failure = record.is_failure();
+    let slow_solve_time_ms = record.slow_solve_time_ms();
+    if !is_failure && slow_solve_time_ms.is_none() {
         return;
     }
+    // Past the guard: this quote logs, so the copies below are not wasted.
+    let capture = record.replay().clone();
+    let num_orders = capture.num_orders();
+    let outcome = record.log_outcome();
     let span = tracing::Span::current();
     actix_web::rt::spawn(async move {
         span.in_scope(|| {
             let replay_json = capture.to_json();
-            if outcome.is_failure() {
+            if is_failure {
                 log_request_capture(num_orders, &replay_json, &outcome);
             }
             if let Some(solve_time_ms) = slow_solve_time_ms {
-                log_slow_solve(
-                    solve_time_ms,
-                    num_orders,
-                    request_capture::SLOW_SOLVE_THRESHOLD_MS,
-                    &replay_json,
-                );
+                log_slow_solve(solve_time_ms, num_orders, SLOW_SOLVE_THRESHOLD_MS, &replay_json);
             }
         });
     });
@@ -589,7 +580,7 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     use crate::api::tokens::{GraphTokenEntry, TokensCache};
-    use crate::api::{dto::QuoteRequest, AppState, HealthTracker};
+    use crate::api::{dto::QuoteRequest, record_emitter::RecordEmitter, AppState, HealthTracker};
 
     // Nested so it doesn't inherit this module's unqualified `test` import above (actix-web
     // exports both a `test` module and a `#[test]` attribute macro at that path; the import
@@ -659,6 +650,10 @@ mod tests {
     }
 
     fn make_test_state() -> AppState {
+        make_test_state_with_emitter(None)
+    }
+
+    fn make_test_state_with_emitter(record_emitter: Option<RecordEmitter>) -> AppState {
         let market_data: MarketData = MarketData::new_shared();
         let derived_data: SharedDerivedDataRef =
             Arc::new(tokio::sync::RwLock::new(Default::default()));
@@ -679,9 +674,10 @@ mod tests {
         AppState::new(
             router,
             health_tracker,
-            1,
+            Chain::Ethereum,
             Some(router_address),
             permit2_address,
+            record_emitter,
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
@@ -689,6 +685,60 @@ mod tests {
             #[cfg(feature = "experimental")]
             market_data,
         )
+    }
+
+    /// Answers `requests` quotes against `state` and returns the status code of each.
+    async fn quote_statuses(state: AppState, requests: usize) -> Vec<u16> {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/quote", web::post().to(super::quote)),
+        )
+        .await;
+        let mut statuses = Vec::with_capacity(requests);
+        for _ in 0..requests {
+            let request = test::TestRequest::post()
+                .uri("/v1/quote")
+                .set_json(serde_json::json!({
+                    "orders": [{
+                        "token_in": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                        "token_out": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                        "amount": "1000000000000000000",
+                        "side": "sell",
+                        "sender": "0x000000000000000000000000000000000000dEaD"
+                    }]
+                }))
+                .to_request();
+            statuses.push(
+                test::call_service(&app, request)
+                    .await
+                    .status()
+                    .as_u16(),
+            );
+        }
+        statuses
+    }
+
+    /// A record queue with no room changes neither the answer nor how long it takes: the first
+    /// quote fills the one slot, the second finds it full and has its record dropped. The
+    /// timeout is what catches a queue that makes the handler wait — a blocking send would never
+    /// return.
+    #[actix_web::test]
+    async fn test_quote_answers_with_a_full_record_queue() {
+        let (emitter, mut receiver) =
+            RecordEmitter::new(std::num::NonZeroUsize::new(1).expect("one is not zero"));
+        let without_queue = quote_statuses(make_test_state(), 1).await;
+
+        let with_full_queue = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            quote_statuses(make_test_state_with_emitter(Some(emitter)), 2),
+        )
+        .await
+        .expect("both quotes answered");
+
+        assert_eq!(with_full_queue, vec![without_queue[0]; 2]);
+        assert!(receiver.try_recv().is_ok(), "the first quote's record was queued");
+        assert!(receiver.try_recv().is_err(), "the second quote's record was dropped");
     }
 
     #[cfg(feature = "experimental")]

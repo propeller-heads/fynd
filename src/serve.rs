@@ -113,7 +113,8 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
 /// All `*_seconds` histograms render as bucketed Prometheus histograms (aggregatable
 /// across pods, unlike summary quantiles); `worker_router_solver_responses` is a count
 /// distribution and gets its own 0..=6 buckets; `quote_simulation_deviation_bps` is a signed
-/// basis-point distribution and gets buckets that span both sides of zero.
+/// basis-point distribution and gets buckets that span both sides of zero;
+/// `quote_simulation_gas_estimate` and `quote_simulation_gas_used` share one set of gas buckets.
 /// Compiled only when the `metrics` feature is enabled.
 #[cfg(feature = "metrics")]
 fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::JoinHandle<()> {
@@ -126,6 +127,25 @@ fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::J
     const SIMULATION_DEVIATION_BPS_BUCKETS: &[f64] = &[
         -1000.0, -500.0, -200.0, -100.0, -50.0, -25.0, -10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0,
         25.0, 50.0, 100.0, 200.0, 500.0, 1000.0,
+    ];
+    // Shared by the estimated and the simulated gas, so the two quantiles read off the same
+    // bounds. The top reaches past the longest routes the solver builds.
+    const SIMULATION_GAS_BUCKETS: &[f64] = &[
+        50_000.0,
+        75_000.0,
+        100_000.0,
+        125_000.0,
+        150_000.0,
+        200_000.0,
+        250_000.0,
+        300_000.0,
+        400_000.0,
+        500_000.0,
+        750_000.0,
+        1_000_000.0,
+        1_500_000.0,
+        2_000_000.0,
+        3_000_000.0,
     ];
 
     let handle = PrometheusBuilder::new()
@@ -142,6 +162,11 @@ fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::J
         .set_buckets_for_metric(
             Matcher::Full("quote_simulation_deviation_bps".to_string()),
             SIMULATION_DEVIATION_BPS_BUCKETS,
+        )
+        .expect("static bucket list is non-empty")
+        .set_buckets_for_metric(
+            Matcher::Prefix("quote_simulation_gas_".to_string()),
+            SIMULATION_GAS_BUCKETS,
         )
         .expect("static bucket list is non-empty")
         .install_recorder()
@@ -341,6 +366,12 @@ async fn setup_solver(
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }
+    if let Some(max_tokens) = args.pricing_max_tokens_per_pass {
+        builder = builder.set_pricing_max_tokens_per_pass(max_tokens);
+    }
+    if let Some(ms) = args.pricing_min_pass_interval_ms {
+        builder = builder.set_pricing_min_pass_interval(Duration::from_millis(ms));
+    }
     builder = builder.price_guard_enabled(args.enable_price_guard);
     builder = builder.simulation_enabled(args.enable_simulation);
     let watermark = args
@@ -388,6 +419,9 @@ pub async fn run_solver_with(
 
     #[cfg(feature = "metrics")]
     let _metrics_task = create_metrics_exporter(&args.metrics_host, args.metrics_port, &args.chain);
+
+    #[cfg(feature = "jemalloc")]
+    let _jemalloc_stats_task = crate::jemalloc_stats::spawn_stats_reporter();
 
     serve_with(args, algorithms, provider, configure).await
 }

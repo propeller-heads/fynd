@@ -15,6 +15,9 @@ pub mod internal;
 pub mod primitives;
 /// Public API types: `Order`, `Quote`, `Route`, `Swap`, `QuoteRequest`, etc.
 pub mod quote;
+#[cfg(any(test, feature = "test-utils"))]
+/// Builders for assembling quote types in tests, here and in dependent crates.
+pub mod test_utils;
 
 // Re-export constants
 pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};
@@ -23,9 +26,9 @@ pub use internal::{RouteRejection, SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
 // Re-export public quote types
 pub use quote::{
-    BlockInfo, ClientFeeParams, EncodingOptions, FeeBreakdown, Order, OrderQuote, OrderSide,
-    OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, Route, RouteExclusionFilter, RouteExclusions, RouteResult, RouteValidationError,
-    SimulationResult, SingleOrderQuote, SolveParams, SurplusInfo, Swap, Transaction,
-    UserTransferType,
+    BlockInfo, ClientFeeParams, EncodingOptions, FallbackLeg, FeeBreakdown, Order, OrderQuote,
+    OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote, QuoteOptions,
+    QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions, RouteResult,
+    RouteValidationError, SimulationResult, SingleOrderQuote, SolveParams, SurplusInfo, Swap,
+    Transaction, UserTransferType,
 };

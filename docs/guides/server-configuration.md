@@ -57,17 +57,22 @@ fynd serve \
 **Limitations:**
 
 * RFQ protocols cannot run alone. At least one on-chain protocol is required.
-* When encoding is enabled (`encoding_options` in the quote request), RFQ quotes require an additional round-trip to the RFQ provider to fetch a signed quote. This can add significant tail latency to solve times. If you are using RFQ protocols, consider quoting first without encoding to evaluate the price, and only request encoding once you are confident the quote is worth executing.
+* When encoding is enabled (`encoding_options` in the quote request), `rfq:bebop` and `rfq:hashflow` quotes require an additional round-trip to the RFQ provider to fetch a signed quote. This can add significant tail latency to solve times. If you are using these protocols, consider quoting first without encoding to evaluate the price, and only request encoding once you are confident the quote is worth executing. `rfq:metric` encodes locally and needs no such round-trip — its executor reads the on-chain oracle Metric updates every block.
+* `rfq:metric` runs on Base and Robinhood only, the chains its executor is deployed on. Naming it on any other chain fails at startup rather than producing quotes that cannot be encoded.
+* Metric is reached by a different entry per chain: `pricelevelstream:metric` on Ethereum, `rfq:metric` on Base and Robinhood. Each is gated on its own chains — the price level stream is Ethereum-only — so the two never serve the same deployment and cannot double-count the liquidity.
 
 **Environment variables:**
 
 * RFQ protocols require API keys passed via environment variables. Check the [RFQ protocol docs](https://docs.propellerheads.xyz/tycho/for-solvers/request-for-quote-protocols) for the specific variables each protocol needs.
+* `rfq:metric` reads `METRIC_API_KEY` (required — the Bearer token for Metric's quote endpoints) and `METRIC_API_URL` (optional, defaults to `https://api.metric.xyz`).
 
 ### pAMM Price Level Stream
 
 Serve a proprietary AMM from Titan's pAMM price level stream instead of simulating it in the EVM. Titan publishes a quote ladder per pair every block, so quotes come from interpolating those levels — much cheaper than a VM simulation.
 
 Name a venue with the `pricelevelstream:` prefix. The served venues are `fermiswap`, `kipseli`, `metric`, `bebop`, and `taurusfi`:
+
+The stream serves Ethereum only. On Base and Robinhood, Metric is reached through `rfq:metric` instead — see [Including RFQ Protocols](#including-rfq-protocols).
 
 ```bash
 fynd serve \
@@ -80,7 +85,7 @@ The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermi
 
 * Ethereum mainnet only — the venue addresses are mainnet deployments.
 * Quotes below the smallest ladder level are rejected rather than extrapolated, and quotes above the largest come back as a partial fill at the limit.
-* A quote executes only in the block it was quoted for. The venue rejects a fill priced off a stale reading, so a quote that misses its block reverts rather than filling at the old price.
+* A quote executes only in the block it was quoted for. The venue rejects a fill priced off a stale reading, so a quote that misses its block falls back to the on-chain pool Fynd names for that leg (Uniswap V2, V3 or V4, Curve or Fluid on Ethereum) instead of filling at the old price. Fynd only returns a route whose fallback fill still clears the route's `min_amount_out`.
 
 ### Self-hosted Tycho
 

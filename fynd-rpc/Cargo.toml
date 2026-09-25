@@ -12,6 +12,7 @@ fynd-core.workspace = true
 rustc-hash.workspace = true
 fynd-rpc-types = { workspace = true, features = ["openapi", "core"] }
 actix-web.workspace = true
+chrono.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 tycho-simulation.workspace = true
@@ -36,6 +37,7 @@ tycho-execution.workspace = true
 experimental = []
 
 [dev-dependencies]
+fynd-core = { workspace = true, features = ["test-utils"] }
 rstest.workspace = true
 metrics-util.workspace = true
 tracing-subscriber.workspace = true

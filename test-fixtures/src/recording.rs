@@ -1,9 +1,22 @@
 //! Market recording types and zstd-compressed I/O.
+//!
+//! A recording holds the raw Tycho feed messages, not decoded states. Replay decodes them with the
+//! decoders a live feed uses, so replay keeps every state a live feed produces. That includes the
+//! states that cannot be serialized: Uniswap v4 and VM-backed pools, and Uniswap v3 pools with
+//! liquidity wider than 64 bits.
 
 use std::path::Path;
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use tycho_simulation::protocol::models::Update;
+use tycho_simulation::{
+    protocol::models::Update,
+    tycho_client::feed::{dto, FeedMessage},
+    tycho_common::models::token::Token,
+};
+
+/// The recording format this crate writes and reads. Version 1 held decoded `Update`s.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Metadata about a recording session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,7 +29,8 @@ pub struct RecordingMetadata {
     pub fynd_version: String,
     /// Actual recording wall-clock duration in seconds.
     pub recording_duration_secs: u64,
-    /// Protocol systems included in the recording.
+    /// The resolved `--protocols` entries. The recorder streams these protocols, and replay
+    /// registers their decoders.
     pub protocols: Vec<String>,
     /// Minimum TVL filter used during recording.
     pub min_tvl: f64,
@@ -32,8 +46,7 @@ pub struct RecordingMetadata {
     /// Integration tests warn if the current file's hash differs.
     #[serde(default)]
     pub worker_pools_hash: Option<String>,
-    /// Recording format version for forward compatibility.
-    #[serde(default)]
+    /// Recording format version, [`SCHEMA_VERSION`] for every file this crate writes.
     pub schema_version: u32,
 }
 
@@ -57,16 +70,48 @@ impl RecordingMetadata {
     }
 }
 
-/// A complete market recording: metadata + ordered `Update` messages.
-///
-/// `Update` is serialized directly (tycho-simulation >= 0.256). VM-backed
-/// protocol states that can't be serialized are silently skipped.
+/// A complete market recording: metadata, the token list, and the raw Tycho feed messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketRecording {
     /// Recording session metadata.
     pub metadata: RecordingMetadata,
-    /// Ordered sequence of stream updates to replay.
-    pub updates: Vec<Update>,
+    /// Every token Tycho served under the recording's quality and recency filters. The decoder
+    /// needs them to build components; a live feed loads the same list at startup.
+    pub tokens: Vec<Token>,
+    /// Feed messages in arrival order. The first is the snapshot, the rest are block deltas.
+    pub messages: Vec<dto::FeedMessage>,
+}
+
+impl MarketRecording {
+    /// Decodes the messages into the `Update`s a live feed would have produced from them.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chain is unknown, the recorded protocol list is invalid, or a message does
+    /// not decode.
+    pub async fn decode_updates(&self) -> anyhow::Result<Vec<Update>> {
+        let chain = fynd_core::types::parse_chain(&self.metadata.chain)?;
+        let min_token_quality =
+            u32::try_from(self.metadata.min_token_quality).with_context(|| {
+                format!("min_token_quality {} is negative", self.metadata.min_token_quality)
+            })?;
+        // Each message is copied and converted just before it is decoded, so the recording is
+        // never held twice.
+        let messages = self
+            .messages
+            .iter()
+            .cloned()
+            .map(FeedMessage::from);
+        fynd_core::feed::protocol_registry::decode_recorded_messages(
+            chain,
+            &self.metadata.protocols,
+            min_token_quality,
+            self.tokens.iter().cloned(),
+            messages,
+        )
+        .await
+        .map_err(anyhow::Error::msg)
+    }
 }
 
 /// Write a [`MarketRecording`] to a zstd-compressed JSON file.
@@ -78,11 +123,49 @@ pub fn write_recording(recording: &MarketRecording, path: &Path) -> anyhow::Resu
 }
 
 /// Read a [`MarketRecording`] from a zstd-compressed JSON file.
+///
+/// # Errors
+///
+/// Fails when the file is missing, is not zstd-compressed JSON, or has a schema version other than
+/// [`SCHEMA_VERSION`]. A version 1 file holds decoded states, which version 2 replaces; record it
+/// again with tools/record-market.
 pub fn read_recording(path: &Path) -> anyhow::Result<MarketRecording> {
+    /// The version alone, read only when the file does not parse, so the error names an old
+    /// version and not the first field that changed.
+    #[derive(Deserialize)]
+    struct VersionOnly {
+        metadata: MetadataVersion,
+    }
+    #[derive(Deserialize)]
+    struct MetadataVersion {
+        #[serde(default)]
+        schema_version: u32,
+    }
+
     let compressed = std::fs::read(path)?;
     let decompressed = zstd::decode_all(compressed.as_slice())?;
-    let recording: MarketRecording = serde_json::from_slice(&decompressed)?;
+    let recording = match serde_json::from_slice::<MarketRecording>(&decompressed) {
+        Ok(recording) => recording,
+        Err(error) => {
+            if let Ok(version) = serde_json::from_slice::<VersionOnly>(&decompressed) {
+                ensure_schema_version(path, version.metadata.schema_version)?;
+            }
+            return Err(error.into());
+        }
+    };
+    ensure_schema_version(path, recording.metadata.schema_version)?;
     Ok(recording)
+}
+
+fn ensure_schema_version(path: &Path, schema_version: u32) -> anyhow::Result<()> {
+    if schema_version != SCHEMA_VERSION {
+        anyhow::bail!(
+            "{} is recording schema version {schema_version}, but this build reads version \
+             {SCHEMA_VERSION}; record it again with tools/record-market",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 /// Compute SHA-256 hex digest of a byte slice.
@@ -94,13 +177,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
 
-    #[test]
-    fn write_read_roundtrip_empty() {
-        let recording = MarketRecording {
+    fn recording(schema_version: u32) -> MarketRecording {
+        MarketRecording {
             metadata: RecordingMetadata {
                 chain: "ethereum".to_string(),
                 recorded_at_secs: 1710000000,
@@ -112,19 +192,36 @@ mod tests {
                 traded_n_days_ago: Some(3),
                 gas_price_wei: Some("15000000000".to_string()),
                 worker_pools_hash: None,
-                schema_version: 1,
+                schema_version,
             },
-            updates: vec![Update::new(12345, HashMap::new(), HashMap::new())],
-        };
+            tokens: Vec::new(),
+            messages: vec![dto::FeedMessage::default()],
+        }
+    }
 
+    #[test]
+    fn test_write_read_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json.zst");
 
-        write_recording(&recording, &path).unwrap();
+        write_recording(&recording(SCHEMA_VERSION), &path).unwrap();
         let loaded = read_recording(&path).unwrap();
 
         assert_eq!(loaded.metadata.chain, "ethereum");
-        assert_eq!(loaded.updates.len(), 1);
-        assert_eq!(loaded.updates[0].block_number_or_timestamp, 12345);
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_read_other_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.json.zst");
+        write_recording(&recording(1), &path).unwrap();
+
+        let error = read_recording(&path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("schema version 1"), "{error}");
+        assert!(error.contains("record it again"), "{error}");
     }
 }

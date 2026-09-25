@@ -30,6 +30,9 @@ mod bps;
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
+/// Picks the pool each pAMM leg falls back to and computes what the route delivers through those
+/// pools, so a quote whose fallback pays less than `min_amount_out` can be dropped.
+pub mod fallback;
 /// Market data feed: Tycho WebSocket integration, gas price fetching, and protocol registry.
 pub mod feed;
 /// Graph management for algorithms. Provides [`GraphManager`](graph::GraphManager)
@@ -37,9 +40,6 @@ pub mod feed;
 pub mod graph;
 /// External price validation for quotes.
 pub mod price_guard;
-/// Computes the amount out a route delivers when its pAMM legs fall back to Uniswap V3, so the
-/// encoder can drop a quote whose fallback pays less than `min_amount_out`.
-pub mod propamm_fallback;
 /// Re-execute an already-built route against a (possibly newer) market state.
 pub mod replay;
 /// `eth_call` plumbing shared by the tasks that read contract state.

@@ -30,6 +30,7 @@ use crate::{
         exclusive_swap::ExclusiveSwapSigner,
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
+    fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
 
@@ -136,7 +137,7 @@ fn solution_from_quote(
         .map(|s| {
             let token_in = lookup_token(s.token_in())?;
             let token_out = lookup_token(s.token_out())?;
-            Ok(Swap::new(
+            let swap = Swap::new(
                 s.protocol_component().clone(),
                 token_in,
                 token_out,
@@ -144,7 +145,15 @@ fn solution_from_quote(
             )
             .with_split(*s.split())
             .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
-            .with_estimated_amount_in(s.amount_in().clone()))
+            .with_estimated_amount_in(s.amount_in().clone());
+            // `TychoFallbackRouter` refuses a swap that does not name its fallback, and the
+            // fallback pool goes in `user_data`.
+            let Some(fallback) = s.fallback() else { return Ok(swap) };
+            let user_data =
+                fallback_user_data(fallback, s.token_in(), s.token_out()).map_err(|error| {
+                    SolveError::FailedEncoding(format!("pAMM leg {}: {error}", s.component_id()))
+                })?;
+            Ok(swap.with_user_data(Bytes::from(user_data.into_bytes())))
         })
         .collect::<Result<Vec<_>, SolveError>>()?;
 
@@ -814,10 +823,10 @@ impl Encoder {
         call_data
     }
 
-    /// Whether the quote's pAMM legs fall back to a Uniswap V3 fill that still pays the user's
+    /// Whether the quote's pAMM legs fall back to a fill that still pays the user's
     /// `min_amount_out`.
     ///
-    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on a Uniswap V3
+    /// A pAMM leg fills on the venue when the maker's quote reaches the chain, and on its fallback
     /// pool when it does not. `min_amount_out` keeps describing the venue quote and the slippage
     /// the user accepted, so a fallback below that floor reverts. Such a quote must be dropped
     /// before the router picks it, so the next-best candidate is quoted instead.
@@ -859,7 +868,7 @@ impl Encoder {
         )?)
     }
 
-    /// Whether a pAMM route's Uniswap V3 fallback fill clears the floor the router checks.
+    /// Whether a pAMM route's fallback fill clears the floor the router checks.
     ///
     /// `floor` is `min_amount_out`: the venue quote, less fees, less the slippage the user
     /// accepted. The fallback pays less than the venue quote, and when it pays less than the floor
@@ -1691,6 +1700,85 @@ mod tests {
     }
 
     // ==================== Signature Offset Tests ====================
+
+    /// The pAMM address tycho's `FallbackSwapEncoder` reads off the component, and the Uniswap V3
+    /// pool `select_fallback` stamped on the leg.
+    const PAMM_ADDRESS: &str = "0x1111111111111111111111111111111111111111";
+    const FALLBACK_POOL: &str = "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640";
+
+    /// A quote whose single leg is a pAMM on the `fallback:` family, stamped with a Uniswap V3
+    /// fallback pool as `price_through_fallbacks` leaves it: a `FallbackLeg` on the swap and a
+    /// `fallback_amount_out` on the route that clears the 1% floor the tests encode at.
+    fn quote_with_fallback_leg() -> OrderQuote {
+        let (token_in, token_out) = (make_address(0x01), make_address(0x02));
+        let (tin, tout) = (make_token(token_in.clone()), make_token(token_out.clone()));
+        let mut pamm = component_with_protocol(
+            "0xpamm-weth-usdc",
+            "fallback:fermiswap",
+            &[tin.clone(), tout.clone()],
+        );
+        pamm.static_attributes
+            .insert("pamm_address".to_string(), Bytes::from(PAMM_ADDRESS));
+        let pool =
+            component_with_protocol(FALLBACK_POOL, "uniswap_v3", &[tin.clone(), tout.clone()]);
+
+        let mut swap = crate::types::Swap::new(
+            pamm.id.clone(),
+            pamm.protocol_system.clone(),
+            token_in.clone(),
+            token_out.clone(),
+            BigUint::from(1000u64),
+            BigUint::from(990u64),
+            BigUint::from(50_000u64),
+            pamm,
+            Box::new(MockProtocolSim::default()),
+        );
+        swap.set_fallback(crate::types::FallbackLeg::new(
+            pool,
+            Box::new(MockProtocolSim::default()),
+            BigUint::from(985u64),
+        ));
+        let tokens = FxHashMap::from_iter([(token_in, tin), (token_out, tout)]);
+        let mut route = crate::types::Route::new(vec![swap], tokens).expect("non-empty route");
+        route.set_fallback_amount_out(BigUint::from(985u64));
+        make_order_quote(990).with_route(route)
+    }
+
+    /// A `fallback:` leg encodes through tycho's default executor config, which ships the deployed
+    /// `FallbackExecutor` from 0.420.0 on. The executor's swap data is
+    /// `token_in ++ token_out ++ pamm ++ protocol byte ++ pool`, so the pool `select_fallback`
+    /// chose is what the calldata carries.
+    #[tokio::test]
+    async fn test_encode_fallback_leg_through_the_default_executors() {
+        let encoder = real_encoder();
+
+        let result = encoder
+            .encode(vec![quote_with_fallback_leg()], EncodingOptions::new(0.01))
+            .await
+            .expect("encode");
+
+        assert_eq!(result[0].status(), QuoteStatus::Success, "{:?}", result[0]);
+        let calldata = result[0]
+            .transaction()
+            .expect("transaction")
+            .data();
+        let uniswap_v3_protocol_byte = [0x01u8];
+        let fallback_swap_data = [
+            make_address(0x01).as_ref(),
+            make_address(0x02).as_ref(),
+            Bytes::from(PAMM_ADDRESS).as_ref(),
+            &uniswap_v3_protocol_byte,
+            Bytes::from(FALLBACK_POOL).as_ref(),
+        ]
+        .concat();
+        assert!(
+            calldata
+                .windows(fallback_swap_data.len())
+                .any(|window| window == fallback_swap_data),
+            "calldata does not carry the fallback swap data: 0x{}",
+            alloy::hex::encode(calldata)
+        );
+    }
 
     fn make_client_fee(bps: u16) -> crate::ClientFeeParams {
         crate::ClientFeeParams::new(

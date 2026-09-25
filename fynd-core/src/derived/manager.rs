@@ -38,11 +38,6 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
-    /// Returns true if this update changes the graph topology (adds or removes components).
-    pub fn is_topology_change(&self) -> bool {
-        !self.added.is_empty() || !self.removed.is_empty()
-    }
-
     /// Returns a HashSet of all changed component IDs.
     pub fn all_changed_ids(&self) -> FxHashSet<ComponentId> {
         let mut all = FxHashSet::default();
@@ -132,6 +127,12 @@ pub struct ComputationManagerConfig {
     /// default. The replay harness sets an effectively unbounded budget so integration tests
     /// can assert exact priced-token counts.
     pricing_pass_budget: Option<Duration>,
+    /// Overrides how many tokens one token-pricing pass may attempt; `None` keeps the
+    /// computation's default.
+    pricing_max_tokens_per_pass: Option<usize>,
+    /// Overrides how long after a token-pricing pass starts the next one may start; `None`
+    /// keeps the computation's default.
+    pricing_min_pass_interval: Option<Duration>,
 }
 
 impl ComputationManagerConfig {
@@ -158,6 +159,18 @@ impl ComputationManagerConfig {
         self
     }
 
+    /// Overrides how many tokens one token-pricing pass may attempt.
+    pub fn with_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+        self.pricing_max_tokens_per_pass = Some(max_tokens);
+        self
+    }
+
+    /// Overrides how long after a token-pricing pass starts the next one may start.
+    pub fn with_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_min_pass_interval = Some(interval);
+        self
+    }
+
     /// Sets the gas token address.
     pub fn with_gas_token(mut self, gas_token: Address) -> Self {
         self.gas_token = gas_token;
@@ -178,6 +191,23 @@ impl ComputationManagerConfig {
     pub fn depth_slippage_threshold(&self) -> f64 {
         self.depth_slippage_threshold
     }
+
+    /// Builds the token price computation this configuration describes.
+    pub(crate) fn build_token_price_computation(&self) -> TokenGasPriceComputation {
+        let mut token_prices = TokenGasPriceComputation::default()
+            .with_max_hops(self.max_hop)
+            .with_gas_token(self.gas_token.clone());
+        if let Some(pass_budget) = self.pricing_pass_budget {
+            token_prices = token_prices.with_pass_budget(pass_budget);
+        }
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            token_prices = token_prices.with_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            token_prices = token_prices.with_min_pass_interval(interval);
+        }
+        token_prices
+    }
 }
 
 impl Default for ComputationManagerConfig {
@@ -190,6 +220,8 @@ impl Default for ComputationManagerConfig {
             max_hop: crate::solver::defaults::POOL_MAX_HOPS,
             depth_slippage_threshold: 0.01,
             pricing_pass_budget: None,
+            pricing_max_tokens_per_pass: None,
+            pricing_min_pass_interval: None,
         }
     }
 }
@@ -227,14 +259,8 @@ impl ComputationManager {
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
-        let mut token_prices = TokenGasPriceComputation::default()
-            .with_max_hops(config.max_hop)
-            .with_gas_token(config.gas_token);
-        if let Some(pass_budget) = config.pricing_pass_budget {
-            token_prices = token_prices.with_pass_budget(pass_budget);
-        }
-        manager.register(token_prices)?;
-        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold)?)?;
+        manager.register(config.build_token_price_computation())?;
+        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold())?)?;
         Ok((manager, event_rx))
     }
 

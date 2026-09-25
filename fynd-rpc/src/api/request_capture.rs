@@ -15,7 +15,7 @@ use tycho_simulation::tycho_common::models::Address;
 /// present. The server-generated `id`, the routing-irrelevant `sender` /
 /// `receiver` (also PII we keep out of logs), and all encoding data are
 /// omitted — nothing is copied implicitly, so no DTO field can leak.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReplayOrder {
     token_in: Address,
     token_out: Address,
@@ -24,7 +24,7 @@ struct ReplayOrder {
 }
 
 /// Routing-essential view of the request-level solve options.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReplayOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
@@ -37,7 +37,7 @@ struct ReplayOptions {
 }
 
 /// The liquidity a captured request excluded, sorted so two captures of one request read alike.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ReplayExclusionRouteFilter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_pools: Vec<String>,
@@ -96,10 +96,12 @@ impl ReplayExclusionRouteFilter {
 /// harness re-sends each as its proxy-injected header. An outcome that
 /// depended on `price_guard` may not reproduce on replay.
 ///
-/// The serialized JSON shape is a log format, not a stable API, and may change between
-/// releases.
+/// These field names are also the request half of the quote record's wire format, which
+/// `RequestRecord` flattens this type into. Renaming one is a collector-visible change, so it
+/// needs a `record::SCHEMA_VERSION` bump. Everything else about the serialized shape — which
+/// fields the log line carries, how they are ordered — remains a log format, not a stable API.
 #[must_use]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReplayRequest {
     orders: Vec<ReplayOrder>,
     options: ReplayOptions,
@@ -212,10 +214,9 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             Some(_) | None => "graph/other",
         },
         SolveError::RouteRejected { reason, .. } => match reason {
-            RouteRejection::PammFallbackExcluded => "route/pamm_fallback_excluded",
-            RouteRejection::PammFeeTiersUnread => "route/pamm_fee_tiers_unread",
-            RouteRejection::PammFallbackPoolMissing => "route/pamm_fallback_pool_missing",
-            RouteRejection::PammFallbackUnpriceable => "route/pamm_fallback_unpriceable",
+            RouteRejection::FallbackExcluded => "route/fallback_excluded",
+            RouteRejection::FallbackPoolMissing => "route/fallback_pool_missing",
+            RouteRejection::FallbackNotSimulatable => "route/fallback_not_simulatable",
             _ => "route/other",
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",
@@ -233,10 +234,19 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
     }
 }
 
+/// The `group/reason` slug for a failure that hit the whole request, which every order then
+/// carries. The one place the `http/` group is spelled out.
+pub(crate) fn request_failure_slug(code: &str) -> String {
+    format!("http/{}", code.to_ascii_lowercase())
+}
+
 /// Recorded outcome of a solved request, for the replay-capture log.
 ///
 /// Both variants log one `failure_reasons` entry per order, so a breakdown by
 /// reason counts order slots without branching on the outcome.
+///
+/// Built from a [`QuoteRecord`](crate::api::record::QuoteRecord) via `log_outcome`, not from
+/// the solve result, so the log line and the record cannot disagree about one quote.
 #[non_exhaustive]
 pub(crate) enum RequestOutcome {
     /// Solve returned a quote; per-order status codes in request order.
@@ -245,10 +255,10 @@ pub(crate) enum RequestOutcome {
         /// Total orchestration time reported by the router.
         solve_time_ms: u64,
         /// One `quote_status_code` per order, in request order.
-        order_statuses: Vec<&'static str>,
+        order_statuses: Vec<String>,
         /// One `failure_reason_slug` per order, aligned with `order_statuses`
         /// (`""` for successful orders).
-        failure_reasons: Vec<&'static str>,
+        failure_reasons: Vec<String>,
     },
     /// Solve failed; carries the crate-internal solve-error code.
     ///
@@ -260,20 +270,6 @@ pub(crate) enum RequestOutcome {
         /// Stable error code (e.g. `TIMEOUT`, `QUEUE_FULL`).
         code: &'static str,
     },
-}
-
-impl RequestOutcome {
-    /// Whether this outcome represents a failed quote: a solver error, or a
-    /// solve in which at least one order did not succeed. Successful quotes
-    /// (every order `success`) are not logged.
-    pub(crate) fn is_failure(&self) -> bool {
-        match self {
-            RequestOutcome::Failed { .. } => true,
-            RequestOutcome::Solved { order_statuses, .. } => order_statuses
-                .iter()
-                .any(|status| *status != "success"),
-        }
-    }
 }
 
 /// Emits the single `quote_failure` capture log line.
@@ -298,7 +294,7 @@ pub(crate) fn log_request_capture(num_orders: usize, request_json: &str, outcome
             "quote failure captured"
         ),
         RequestOutcome::Failed { code } => {
-            let reason = format!("http/{}", code.to_lowercase());
+            let reason = request_failure_slug(code);
             let failure_reasons = vec![reason.as_str(); num_orders];
             info!(
                 event = "quote_failure",
@@ -342,25 +338,17 @@ pub(crate) fn log_slow_solve(
     );
 }
 
+/// Request fixtures shared with the record tests: one order with a sender and receiver, and a
+/// request carrying every signed field a capture must leave out.
 #[cfg(test)]
-mod tests {
-    use std::{
-        io,
-        sync::{Arc, Mutex},
-    };
-
+pub(crate) mod test_utils {
     use fynd_rpc_types::{
         Bytes, ClientFeeParams, EncodingOptions, Order, OrderSide, PermitDetails, PermitSingle,
         QuoteOptions, QuoteRequest,
     };
     use num_bigint::BigUint;
-    use rstest::rstest;
-    use serde_json::Value;
-    use tracing_subscriber::fmt::MakeWriter;
 
-    use super::*;
-
-    fn order() -> Order {
+    pub(crate) fn order() -> Order {
         Order::new(
             Bytes::from([0xAAu8; 20]),
             Bytes::from([0xBBu8; 20]),
@@ -371,7 +359,9 @@ mod tests {
         .with_receiver(Bytes::from([0x77u8; 20]))
     }
 
-    fn request_with_signatures() -> QuoteRequest {
+    /// Carries a route filter so the capture's `route_filter` block is never empty: the
+    /// allowlist tests on both sides only see a level that actually serializes.
+    pub(crate) fn request_with_signatures() -> QuoteRequest {
         let permit = PermitSingle::new(
             PermitDetails::new(
                 Bytes::from([0xAAu8; 20]),
@@ -396,9 +386,32 @@ mod tests {
             .with_timeout_ms(2000)
             .with_min_responses(1)
             .with_max_gas(BigUint::from(500_000u64))
-            .with_encoding_options(encoding);
+            .with_encoding_options(encoding)
+            .with_route_filter(
+                fynd_rpc_types::RouteFilter::default()
+                    .with_excluded_pools(["excluded-pool".to_string()]),
+            );
         QuoteRequest::new(vec![order()]).with_options(options)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeSet,
+        io,
+        sync::{Arc, Mutex},
+    };
+
+    use fynd_rpc_types::{QuoteOptions, QuoteRequest};
+    use rstest::rstest;
+    use serde_json::Value;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::{
+        test_utils::{order, request_with_signatures},
+        *,
+    };
 
     #[test]
     fn replay_json_captures_only_routing_fields() {
@@ -417,6 +430,28 @@ mod tests {
         // Routing inputs preserved.
         assert!(json.contains("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "json was: {json}");
         assert!(json.contains("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), "json was: {json}");
+    }
+
+    /// The log's own key allowlist. `RequestRecord` flattens this capture, so a new field also
+    /// breaks the record's allowlist test — this one fails for the log's sake, next to the
+    /// code that builds it.
+    #[test]
+    fn test_replay_json_keys_are_allowlisted() {
+        let json = replay_json(request_with_signatures(), ExclusiveAccess::Denied);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let keys: BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["orders", "options", "exclusive_access", "disable_slippage_taking"]
+                .into_iter()
+                .collect(),
+            "a new field would leak into replay logs; json: {json}"
+        );
     }
 
     #[test]
@@ -450,58 +485,6 @@ mod tests {
         assert_eq!(captured["exclude_pools"], serde_json::json!(["pool-1"]));
         assert_eq!(captured["exclude_protocols"], serde_json::json!(["uniswap_v2"]));
         assert!(captured.get("exclude_tokens").is_none(), "an empty list is left out");
-    }
-
-    #[test]
-    fn replay_json_output_keys_are_allowlisted() {
-        let req = request_with_signatures();
-        let json = replay_json(req, ExclusiveAccess::Denied);
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        let top_level: std::collections::BTreeSet<&str> = value
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(
-            top_level,
-            ["orders", "options", "exclusive_access", "disable_slippage_taking"]
-                .into_iter()
-                .collect(),
-            "unexpected top-level keys {top_level:?} — a new field may leak into replay logs; json: {json}"
-        );
-
-        let options = value
-            .get("options")
-            .and_then(Value::as_object)
-            .unwrap();
-        assert!(
-            !options.contains_key("encoding_options"),
-            "encoding_options leaked into replay log; json: {json}"
-        );
-        let options_allowlist = ["timeout_ms", "min_responses", "max_gas", "route_filter"];
-        for key in options.keys() {
-            assert!(
-                options_allowlist.contains(&key.as_str()),
-                "unexpected key {key} — a new option field may leak into replay logs; json: {json}"
-            );
-        }
-
-        // Only routing-essential order fields — id / sender / receiver must NOT appear.
-        let orders_allowlist = ["token_in", "token_out", "amount", "side"];
-        for order in value
-            .get("orders")
-            .and_then(Value::as_array)
-            .unwrap()
-        {
-            for key in order.as_object().unwrap().keys() {
-                assert!(
-                    orders_allowlist.contains(&key.as_str()),
-                    "unexpected key {key} — a new order field may leak into replay logs; json: {json}"
-                );
-            }
-        }
     }
 
     #[rstest]
@@ -598,8 +581,8 @@ mod tests {
                 r#"{"orders":[]}"#,
                 &RequestOutcome::Solved {
                     solve_time_ms: 12,
-                    order_statuses: vec!["success", "no_route_found"],
-                    failure_reasons: vec!["", "graph/no_graph_path"],
+                    order_statuses: vec!["success".to_string(), "no_route_found".to_string()],
+                    failure_reasons: vec![String::new(), "graph/no_graph_path".to_string()],
                 },
             );
         });
@@ -633,9 +616,9 @@ mod tests {
         assert_eq!(
             failure_reason_slug(
                 s,
-                Some(&SolveError::route_rejected("o", RouteRejection::PammFeeTiersUnread))
+                Some(&SolveError::route_rejected("o", RouteRejection::FallbackPoolMissing))
             ),
-            "route/pamm_fee_tiers_unread"
+            "route/fallback_pool_missing"
         );
         assert_eq!(
             failure_reason_slug(
@@ -699,8 +682,8 @@ mod tests {
                 r#"{"orders":[]}"#,
                 &RequestOutcome::Solved {
                     solve_time_ms: 12,
-                    order_statuses: vec!["success", "no_route_found"],
-                    failure_reasons: vec!["", "graph/no_graph_path"],
+                    order_statuses: vec!["success".to_string(), "no_route_found".to_string()],
+                    failure_reasons: vec![String::new(), "graph/no_graph_path".to_string()],
                 },
             );
         });
@@ -728,29 +711,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_failure_true_for_failed_outcome() {
-        assert!(RequestOutcome::Failed { code: "TIMEOUT" }.is_failure());
-    }
-
-    #[test]
-    fn is_failure_false_when_all_orders_succeed() {
-        let outcome = RequestOutcome::Solved {
-            solve_time_ms: 5,
-            order_statuses: vec!["success", "success"],
-            failure_reasons: vec!["", ""],
-        };
-        assert!(!outcome.is_failure());
-    }
-
-    #[test]
-    fn is_failure_true_when_any_order_not_success() {
-        let outcome = RequestOutcome::Solved {
-            solve_time_ms: 5,
-            order_statuses: vec!["success", "no_route_found"],
-            failure_reasons: vec!["", "graph/no_graph_path"],
-        };
-        assert!(outcome.is_failure());
+    #[rstest]
+    #[case::lowercases("TIMEOUT", "http/timeout")]
+    #[case::already_lower("queue_full", "http/queue_full")]
+    fn test_request_failure_slug(#[case] code: &str, #[case] expected: &str) {
+        assert_eq!(request_failure_slug(code), expected);
     }
 
     const TEST_REQUEST: &str = r#"{"orders":[]}"#;

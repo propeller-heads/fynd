@@ -23,6 +23,7 @@ use crate::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
+    fallback::{has_fallback_leg, manager::PammManager, price_through_fallbacks},
     feed::{
         component_filter::{
             filter_event, is_excluded_protocol, protocol_matches, remove_components,
@@ -32,15 +33,7 @@ use crate::{
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
-    propamm_fallback::{
-        fallback_amount_out, has_pamm_leg, manager::PammManager, FallbackAmountOut,
-        FallbackPoolIndex, FeeTiers, SharedFeeTiers, FALLBACK_PROTOCOL_SYSTEM,
-        PROPAMM_FALLBACK_PREFIX,
-    },
-    types::{
-        internal::{RouteRejection, SolveTask},
-        ComponentId, Route, RouteExclusionFilter, RouteExclusions,
-    },
+    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions},
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -102,39 +95,6 @@ fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<Ro
     exclusions
 }
 
-/// The Uniswap V3 pool a pAMM leg would fall back to and the request excludes, if there is one.
-///
-/// A pAMM leg clears the filter under its own component id, then settles on chain through the
-/// fallback pool its fee tier selects. That pool is what the caller sees traded, so the filter has
-/// to reach it too.
-fn excluded_fallback_pool<'a>(
-    route: &Route,
-    fee_tiers: &FeeTiers,
-    fallback_pools: &'a FallbackPoolIndex,
-    filter: &RouteExclusionFilter,
-) -> Option<&'a ComponentId> {
-    let protocol_excluded = filter
-        .excluded_protocols()
-        .iter()
-        .any(|entry| protocol_matches(entry, FALLBACK_PROTOCOL_SYSTEM));
-    for swap in route.swaps() {
-        if !swap
-            .protocol()
-            .starts_with(PROPAMM_FALLBACK_PREFIX)
-        {
-            continue;
-        }
-        let tier = fee_tiers.resolved_tier(swap.token_in(), swap.token_out());
-        let Some(pool) = fallback_pools.pool_for(swap.token_in(), swap.token_out(), tier) else {
-            continue;
-        };
-        if protocol_excluded || filter.excluded_pools().contains(pool) {
-            return Some(pool);
-        }
-    }
-    None
-}
-
 /// Check every leg, including split branches, against the original request filter. Reading
 /// protocol systems from the returned components also covers pools added after exclusions were
 /// resolved. The order's endpoints remain allowed by intermediate-token exclusions.
@@ -191,12 +151,89 @@ fn record_task_pickup_metrics(pool_name: &str, queue_wait: Duration, queue_depth
 /// `worker_router_solve_duration_seconds`, which times the router racing every pool and so
 /// belongs to no single pool, this is attributable per pool.
 ///
-/// Successful quotes only: a pool that exhausts its timeout returns before this point and is
-/// counted in `worker_router_solver_failures_total{error_type="timeout"}` instead.
+/// Successful quotes only: a pool that exhausts its timeout returns before this point, and a
+/// task the router has already abandoned never reaches it. Those are in
+/// `worker_pool_task_duration_seconds`, which also carries the readiness wait this excludes.
+/// Read as a pair, the two separate a slow search from a long wait to start one; read alone,
+/// this histogram shows a saturated pool as an idle one.
 fn record_quote_duration(pool_name: &str, quote_duration: Duration) {
     // The metric keeps its established external name for dashboard compatibility.
     metrics::histogram!("worker_pool_solve_duration_seconds", "pool" => pool_name.to_string())
         .record(quote_duration.as_secs_f64());
+}
+
+/// Records how long a task held its worker, from pickup to response, under the outcome it
+/// reached: `success`, or the [`SolveError::label`] of the failure.
+///
+/// Spans the whole task rather than the algorithm's solve alone, so it also covers the wait for
+/// derived-data readiness. What this measures is worker occupancy, and a task blocked waiting to
+/// become ready occupies its worker exactly as one that is solving.
+///
+/// Every outcome is recorded, which is what `worker_pool_solve_duration_seconds` beside it
+/// cannot do: a pool that fails its work is absent from that histogram, so a saturated pool
+/// reads there as an idle one.
+///
+/// `rate(worker_pool_task_duration_seconds_sum[..]) / workers` is therefore the share of worker
+/// slots that are occupied, and not the share of a CPU that is busy. The two differ: a worker
+/// waiting on the market lock is occupied, because it cannot take the next task, and burns no
+/// CPU while it waits. Read this against `worker_pool_activity_duration_seconds` to see what
+/// remaining time went to, and against container CPU to see how much of either was work.
+fn record_task_duration(pool_name: &str, duration: Duration, outcome: &'static str) {
+    metrics::histogram!(
+        "worker_pool_task_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "outcome" => outcome
+    )
+    .record(duration.as_secs_f64());
+}
+
+/// How long this task may run, or `None` when the router has already given up on it.
+///
+/// The router starts its deadline when the request arrives, before the task is queued, and
+/// abandons every pool that has not answered by then. Two things follow, and this is both of
+/// them. A task picked up after the deadline has no reader left, so solving it only takes a
+/// worker away from a task that still has one. A task picked up before the deadline may run
+/// until the earlier of its pool budget and what remains of the deadline.
+///
+/// Taking the smaller of the two is what lets the pool budget stay meaningful: a caller that
+/// raises `timeout_ms` moves the deadline out and gets the deeper search it asked for, and a
+/// caller that does not is never promised a budget the router will cut short.
+fn task_budget(pool_timeout: Duration, deadline: Instant, now: Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(now)?;
+    if remaining.is_zero() {
+        return None;
+    }
+    Some(pool_timeout.min(remaining))
+}
+
+/// Records time the worker spent on something other than a solve task.
+///
+/// The worker's `select!` is `biased` with market events and derived-data events ahead of the
+/// task queue, so a task in the queue waits behind whatever this records. That wait is otherwise
+/// unattributable: `worker_pool_queue_wait_seconds` shows that a task waited, and nothing shows
+/// what it waited for.
+///
+/// Recorded at the call sites in the worker loop rather than inside the functions themselves,
+/// because only the loop knows whether the work delays a task. [`Worker::initialize_graph`] also
+/// runs at startup and, once, from inside [`Worker::quote`]: neither competes with task pickup,
+/// and the second is already counted by `worker_pool_task_duration_seconds`.
+///
+/// `activity` partitions the time and the values are mutually exclusive, so they sum without
+/// double-counting: `market_event` is a pass through [`Worker::process_event`], `graph_init` is
+/// the full rebuild the lagged branch runs *instead of* it, and `derived_event` is the
+/// derived-data arm.
+///
+/// Wall time, which is the right measure of what a task waits behind: each worker owns its
+/// thread and a single-threaded runtime, so nothing else runs while the worker is here. It is
+/// not a measure of work, because time blocked on the market or derived lock is counted in full
+/// and spends no CPU.
+fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity: &'static str) {
+    metrics::histogram!(
+        "worker_pool_activity_duration_seconds",
+        "pool" => pool_name.to_string(),
+        "activity" => activity
+    )
+    .record(duration.as_secs_f64());
 }
 
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
@@ -292,14 +329,6 @@ where
         }
     }
 
-    /// Sets the fee tiers used to locate a pAMM leg's Uniswap V3 fallback pool.
-    pub(crate) fn with_fallback_fee_tiers(mut self, fallback_fee_tiers: SharedFeeTiers) -> Self {
-        self.pamm_admission = self
-            .pamm_admission
-            .with_fee_tiers(fallback_fee_tiers);
-        self
-    }
-
     /// Sets which liquidity this worker ingests.
     pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
@@ -347,8 +376,8 @@ where
     /// Builds the graph from the market topology, and the pAMM state the event path reads from it.
     ///
     /// Call this on startup or to recreate the graph from the latest market topology. It resets
-    /// four things together, from one read: the graph, the fallback pool index, which pAMMs the
-    /// graph holds and which it left out, and the fee tiers all of that was decided with.
+    /// three things together, from one read: the graph, the fallback pool index, and which pAMMs
+    /// the graph holds and which it left out.
     pub async fn initialize_graph(&mut self) {
         let topology = {
             // One read: the index and the topology must describe the same market, or a pAMM whose
@@ -372,25 +401,8 @@ where
         self.initialized = true;
     }
 
-    /// Applies one market event to the graph, or rebuilds the graph when the fee tiers moved.
-    ///
-    /// A tier change decides which Uniswap V3 pool a pAMM falls back to, and putting a pAMM back
-    /// needs the market topology, which only [`initialize_graph`](Self::initialize_graph) reads.
-    /// The feed writes the market before it broadcasts, so a rebuild already reflects this event
-    /// and the event is not applied on top of it. Tiers change on the fetcher's timer, not per
-    /// block, so a rebuild is rare.
+    /// Applies one market event to the graph, with the pAMM admission rule run over it first.
     pub async fn process_event(&mut self, event: MarketEvent) {
-        // One read for the whole event: the fetcher writes on its own timer, and a second read
-        // could decide admission against tiers the rebuild test just passed on.
-        let fee_tiers = self.pamm_admission.fee_tiers();
-        if self
-            .pamm_admission
-            .needs_rebuild(fee_tiers.as_ref())
-        {
-            self.initialize_graph().await;
-            return;
-        }
-
         let market_data = self.market_data.clone();
         let event = {
             let market = market_data.read().await;
@@ -399,12 +411,7 @@ where
                 should_drop_component(*liquidity_scope, exclude_protocols, component)
             };
             let mut event = event;
-            pamm_admission.apply_pamm_admission(
-                &market,
-                fee_tiers.as_ref(),
-                &caller_drops,
-                &mut event,
-            );
+            pamm_admission.apply_pamm_admission(&market, &caller_drops, &mut event);
             filter_event(market.base_market_state(), event, &caller_drops)
         };
 
@@ -526,85 +533,27 @@ where
                     )));
                 }
 
-                // A route with a pAMM leg needs the amount out its Uniswap V3 fallback would
-                // deliver: the router checks it against `min_amount_out` before ranking and drops
-                // the candidate when it falls short. A route whose fallback cannot be priced is
-                // dropped here, because there is nothing to check that floor against.
-                if has_pamm_leg(&route) {
-                    let Some(fee_tiers) = self.pamm_admission.fee_tiers() else {
-                        debug!(
-                            order_id = %order.id(),
-                            "dropping pAMM route: the router's fee tiers are not read yet"
-                        );
-                        return Err(SolveError::route_rejected(
-                            order.id(),
-                            RouteRejection::PammFeeTiersUnread,
-                        ));
-                    };
-                    // The same view the algorithm solved against, so the fallback is priced on the
-                    // requested overlay rather than the base state.
+                // A pAMM route is ranked on what its fallbacks pay against `min_amount_out`, so a
+                // leg with no fallback, or one that cannot be priced, is dropped here — there is
+                // no floor to check.
+                if has_fallback_leg(&route) {
+                    // The same view the algorithm solved against, so the fallback is selected and
+                    // priced on the requested overlay rather than the base state.
                     let market = self
                         .read_market(params.state_label())
                         .await?;
-                    if let Some(pool) = excluded_fallback_pool(
-                        &route,
-                        &fee_tiers,
+                    match price_through_fallbacks(
+                        &mut route,
+                        &market,
                         self.pamm_admission.fallback_pools(),
                         params.route_filter(),
+                        &self.exclude_protocols,
                     ) {
-                        debug!(order_id = %order.id(), fallback_pool = %pool,
-                            "dropping pAMM route: request excludes its fallback pool");
-                        return Err(SolveError::route_rejected(
-                            order.id(),
-                            RouteRejection::PammFallbackExcluded,
-                        ));
-                    }
-                    match fallback_amount_out(
-                        &route,
-                        &market,
-                        &fee_tiers,
-                        self.pamm_admission.fallback_pools(),
-                    ) {
-                        FallbackAmountOut::AmountOut(amount) => {
-                            route.set_fallback_amount_out(amount)
-                        }
-                        FallbackAmountOut::NoFallbackPool {
-                            component_id,
-                            fee_tier,
-                            token_in,
-                            token_out,
-                        } => {
-                            // An empty list is a pair the market holds no Uniswap V3 pool for at
-                            // all, which is a different finding from holding one at a tier the
-                            // router does not resolve to.
-                            let tiers_in_market = self
-                                .pamm_admission
-                                .fallback_pools()
-                                .tiers_for(&token_in, &token_out);
-                            debug!(
-                                order_id = %order.id(),
-                                %component_id,
-                                fee_tier,
-                                token_in = %token_in,
-                                token_out = %token_out,
-                                tiers_in_market = ?tiers_in_market,
-                                "dropping pAMM route: no Uniswap V3 pool at the router's fee tier"
-                            );
-                            return Err(SolveError::route_rejected(
-                                order.id(),
-                                RouteRejection::PammFallbackPoolMissing,
-                            ));
-                        }
-                        FallbackAmountOut::NotPriceable { reason } => {
-                            debug!(
-                                order_id = %order.id(),
-                                %reason,
-                                "dropping pAMM route: the Uniswap V3 fallback could not be simulated"
-                            );
-                            return Err(SolveError::route_rejected(
-                                order.id(),
-                                RouteRejection::PammFallbackUnpriceable,
-                            ));
+                        Ok(amount) => route.set_fallback_amount_out(amount),
+                        Err(error) => {
+                            let rejection = error.rejection();
+                            debug!(order_id = %order.id(), %error, "{rejection}");
+                            return Err(SolveError::route_rejected(order.id(), rejection));
                         }
                     }
                 }
@@ -692,6 +641,8 @@ where
             }
         };
 
+        // The solve alone. Occupancy is timed by the caller, which also sees the failing
+        // outcomes this point never reaches.
         let quote_duration = start_time.elapsed();
         record_quote_duration(&self.pool_name, quote_duration);
 
@@ -807,9 +758,17 @@ where
 
                 // Process market events
                 event_result = event_rx.recv() => {
+                    // Timed here rather than inside the two calls: this is the point at which
+                    // the work holds the worker away from the task queue.
+                    let activity_started = Instant::now();
                     match event_result {
                         Ok(event) => {
                             self.process_event(event).await;
+                            record_worker_activity_duration(
+                                &self.pool_name,
+                                activity_started.elapsed(),
+                                "market_event",
+                            );
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             info!(self.worker_id, "event receiver closed, shutting down");
@@ -824,12 +783,18 @@ where
                             );
                             // Reinitialize the graph from the current market state to recover from the missed events.
                             self.initialize_graph().await;
+                            record_worker_activity_duration(
+                                &self.pool_name,
+                                activity_started.elapsed(),
+                                "graph_init",
+                            );
                         }
                     }
                 }
 
                 // Process derived data events (component depths, token prices)
                 derived_result = derived_event_rx.recv(), if !derived_closed => {
+                    let activity_started = Instant::now();
                     match derived_result {
                         Ok(event) => {
                             // Always update tracker with every event
@@ -876,6 +841,11 @@ where
                             );
                         }
                     }
+                    record_worker_activity_duration(
+                        &self.pool_name,
+                        activity_started.elapsed(),
+                        "derived_event",
+                    );
                 }
 
                 // Get next solve task
@@ -883,21 +853,48 @@ where
                     match task.ok() {
                         Some(task) => {
                             let task_id = task.id();
+                            // Occupancy starts at pickup and runs to the response, so it covers
+                            // the readiness wait as well as the solve.
+                            let started = Instant::now();
                             record_task_pickup_metrics(
                                 &self.pool_name,
                                 task.wait_time(),
                                 task_rx.len(),
                             );
 
-                            // Wait for derived data readiness before solving
-                            // Use algorithm timeout as the max wait time
-                            if let Err(e) = self.wait_until_ready(self.algorithm.timeout()).await {
+                            // The router gives up at its own deadline and reads no answer after
+                            // it. Solving anyway takes this worker away from a task that still
+                            // has a reader, which lengthens the queue and pushes the next task
+                            // past its deadline too.
+                            let Some(budget) =
+                                task_budget(self.algorithm.timeout(), task.deadline(), started)
+                            else {
+                                debug!(
+                                    self.worker_id,
+                                    task_id = %task_id,
+                                    waited_ms = task.wait_time().as_millis() as u64,
+                                    "task passed its deadline in the queue; not solving"
+                                );
+                                record_task_duration(
+                                    &self.pool_name,
+                                    started.elapsed(),
+                                    "abandoned",
+                                );
+                                let waited_ms = task.wait_time().as_millis() as u64;
+                                task.respond(Err(SolveError::timeout(waited_ms)));
+                                continue;
+                            };
+
+                            // Wait for derived data readiness before solving, bounded by what
+                            // remains of the deadline as well as by the pool's own budget.
+                            if let Err(e) = self.wait_until_ready(budget).await {
                                 warn!(
                                     self.worker_id,
                                     task_id = %task_id,
                                     error = %e,
                                     "not ready to solve"
                                 );
+                                record_task_duration(&self.pool_name, started.elapsed(), e.label());
                                 task.respond(Err(e));
                                 continue;
                             }
@@ -908,6 +905,12 @@ where
                                 let order = task.order();
                                 self.quote(order, params).await
                             };
+
+                            let outcome = match &result {
+                                Ok(_) => "success",
+                                Err(e) => e.label(),
+                            };
+                            record_task_duration(&self.pool_name, started.elapsed(), outcome);
 
                             // Send response. The specific failure cause is already logged in
                             // `quote()` and returned to the caller, so we don't re-log here.
@@ -990,12 +993,11 @@ mod tests {
             computations::{SpotPriceComputation, TokenGasPriceComputation},
             DerivedData,
         },
+        fallback::{manager::PammState, FALLBACK_PREFIX},
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
-        propamm_fallback::{
-            manager::PammState, FeeTiers, FALLBACK_PROTOCOL_SYSTEM, FEE_ATTRIBUTE,
-            PROPAMM_FALLBACK_PREFIX,
+        types::{
+            ComponentId, OrderSide, Route, RouteExclusionFilter, RouteRejection, RouteResult, Swap,
         },
-        types::{ComponentId, OrderSide, Route, RouteExclusionFilter, RouteResult, Swap},
         AlgorithmError,
     };
 
@@ -1468,9 +1470,8 @@ mod tests {
         assert_eq!(quote.order().amount_out(), &BigUint::from(190u64));
     }
 
-    /// Mock algorithm that returns a single-leg route through a pAMM executed via the
-    /// PropAMMRouter. The market holds no Uniswap V3 pool for the pair, so the router's fallback
-    /// would revert and the worker must drop the route.
+    /// Mock algorithm returning one `fallback:` leg for the (A, B) pair; the market each
+    /// test builds decides whether the leg gets a fallback.
     struct PropAMMRouteAlgorithm;
 
     impl Algorithm for PropAMMRouteAlgorithm {
@@ -1489,7 +1490,7 @@ mod tests {
             let token_b = token(0x02, "B");
             let swap = Swap::new(
                 "pamm".to_string(),
-                format!("{PROPAMM_FALLBACK_PREFIX}fermiswap"),
+                format!("{FALLBACK_PREFIX}fermiswap"),
                 token_a.address.clone(),
                 token_b.address.clone(),
                 BigUint::from(100u64),
@@ -1511,28 +1512,17 @@ mod tests {
         }
     }
 
-    /// The fee tier the router resolves the route's pair to.
-    const FALLBACK_FEE_TIER: u32 = 3000;
-
-    /// Quotes the pAMM route above through a worker holding `fee_tiers`, against a market with no
-    /// fallback pool in it.
-    async fn quote_pamm_route(fee_tiers: SharedFeeTiers) -> Result<SingleOrderQuote, SolveError> {
-        let (market, _) = setup_market_weighted(vec![]);
-        quote_pamm_route_against(market, fee_tiers).await
-    }
-
-    /// Quotes the pAMM route above through a worker holding `fee_tiers`, against `market`.
+    /// Quotes the pAMM route above against `market`, under the request filter `filter`.
     ///
     /// The worker indexes the market's fallback pools on `initialize_graph`, so the market has to
     /// be in place before the quote.
     async fn quote_pamm_route_against(
         market: MarketData,
-        fee_tiers: SharedFeeTiers,
+        filter: RouteExclusionFilter,
     ) -> Result<SingleOrderQuote, SolveError> {
         let derived = DerivedData::new_shared();
         let mut worker =
-            SolverWorker::new(market, derived, PropAMMRouteAlgorithm, 0, "test_pool".to_string())
-                .with_fallback_fee_tiers(fee_tiers);
+            SolverWorker::new(market, derived, PropAMMRouteAlgorithm, 0, "test_pool".to_string());
         worker.initialize_graph().await;
 
         let token_a = token(0x01, "A");
@@ -1540,23 +1530,19 @@ mod tests {
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
 
         worker
-            .quote(&ord, SolveParams::default())
+            .quote(&ord, SolveParams::default().with_route_filter(filter))
             .await
     }
 
-    /// A market holding one Uniswap V3 pool for the route's pair, at the tier the router resolves
-    /// to, but with too little liquidity to price the swap the fallback would make.
+    /// A market holding one Uniswap V3 pool for the route's pair, but with too little liquidity to
+    /// price the swap the fallback would make.
     fn market_with_unpriceable_fallback_pool() -> MarketData {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
-        let mut fallback = component_with_protocol(
-            "fallback_pool",
-            FALLBACK_PROTOCOL_SYSTEM,
+        let fallback = component_with_protocol(
+            FALLBACK_POOL,
+            "uniswap_v3",
             &[token_a.clone(), token_b.clone()],
-        );
-        fallback.static_attributes.insert(
-            FEE_ATTRIBUTE.to_string(),
-            Bytes::from(FALLBACK_FEE_TIER.to_be_bytes().to_vec()),
         );
 
         // Built on the shared setup so the market carries the block info and gas price a quote
@@ -1567,60 +1553,44 @@ mod tests {
             state.upsert_tokens([token_a, token_b]);
             state.upsert_components([fallback]);
             state.update_states([(
-                "fallback_pool".to_string(),
+                FALLBACK_POOL.to_string(),
                 Box::new(MockProtocolSim::new(2.0).with_liquidity(1)) as Box<dyn ProtocolSim>,
             )]);
         }
         market
     }
 
+    /// The request's filter reaches the pool a pAMM leg settles through, so excluding every
+    /// candidate, by pool or by protocol, leaves the leg no fallback.
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["fallback_pool".to_string()]))]
+    #[case::pool(RouteExclusionFilter::default().with_excluded_pools([FALLBACK_POOL.to_string()]))]
     #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
     #[tokio::test]
     async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteExclusionFilter) {
-        let tiers = SharedFeeTiers::default();
-        tiers.set(FeeTiers::new(FALLBACK_FEE_TIER));
-        let mut worker = SolverWorker::new(
-            market_with_unpriceable_fallback_pool(),
-            DerivedData::new_shared(),
-            PropAMMRouteAlgorithm,
-            0,
-            "test_pool".to_string(),
-        )
-        .with_fallback_fee_tiers(tiers);
-        worker.initialize_graph().await;
-        let a = token(0x01, "A");
-        let b = token(0x02, "B");
-        let order = order(&a, &b, 100, OrderSide::Sell);
-        let result = worker
-            .quote(&order, SolveParams::default().with_route_filter(filter))
-            .await;
+        let result =
+            quote_pamm_route_against(market_with_unpriceable_fallback_pool(), filter).await;
+
         assert!(
             matches!(
                 result,
-                Err(SolveError::RouteRejected { reason: RouteRejection::PammFallbackExcluded, .. })
+                Err(SolveError::RouteRejected { reason: RouteRejection::FallbackExcluded, .. })
             ),
             "expected rejection before fallback simulation, got {result:?}"
         );
     }
 
-    /// Without a Uniswap V3 pool at the router's fee tier the fallback reverts too, so there is no
-    /// fallback amount to check `min_amount_out` against.
+    /// Without a fallback pool for the pair the fallback reverts too, so there is no fallback
+    /// amount to check `min_amount_out` against.
     #[tokio::test]
     async fn test_quote_pamm_route_without_fallback_pool() {
-        let fee_tiers = SharedFeeTiers::default();
-        fee_tiers.set(crate::propamm_fallback::FeeTiers::new(3000));
+        let (market, _) = setup_market_weighted(vec![]);
 
-        let result = quote_pamm_route(fee_tiers).await;
+        let result = quote_pamm_route_against(market, RouteExclusionFilter::default()).await;
 
         assert!(
             matches!(
                 result,
-                Err(SolveError::RouteRejected {
-                    reason: RouteRejection::PammFallbackPoolMissing,
-                    ..
-                })
+                Err(SolveError::RouteRejected { reason: RouteRejection::FallbackPoolMissing, .. })
             ),
             "expected the unbacked pAMM route to be dropped, got {result:?}"
         );
@@ -1630,36 +1600,21 @@ mod tests {
     /// against, so the route is dropped rather than ranked on the pAMM's own amount.
     #[tokio::test]
     async fn test_quote_pamm_route_with_unpriceable_fallback() {
-        let fee_tiers = SharedFeeTiers::default();
-        fee_tiers.set(FeeTiers::new(FALLBACK_FEE_TIER));
-
-        let result =
-            quote_pamm_route_against(market_with_unpriceable_fallback_pool(), fee_tiers).await;
+        let result = quote_pamm_route_against(
+            market_with_unpriceable_fallback_pool(),
+            RouteExclusionFilter::default(),
+        )
+        .await;
 
         assert!(
             matches!(
                 result,
                 Err(SolveError::RouteRejected {
-                    reason: RouteRejection::PammFallbackUnpriceable,
+                    reason: RouteRejection::FallbackNotSimulatable,
                     ..
                 })
             ),
             "expected the unpriceable fallback to drop the route, got {result:?}"
-        );
-    }
-
-    /// Before the fetcher reads the router's tiers there is no tier to price the fallback at, so
-    /// the route is dropped rather than priced against a guessed one.
-    #[tokio::test]
-    async fn test_quote_pamm_route_without_fee_tiers() {
-        let result = quote_pamm_route(SharedFeeTiers::default()).await;
-
-        assert!(
-            matches!(
-                result,
-                Err(SolveError::RouteRejected { reason: RouteRejection::PammFeeTiersUnread, .. })
-            ),
-            "expected the pAMM route to be dropped, got {result:?}"
         );
     }
 
@@ -1777,10 +1732,9 @@ mod tests {
             0,
             "test_pool".to_string(),
         )
-        .with_exclude_protocols(vec![PROPAMM_FALLBACK_PREFIX.to_string()]);
+        .with_exclude_protocols(vec![FALLBACK_PREFIX.to_string()]);
 
-        let pamm =
-            component_with_protocol("pamm-1", "propammfallback:fermiswap", &[token(0x01, "A")]);
+        let pamm = component_with_protocol("pamm-1", "fallback:fermiswap", &[token(0x01, "A")]);
         let public = component("uni-1", &[token(0x01, "A")]);
 
         assert!(should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &pamm));
@@ -1790,8 +1744,9 @@ mod tests {
     /// The pAMM every admission test decides.
     const PAMM: &str = "pamm-1";
 
-    /// The Uniswap V3 pool the pAMM falls back to.
-    const FALLBACK_POOL: &str = "uni-1";
+    /// The pool the pAMM falls back to. A real address, because selection refuses a candidate
+    /// whose component id it cannot encode as a pool for the router.
+    const FALLBACK_POOL: &str = "0x3333333333333333333333333333333333333333";
 
     /// A market holding the pAMM and the Uniswap V3 pool it falls back to.
     fn market_with_pamm_and_fallback() -> MarketData {
@@ -1813,7 +1768,7 @@ mod tests {
         let token_b = token(0x02, "B");
         let pamm = component_with_protocol(
             PAMM,
-            "propammfallback:fermiswap",
+            "fallback:fermiswap",
             &[token_a.clone(), token_b.clone()],
         );
         let mut state = market.try_write().expect("uncontended");
@@ -1821,46 +1776,47 @@ mod tests {
         state.upsert_components([pamm]);
     }
 
-    /// Adds the Uniswap V3 pool the pAMM falls back to at [`FALLBACK_FEE_TIER`].
-    fn add_fallback_pool(market: &MarketData) {
-        let mut fallback = component_with_protocol(
-            FALLBACK_POOL,
-            FALLBACK_PROTOCOL_SYSTEM,
+    /// A second candidate pool on the same pair, so the pAMM keeps a fallback when one leaves.
+    const SECOND_FALLBACK_POOL: &str = "0x4444444444444444444444444444444444444444";
+
+    /// Adds a `uniswap_v2` pool serving the same pair as `FALLBACK_POOL`.
+    fn add_second_fallback_pool(market: &MarketData) {
+        let second = component_with_protocol(
+            SECOND_FALLBACK_POOL,
+            "uniswap_v2",
             &[token(0x01, "A"), token(0x02, "B")],
         );
-        fallback.static_attributes.insert(
-            FEE_ATTRIBUTE.to_string(),
-            Bytes::from(FALLBACK_FEE_TIER.to_be_bytes().to_vec()),
+        let mut state = market.try_write().expect("uncontended");
+        state.upsert_components([second]);
+    }
+
+    /// Adds the Uniswap V3 pool the pAMM falls back to.
+    fn add_fallback_pool(market: &MarketData) {
+        let fallback = component_with_protocol(
+            FALLBACK_POOL,
+            "uniswap_v3",
+            &[token(0x01, "A"), token(0x02, "B")],
         );
         let mut state = market.try_write().expect("uncontended");
         state.upsert_components([fallback]);
     }
 
-    /// A worker whose fallback pool index describes `market`, holding `fee_tiers`, beside the
-    /// shared handle a test writes a later tier read through.
-    fn admission_worker(
-        market: MarketData,
-        fee_tiers: Option<FeeTiers>,
-    ) -> (SolverWorker<MockAlgorithm>, SharedFeeTiers) {
-        let shared = SharedFeeTiers::default();
-        if let Some(fee_tiers) = fee_tiers {
-            shared.set(fee_tiers);
-        }
+    /// A worker whose fallback pool index describes `market`.
+    fn admission_worker(market: MarketData) -> SolverWorker<MockAlgorithm> {
         let mut worker = SolverWorker::new(
             market.clone(),
             DerivedData::new_shared(),
             MockAlgorithm::new(),
             0,
             "test_pool".to_string(),
-        )
-        .with_fallback_fee_tiers(shared.clone());
+        );
         let view = market
             .try_read_blocking()
             .expect("uncontended");
         worker
             .pamm_admission
             .rebuild_pools(&view);
-        (worker, shared)
+        worker
     }
 
     /// A `MarketUpdated` event that adds one component, by id.
@@ -1903,37 +1859,22 @@ mod tests {
         let view = market
             .try_read_blocking()
             .expect("uncontended");
-        let fee_tiers = worker.pamm_admission.fee_tiers();
         let caller_drops = |component: &ProtocolComponent| {
             should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, component)
         };
         worker
             .pamm_admission
-            .apply_pamm_admission(&view, fee_tiers.as_ref(), &caller_drops, &mut event);
+            .apply_pamm_admission(&view, &caller_drops, &mut event);
         filter_event(view.base_market_state(), event, &caller_drops)
     }
 
-    /// A pAMM only reaches the chain through the Uniswap V3 pool it falls back to, so the worker
-    /// admits one exactly when this market holds that pool at the tier the router resolves. With
-    /// no tiers read there is no tier to look up, and guessing one prices the wrong pool.
+    /// A pAMM only reaches the chain through a fallback pool, so the worker admits one exactly
+    /// when this market holds a candidate for its pair.
     #[rstest]
-    #[case::without_fallback_pool(
-        market_with_pamm(),
-        Some(FeeTiers::new(FALLBACK_FEE_TIER)),
-        false
-    )]
-    #[case::with_fallback_pool(
-        market_with_pamm_and_fallback(),
-        Some(FeeTiers::new(FALLBACK_FEE_TIER)),
-        true
-    )]
-    #[case::before_fee_tiers(market_with_pamm_and_fallback(), None, false)]
-    fn test_apply_pamm_admission(
-        #[case] market: MarketData,
-        #[case] fee_tiers: Option<FeeTiers>,
-        #[case] expect_admitted: bool,
-    ) {
-        let (mut worker, _shared_tiers) = admission_worker(market.clone(), fee_tiers);
+    #[case::without_fallback_pool(market_with_pamm(), false)]
+    #[case::with_fallback_pool(market_with_pamm_and_fallback(), true)]
+    fn test_apply_pamm_admission(#[case] market: MarketData, #[case] expect_admitted: bool) {
+        let mut worker = admission_worker(market.clone());
 
         let event = admit(&mut worker, &market, added_component_event(PAMM));
 
@@ -1946,8 +1887,7 @@ mod tests {
     #[test]
     fn test_apply_pamm_admission_after_the_fallback_pool_leaves() {
         let market = market_with_pamm_and_fallback();
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
+        let mut worker = admission_worker(market.clone());
         admit(&mut worker, &market, added_component_event(PAMM));
         let event = admit(&mut worker, &market, removed_component_event(FALLBACK_POOL));
 
@@ -1963,14 +1903,32 @@ mod tests {
         );
     }
 
+    /// A pAMM is evicted when its last candidate pool leaves, not when any one does — the whole
+    /// point of choosing a pool per leg is that one pair can have several.
+    #[test]
+    fn test_apply_pamm_admission_keeps_a_pamm_behind_a_second_fallback_pool() {
+        let market = market_with_pamm_and_fallback();
+        add_second_fallback_pool(&market);
+        let mut worker = admission_worker(market.clone());
+        admit(&mut worker, &market, added_component_event(PAMM));
+
+        let event = admit(&mut worker, &market, removed_component_event(FALLBACK_POOL));
+
+        assert!(
+            !removed_ids(&event).contains(&PAMM.to_string()),
+            "the pAMM still has a fallback pool: {:?}",
+            removed_ids(&event)
+        );
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
+    }
+
     /// The market names a component in `added_components` once, so the event that adds the
-    /// fallback pool does not name the pAMM. Without the withheld set the pAMM would stay out
-    /// until the next rebuild, which is worse than before this rule existed.
+    /// fallback pool does not name the pAMM. The withheld set is what lets the pAMM back in
+    /// before the next rebuild.
     #[test]
     fn test_apply_pamm_admission_after_the_fallback_pool_arrives() {
         let market = market_with_pamm();
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
+        let mut worker = admission_worker(market.clone());
         admit(&mut worker, &market, added_component_event(PAMM));
         assert_eq!(
             worker.pamm_admission.state_of(PAMM),
@@ -1995,8 +1953,7 @@ mod tests {
     #[test]
     fn test_apply_pamm_admission_keeps_a_missing_pamm_withheld() {
         let market = market_with_pamm();
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
+        let mut worker = admission_worker(market.clone());
         admit(&mut worker, &market, added_component_event(PAMM));
         assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Withheld));
 
@@ -2019,8 +1976,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_event_pamm_and_fallback_pool_in_one_block() {
         let (market, _) = setup_market_weighted(vec![]);
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
+        let mut worker = admission_worker(market.clone());
         worker.initialize_graph().await;
         add_pamm(&market);
         add_fallback_pool(&market);
@@ -2042,68 +1998,6 @@ mod tests {
         );
     }
 
-    /// The first tier read is what lets a pAMM in, so the worker rebuilds when the tiers it
-    /// filtered with stop matching the current ones.
-    #[tokio::test]
-    async fn test_process_event_after_the_first_fee_tier_read() {
-        let market = market_with_pamm_and_fallback();
-        let (mut worker, shared_tiers) = admission_worker(market.clone(), None);
-        worker.initialize_graph().await;
-        assert_eq!(
-            worker
-                .pamm_admission
-                .count_in(PammState::Admitted),
-            0,
-            "no tiers, no pAMM"
-        );
-
-        shared_tiers.set(FeeTiers::new(FALLBACK_FEE_TIER));
-        worker
-            .process_event(added_component_event(FALLBACK_POOL))
-            .await;
-
-        assert_eq!(
-            worker
-                .pamm_admission
-                .built_with_fee_tiers(),
-            Some(&FeeTiers::new(FALLBACK_FEE_TIER))
-        );
-        assert_eq!(
-            worker.pamm_admission.state_of(PAMM),
-            Some(PammState::Admitted),
-            "the rebuild admits the backed pAMM"
-        );
-    }
-
-    /// A tier change moves which Uniswap V3 pool a pAMM falls back to, so the worker rebuilds and
-    /// the pAMM leaves the graph when the new tier names no pool for its pair.
-    #[tokio::test]
-    async fn test_process_event_after_a_fee_tier_change() {
-        let market = market_with_pamm_and_fallback();
-        let (mut worker, shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
-        worker.initialize_graph().await;
-        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
-
-        shared_tiers.set(FeeTiers::new(FALLBACK_FEE_TIER + 1));
-        worker
-            .process_event(added_component_event(FALLBACK_POOL))
-            .await;
-
-        assert_eq!(
-            worker
-                .pamm_admission
-                .built_with_fee_tiers(),
-            Some(&FeeTiers::new(FALLBACK_FEE_TIER + 1)),
-            "the tier change must rebuild the graph"
-        );
-        assert_eq!(
-            worker.pamm_admission.state_of(PAMM),
-            Some(PammState::Withheld),
-            "no pool at the new tier, so the pAMM leaves"
-        );
-    }
-
     /// A pAMM falls back through the router, not through this worker's graph, so a Uniswap V3
     /// pool the worker excludes still backs it. The block that adds that pool names no pAMM, and
     /// the worker's own filter empties it, so the pAMM pass must read the event the market
@@ -2111,9 +2005,8 @@ mod tests {
     #[tokio::test]
     async fn test_process_event_readmits_a_pamm_behind_an_excluded_fallback_pool() {
         let market = market_with_pamm();
-        let (mut worker, _shared_tiers) =
-            admission_worker(market.clone(), Some(FeeTiers::new(FALLBACK_FEE_TIER)));
-        worker.exclude_protocols = vec![FALLBACK_PROTOCOL_SYSTEM.to_string()];
+        let mut worker = admission_worker(market.clone());
+        worker.exclude_protocols = vec!["uniswap_v3".to_string()];
         worker.initialize_graph().await;
         assert_eq!(
             worker.pamm_admission.state_of(PAMM),
@@ -2139,9 +2032,8 @@ mod tests {
     #[tokio::test]
     async fn test_initialize_graph_leaves_an_excluded_pamm_off_the_record() {
         let market = market_with_pamm_and_fallback();
-        let (mut worker, _shared_tiers) =
-            admission_worker(market, Some(FeeTiers::new(FALLBACK_FEE_TIER)));
-        worker.exclude_protocols = vec![PROPAMM_FALLBACK_PREFIX.to_string()];
+        let mut worker = admission_worker(market);
+        worker.exclude_protocols = vec![FALLBACK_PREFIX.to_string()];
 
         worker.initialize_graph().await;
 
@@ -2161,8 +2053,7 @@ mod tests {
             "test_pool".to_string(),
         );
 
-        let pamm =
-            component_with_protocol("pamm-1", "propammfallback:fermiswap", &[token(0x01, "A")]);
+        let pamm = component_with_protocol("pamm-1", "fallback:fermiswap", &[token(0x01, "A")]);
 
         assert!(!should_drop_component(worker.liquidity_scope, &worker.exclude_protocols, &pamm));
     }
@@ -2532,9 +2423,27 @@ mod tests {
         assert!(depth_seen, "queue depth gauge not recorded");
     }
 
+    /// One sample of `name` in `recorded`, as (labels, seconds).
+    fn one_histogram_sample(
+        recorded: &[crate::tests::metrics::Recorded],
+        name: &str,
+    ) -> (Vec<String>, f64) {
+        use metrics_util::debugging::DebugValue;
+
+        let (_, labels, value) = recorded
+            .iter()
+            .find(|(recorded_name, _, _)| recorded_name == name)
+            .unwrap_or_else(|| panic!("{name} not recorded"));
+        let DebugValue::Histogram(samples) = value else {
+            panic!("expected histogram, got {value:?}");
+        };
+        assert_eq!(samples.len(), 1, "{name} recorded {} samples", samples.len());
+        (labels.clone(), samples[0].into_inner())
+    }
+
     #[test]
     fn test_quote_duration_metric_recorded() {
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+        use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -2542,25 +2451,88 @@ mod tests {
             record_quote_duration("test_pool", std::time::Duration::from_millis(120));
         });
 
-        let mut quote_duration_seen = false;
-        for (key, _unit, _description, value) in snapshotter.snapshot().into_vec() {
-            let key = key.key();
-            if key.name() != "worker_pool_solve_duration_seconds" {
-                continue;
-            }
-            let pool_label = key
-                .labels()
-                .find(|label| label.key() == "pool")
-                .map(|label| label.value().to_string());
-            assert_eq!(pool_label.as_deref(), Some("test_pool"));
-            let DebugValue::Histogram(samples) = value else {
-                panic!("expected histogram, got {value:?}");
-            };
-            assert_eq!(samples.len(), 1);
-            assert!((samples[0].into_inner() - 0.120).abs() < 1e-9);
-            quote_duration_seen = true;
-        }
-        assert!(quote_duration_seen, "quote duration histogram not recorded");
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_solve_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string()]);
+        assert!((seconds - 0.120).abs() < 1e-9);
+    }
+
+    #[rstest]
+    #[case("success")]
+    #[case("timeout")]
+    #[case("not_ready")]
+    fn test_task_duration_recorded_for_every_outcome(#[case] outcome: &'static str) {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_task_duration("test_pool", std::time::Duration::from_millis(120), outcome);
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_task_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("outcome={outcome}")]);
+        assert!((seconds - 0.120).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_expired_task_has_no_budget() {
+        let now = Instant::now();
+        let deadline = now - Duration::from_millis(1);
+        assert_eq!(task_budget(Duration::from_millis(1000), deadline, now), None);
+    }
+
+    /// The router gives up at its own deadline, so a budget past it buys nothing: the pool would
+    /// keep searching for an answer no caller is still waiting for.
+    #[test]
+    fn test_budget_is_capped_by_the_router_deadline() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(100);
+        assert_eq!(
+            task_budget(Duration::from_millis(1000), deadline, now),
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    /// A caller that raises its own timeout gets the deeper search it asked for, bounded by the
+    /// pool's configured budget rather than by the router default.
+    #[test]
+    fn test_budget_keeps_the_pool_limit_when_the_deadline_is_further_out() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(5000);
+        assert_eq!(
+            task_budget(Duration::from_millis(1000), deadline, now),
+            Some(Duration::from_millis(1000))
+        );
+    }
+
+    /// The three activities partition the worker's non-solving time, so each must carry its own
+    /// label and none may be recorded under another's name.
+    #[rstest]
+    #[case("market_event")]
+    #[case("graph_init")]
+    #[case("derived_event")]
+    fn test_worker_activity_duration_recorded(#[case] activity: &'static str) {
+        use metrics_util::debugging::DebuggingRecorder;
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            record_worker_activity_duration(
+                "test_pool",
+                std::time::Duration::from_micros(250),
+                activity,
+            );
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (labels, seconds) =
+            one_histogram_sample(&recorded, "worker_pool_activity_duration_seconds");
+        assert_eq!(labels, vec!["pool=test_pool".to_string(), format!("activity={activity}")]);
+        assert!((seconds - 0.000_25).abs() < 1e-12);
     }
 
     #[test]

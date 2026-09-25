@@ -60,6 +60,20 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_subscription_buffer_size: Option<usize>,
 
+    /// How many tokens one token-pricing pass may attempt. A pass ranks its candidates — the
+    /// tokens a component arrival brought first, then the ones with no price and the ones a
+    /// change points at, longest-unattempted first — and takes this many. Tokens it leaves out
+    /// keep their previous price and rank first next time. Unset keeps the built-in default.
+    #[arg(long, env)]
+    pub pricing_max_tokens_per_pass: Option<usize>,
+
+    /// How long, in milliseconds, after a token-pricing pass starts the next one may start. A
+    /// block inside the interval serves the stored prices. A component that brings a token with
+    /// no price runs a pass anyway, so a newly listed token is priced on the block it appears.
+    /// Unset keeps the built-in default.
+    #[arg(long, env)]
+    pub pricing_min_pass_interval_ms: Option<u64>,
+
     /// Disable TLS for Tycho connection
     #[arg(long)]
     pub disable_tls: bool,

@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "profile"
 harness = false
+
+[[bench]]
+name = "derived"
+harness = false

@@ -147,7 +147,10 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
 
     // Always include the chain's native and wrapped native tokens so that
     // wrap/unwrap hops are never accidentally blocked by connector_tokens.
-    for addr in [chain.native_token().address, chain.wrapped_native_token().address] {
+    let wrap_pair = std::iter::once(chain.native_token())
+        .chain(chain.wrapped_native_token())
+        .map(|token| token.address);
+    for addr in wrap_pair {
         let already_present = candidates
             .iter()
             .any(|(a, _)| *a == addr);

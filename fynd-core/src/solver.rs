@@ -15,10 +15,7 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::broadcast,
-    task::{AbortHandle, JoinHandle},
-};
+use tokio::{sync::broadcast, task::JoinHandle};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
@@ -46,9 +43,6 @@ use crate::{
     graph::EdgeWeightUpdaterWithDerived,
     price_guard::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
-    },
-    propamm_fallback::{
-        fee_tier_fetcher::FeeTierFetcher, SharedFeeTiers, PROPAMM_ROUTER_ADDRESS, PROPAMM_VENUES,
     },
     simulation::simulator::QuoteSimulator,
     types::constants::native_token,
@@ -84,9 +78,6 @@ pub mod defaults {
     pub const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
     pub const ROUTER_FEE_REFRESH_INTERVAL: Duration = Duration::from_secs(300);
-    /// How often the PropAMMRouter's Uniswap V3 fee tiers are refreshed. Governance changes them
-    /// rarely, so this is deliberately slower than a block.
-    pub const FALLBACK_FEE_TIER_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
     /// Delay before reconnecting to the Tycho feed after a disconnect.
     pub const RECONNECT_DELAY: Duration = Duration::from_secs(5);
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
@@ -134,43 +125,6 @@ fn default_max_hops() -> usize {
 
 fn default_algo_timeout_ms() -> u64 {
     defaults::POOL_TIMEOUT_MS
-}
-
-/// A fetcher for the PropAMMRouter's fee tiers, reading through the node at `rpc_url`.
-///
-/// Both build paths need one: without tiers, `SolverWorker` drops every route holding a
-/// `propammfallback:` leg, because it cannot find the Uniswap V3 pool the router would fall back
-/// to and so cannot tell whether that fallback clears the user's floor.
-///
-/// # Errors
-///
-/// Returns [`SolverBuildError::FeeTierFetcher`] if `rpc_url` will not parse. The router and venue
-/// addresses are compile-time constants, so a malformed one is a typo that would silently lose
-/// that venue's fee tiers, and it fails the build rather than warning.
-fn propamm_fee_tier_fetcher(
-    rpc_url: &str,
-    fallback_fee_tiers: SharedFeeTiers,
-) -> Result<FeeTierFetcher, SolverBuildError> {
-    let router = Bytes::from_str(PROPAMM_ROUTER_ADDRESS).map_err(|e| {
-        SolverBuildError::FeeTierFetcher(format!(
-            "PropAMMRouter address {PROPAMM_ROUTER_ADDRESS}: {e}"
-        ))
-    })?;
-    let venues = PROPAMM_VENUES
-        .iter()
-        .map(|venue| {
-            Bytes::from_str(venue)
-                .map_err(|e| SolverBuildError::FeeTierFetcher(format!("pAMM venue {venue}: {e}")))
-        })
-        .collect::<Result<Vec<Bytes>, _>>()?;
-    FeeTierFetcher::new(
-        rpc_url,
-        &router,
-        &venues,
-        fallback_fee_tiers,
-        defaults::FALLBACK_FEE_TIER_REFRESH_INTERVAL,
-    )
-    .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))
 }
 
 /// The token pricing pass's hop budget, from the configured pools' `max_hops` values.
@@ -232,7 +186,7 @@ pub struct PoolConfig {
     #[serde(default)]
     liquidity_scope: Option<LiquidityScope>,
     /// Protocol systems this worker pool's workers never route through, e.g.
-    /// `["propammfallback:"]`. Absent = no restriction.
+    /// `["fallback:"]`. Absent = no restriction.
     #[serde(default)]
     exclude_protocols: Option<Vec<String>>,
 }
@@ -278,7 +232,7 @@ impl PoolConfig {
 
     /// Sets the protocol systems this worker pool never routes through. An entry names a protocol
     /// system exactly (`"uniswap_v2"`), or the whole family under a prefix when it ends with `:`
-    /// (`"propammfallback:"` covers every venue on the PropAMMRouter).
+    /// (`"fallback:"` covers every pAMM the TychoFallbackRouter executes).
     pub fn with_exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
         self.exclude_protocols = Some(exclude_protocols);
         self
@@ -392,10 +346,6 @@ pub enum SolverBuildError {
     /// The quote simulator could not be created (e.g. malformed RPC URL).
     #[error("failed to create quote simulator: {0}")]
     QuoteSimulator(String),
-    /// The PropAMMRouter fee tier fetcher could not be created (e.g. malformed RPC URL, or a
-    /// malformed router or venue address constant).
-    #[error("failed to create fallback fee tier fetcher: {0}")]
-    FeeTierFetcher(String),
     /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
@@ -452,7 +402,40 @@ enum PoolEntry {
     Custom(CustomPoolEntry),
 }
 
+/// Names the worker pools whose solve budget the router deadline will cut short.
+///
+/// The router starts its deadline when the request arrives and stops waiting when it expires, so
+/// a pool budget above it is only reachable for a request that raises its own `timeout_ms`. A
+/// budget equal to the deadline is honoured in full and is not reported.
+///
+/// Separated from the warning it feeds so the rule can be tested without building a solver.
+fn pools_over_router_timeout<'a>(
+    pools: impl IntoIterator<Item = (&'a str, Duration)>,
+    router_timeout: Duration,
+) -> Vec<(&'a str, Duration)> {
+    pools
+        .into_iter()
+        .filter(|(_, timeout)| *timeout > router_timeout)
+        .collect()
+}
+
 impl PoolEntry {
+    /// Returns the name this worker pool is configured under.
+    fn name(&self) -> &str {
+        match self {
+            PoolEntry::BuiltIn { name, .. } => name,
+            PoolEntry::Custom(custom) => &custom.name,
+        }
+    }
+
+    /// Returns the solve budget configured for this worker pool.
+    fn timeout(&self) -> Duration {
+        match self {
+            PoolEntry::BuiltIn { timeout_ms, .. } => Duration::from_millis(*timeout_ms),
+            PoolEntry::Custom(custom) => Duration::from_millis(custom.timeout_ms),
+        }
+    }
+
     /// Returns the configured liquidity scope for this worker pool.
     fn liquidity_scope(&self) -> Option<LiquidityScope> {
         match self {
@@ -490,7 +473,6 @@ struct BuiltComponents {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
     router_fee_fetcher: Option<RouterFeeFetcher>,
-    fee_tier_fetcher: Option<FeeTierFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
@@ -529,6 +511,10 @@ pub struct FyndBuilder {
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     tycho_subscription_buffer_size: Option<usize>,
+    /// Shortest time between two full token-pricing passes; `None` keeps the computation's
+    /// default.
+    pricing_max_tokens_per_pass: Option<usize>,
+    pricing_min_pass_interval: Option<Duration>,
     router_timeout: Duration,
     router_min_responses: usize,
     encoder: Option<Encoder>,
@@ -566,6 +552,8 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
+            pricing_max_tokens_per_pass: None,
+            pricing_min_pass_interval: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoder: None,
@@ -652,6 +640,26 @@ impl FyndBuilder {
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
         self.tycho_subscription_buffer_size = Some(size);
+        self
+    }
+
+    /// Sets how many tokens one token-pricing pass may attempt.
+    ///
+    /// A pass ranks its candidates and attempts this many. Tokens it leaves out keep their
+    /// previous price and rank first in the next pass, so a cap smaller than the candidate set
+    /// rotates over it rather than starving part of it.
+    pub fn set_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
+        self.pricing_max_tokens_per_pass = Some(max_tokens);
+        self
+    }
+
+    /// Sets how long after a token-pricing pass starts the next one may start.
+    ///
+    /// The cap bounds what one pass costs; this bounds how often one runs. A block inside the
+    /// interval serves the stored prices, unless a component brought a token with no price or
+    /// the manager asked for a full recompute.
+    pub fn set_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
+        self.pricing_min_pass_interval = Some(interval);
         self
     }
 
@@ -850,6 +858,24 @@ impl FyndBuilder {
             return Err(SolverBuildError::NoPublicPool);
         }
 
+        // Warned rather than refused: the shipped worker_pools.toml carries a budget above the
+        // service's router default, so refusing here would stop a deployment that works today.
+        for (name, timeout) in pools_over_router_timeout(
+            self.pools
+                .iter()
+                .map(|pool| (pool.name(), pool.timeout())),
+            self.router_timeout,
+        ) {
+            tracing::warn!(
+                pool = name,
+                pool_timeout_ms = timeout.as_millis() as u64,
+                router_timeout_ms = self.router_timeout.as_millis() as u64,
+                "worker pool solve budget is longer than the router deadline; the router stops \
+                 waiting first, so the extra budget is only reachable for a request that raises \
+                 its own timeout_ms"
+            );
+        }
+
         // Add built-in providers if none were explicitly registered.
         if self.price_providers.is_empty() {
             self = self.add_default_price_providers();
@@ -892,10 +918,16 @@ impl FyndBuilder {
                 .iter()
                 .map(PoolEntry::max_hops),
         );
-        let computation_config = ComputationManagerConfig::new()
+        let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
         let (computation_manager, _) =
@@ -912,8 +944,6 @@ impl FyndBuilder {
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
-        // Created before the pools so every worker reads the same tiers the fetcher refreshes.
-        let fallback_fee_tiers = SharedFeeTiers::default();
 
         let pools = std::mem::take(&mut self.pools);
 
@@ -954,8 +984,7 @@ impl FyndBuilder {
                         .num_workers(num_workers)
                         .task_queue_capacity(task_queue_capacity)
                         .liquidity_scope(pool_scope)
-                        .exclude_protocols(exclude_protocols)
-                        .fallback_fee_tiers(fallback_fee_tiers.clone());
+                        .exclude_protocols(exclude_protocols);
                     let builder = self
                         .algorithms
                         .configure(&algorithm, named)?;
@@ -978,8 +1007,7 @@ impl FyndBuilder {
                         .algorithm_config(algo_cfg)
                         .num_workers(custom.num_workers)
                         .task_queue_capacity(custom.task_queue_capacity)
-                        .liquidity_scope(pool_scope)
-                        .fallback_fee_tiers(fallback_fee_tiers.clone());
+                        .liquidity_scope(pool_scope);
                     let builder = (custom.configure)(builder);
                     builder.build(
                         market_data.clone(),
@@ -1048,17 +1076,6 @@ impl FyndBuilder {
             None
         };
 
-        // The PropAMMRouter is an Ethereum mainnet deployment, so no other chain has fee tiers to
-        // read. Without the fetcher the tiers stay empty and every pAMM route is dropped.
-        //
-        // The router and venue addresses are compile-time constants, so a malformed one is a typo
-        // that would silently lose that venue's fee tiers. Fail the build instead.
-        let fee_tier_fetcher = if chain == Chain::Ethereum {
-            Some(propamm_fee_tier_fetcher(self.rpc_url.as_str(), fallback_fee_tiers.clone())?)
-        } else {
-            None
-        };
-
         // Only start price providers when the guard is enabled.
         // When disabled, per-request attempts to enable the guard return an error.
         let router_config = WorkerPoolRouterConfig::default()
@@ -1084,7 +1101,6 @@ impl FyndBuilder {
             tycho_feed,
             gas_price_fetcher,
             router_fee_fetcher,
-            fee_tier_fetcher,
             computation_manager,
             computation_event_rx,
             computation_shutdown_tx,
@@ -1125,10 +1141,6 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
-        let fee_tier_handle = match c.fee_tier_fetcher {
-            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
-            None => tokio::spawn(async {}),
-        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1145,7 +1157,6 @@ impl FyndBuilder {
             gas_price_handle,
             metrics_sampler_handle,
             router_fee_handle,
-            fee_tier_handle,
             computation_handle,
             computation_shutdown_tx: c.computation_shutdown_tx,
             chain: c.chain,
@@ -1194,10 +1205,6 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
-        let fee_tier_handle = match c.fee_tier_fetcher {
-            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
-            None => tokio::spawn(async {}),
-        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1220,7 +1227,6 @@ impl FyndBuilder {
                 gas_price_handle,
                 metrics_sampler_handle,
                 router_fee_handle,
-                fee_tier_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
                 chain: c.chain,
@@ -1273,10 +1279,6 @@ impl FyndBuilder {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
-        let fee_tier_handle = match c.fee_tier_fetcher {
-            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
-            None => tokio::spawn(async {}),
-        };
         let computation_handle = tokio::spawn(async move {
             c.computation_manager
                 .run(c.computation_event_rx, c.computation_shutdown_rx)
@@ -1299,7 +1301,6 @@ impl FyndBuilder {
                 gas_price_handle,
                 metrics_sampler_handle,
                 router_fee_handle,
-                fee_tier_handle,
                 computation_handle,
                 computation_shutdown_tx: c.computation_shutdown_tx,
                 chain: c.chain,
@@ -1322,7 +1323,6 @@ pub struct Solver {
     gas_price_handle: JoinHandle<()>,
     metrics_sampler_handle: JoinHandle<()>,
     router_fee_handle: JoinHandle<()>,
-    fee_tier_handle: JoinHandle<()>,
     computation_handle: JoinHandle<()>,
     computation_shutdown_tx: broadcast::Sender<()>,
     chain: Chain,
@@ -1422,14 +1422,8 @@ impl Solver {
     /// Solver behaves identically to a live one — call [`wait_until_ready`](Self::wait_until_ready)
     /// then [`quote`](Self::quote).
     ///
-    /// VM-backed protocol states that couldn't be serialized will be absent from
-    /// the recording. Components without states will still be registered but
-    /// won't contribute to routing.
-    ///
-    /// `rpc_url` reads the PropAMMRouter's fee tiers once, which a recording holding
-    /// `propammfallback:` components needs: without them every route through one is dropped. It is
-    /// read once and never refreshed, because a recording is solved against a single block. `None`
-    /// skips the read, and suits a recording with no such component.
+    /// The solver registers components whose state failed to decode, but does not route through
+    /// them.
     ///
     /// Requires the `test-utils` feature.
     #[cfg(feature = "test-utils")]
@@ -1438,17 +1432,9 @@ impl Solver {
         updates: Vec<tycho_simulation::protocol::models::Update>,
         pools: std::collections::HashMap<String, PoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
-        rpc_url: Option<&str>,
     ) -> Result<Self, SolverBuildError> {
-        Self::from_recording_with(
-            chain,
-            updates,
-            pools,
-            gas_price_wei,
-            rpc_url,
-            &AlgorithmRegistry::new(),
-        )
-        .await
+        Self::from_recording_with(chain, updates, pools, gas_price_wei, &AlgorithmRegistry::new())
+            .await
     }
 
     /// [`from_recording`](Self::from_recording), with algorithms the caller brought.
@@ -1468,7 +1454,6 @@ impl Solver {
         updates: Vec<tycho_simulation::protocol::models::Update>,
         pools: std::collections::HashMap<String, PoolConfig>,
         gas_price_wei: Option<num_bigint::BigUint>,
-        rpc_url: Option<&str>,
         algorithms: &AlgorithmRegistry,
     ) -> Result<Self, SolverBuildError> {
         if pools.is_empty() {
@@ -1531,10 +1516,13 @@ impl Solver {
             .with_gas_token(gas_token)
             .with_max_hop(pricing_max_hops)
             .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
-            // Replay tests assert exact priced-token counts against a deterministic recording;
-            // an effectively unbounded budget keeps a starved CI machine from cutting the
-            // pricing pass short and failing the count.
-            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60));
+            // Replay tests assert exact priced-token counts against a deterministic recording, so
+            // neither bound on a pricing pass may apply: an effectively unbounded budget keeps a
+            // starved CI machine from cutting a pass short, and an unbounded cap keeps a pass
+            // from deferring tokens to a later one that the replay never runs.
+            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60))
+            .with_pricing_max_tokens_per_pass(usize::MAX)
+            .with_pricing_min_pass_interval(Duration::ZERO);
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
@@ -1550,16 +1538,6 @@ impl Solver {
                 .run(computation_event_rx, computation_shutdown_rx)
                 .await;
         });
-
-        // Read once, before any worker can be asked for a route: a recording is one block, so
-        // there is nothing to refresh and no window in which a pAMM route would be dropped.
-        let fallback_fee_tiers = SharedFeeTiers::default();
-        if let Some(rpc_url) = rpc_url.filter(|_| chain == Chain::Ethereum) {
-            propamm_fee_tier_fetcher(rpc_url, fallback_fee_tiers.clone())?
-                .refresh_once()
-                .await
-                .map_err(|e| SolverBuildError::FeeTierFetcher(e.to_string()))?;
-        }
 
         // Build worker pools BEFORE sending MarketUpdated
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
@@ -1589,8 +1567,7 @@ impl Solver {
                     pool_cfg
                         .liquidity_scope()
                         .unwrap_or_default(),
-                )
-                .fallback_fee_tiers(fallback_fee_tiers.clone());
+                );
             let (worker_pool, task_handle) = algorithms
                 .configure(pool_cfg.algorithm(), named)?
                 .build(market_data.clone(), Arc::clone(&derived_data), pool_event_rx, derived_rx)?;
@@ -1646,7 +1623,6 @@ impl Solver {
         let gas_price_handle = tokio::spawn(async { /* no-op */ });
         let metrics_sampler_handle = tokio::spawn(async { /* no-op */ });
         let router_fee_handle = tokio::spawn(async { /* no-op */ });
-        let fee_tier_handle = tokio::spawn(async { /* no-op */ });
 
         Ok(Solver {
             router,
@@ -1658,7 +1634,6 @@ impl Solver {
             gas_price_handle,
             metrics_sampler_handle,
             router_fee_handle,
-            fee_tier_handle,
             computation_handle,
             computation_shutdown_tx,
             chain,
@@ -1677,7 +1652,6 @@ impl Solver {
         self.gas_price_handle.abort();
         self.metrics_sampler_handle.abort();
         self.router_fee_handle.abort();
-        self.fee_tier_handle.abort();
     }
 
     /// Consumes the solver into its raw parts for callers that add their own layer.
@@ -1692,7 +1666,6 @@ impl Solver {
             gas_price_handle: self.gas_price_handle,
             metrics_sampler_handle: self.metrics_sampler_handle,
             router_fee_handle: self.router_fee_handle,
-            fee_tier_handle: self.fee_tier_handle,
             computation_handle: self.computation_handle,
             computation_shutdown_tx: self.computation_shutdown_tx,
             chain: self.chain,
@@ -1723,11 +1696,6 @@ pub struct SolverParts {
     metrics_sampler_handle: JoinHandle<()>,
     /// Background task refreshing router fees from the on-chain FeeCalculator.
     router_fee_handle: JoinHandle<()>,
-    /// Background task refreshing the PropAMMRouter's Uniswap V3 fee tiers.
-    ///
-    /// Handed out as an [`AbortHandle`] by [`SolverParts::fee_tier_abort_handle`] rather than by
-    /// [`SolverParts::into_components`], so adding it did not change that function's signature.
-    fee_tier_handle: JoinHandle<()>,
     /// Background task running the computation manager.
     computation_handle: JoinHandle<()>,
     /// Send a unit value on this channel to trigger a graceful computation-manager shutdown.
@@ -1767,15 +1735,6 @@ impl SolverParts {
     /// Returns a reference to the shared router fee configuration.
     pub fn router_fees(&self) -> &SharedRouterFees {
         &self.router_fees
-    }
-
-    /// Returns a handle that stops the task refreshing the PropAMMRouter's fee tiers.
-    ///
-    /// The handle outlives [`into_components`](Self::into_components), which drops the task's
-    /// `JoinHandle` and so detaches the task. Take this before calling it, and abort it wherever
-    /// the other background tasks are aborted.
-    pub fn fee_tier_abort_handle(&self) -> AbortHandle {
-        self.fee_tier_handle.abort_handle()
     }
 
     /// Consumes the parts and returns the router.
@@ -1850,5 +1809,26 @@ mod tests {
         .build();
 
         assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
+    }
+
+    /// A pool budget above the router deadline cannot take effect for a request that does not
+    /// raise its own `timeout_ms`: the router stops waiting first.
+    #[test]
+    fn test_pools_over_router_timeout_names_the_offenders() {
+        let over = pools_over_router_timeout(
+            [("deep", Duration::from_millis(1000)), ("shallow", Duration::from_millis(50))],
+            Duration::from_millis(100),
+        );
+        assert_eq!(over, vec![("deep", Duration::from_millis(1000))]);
+    }
+
+    /// A budget equal to the router deadline is honoured in full, so it is not reported.
+    #[test]
+    fn test_pool_budget_equal_to_the_router_timeout_is_not_reported() {
+        let over = pools_over_router_timeout(
+            [("exact", Duration::from_millis(100))],
+            Duration::from_millis(100),
+        );
+        assert!(over.is_empty());
     }
 }

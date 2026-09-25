@@ -14,7 +14,8 @@ RUST_LOG=info cargo run -p record-market -- \
 ```
 
 This produces two files:
-- `market_recording.json.zst` — zstd-compressed recording of Tycho stream updates
+- `market_recording.json.zst` — zstd-compressed raw Tycho feed messages and the token list (see
+  `MarketRecording` in `test-fixtures/src/recording.rs`)
 - `expected_outputs.json` — expected quote results for canonical trading pairs
 
 The recording stores the chain in its metadata; replay (expected-output generation and the
@@ -32,7 +33,7 @@ a pairs file for it.
 | `--chain` | `ethereum` | Chain to record (any chain Tycho supports, e.g. `base`, `unichain`) |
 | `--duration-secs` | 600 | Recording duration (30s is usually sufficient) |
 | `--output-dir` | `fynd-core/tests/fixtures` | Where to write fixtures |
-| `--protocols` | auto-discover | Comma-separated protocol filter |
+| `--protocols` | all on-chain | Comma-separated, resolved as `fynd serve --protocols` resolves them (`native_onchain`, `all_onchain`, `exclude:`) |
 | `--min-tvl` | 10.0 | Minimum TVL in ETH |
 | `--min-token-quality` | 100 | Token quality threshold |
 | `--traded-n-days-ago` | 3 | Token recency filter |

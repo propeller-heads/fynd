@@ -7,7 +7,7 @@ publish = false
 license-file = "../LICENSE.md"
 
 [dependencies]
-fynd-core.workspace = true
+fynd-core = { workspace = true, features = ["test-utils"] }
 tycho-simulation.workspace = true
 serde.workspace = true
 serde_json.workspace = true
