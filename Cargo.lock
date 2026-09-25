@@ -7952,9 +7952,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.423.0"
+version = "0.427.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9d2b40f351d3d6ea82e46544ddbcff9050e795a3aa7fc99a2c83a0a416bd480"
+checksum = "4aaaf8e828d5a23677f5f925cc5edf8f7d70e06b39852939b9cabc9a770776cf"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7982,9 +7982,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.423.0"
+version = "0.427.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef11a3b588410eba043e5b2afa11868c99c1d8940446b90a10b5acf351c0278a"
+checksum = "41a4963df9f7c5256c485293c3547f77fc7bbfb407b3834eb69fb13fa56c870e"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8011,9 +8011,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.423.0"
+version = "0.427.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e2015824a9ebfadfcd77a74b8e72029b82d264d8dc0fafaea5dd43853020ca"
+checksum = "42e4e9b48acc0f04c9e24fca4bb6560cc75e453372bd22e75b3d4aef61e4fa63"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8033,9 +8033,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.423.0"
+version = "0.427.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48d8746474d9bc872e3a9d5ed28da8f2835ddc0ac659fa04ce5e44939929c680"
+checksum = "0812ee14e2d63e3b4bc5cb44accce2f692923ce7bd45b13b2cc39f1924590d9a"
 dependencies = [
  "alloy",
  "chrono",
@@ -8057,9 +8057,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.423.0"
+version = "0.427.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e673c929b1ea38023e3b16e05e4aaa7b23ad0e5e0b56af1d969de62a4c9a520"
+checksum = "38724ef0945ef9fd98f2d52acf6765bcac1a8abe46202ef90cba073a19c4ebdd"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8067,6 +8067,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "balancer-maths-rust",
+ "base64",
  "chrono",
  "dotenv",
  "ekubo_sdk",
