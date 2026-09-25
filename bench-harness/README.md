@@ -181,11 +181,11 @@ Depend on this crate, and declare a bench target that hands `run` a registry wit
 it:
 
 ```toml
-# Cargo.toml. The harness and fynd-core have to be the same revision: an `AlgorithmRegistry` built
+# Cargo.toml. The harness and fynd-core have to be the same version: an `AlgorithmRegistry` built
 # from one copy of fynd-core does not typecheck against a `run` from another.
 [dev-dependencies]
-fynd-bench-harness = { git = "https://github.com/propeller-heads/fynd", tag = "<release>" }
-fynd-core = { git = "https://github.com/propeller-heads/fynd", tag = "<release>" }
+fynd-bench-harness = "<version>"
+fynd-core = "<version>"
 tokio = { version = "1", features = ["full"] }
 
 [[bench]]
@@ -225,8 +225,8 @@ Three things have to be named from outside this repository:
 | flag | why |
 |---|---|
 | `--configs-dir` | Where the caller's config files are. Read on top of the built-in ones, which still run. A name held by two directories stops the run, so a caller cannot replace the baseline by accident |
-| `--fixture` | The market. This repository's copy is in Git LFS, so the checkout cargo makes for a git dependency holds the pointer file rather than the market — keep a copy beside the caller's tests |
-| `--trades` | The order dataset, which is gitignored here and so is not in that checkout either |
+| `--fixture` | The market. This repository's copy is in Git LFS under `fynd-core`, outside both the published package and the checkout cargo makes for a git dependency — keep a copy beside the caller's tests |
+| `--trades` | The order dataset, which is gitignored here and so is not in either of those |
 
 Everything else works as it does in this repository, the baseline included: `BF_d2` comes from the
 config files this crate ships, so a caller's algorithm is measured against the same baseline as
@@ -398,8 +398,9 @@ edited. `MarketFlags` carries `--market`, `--fixture` and the Tycho settings; `C
 The configs, the token table and the blocked list ship inside this crate, in `configs/` and
 `data/`, and are found relative to the crate rather than the working directory. A caller depending
 on this crate therefore reads the same ones without copying anything. The market fixture is the
-exception: it is in Git LFS, so a checkout cargo made for a git dependency holds the pointer file,
-and an outside caller names its own copy with `--fixture`.
+exception: it is in Git LFS under `fynd-core`, so neither the published package nor a checkout
+cargo made for a git dependency holds it, and an outside caller names its own copy with
+`--fixture`.
 
 Both targets are declared `harness = false` in `Cargo.toml`, which means they get a plain `main()`
 instead of the test harness. That is why they parse their own arguments with `clap`.

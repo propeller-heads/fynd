@@ -28,8 +28,8 @@ Key properties:
 | [`fynd-core`](../fynd-core/CLAUDE.md) | `fynd-core/` | Pure solving logic: algorithms, worker pools, graph, feed, derived data, encoding. No HTTP deps |
 | [`fynd-rpc`](../fynd-rpc/CLAUDE.md) | `fynd-rpc/` | HTTP RPC server builder (Actix Web): API handlers, middleware, `FyndRPCBuilder` |
 | [`fynd-rpc-types`](../fynd-rpc-types/CLAUDE.md) | `fynd-rpc-types/` | Shared DTO types for the RPC API (request/response wire format) |
-| `fynd-test-fixtures` | `test-fixtures/` | Shared types for recorded-market test fixtures: `MarketRecording`, expected outputs, test scenarios. Not published |
-| [`fynd-bench-harness`](../bench-harness/README.md) | `bench-harness/` | Runs the routing algorithms over one market and writes a report: the `algorithm_bench`, `profile` and `derived` targets, the configs, the viewer. Takes an `AlgorithmRegistry`, so a crate outside this workspace can benchmark its own algorithm. Not published |
+| `fynd-test-fixtures` | `test-fixtures/` | Shared types for recorded-market test fixtures: `MarketRecording`, expected outputs, test scenarios |
+| [`fynd-bench-harness`](../bench-harness/README.md) | `bench-harness/` | Runs the routing algorithms over one market and writes a report: the `algorithm_bench`, `profile` and `derived` targets, the configs, the viewer. Takes an `AlgorithmRegistry`, so a crate outside this workspace can benchmark its own algorithm |
 
 ### [Clients](../clients/CLAUDE.md)
 
@@ -49,7 +49,7 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 | `hindsight` | `tools/hindsight/` | Decode solver swaps from on-chain data; live-monitor re-solve quality |
 | `record-market` | `tools/record-market/` | Record live Tycho market state and generate expected outputs for the integration tests |
 | `fynd-gas-audit` | `tools/fynd-gas-audit/` | Compare quote-time gas estimates against `eth_estimateGas` |
-| `fynd-tools-common` | `tools/common/` | Shared internal library for tool crates |
+| `fynd-tools-common` | `tools/common/` | Shared library for the tool crates: aggregator quote model, on-chain swap simulation, BPS math |
 
 ## Architecture Overview
 

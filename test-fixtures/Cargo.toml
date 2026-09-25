@@ -3,8 +3,9 @@ name = "fynd-test-fixtures"
 version.workspace = true
 edition = "2021"
 description = "Shared types for Fynd integration test recordings and expected outputs"
-publish = false
+repository.workspace = true
 license-file = "../LICENSE.md"
+readme = "README.md"
 
 [dependencies]
 fynd-core = { workspace = true, features = ["test-utils"] }

@@ -66,6 +66,9 @@ clap.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
 toml.workspace = true
-fynd-test-fixtures.workspace = true
+# Path only, deliberately: a version here would make this a registry requirement, and
+# fynd-test-fixtures depends on fynd-core, so neither could be published first. Cargo drops a
+# path-only dev-dependency when it packages, which breaks the cycle.
+fynd-test-fixtures = { path = "../test-fixtures" }
 tracing-subscriber.workspace = true
 metrics-util.workspace = true

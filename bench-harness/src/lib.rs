@@ -8,9 +8,9 @@
 //!
 //! The configurations, the token table and the blocked list ship with this crate, in `configs/`
 //! and `data/`, and are found relative to the crate rather than the working directory. The market
-//! fixture is the exception: this repository's copy is in Git LFS, so a checkout cargo made for a
-//! git dependency holds the pointer file, and a caller from outside names its own with
-//! `--fixture`.
+//! fixture is the exception: this repository's copy is in Git LFS under `fynd-core`, so neither
+//! the published package nor a checkout cargo made for a git dependency holds the market, and a
+//! caller from outside names its own with `--fixture`.
 //!
 //! # Benchmarking an algorithm from another crate
 //!
@@ -111,8 +111,9 @@ fn data_path(file: &str) -> PathBuf {
 
 /// The dataset a run reads when `--trades` names nothing else.
 ///
-/// Only useful inside this repository: the file is gitignored for its size, so a checkout cargo
-/// made for a git dependency does not hold it, and a caller from outside names its own copy.
+/// Only useful inside this repository: the file is gitignored for its size, so neither the
+/// published package nor a checkout cargo made for a git dependency holds it, and a caller from
+/// outside names its own copy.
 pub(crate) fn default_trades_path() -> PathBuf {
     crate_path("../aggregator_trades_50k_1k_usd.json")
 }
@@ -384,9 +385,9 @@ impl ConfigCatalog {
 
 /// The fixture an offline run replays when `--fixture` names nothing else.
 ///
-/// Only useful inside this repository: the file is in Git LFS, so a checkout cargo made for a git
-/// dependency holds the pointer rather than the market, and a caller from outside names its own
-/// copy.
+/// Only useful inside this repository: the file is in Git LFS under `fynd-core`, so neither the
+/// published package nor a checkout cargo made for a git dependency holds the market, and a
+/// caller from outside names its own copy.
 fn default_fixture_path() -> PathBuf {
     crate_path("../fynd-core/tests/fixtures/market_recording.json.zst")
 }
@@ -543,8 +544,8 @@ pub(crate) struct MarketFlags {
     pub(crate) market: MarketMode,
 
     /// The market recording an offline run replays. Defaults to this repository's fixture, which a
-    /// caller depending on this crate does not have: that copy is in Git LFS, so a checkout cargo
-    /// made holds the pointer file instead of the market.
+    /// caller depending on this crate does not have: that copy is in Git LFS under `fynd-core`,
+    /// outside both the published package and a checkout cargo made for a git dependency.
     #[arg(long)]
     pub(crate) fixture: Option<PathBuf>,
 

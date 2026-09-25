@@ -45,7 +45,12 @@ jobs:
             curl -sf "https://crates.io/api/v1/crates/$1/${version}" \
               -H "User-Agent: fynd-ci (github.com/propeller-heads/fynd)" >/dev/null
           }
-          for crate in fynd-core fynd-rpc-types fynd-client fynd-rpc fynd; do
+          # Dependency order: every crate is published before anything that depends on it,
+          # because cargo resolves a dependency against the registry when it packages.
+          # fynd-test-fixtures precedes fynd-bench-harness, which depends on it; both follow
+          # fynd-core. fynd-tools-common follows fynd-client.
+          for crate in fynd-core fynd-rpc-types fynd-client fynd-rpc \
+                       fynd-test-fixtures fynd-tools-common fynd-bench-harness fynd; do
             if published "${crate}"; then
               echo "${crate} ${version} already on crates.io, skipping"
               continue

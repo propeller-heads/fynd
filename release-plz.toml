@@ -4,8 +4,13 @@
 #
 # Single root CHANGELOG.md: changelogs are disabled for every crate and enabled only on `fynd`,
 # which aggregates the published crates' commits (changelog_include) into one section per
-# release, in the conventional-changelog format. Internal tool crates are release=false: still
-# version-bumped via the shared workspace version, but excluded from changelog/tag/publish.
+# release, in the conventional-changelog format. Tool crates are release=false: still
+# version-bumped via the shared workspace version, but excluded from changelog and tag.
+#
+# release=false does not decide what reaches crates.io. Nothing here publishes (publish=false
+# above); release.yaml publishes the list it names on the release event. fynd-test-fixtures,
+# fynd-tools-common and fynd-bench-harness are on that list, because fynd-labs depends on them
+# and a git dependency there would put a second copy of fynd-core in its build.
 [workspace]
 changelog_update = false
 # All crates share the workspace version, so they all resolve to the same bare tag name.

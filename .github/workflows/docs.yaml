@@ -40,4 +40,7 @@ jobs:
             --package fynd-core \
             --package fynd-rpc-types \
             --package fynd-rpc \
-            --package fynd-client
+            --package fynd-client \
+            --package fynd-test-fixtures \
+            --package fynd-bench-harness \
+            --package fynd-tools-common
