@@ -29,6 +29,10 @@ futures = { workspace = true }
 name = "fynd-benchmark"
 path = "src/main.rs"
 
+[[bin]]
+name = "record-collector-stub"
+path = "src/bin/record_collector_stub.rs"
+
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { workspace = true, features = ["test-util"] }
