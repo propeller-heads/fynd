@@ -565,10 +565,7 @@ impl Default for TokenGasPriceComputation {
     fn default() -> Self {
         Self {
             gas_token: Address::zero(20), // ETH address
-            // The builder overrides this with the deepest configured pool's max_hops; the
-            // default matches the default pool, so a bare computation never prices deeper
-            // than a default pool routes.
-            max_hops: crate::solver::defaults::POOL_MAX_HOPS,
+            max_hops: crate::solver::defaults::PRICING_MAX_HOPS,
             probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
             pass_budget: DEFAULT_PASS_BUDGET,
             max_tokens_per_pass: DEFAULT_MAX_TOKENS_PER_PASS,

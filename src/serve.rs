@@ -367,6 +367,9 @@ async fn setup_solver(
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }
+    if let Some(max_hops) = args.pricing_max_hops {
+        builder = builder.set_pricing_max_hops(max_hops);
+    }
     if let Some(max_tokens) = args.pricing_max_tokens_per_pass {
         builder = builder.set_pricing_max_tokens_per_pass(max_tokens);
     }

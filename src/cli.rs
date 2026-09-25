@@ -60,6 +60,13 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub tycho_subscription_buffer_size: Option<usize>,
 
+    /// How far from the gas token the token-pricing pass reaches, in hops. A token within this
+    /// many hops gets a gas price; one beyond it is quoted gas-blind even when a worker pool's
+    /// `max_hops` can route to it. Each extra hop widens the walk every pass makes. Unset keeps
+    /// the built-in default.
+    #[arg(long, env)]
+    pub pricing_max_hops: Option<usize>,
+
     /// How many tokens one token-pricing pass may attempt. A pass ranks its candidates — the
     /// tokens a component arrival brought first, then the ones with no price and the ones a
     /// change points at, longest-unattempted first — and takes this many. Tokens it leaves out
