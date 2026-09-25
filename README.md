@@ -3,6 +3,8 @@
 A high-performance DeFi route-finding engine built on [Tycho](https://www.propellerheads.xyz/tycho). Finds optimal swap
 routes across multiple DeFi protocols in real-time.
 
+Fynd is provided under the [Fynd License 1.0](LICENSE.md). Use, modification, distribution, and settlement are subject to its terms.
+
 ## Features
 
 - **Multi-protocol routing** - Routes through your favorite on-chain liquidity protocol, like Uniswap, Balancer, Curve,
@@ -95,3 +97,7 @@ Client SDKs that handle quoting, token approvals, and swap execution end-to-end:
 
 - **[`fynd-client`](https://crates.io/crates/fynd-client)** — Rust
 - **[`@kayibal/fynd-client`](https://www.npmjs.com/package/@kayibal/fynd-client)** — TypeScript
+
+## License
+
+The [Fynd License 1.0](LICENSE.md) applies to Fynd-authored code, clients, tools, examples, and documentation, except material expressly identified as separately licensed. It requires settlement through the designated router and includes fee, revenue-share, and distribution conditions. Third-party components retain their own licenses.

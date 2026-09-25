@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Dependency caching layer: copy all workspace manifests and build deps first
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock LICENSE.md ./
 COPY bench-harness/Cargo.toml bench-harness/
 COPY fynd-core/Cargo.toml fynd-core/
 COPY fynd-rpc/Cargo.toml fynd-rpc/
@@ -87,6 +87,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
 COPY --from=builder /app/target/release/fynd-swap-cli /usr/local/bin/fynd-swap-cli
+COPY --from=builder /app/LICENSE.md /usr/share/licenses/fynd/LICENSE.md
 
 EXPOSE 3000 9898
 

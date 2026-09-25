@@ -3,7 +3,8 @@ name = "fynd-benchmark"
 version.workspace = true
 edition = "2021"
 description = "Benchmark and comparison tooling for Fynd solvers"
-license = "MIT"
+license-file = "../../LICENSE.md"
+repository.workspace = true
 
 [dependencies]
 fynd-client = { workspace = true }

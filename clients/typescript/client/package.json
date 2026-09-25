@@ -2,6 +2,7 @@
   "name": "@kayibal/fynd-client",
   "version": "0.97.1",
   "description": "TypeScript client for the Fynd DEX router",
+  "license": "SEE LICENSE IN LICENSE.md",
   "repository": {
     "type": "git",
     "url": "https://github.com/propeller-heads/fynd"
@@ -16,7 +17,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE.md"
   ],
   "scripts": {
     "build": "tsc",

@@ -427,10 +427,10 @@ fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
     if protocol != FallbackProtocol::UniswapV4 {
         return true;
     }
-    !component
+    component
         .static_attributes
         .get("hooks")
-        .is_some_and(|hooks| !is_zero(hooks.as_ref()))
+        .is_none_or(|hooks| is_zero(hooks.as_ref()))
 }
 
 /// Whether `token` is native ETH under either name a fallback protocol gives it.

@@ -1,12 +1,14 @@
 [workspace.package]
 version = "0.110.0"
+repository = "https://github.com/propeller-heads/fynd"
 
 [package]
 name = "fynd"
 version.workspace = true
 edition = "2021"
 description = "High-performance DeFi route-finding engine — embeddable library and CLI"
-license = "MIT"
+license-file = "LICENSE.md"
+repository.workspace = true
 
 [features]
 default = ["metrics", "jemalloc"]

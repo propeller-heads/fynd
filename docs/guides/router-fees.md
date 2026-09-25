@@ -4,6 +4,8 @@ icon: coins
 
 # Fynd Fees
 
+This page describes the on-chain fee calculation. The [Fynd License 1.0](../reference/license.md) governs settlement and also sets out revenue-share and reporting obligations, including for revenue collected off-chain.
+
 Fynd charges a fee when you execute a swap. Quotes are free.
 
 The default Fynd fee is 0.1 bps (0.001%) of swap output. Contact us for volume discounts.

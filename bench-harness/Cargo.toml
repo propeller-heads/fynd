@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 description = "Runs the routing algorithms over a market and writes a report"
 publish = false
+license-file = "../LICENSE.md"
 
 [features]
 # Per-pool simulation metering, forwarded to fynd-core. The profiler asks for it; the benchmark

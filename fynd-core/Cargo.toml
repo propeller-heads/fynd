@@ -3,7 +3,8 @@ name = "fynd-core"
 version.workspace = true
 edition = "2021"
 description = "Core solving logic for Fynd DEX router"
-license = "MIT"
+license-file = "../LICENSE.md"
+repository.workspace = true
 readme = "README.md"
 # Integration tests and their Git LFS fixtures are dev-only; excluding them keeps
 # the published crate lean and stops `cargo publish` from dirty-checking the

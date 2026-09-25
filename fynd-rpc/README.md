@@ -1,5 +1,7 @@
 # fynd-rpc
 
+This package is provided under the [Fynd License 1.0](https://github.com/propeller-heads/fynd/blob/main/LICENSE.md). Use, modification, distribution, and settlement are subject to its terms.
+
 HTTP RPC server for the [Fynd](https://fynd.xyz) DEX router.
 
 Wraps [`fynd-core`](https://crates.io/crates/fynd-core) with Actix Web and exposes swap routing

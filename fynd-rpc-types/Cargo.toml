@@ -3,7 +3,8 @@ name = "fynd-rpc-types"
 version.workspace = true
 edition = "2021"
 description = "Shared DTO types for the Fynd RPC API (request/response wire format)"
-license = "MIT"
+license-file = "../LICENSE.md"
+repository.workspace = true
 readme = "README.md"
 
 [features]

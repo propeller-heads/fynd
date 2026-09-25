@@ -3,7 +3,8 @@ name = "fynd-tools-common"
 version.workspace = true
 edition = "2021"
 description = "Shared utilities for Fynd tooling: aggregator quote model, on-chain simulation, BPS math"
-license = "MIT"
+license-file = "../../LICENSE.md"
+repository.workspace = true
 
 [dependencies]
 fynd-client = { workspace = true }

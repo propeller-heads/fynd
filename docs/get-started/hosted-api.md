@@ -25,7 +25,7 @@ layout:
 **Beta.** The hosted Fynd API is in beta. Limits, supported chains, and the surface area may change as we scale the service. There is no SLA during beta — status and incidents are posted in [our Telegram group](https://t.me/+B4CNQwv7dgIyYTJl). For production workloads with strict uptime or throughput requirements, see [Scaling beyond the hosted tiers](#scaling-beyond-the-hosted-tiers).
 {% endhint %}
 
-Fynd is an [open-source](https://github.com/propeller-heads/fynd) DEX aggregator: you send it a token pair and amount, it finds the best on-chain route across the liquidity venues it tracks, and returns the expected output plus a ready-to-submit transaction. You can run Fynd on your own hardware (see [Self-host quickstart](quickstart/README.md)) — **or you can use our hosted API and skip the setup entirely.** This page covers the hosted path: get an API key, send a request, get a route.
+Fynd is a DEX aggregator provided under the [Fynd License 1.0](../reference/license.md): you send it a token pair and amount, it finds the best on-chain route across the liquidity venues it tracks, and returns the expected output plus a ready-to-submit transaction. You can run Fynd on your own hardware (see [Self-host quickstart](quickstart/README.md)), or you can use our hosted API and skip the setup entirely. This page covers the hosted path: get an API key, send a request, get a route.
 
 The hosted API runs the **latest released Fynd** with **routing settings tuned per chain by the Fynd team**, so you always track the newest routing improvements without managing releases or worker pools yourself.
 
