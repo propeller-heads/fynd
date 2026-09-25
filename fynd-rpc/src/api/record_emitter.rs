@@ -176,14 +176,15 @@ impl RecordSink {
         if records == 0 {
             return;
         }
-        let body = match zstd::encode_all(batch.into_body().as_bytes(), COMPRESSION_LEVEL) {
-            Ok(body) => body,
-            Err(error) => {
-                error!(%error, records, "dropping a batch that could not be compressed");
-                record_drop("encode_failed", records);
-                return;
-            }
-        };
+        let body =
+            match zstd::encode_all(batch.into_body().as_bytes(), zstd::DEFAULT_COMPRESSION_LEVEL) {
+                Ok(body) => body,
+                Err(error) => {
+                    error!(%error, records, "dropping a batch that could not be compressed");
+                    record_drop("encode_failed", records);
+                    return;
+                }
+            };
         let response = self
             .client
             .post(&self.records_url)
@@ -210,10 +211,6 @@ impl RecordSink {
         }
     }
 }
-
-/// zstd's own default. The batch is compressed off the response path, but spending more CPU on a
-/// body already far under the collector's limit buys nothing.
-const COMPRESSION_LEVEL: i32 = 3;
 
 #[cfg(test)]
 mod tests {
