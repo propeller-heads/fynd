@@ -824,16 +824,16 @@ const DEFAULT_PASS_BUDGET: Duration = Duration::from_secs(30);
 
 /// Default time a pass waits for the pass before it.
 ///
-/// A capped pass costs about 0.6s on Base at `min-tvl 1`, and the manager starts another as soon
-/// as one ends, so the cap alone left pricing at a 94% duty cycle. Two seconds puts that near
-/// 30% and still refreshes the whole market in about 44s, against the 30s an uncapped pass took.
-const DEFAULT_MIN_PASS_INTERVAL: Duration = Duration::from_secs(2);
+/// A token's sell runs back along its buy route, so a capped pass costs tens of milliseconds and
+/// can run on most blocks. The interval still keeps a chain with sub-second blocks from pricing
+/// on every one of them.
+const DEFAULT_MIN_PASS_INTERVAL: Duration = Duration::from_millis(667);
 
 /// Default cap on the tokens one pass attempts.
 ///
-/// At 100 tokens per pass, the whole market of about 2200 tokens on Base at `min-tvl 1` refreshes
-/// in some 23 passes.
-const DEFAULT_MAX_TOKENS_PER_PASS: usize = 100;
+/// At 500 tokens per pass, the whole market of about 2200 tokens on Base at `min-tvl 1` refreshes
+/// in some 5 passes.
+const DEFAULT_MAX_TOKENS_PER_PASS: usize = 500;
 
 impl Default for TokenGasPriceComputation {
     fn default() -> Self {
