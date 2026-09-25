@@ -5,9 +5,9 @@
 //! dropped and counted. Dropping the incoming record rather than evicting an older one leaves the
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 //!
-//! [`record_sink`] builds the other end: a task that drains the queue, batches what it finds and
-//! POSTs each batch to `<record_sink_url>/v1/records`, zstd-compressed, at least once a second. A
-//! batch that times out or is refused is dropped and counted, never retried — the collector mints
+//! [`spawn_record_sink`] builds the other end: a task that drains the queue, batches what it finds
+//! and POSTs each batch to `<record_sink_url>/v1/records`, zstd-compressed, at least once a second.
+//! A batch that times out or is refused is dropped and counted, never retried — the collector mints
 //! a record id per record on receipt, so a second attempt at a batch that did arrive stores every
 //! record in it twice, and nothing downstream can tell the copies apart.
 
@@ -79,7 +79,7 @@ fn record_drop(reason: &'static str, records: u64) {
 /// # Panics
 ///
 /// Spawns with [`tokio::spawn`], which panics when called outside a runtime.
-pub(crate) fn record_sink(sink_url: &str) -> Result<(RecordEmitter, JoinHandle<()>)> {
+pub(crate) fn spawn_record_sink(sink_url: &str) -> Result<(RecordEmitter, JoinHandle<()>)> {
     let sink = RecordSink::new(sink_url)?;
     info!(url = %sink.records_url, "emitting quote records");
     let (emitter, receiver) = RecordEmitter::new(defaults::RECORD_QUEUE_CAPACITY);
@@ -466,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sink_rejects_a_url_that_is_not_one() {
-        assert!(record_sink("collector.internal:8080").is_err());
+        assert!(spawn_record_sink("collector.internal:8080").is_err());
     }
 
     /// The path is appended to the collector's root, whether or not it ends in a slash.

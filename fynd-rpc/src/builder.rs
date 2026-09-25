@@ -14,7 +14,10 @@ use tracing::{error, info, warn};
 use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Chain};
 
 use crate::{
-    api::{configure_app, record_emitter::record_sink, AppState, HealthTracker, RouteConfigurator},
+    api::{
+        configure_app, record_emitter::spawn_record_sink, AppState, HealthTracker,
+        RouteConfigurator,
+    },
     config::{defaults, PoolConfig},
 };
 
@@ -392,7 +395,7 @@ impl FyndRPCBuilder {
         // nothing.
         let (record_emitter, record_sink_handle) = match self.record_sink_url.as_deref() {
             Some(url) => {
-                let (emitter, handle) = record_sink(url)?;
+                let (emitter, handle) = spawn_record_sink(url)?;
                 (Some(emitter), Some(handle))
             }
             None => (None, None),
