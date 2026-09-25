@@ -10,7 +10,7 @@ Five subcommands available via `cargo run -p fynd-benchmark --release --`:
 
 - **`compare`** — Compare output quality between two solver instances. Sends identical quote requests to both and reports differences in amount out (bps), net-of-gas output (server-side `amount_out_net_gas`), gas estimates, route selection, and status. Requires two solvers running on different ports (use git worktrees to run different branches simultaneously).
 
-- **`scale`** — Measure how solver throughput scales with worker thread count. Builds and tears down the solver in-process for each iteration; no external solver instance needed. `--protocols` accepts the `all_onchain` and `native_onchain` expansion tokens (the latter drops VM-simulated `vm:*` protocols), and `--min-tvl` sets the TVL floor — both resolved via the shared `fynd_rpc::protocols::resolve_protocols`.
+- **`scale`** — Measure how solver throughput scales with worker thread count. Builds and tears down the solver in-process for each iteration; no external solver instance needed. `--protocols` accepts the `all_onchain` and `native_onchain` expansion tokens (the latter drops VM-simulated `vm:*` protocols), and `--min-tvl` sets the TVL floor — both resolved via the shared `fynd_core::feed::protocol_resolution::resolve_protocols`.
 
 - **`download-trades`** — Download the full 10k aggregator trade dataset from GitHub Releases for use with `--requests-file`.
 

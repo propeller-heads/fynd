@@ -64,7 +64,7 @@ same system both ways in one list is rejected too, so `ekubo_v3,exclusive:ekubo_
 than streaming whichever entry came last.
 
 `--protocols` here is a literal list of protocol systems. The `all_onchain` shorthand the server
-takes is expanded by `fynd_rpc::protocols::resolve_protocols`, which the benchmark does not go
+takes is expanded by `fynd_core::feed::protocol_resolution::resolve_protocols`, which the benchmark does not go
 through — name the systems you want, and give Ekubo V3 the prefix. Leaving `--protocols` off
 discovers every protocol Tycho has, none of them exclusive.
 

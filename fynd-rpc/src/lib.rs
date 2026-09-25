@@ -47,8 +47,6 @@ pub mod api;
 pub mod builder;
 /// TOML-based worker pool configuration and server defaults.
 pub mod config;
-/// Protocol discovery via the Tycho RPC.
-pub mod protocols;
 
 // Re-export parse_chain so tools that depend on fynd-rpc (not fynd-core) can use it.
 use std::path::Path;

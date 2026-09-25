@@ -264,7 +264,7 @@ pub fn register_exchanges_for_live_capture(
 ///
 /// Registration is keyed by protocol system, so naming one system both with and without the
 /// `exclusive:` prefix would silently keep whichever entry came last. Callers that expand a
-/// protocol list (`fynd_rpc::protocols::resolve_protocols`) merge the variants before getting here;
+/// protocol list (`protocol_resolution::resolve_protocols`) merge the variants before getting here;
 /// a hand-assembled list gets an error instead of an order-dependent stream.
 fn parse_protocols(entries: &[String]) -> Result<Vec<ProtocolSpec>, DataFeedError> {
     let mut protocols = Vec::with_capacity(entries.len());

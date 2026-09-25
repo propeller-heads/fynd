@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
-use fynd_core::feed::protocol_registry::open_recording_stream;
-use fynd_rpc::protocols::resolve_protocols;
+use fynd_core::feed::{
+    protocol_registry::open_recording_stream, protocol_resolution::resolve_protocols,
+};
 use fynd_test_fixtures::{MarketRecording, RecordingMetadata, SCHEMA_VERSION};
 use tycho_simulation::{
     tycho_client::feed::{component_tracker::ComponentFilter, dto},

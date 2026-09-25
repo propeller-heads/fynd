@@ -83,7 +83,7 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
     let rpc_url = crate::serve::resolve_rpc_url(&args.chain, args.rpc_url.as_deref())
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let protocols = fynd_rpc::protocols::resolve_protocols(
+    let protocols = fynd_core::feed::protocol_resolution::resolve_protocols(
         &tycho_url,
         args.tycho_api_key.as_deref(),
         !args.disable_tls,

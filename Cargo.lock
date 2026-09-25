@@ -3514,6 +3514,7 @@ dependencies = [
  "fastrand",
  "futures 0.3.32",
  "fynd-client",
+ "fynd-core",
  "fynd-rpc",
  "fynd-tools-common",
  "num-bigint",
@@ -3584,6 +3585,7 @@ dependencies = [
  "tycho-simulation",
  "typetag",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -3642,7 +3644,6 @@ dependencies = [
  "utoipa 5.5.0",
  "utoipa-swagger-ui",
  "uuid",
- "wiremock",
 ]
 
 [[package]]

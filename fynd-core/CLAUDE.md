@@ -11,7 +11,7 @@ applications.
 | `solver.rs`           | `FyndBuilder` assembles the full pipeline (feed + gas + computations + pools + encoder + router). `Solver` runs it                                                                 |
 | `worker_pool/`        | `WorkerPool` manages dedicated OS threads. `SolverWorker` runs a prioritized select loop (shutdown > market events > derived events > tasks). `TaskQueue` is `async_channel`-based. Two rules keep components out of one worker's graph: `should_drop_component` (a free function here) for exclusive components in a `PublicOnly` pool and for the pool's `exclude_protocols`, and `fallback::manager::PammManager` for pAMMs the market does not back. The first holds for the worker's life; the pAMM rule expires, so `PammManager::apply_pamm_admission` re-decides it per market event, in both directions, on `propamm_admissions_total{outcome=admitted|withheld|evicted,pool}`. `price_impact` runs after route finding: it computes `price_impact_bps` from the route token map and each swap's reported spot price, supports linear and split routes, and reads no shared `MarketState`. On failure the worker omits the field, logs at debug, and increments `worker_pool_price_impact_calculations_total{pool,outcome}` |
 | `worker_pool_router/` | `WorkerPoolRouter` allocates the worker pools that serve each order (`allocation`: `OrderClass` matched by `SolverPoolHandle::serves`), fans out to those, drops candidates whose pAMM fallback misses `min_amount_out`, ranks the rest by `amount_out_net_gas` descending; price guard (if enabled) validates in rank order; optionally encodes |
-| `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`. `component_filter` drops components from one worker's graph topology and incoming events; `exclusivity` classifies exclusive components |
+| `feed/`               | `TychoFeed` (WebSocket → MarketState), `GasPriceFetcher`, `MarketEvent` broadcasting, `ProtocolRegistry`. `protocol_resolution::resolve_protocols` turns a `--protocols` list into protocol systems: it expands `all_onchain`/`native_onchain` from the Tycho RPC, merges `exclusive:` entries, applies `exclude:` entries, and drops systems Tycho does not serve. `component_filter` drops components from one worker's graph topology and incoming events; `exclusivity` classifies exclusive components |
 | `derived/`            | `ComputationManager` runs `SpotPriceComputation` and `TokenGasPriceComputation` in one stage, then `ComponentDepthComputation`, every block. `ReadinessTracker` gates workers until data is fresh |
 | `graph/`              | `pub` — `GraphManager` trait (initialize + incremental update), `PetgraphStableDiGraphManager`, `StableDiGraph` (re-exported), `EdgeWeightUpdaterWithDerived`, `Path` type           |
 | `fallback/`           | Picks the pool each `fallback:` leg falls back to and prices the route through it. Tycho's `TychoFallbackRouter` retries a failed pAMM leg on a fallback pool the encoder names, so the solver chooses it: `FallbackPoolIndex` indexes candidate pools by pair, admitting a component whose protocol system tycho-execution's `FallbackProtocol::from_protocol_system` maps to a protocol `supported_on` the component's chain (none on a chain with no router, so its pAMMs are all withheld), and never a hooked Uniswap V4 pool; `price_through_fallbacks` runs `select_fallback` on every pAMM leg, taking the candidate pool with the best simulated amount out that the request's route filter does not exclude, stamps it on the `Swap` as a `FallbackLeg`, and replays the route through those fallbacks in the same pass. `WorkerPoolRouter` drops the route candidate before ranking when that amount cannot clear `min_amount_out`, which keeps describing the pAMM quote and the user's slippage. Selection and replay share one `FallbackError`, whose `rejection()` gives the `RouteRejection` the worker reports. `PammManager` (`manager.rs`) owns one worker's pAMM state — the fallback pool index and where each pAMM stands: `withhold_from_graph` decides them all for a new graph, `apply_pamm_admission` re-decides them per event as candidate pools arrive and leave |
@@ -142,7 +142,7 @@ its own registration function in `feed/protocol_registry.rs`:
 
 `register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
 `TychoFeed` which sources to open. `is_tycho_system` is the per-entry form of the first, used by
-`register_exchanges` to skip these entries and exported so `fynd_rpc::protocols` can leave them out
+`register_exchanges` to skip these entries and exported so `feed::protocol_resolution` can leave them out
 of its Tycho availability check. All three feed loops (`run`, `run_with_pending`,
 `run_with_step_controller`) select over whichever sources are configured and hand every `Update`
 to the same `handle_tycho_message`. Both non-Tycho streams are opened before the loop answers its
@@ -171,7 +171,7 @@ chain of its own). Its components arrive labelled `fallback:{venue}`, tycho-exec
 protocol system (`vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory),
 so drop the
 Tycho one with an `exclude:` entry rather than streaming both. `EXCLUDE_PREFIX` and
-`parse_exclusion` live here with the other entry prefixes; `fynd_rpc::protocols` applies them
+`parse_exclusion` live here with the other entry prefixes; `feed::protocol_resolution` applies them
 after expanding `all_onchain`.
 
 ## Exclusive Liquidity (restricted)
@@ -193,7 +193,7 @@ Tycho only sees the bare system name.
 `parse_protocols` also rejects a list naming one protocol both with and without the prefix. Registration
 is keyed by system name (the stream builder and decoder both hold `HashMap`s), so such a list would
 otherwise stream whichever variant happened to come last. Callers going through
-`fynd_rpc::protocols::resolve_protocols` never hit this — it merges the variants first — but a
+`feed::protocol_resolution::resolve_protocols` never hit this — it merges the variants first — but a
 `Vec<String>` assembled by hand for `FyndBuilder::new` can, and gets an error rather than an
 order-dependent stream.
 

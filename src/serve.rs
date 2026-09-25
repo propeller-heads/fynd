@@ -12,12 +12,11 @@ use std::time::Duration;
 
 #[cfg(feature = "metrics")]
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
-use fynd_core::AlgorithmRegistry;
+use fynd_core::{feed::protocol_resolution::resolve_protocols, AlgorithmRegistry};
 use fynd_rpc::{
     builder::FyndRPCBuilder,
     config::{defaults, BlocklistConfig, WorkerPoolsConfig},
     parse_chain,
-    protocols::resolve_protocols,
 };
 #[cfg(feature = "metrics")]
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};

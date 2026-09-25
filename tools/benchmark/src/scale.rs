@@ -14,11 +14,11 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use fynd_client::FyndClientBuilder;
+use fynd_core::feed::protocol_resolution::resolve_protocols;
 use fynd_rpc::{
     builder::{FyndRPC, FyndRPCBuilder},
     config::{PoolConfig, WorkerPoolsConfig},
     parse_chain,
-    protocols::resolve_protocols,
 };
 use serde::Serialize;
 use tracing::info;
