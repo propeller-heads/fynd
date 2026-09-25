@@ -47,8 +47,8 @@ impl RecordEmitter {
     pub(crate) fn emit(&self, record: QuoteRecord) {
         match self.sender.try_send(record) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => record_drop("queue_full", 1),
-            Err(TrySendError::Closed(_)) => record_drop("sender_stopped", 1),
+            Err(TrySendError::Full(_)) => record_dropped("queue_full", 1),
+            Err(TrySendError::Closed(_)) => record_dropped("sender_stopped", 1),
         }
     }
 }
@@ -60,7 +60,7 @@ impl RecordEmitter {
 /// `collector_timeout` when the POST carrying them did not finish in time, `collector_rejected`
 /// when the collector turned them down, and `collector_unreachable` when the POST never got that
 /// far.
-fn record_drop(reason: &'static str, records: u64) {
+fn record_dropped(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
 
@@ -130,7 +130,7 @@ impl Batch {
             // types.
             Err(error) => {
                 error!(%error, "dropping a quote record that cannot be serialized");
-                record_drop("encode_failed", 1);
+                record_dropped("encode_failed", 1);
             }
         }
     }
@@ -185,7 +185,7 @@ impl Collector {
                 Ok(body) => body,
                 Err(error) => {
                     error!(%error, records, "dropping a batch that could not be compressed");
-                    record_drop("encode_failed", records);
+                    record_dropped("encode_failed", records);
                     return;
                 }
             };
@@ -202,15 +202,15 @@ impl Collector {
             Ok(response) if response.status().is_success() => record_sent(records),
             Ok(response) => {
                 warn!(status = %response.status(), records, "collector refused a batch of records");
-                record_drop("collector_rejected", records);
+                record_dropped("collector_rejected", records);
             }
             Err(error) if error.is_timeout() => {
                 warn!(%error, records, "collector did not answer in time");
-                record_drop("collector_timeout", records);
+                record_dropped("collector_timeout", records);
             }
             Err(error) => {
                 warn!(%error, records, "could not reach the collector");
-                record_drop("collector_unreachable", records);
+                record_dropped("collector_unreachable", records);
             }
         }
     }
