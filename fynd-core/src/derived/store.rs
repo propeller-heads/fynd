@@ -2,7 +2,7 @@
 
 use std::{any::Any, str::FromStr, sync::Arc, time::Instant};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tracing::warn;
 use tycho_simulation::tycho_common::models::Address;
@@ -15,7 +15,7 @@ use super::{
         TokenGasPrices, TokenPricesWithDeps,
     },
 };
-use crate::derived::SharedDerivedDataRef;
+use crate::{derived::SharedDerivedDataRef, types::ComponentId};
 
 /// A computed value paired with the block it was computed for.
 #[derive(Debug)]
@@ -430,6 +430,21 @@ impl DerivedData {
     // Bulk Operations
     // -------------------------------------------------------------------------
 
+    /// Drops the spot price and component depth failures of `removed` components.
+    ///
+    /// An incremental update drops a failure only when its key succeeds, and a removed component
+    /// never succeeds again, so without this its failures stay for the life of the process.
+    pub(crate) fn drop_failures_of_removed(&mut self, removed: &[ComponentId]) {
+        if removed.is_empty() {
+            return;
+        }
+        let removed: FxHashSet<&ComponentId> = removed.iter().collect();
+        self.spot_prices_failed
+            .retain(|(component_id, _, _), _| !removed.contains(component_id));
+        self.component_depths_failed
+            .retain(|(component_id, _, _), _| !removed.contains(component_id));
+    }
+
     /// Clears all stored data, including all failure maps.
     pub fn clear_all(&mut self) {
         self.slots.clear();
@@ -663,6 +678,34 @@ mod tests {
             Some((7, &FailedItemError::SimulationFailed("depth error".into())))
         );
         assert_eq!(store.component_depth_failure(&pair_key("component2", 0x01, 0x02)), None);
+    }
+
+    #[test]
+    fn test_drop_failures_of_removed() {
+        let failure = |component: &str| {
+            let key = format!("{component}/{}/{}", addr(0x01), addr(0x02));
+            failed(&key, FailedItemError::MissingSimulationState)
+        };
+        let mut store = DerivedData::new();
+        store.set_spot_prices(Default::default(), vec![failure("gone"), failure("kept")], 1, true);
+        store.set_component_depths(
+            Default::default(),
+            vec![failure("gone"), failure("kept")],
+            1,
+            true,
+        );
+
+        store.drop_failures_of_removed(&["gone".to_string()]);
+
+        let key = |component: &str| pair_key(component, 0x01, 0x02);
+        assert_eq!(store.spot_price_failure(&key("gone")), None);
+        assert_eq!(store.component_depth_failure(&key("gone")), None);
+        assert!(store
+            .spot_price_failure(&key("kept"))
+            .is_some());
+        assert!(store
+            .component_depth_failure(&key("kept"))
+            .is_some());
     }
 
     #[test]
