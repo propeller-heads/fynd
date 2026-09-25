@@ -137,6 +137,9 @@ pub(crate) struct ReachedToken {
     pub(crate) amount_out: BigUint,
     /// The components the path runs through, in hop order.
     pub(crate) components: Vec<ComponentId>,
+    /// The path's hops in route order: the node of the token each hop sells, the node of the
+    /// token it buys, and the component it swaps through.
+    pub(crate) hops: Vec<(NodeIndex, NodeIndex, ComponentId)>,
 }
 
 /// Controls how `find_single_route` ranks candidate routes after simulation.
@@ -456,11 +459,13 @@ impl BellmanFordAlgorithm {
                 }
             };
             let components = path_edges
-                .into_iter()
-                .map(|(_, _, component_id)| component_id)
+                .iter()
+                .map(|(_, _, component_id)| component_id.clone())
                 .collect();
-            reached
-                .insert(address.clone(), ReachedToken { amount_out: amount.clone(), components });
+            reached.insert(
+                address.clone(),
+                ReachedToken { amount_out: amount.clone(), components, hops: path_edges },
+            );
         }
 
         debug!(
@@ -1774,6 +1779,24 @@ mod tests {
             .map(|t| t.address.clone())
             .collect();
         assert_eq!(reached, expected);
+        let hops_to_c: Vec<(&Address, &Address, &str)> = routes.reached[&token_c.address]
+            .hops
+            .iter()
+            .map(|(sold_node, bought_node, component_id)| {
+                (
+                    &ctx.node_address[sold_node],
+                    &ctx.node_address[bought_node],
+                    component_id.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hops_to_c,
+            vec![
+                (&token_g.address, &token_b.address, "component_gb"),
+                (&token_b.address, &token_c.address, "component_bc"),
+            ]
+        );
     }
 
     #[tokio::test]
