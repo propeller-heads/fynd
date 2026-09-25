@@ -5,12 +5,10 @@
 //! dropped and counted. Dropping the incoming record rather than evicting an older one leaves the
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 //!
-//! [`spawn_record_sender`] builds the other end: a task that drains the queue, batches what it
-//! finds and POSTs each batch to `<collector_url>/v1/records`, zstd-compressed, within a second of
-//! the batch's first record. A batch that times out or is refused is dropped and counted, never
-//! retried — the collector mints a record id per record on receipt, so a second attempt at a batch
-//! that did arrive stores every record in it twice, and nothing downstream can tell the copies
-//! apart.
+//! [`spawn_record_sender`] builds the other end: a task that drains the queue and POSTs each batch
+//! to `<collector_url>/v1/records`, zstd-compressed, within a second of the batch's first record.
+//! A batch that fails is dropped and counted, never retried: the collector mints the record ids on
+//! receipt, so a retry stores every record in that batch a second time.
 
 use std::num::NonZeroUsize;
 
@@ -36,17 +34,16 @@ impl RecordEmitter {
     /// Creates the queue, returning the emitter the handler holds and the receiver the sending
     /// task drains. The queue holds `capacity` records; one arriving at a full queue is dropped.
     ///
-    /// The capacity is a [`NonZeroUsize`] because a queue of zero has no room for anything: it
-    /// would drop every record, so a misread config would silence the whole feed rather than fail
-    /// where it was read.
+    /// The capacity is a [`NonZeroUsize`] because a queue of zero would drop every record, and
+    /// that belongs where the config is read, not here.
     #[must_use]
     pub(crate) fn new(capacity: NonZeroUsize) -> (Self, mpsc::Receiver<QuoteRecord>) {
         let (sender, receiver) = mpsc::channel(capacity.get());
         (Self { sender }, receiver)
     }
 
-    /// Queues `record`, or drops it and counts the drop. Called on the response path, so it only
-    /// ever moves the record into the queue — nothing it does waits on the sending task.
+    /// Queues `record`, or drops it and counts the drop. Runs on the response path, so it never
+    /// waits on the sending task.
     pub(crate) fn emit(&self, record: QuoteRecord) {
         match self.sender.try_send(record) {
             Ok(()) => {}
@@ -67,22 +64,19 @@ fn record_drop(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
 
-/// Counts `records` the collector took, the denominator the drop count is read against: without
-/// it, no drops reads the same whether the pipeline is healthy or nothing is being recorded.
+/// Counts `records` the collector took. Drops only mean something against this: with nothing
+/// sent, a drop count of zero says the pipeline is idle, not healthy.
 fn record_sent(records: u64) {
     counter!("quote_records_sent_total").increment(records);
 }
 
-/// Builds the record queue and starts the task draining it into the collector at `collector_url`,
-/// the collector's root — the task appends the `/v1/records` path itself.
-///
-/// A deployment with no collector never calls this: it holds no emitter, and its handler records
-/// nothing.
+/// Builds the record queue and starts the task draining it into the collector rooted at
+/// `collector_url`; the task appends the `/v1/records` path itself.
 ///
 /// # Errors
 ///
-/// Returns an error when `collector_url` is not a URL, so a typo stops the pod at startup rather
-/// than silently dropping every record it serves.
+/// Returns an error when `collector_url` is not an http(s) URL, so a typo stops the pod at startup
+/// instead of dropping every record it serves.
 ///
 /// # Panics
 ///
@@ -97,9 +91,9 @@ pub(crate) fn spawn_record_sender(collector_url: &str) -> Result<(RecordEmitter,
 /// Drains `receiver` into `collector`, one batch at a time, until the queue closes.
 ///
 /// A batch is sent when it fills up or when [`RECORD_FLUSH_INTERVAL`](defaults::
-/// RECORD_FLUSH_INTERVAL) has passed since its first record, whichever comes first, so a quiet
-/// pod still ships what it has rather than holding it. Sending is sequential: while a POST is in
-/// flight the queue absorbs what the handler serves, and drops it once full.
+/// RECORD_FLUSH_INTERVAL) has passed since its first record, so a quiet pod ships what it has.
+/// Sending is sequential: while a POST is in flight the queue takes what the handler serves, and
+/// drops it once full.
 async fn drain_into(collector: Collector, mut receiver: mpsc::Receiver<QuoteRecord>) {
     while let Some(first) = receiver.recv().await {
         let deadline = Instant::now() + defaults::RECORD_FLUSH_INTERVAL;
