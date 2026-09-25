@@ -182,7 +182,7 @@ pub struct ServeArgs {
 
     /// Root URL of the collector every answered quote's record is posted to, in batches, on
     /// `<url>/v1/records`. When unset, no records are queued and none are sent.
-    #[arg(long, env)]
+    #[arg(long, env = "FYND_COLLECTOR_URL")]
     pub collector_url: Option<String>,
 
     /// Port for the Prometheus metrics HTTP server (requires `metrics` feature).

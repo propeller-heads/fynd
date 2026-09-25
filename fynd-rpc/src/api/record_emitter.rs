@@ -67,6 +67,12 @@ fn record_drop(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
 
+/// Counts `records` the collector took, the denominator the drop count is read against: without
+/// it, no drops reads the same whether the pipeline is healthy or nothing is being recorded.
+fn record_sent(records: u64) {
+    counter!("quote_records_sent_total").increment(records);
+}
+
 /// Builds the record queue and starts the task draining it into the collector at `collector_url`,
 /// the collector's root — the task appends the `/v1/records` path itself.
 ///
@@ -198,7 +204,7 @@ impl Collector {
             .send()
             .await;
         match response {
-            Ok(response) if response.status().is_success() => {}
+            Ok(response) if response.status().is_success() => record_sent(records),
             Ok(response) => {
                 warn!(status = %response.status(), records, "collector refused a batch of records");
                 record_drop("collector_rejected", records);
@@ -268,20 +274,21 @@ mod tests {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, f);
-        drops_of(snapshotter.snapshot().into_vec())
+        drops_of(&snapshotter.snapshot().into_vec())
     }
 
+    /// One metric as the debugging recorder hands it back.
+    type Recorded = (
+        metrics_util::CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        DebugValue,
+    );
+
     /// The `quote_records_dropped_total` counts in a recorder snapshot, by reason.
-    fn drops_of(
-        recorded: Vec<(
-            metrics_util::CompositeKey,
-            Option<metrics::Unit>,
-            Option<metrics::SharedString>,
-            DebugValue,
-        )>,
-    ) -> Vec<(String, u64)> {
+    fn drops_of(recorded: &[Recorded]) -> Vec<(String, u64)> {
         recorded
-            .into_iter()
+            .iter()
             .filter(|(key, _, _, _)| key.key().name() == "quote_records_dropped_total")
             .map(|(key, _, _, value)| {
                 let reason = key
@@ -292,7 +299,7 @@ mod tests {
                     .value()
                     .to_string();
                 let DebugValue::Counter(count) = value else { panic!("not a counter: {value:?}") };
-                (reason, count)
+                (reason, *count)
             })
             .collect()
     }
@@ -385,24 +392,22 @@ mod tests {
         serde_json::from_slice(&body).expect("body is the collector's JSON")
     }
 
-    /// Feeds `records` through a collector client pointed at `server` and returns the drops it
-    /// emitter is dropped straight away, so the task ships one batch and stops instead of
-    /// waiting out the flush interval.
-    async fn drain_to(server: &wiremock::MockServer, records: u64) -> Vec<(String, u64)> {
+    /// Feeds `records` through a collector client pointed at `server` and returns what the
+    /// sender recorded. The emitter is dropped straight away, so the task ships one batch and
+    /// stops instead of waiting out the flush interval.
+    async fn drain_to(server: &wiremock::MockServer, records: u64) -> Vec<Recorded> {
         let collector = Collector::new(&server.uri()).expect("the stub's URI is a URL");
         let (emitter, receiver) = RecordEmitter::new(queue_of(16));
         for amount in 1..=records {
             emitter.emit(record(amount));
         }
         drop(emitter);
-        drops_by_reason_async(drain_into(collector, receiver)).await
+        metrics_after(drain_into(collector, receiver)).await
     }
 
-    /// [`drops_by_reason`] for a future: the local recorder is thread-local, and these tests run
-    /// on a current-thread runtime, so the future is driven to completion inside the closure.
-    async fn drops_by_reason_async(
-        task: impl std::future::Future<Output = ()>,
-    ) -> Vec<(String, u64)> {
+    /// Everything `task` records. The local recorder is thread-local and these tests run on a
+    /// current-thread runtime, so the future is driven to completion inside the closure.
+    async fn metrics_after(task: impl std::future::Future<Output = ()>) -> Vec<Recorded> {
         let mut task = Box::pin(task);
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -410,7 +415,18 @@ mod tests {
             metrics::with_local_recorder(&recorder, || task.as_mut().poll(cx))
         })
         .await;
-        drops_of(snapshotter.snapshot().into_vec())
+        snapshotter.snapshot().into_vec()
+    }
+
+    /// The records the collector took, per `quote_records_sent_total`.
+    fn sent_of(recorded: &[Recorded]) -> u64 {
+        recorded
+            .iter()
+            .find(|(key, _, _, _)| key.key().name() == "quote_records_sent_total")
+            .map_or(0, |(_, _, _, value)| {
+                let DebugValue::Counter(count) = value else { panic!("not a counter: {value:?}") };
+                *count
+            })
     }
 
     /// Every record queued before the sender shuts down arrives, in one batch.
@@ -418,9 +434,11 @@ mod tests {
     async fn test_collector_posts_queued_records_in_one_batch() {
         let server = stub_collector(202, Duration::ZERO).await;
 
-        let drops = drain_to(&server, 3).await;
+        let recorded = drain_to(&server, 3).await;
 
+        let drops = drops_of(&recorded);
         assert!(drops.is_empty(), "nothing was dropped: {drops:?}");
+        assert_eq!(sent_of(&recorded), 3, "every record in the batch counts as sent");
         let batch = received_batch(&server).await;
         let records = batch["records"]
             .as_array()
@@ -436,9 +454,10 @@ mod tests {
         let server =
             stub_collector(202, defaults::RECORD_POST_TIMEOUT + Duration::from_secs(1)).await;
 
-        let drops = drain_to(&server, 2).await;
+        let recorded = drain_to(&server, 2).await;
 
-        assert_eq!(drops, vec![("collector_timeout".to_string(), 2)]);
+        assert_eq!(drops_of(&recorded), vec![("collector_timeout".to_string(), 2)]);
+        assert_eq!(sent_of(&recorded), 0, "a batch that timed out is not counted as sent");
     }
 
     /// A refused batch is dropped where it stands. Retrying it would duplicate every record in
@@ -447,9 +466,9 @@ mod tests {
     async fn test_collector_counts_a_refusal() {
         let server = stub_collector(400, Duration::ZERO).await;
 
-        let drops = drain_to(&server, 2).await;
+        let recorded = drain_to(&server, 2).await;
 
-        assert_eq!(drops, vec![("collector_rejected".to_string(), 2)]);
+        assert_eq!(drops_of(&recorded), vec![("collector_rejected".to_string(), 2)]);
         assert_eq!(
             server
                 .received_requests()
@@ -470,9 +489,9 @@ mod tests {
         emitter.emit(record(1));
         drop(emitter);
 
-        let drops = drops_by_reason_async(drain_into(collector, receiver)).await;
+        let recorded = metrics_after(drain_into(collector, receiver)).await;
 
-        assert_eq!(drops, vec![("collector_unreachable".to_string(), 1)]);
+        assert_eq!(drops_of(&recorded), vec![("collector_unreachable".to_string(), 1)]);
     }
 
     #[tokio::test]
