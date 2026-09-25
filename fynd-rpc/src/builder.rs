@@ -388,11 +388,15 @@ impl FyndRPCBuilder {
             computation_shutdown_tx,
         ) = parts.into_components();
 
-        let (record_emitter, record_sink_handle) =
-            match record_sink(self.record_sink_url.as_deref())? {
-                Some((emitter, handle)) => (Some(emitter), Some(handle)),
-                None => (None, None),
-            };
+        // No collector configured, nothing built: no queue, no task, and a handler that records
+        // nothing.
+        let (record_emitter, record_sink_handle) = match self.record_sink_url.as_deref() {
+            Some(url) => {
+                let (emitter, handle) = record_sink(url)?;
+                (Some(emitter), Some(handle))
+            }
+            None => (None, None),
+        };
 
         let app_state = AppState::new(
             router,

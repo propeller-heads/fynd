@@ -50,25 +50,25 @@ impl RecordEmitter {
         match self.sender.try_send(record) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => record_drop("queue_full", 1),
-            Err(TrySendError::Closed(_)) => record_drop("sink_closed", 1),
+            Err(TrySendError::Closed(_)) => record_drop("sender_stopped", 1),
         }
     }
 }
 
 /// Counts `records` this pod will not store, under `quote_records_dropped_total{reason}`.
 ///
-/// The reasons: `queue_full` when the queue had no room for them, `sink_closed` when the sending
-/// task is gone, `sink_timeout` when the POST carrying them did not finish in time, and
-/// `sink_rejected` when the collector refused them or could not be reached.
+/// The reasons: `queue_full` when the queue had no room for them, `sender_stopped` when the task
+/// draining it is gone, `sink_timeout` when the POST carrying them did not finish in time,
+/// and `sink_rejected` when the collector turned them down or could not be reached.
 fn record_drop(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
 
-/// Builds the record queue and starts the task draining it into the collector at `sink_url`.
+/// Builds the record queue and starts the task draining it into the collector at `sink_url`, the
+/// collector's root — the task appends the `/v1/records` path itself.
 ///
-/// Returns `Ok(None)` when no collector is configured: no queue, no task, and a handler holding
-/// no emitter records nothing. `sink_url` is the collector's root — the task appends the
-/// `/v1/records` path itself.
+/// A deployment with no collector never calls this: it holds no emitter, and its handler records
+/// nothing.
 ///
 /// # Errors
 ///
@@ -78,16 +78,11 @@ fn record_drop(reason: &'static str, records: u64) {
 /// # Panics
 ///
 /// Spawns with [`tokio::spawn`], which panics when called outside a runtime.
-pub(crate) fn record_sink(
-    sink_url: Option<&str>,
-) -> Result<Option<(RecordEmitter, JoinHandle<()>)>> {
-    let Some(sink_url) = sink_url else {
-        return Ok(None);
-    };
+pub(crate) fn record_sink(sink_url: &str) -> Result<(RecordEmitter, JoinHandle<()>)> {
     let sink = RecordSink::new(sink_url)?;
     info!(url = %sink.records_url, "emitting quote records");
     let (emitter, receiver) = RecordEmitter::new(defaults::RECORD_QUEUE_CAPACITY);
-    Ok(Some((emitter, tokio::spawn(drain_into(sink, receiver)))))
+    Ok((emitter, tokio::spawn(drain_into(sink, receiver))))
 }
 
 /// Drains `receiver` into `sink`, one batch at a time, until the queue closes.
@@ -348,7 +343,7 @@ mod tests {
 
         let drops = drops_by_reason(|| emitter.emit(record(1)));
 
-        assert_eq!(drops, vec![("sink_closed".to_string(), 1)]);
+        assert_eq!(drops, vec![("sender_stopped".to_string(), 1)]);
     }
 
     /// Emitting into a full queue neither panics nor waits: the response path never pays for a
@@ -468,17 +463,9 @@ mod tests {
         );
     }
 
-    /// No collector configured, nothing built: no queue to fill and no task to run.
-    #[tokio::test]
-    async fn test_no_sink_without_a_url() {
-        assert!(record_sink(None)
-            .expect("no URL is not an error")
-            .is_none());
-    }
-
     #[tokio::test]
     async fn test_sink_rejects_a_url_that_is_not_one() {
-        assert!(record_sink(Some("collector.internal:8080")).is_err());
+        assert!(record_sink("collector.internal:8080").is_err());
     }
 
     /// The path is appended to the collector's root, whether or not it ends in a slash.
