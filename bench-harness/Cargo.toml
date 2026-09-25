@@ -3,8 +3,22 @@ name = "fynd-bench-harness"
 version.workspace = true
 edition = "2021"
 description = "Runs the routing algorithms over a market and writes a report"
-publish = false
+repository.workspace = true
 license-file = "../LICENSE.md"
+readme = "README.md"
+# `configs/` and `data/` are read at run time, resolved against the manifest directory, so the
+# package has to carry them. `data/` is also where large local datasets land, hence a whitelist.
+include = [
+    "src/**",
+    "benches/**",
+    "configs/**",
+    "data/blocked_tokens.toml",
+    "data/dataset.sql",
+    "data/tokens.json",
+    "analysis/**",
+    "viewer/**",
+    "README.md",
+]
 
 [features]
 # Per-pool simulation metering, forwarded to fynd-core. The profiler asks for it; the benchmark
