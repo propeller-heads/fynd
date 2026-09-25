@@ -6,10 +6,11 @@
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 //!
 //! [`spawn_record_sender`] builds the other end: a task that drains the queue, batches what it
-//! finds and POSTs each batch to `<record_collector_url>/v1/records`, zstd-compressed, at least
-//! once a second. A batch that times out or is refused is dropped and counted, never retried — the
-//! collector mints a record id per record on receipt, so a second attempt at a batch that did
-//! arrive stores every record in it twice, and nothing downstream can tell the copies apart.
+//! finds and POSTs each batch to `<collector_url>/v1/records`, zstd-compressed, within a second of
+//! the batch's first record. A batch that times out or is refused is dropped and counted, never
+//! retried — the collector mints a record id per record on receipt, so a second attempt at a batch
+//! that did arrive stores every record in it twice, and nothing downstream can tell the copies
+//! apart.
 
 use std::num::NonZeroUsize;
 
