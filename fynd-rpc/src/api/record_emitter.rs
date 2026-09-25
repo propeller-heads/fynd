@@ -82,7 +82,7 @@ fn record_sent(records: u64) {
 ///
 /// Spawns with [`tokio::spawn`], which panics when called outside a runtime.
 pub(crate) fn spawn_record_sender(collector_url: &str) -> Result<(RecordEmitter, JoinHandle<()>)> {
-    let collector = Collector::new(collector_url)?;
+    let collector = RecordCollector::new(collector_url)?;
     info!(url = %collector.records_url, "emitting quote records");
     let (emitter, receiver) = RecordEmitter::new(defaults::RECORD_QUEUE_CAPACITY);
     Ok((emitter, tokio::spawn(drain_into(collector, receiver))))
@@ -94,7 +94,7 @@ pub(crate) fn spawn_record_sender(collector_url: &str) -> Result<(RecordEmitter,
 /// RECORD_FLUSH_INTERVAL) has passed since its first record, so a quiet pod ships what it has.
 /// Sending is sequential: while a POST is in flight the queue takes what the handler serves, and
 /// drops it once full.
-async fn drain_into(collector: Collector, mut receiver: mpsc::Receiver<QuoteRecord>) {
+async fn drain_into(collector: RecordCollector, mut receiver: mpsc::Receiver<QuoteRecord>) {
     while let Some(first) = receiver.recv().await {
         let deadline = Instant::now() + defaults::RECORD_FLUSH_INTERVAL;
         let mut batch = Batch::default();
@@ -153,12 +153,12 @@ impl Batch {
 }
 
 /// The collector endpoint, and the client that posts to it.
-struct Collector {
+struct RecordCollector {
     client: reqwest::Client,
     records_url: String,
 }
 
-impl Collector {
+impl RecordCollector {
     /// Builds the client for the collector rooted at `collector_url`, failing on a URL that is not
     /// one.
     fn new(collector_url: &str) -> Result<Self> {
@@ -391,7 +391,7 @@ mod tests {
     /// sender recorded. The emitter is dropped straight away, so the task ships one batch and
     /// stops instead of waiting out the flush interval.
     async fn drain_to(server: &wiremock::MockServer, records: u64) -> Vec<Recorded> {
-        let collector = Collector::new(&server.uri()).expect("the stub's URI is a URL");
+        let collector = RecordCollector::new(&server.uri()).expect("the stub's URI is a URL");
         let (emitter, receiver) = RecordEmitter::new(queue_of(16));
         for amount in 1..=records {
             emitter.emit(record(amount));
@@ -479,7 +479,7 @@ mod tests {
     #[tokio::test]
     async fn test_collector_counts_an_unreachable_collector() {
         // Port 1 is reserved and bound by nothing, so the connection fails outright.
-        let collector = Collector::new("http://127.0.0.1:1").expect("a URL");
+        let collector = RecordCollector::new("http://127.0.0.1:1").expect("a URL");
         let (emitter, receiver) = RecordEmitter::new(queue_of(4));
         emitter.emit(record(1));
         drop(emitter);
@@ -499,7 +499,7 @@ mod tests {
     #[case("http://collector.internal:8080")]
     #[case("http://collector.internal:8080/")]
     fn test_collector_url_names_the_records_endpoint(#[case] root: &str) {
-        let collector = Collector::new(root).expect("a URL");
+        let collector = RecordCollector::new(root).expect("a URL");
         assert_eq!(collector.records_url, "http://collector.internal:8080/v1/records");
     }
 
