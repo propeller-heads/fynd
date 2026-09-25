@@ -58,8 +58,9 @@ impl RecordEmitter {
 /// Counts `records` this pod will not store, under `quote_records_dropped_total{reason}`.
 ///
 /// The reasons: `queue_full` when the queue had no room for them, `sender_stopped` when the task
-/// draining it is gone, `sink_timeout` when the POST carrying them did not finish in time,
-/// and `sink_rejected` when the collector turned them down or could not be reached.
+/// draining it is gone, `encode_failed` when they could not be turned into a request body,
+/// `sink_timeout` when the POST carrying them did not finish in time, and `sink_rejected` when
+/// the collector turned them down or could not be reached.
 fn record_drop(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
@@ -127,10 +128,10 @@ impl Batch {
                 self.records.push(json);
             }
             // Every field of a record is an owned primitive, so this needs a bug in the record
-            // types. The collector would refuse the record either way.
+            // types.
             Err(error) => {
                 error!(%error, "dropping a quote record that cannot be serialized");
-                record_drop("sink_rejected", 1);
+                record_drop("encode_failed", 1);
             }
         }
     }
@@ -182,7 +183,7 @@ impl RecordSink {
             Ok(body) => body,
             Err(error) => {
                 error!(%error, records, "dropping a batch that could not be compressed");
-                record_drop("sink_rejected", records);
+                record_drop("encode_failed", records);
                 return;
             }
         };
