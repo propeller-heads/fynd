@@ -59,8 +59,8 @@ impl RecordEmitter {
 ///
 /// The reasons: `queue_full` when the queue had no room for them, `sender_stopped` when the task
 /// draining it is gone, `encode_failed` when they could not be turned into a request body,
-/// `sink_timeout` when the POST carrying them did not finish in time, and `sink_rejected` when
-/// the collector turned them down or could not be reached.
+/// `sink_timeout` when the POST carrying them did not finish in time, `sink_rejected` when the
+/// collector turned them down, and `sink_unreachable` when the POST never got that far.
 fn record_drop(reason: &'static str, records: u64) {
     counter!("quote_records_dropped_total", "reason" => reason).increment(records);
 }
@@ -206,7 +206,7 @@ impl RecordSink {
             }
             Err(error) => {
                 warn!(%error, records, "could not reach the collector");
-                record_drop("sink_rejected", records);
+                record_drop("sink_unreachable", records);
             }
         }
     }
@@ -456,6 +456,20 @@ mod tests {
             1,
             "a refused batch is never retried"
         );
+    }
+
+    /// A collector that cannot be reached at all is counted apart from one that answered.
+    #[tokio::test]
+    async fn test_sink_counts_an_unreachable_collector() {
+        // Port 1 is reserved and bound by nothing, so the connection fails outright.
+        let sink = RecordSink::new("http://127.0.0.1:1").expect("a URL");
+        let (emitter, receiver) = RecordEmitter::new(queue_of(4));
+        emitter.emit(record(1));
+        drop(emitter);
+
+        let drops = drops_by_reason_async(drain_into(sink, receiver)).await;
+
+        assert_eq!(drops, vec![("sink_unreachable".to_string(), 1)]);
     }
 
     #[tokio::test]
