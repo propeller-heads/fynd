@@ -112,24 +112,28 @@ async fn build_dry_run_overrides(
     spender: Address,
 ) -> anyhow::Result<StorageOverrides> {
     info!("Detecting storage slots for {sell_token:#x}...");
-    let layout = discover_layout(provider, sell_token, sender, spender).await?;
-    let balance_slot = layout.balance_slot(sender);
-    let allowance_slot = layout.allowance_slot(sender, spender);
+    let layout = discover_layout(provider, sell_token).await?;
+    let (balance_slot, balance_value) = layout.encode_balance(sender, U256::MAX);
+    let (allowance_slot, allowance_value) = layout.encode_allowance(sender, spender, U256::MAX);
     info!(
         "Found balance slot {balance_slot} and allowance slot {allowance_slot} in {:#x}",
         layout.storage_contract()
     );
 
-    // Use MAX >> 1 (clear the top bit) to avoid triggering tokens that pack metadata into
-    // bit 255 of the storage slot — e.g. USDC uses the top bit as a blacklist flag.
-    // 2^255 - 1 is still large enough to cover any realistic balance or allowance.
-    let max_val = Bytes::copy_from_slice(&B256::from(U256::MAX >> 1).0);
     // A proxy keeps its balances somewhere other than the address the swap calls, so the write
     // goes to the contract discovery named rather than to the token.
     let token_key = Bytes::copy_from_slice(layout.storage_contract().as_slice());
     let mut overrides = StorageOverrides::default();
-    overrides.insert(token_key.clone(), Bytes::copy_from_slice(&balance_slot.0), max_val.clone());
-    overrides.insert(token_key, Bytes::copy_from_slice(&allowance_slot.0), max_val);
+    overrides.insert(
+        token_key.clone(),
+        Bytes::copy_from_slice(&balance_slot.0),
+        Bytes::copy_from_slice(&balance_value.0),
+    );
+    overrides.insert(
+        token_key,
+        Bytes::copy_from_slice(&allowance_slot.0),
+        Bytes::copy_from_slice(&allowance_value.0),
+    );
     Ok(overrides)
 }
 

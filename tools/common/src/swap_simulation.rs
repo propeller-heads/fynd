@@ -52,8 +52,8 @@ pub struct EthCallRunner {
     provider: Arc<RootProvider<Ethereum>>,
     /// Fixed sender used in all quotes — overridden in state to hold sufficient balance.
     sender: Address,
-    /// Per-(token, spender) storage layout (discovered once, cached for the run).
-    layouts: Arc<Mutex<HashMap<(Address, Address), TokenLayout>>>,
+    /// Per-token storage layout (discovered once, cached for the run).
+    layouts: Arc<Mutex<HashMap<Address, TokenLayout>>>,
     /// Set to `false` after the first `eth_simulateV1` "method not found" error so subsequent
     /// calls skip straight to the `eth_call` fallback without retrying.
     simulate_supported: Arc<AtomicBool>,
@@ -354,8 +354,6 @@ impl EthCallRunner {
         token_in: Address,
         router: Address,
     ) -> anyhow::Result<StateOverride> {
-        // Use MAX >> 1: avoids triggering tokens that pack metadata into bit 255 (e.g. USDC).
-        let max_val = B256::from(U256::MAX >> 1);
         let eth_balance = U256::MAX >> 1;
 
         let mut overrides = StateOverride::default();
@@ -368,11 +366,12 @@ impl EthCallRunner {
         );
 
         if token_in != Address::ZERO {
-            let layout = self.layout(token_in, router).await?;
+            let layout = self.layout(token_in).await?;
 
-            let mut state_diff = B256HashMap::default();
-            state_diff.insert(layout.balance_slot(self.sender), max_val);
-            state_diff.insert(layout.allowance_slot(self.sender, router), max_val);
+            let state_diff = B256HashMap::from_iter([
+                layout.encode_balance(self.sender, U256::MAX),
+                layout.encode_allowance(self.sender, router, U256::MAX),
+            ]);
 
             // A proxy keeps its balances somewhere other than the address the swap calls, so the
             // write goes to the contract discovery named rather than to the token.
@@ -385,18 +384,18 @@ impl EthCallRunner {
         Ok(overrides)
     }
 
-    async fn layout(&self, token: Address, spender: Address) -> anyhow::Result<TokenLayout> {
+    async fn layout(&self, token: Address) -> anyhow::Result<TokenLayout> {
         {
             let cache = self.layouts.lock().await;
-            if let Some(&layout) = cache.get(&(token, spender)) {
-                return Ok(layout);
+            if let Some(layout) = cache.get(&token) {
+                return Ok(layout.clone());
             }
         }
-        let layout = discover_layout(&self.provider, token, self.sender, spender).await?;
+        let layout = discover_layout(&self.provider, token).await?;
         self.layouts
             .lock()
             .await
-            .insert((token, spender), layout);
+            .insert(token, layout.clone());
         Ok(layout)
     }
 }

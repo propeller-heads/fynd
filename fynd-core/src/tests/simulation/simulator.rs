@@ -16,7 +16,9 @@ use super::*;
 use crate::{
     simulation::{
         deviation::fixtures::quote_with_fees,
-        token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
+        token_layout::fixtures::{
+            push_solidity_discovery, push_unrecoverable_discovery, solidity_layout,
+        },
     },
     tests::metrics::recorded_metrics,
 };
@@ -45,10 +47,8 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
     let router = Address::repeat_byte(2);
     let token = Address::repeat_byte(3);
     let permit2 = Address::repeat_byte(4);
-    let balance = MappingPosition::Direct { base: 5, key_order: KeyOrder::Solidity };
-    let allowance = MappingPosition::Direct { base: 6, key_order: KeyOrder::Solidity };
-    let layout = TokenLayout::new(token, balance, allowance);
-    let overrides = token_overrides(sender, router, permit2, layout);
+    let layout = solidity_layout(token, 5, 6);
+    let overrides = token_overrides(sender, router, permit2, &layout);
     let state_diff = overrides
         .get(&token)
         .and_then(|override_| override_.state_diff.as_ref())
@@ -56,10 +56,15 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 
     // A `transfer_from` route pulls from the sender and a `use_vaults_funds` one from the router,
     // so both hold a balance and the sender approves both spenders a route can name.
-    assert!(state_diff.contains_key(&layout.balance_slot(sender)));
-    assert!(state_diff.contains_key(&layout.balance_slot(router)));
-    assert!(state_diff.contains_key(&layout.allowance_slot(sender, router)));
-    assert!(state_diff.contains_key(&layout.allowance_slot(sender, permit2)));
+    let writes = [
+        layout.encode_balance(sender, SIMULATION_FUNDING_VALUE),
+        layout.encode_balance(router, SIMULATION_FUNDING_VALUE),
+        layout.encode_allowance(sender, router, SIMULATION_FUNDING_VALUE),
+        layout.encode_allowance(sender, permit2, SIMULATION_FUNDING_VALUE),
+    ];
+    for (slot, word) in writes {
+        assert_eq!(state_diff.get(&slot), Some(&word), "slot {slot:#x}");
+    }
     assert_eq!(state_diff.len(), 4);
 }
 
@@ -244,49 +249,19 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     );
 }
 
-/// A prestate trace naming one account and the slots its read touched.
-fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
-    let storage: serde_json::Map<String, serde_json::Value> = slots
-        .iter()
-        .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
-        .collect();
-    serde_json::json!({ format!("{contract:#x}"): { "storage": storage } })
-}
-
-/// Queues one full discovery: a balance trace and probe, then an allowance trace and probe.
-fn push_successful_discovery(
-    asserter: &Asserter,
-    token: Address,
-    holder: Address,
-    spender: Address,
-) {
-    let layout = TokenLayout::new(
-        token,
-        MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
-        MappingPosition::Direct { base: 0, key_order: KeyOrder::Solidity },
-    );
-    let sentinel = Bytes::from(B256::from(PROBE_SENTINEL).to_vec());
-    asserter.push_success(&prestate(token, &[layout.balance_slot(holder)]));
-    asserter.push_success(&sentinel);
-    asserter.push_success(&prestate(token, &[layout.allowance_slot(holder, spender)]));
-    asserter.push_success(&sentinel);
-}
-
 #[tokio::test]
 async fn test_layout_cache_reuses_a_resolved_layout() {
     let asserter = Asserter::new();
     let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
     let token = Address::repeat_byte(3);
-    let holder = Address::repeat_byte(1);
-    let spender = Address::repeat_byte(2);
-    push_successful_discovery(&asserter, token, holder, spender);
+    push_solidity_discovery(&asserter, token, 0, 0);
 
     let first = simulator
-        .cached_layout(token, holder, spender)
+        .cached_layout(token)
         .await
         .expect("discovery resolves the layout");
     let second = simulator
-        .cached_layout(token, holder, spender)
+        .cached_layout(token)
         .await
         .expect("the second call reads the cache");
 
@@ -302,19 +277,16 @@ async fn test_layout_cache_reuses_a_resolved_layout() {
 async fn test_layout_cache_remembers_an_unsupported_token() {
     let asserter = Asserter::new();
     let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
-    // Both balance views name a slot no convention produces, so recovery fails on the token
+    // Both balance views name a slot no traced hash yields, so recovery fails on the token
     // itself rather than on the node.
-    for _ in 0..2 {
-        asserter.push_success(&prestate(Address::repeat_byte(3), &[B256::repeat_byte(0x99)]));
-        asserter.push_success(&Bytes::from(B256::from(PROBE_SENTINEL).to_vec()));
-    }
+    push_unrecoverable_discovery(&asserter, Address::repeat_byte(3));
 
     let first = simulator
-        .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))
+        .cached_layout(Address::repeat_byte(3))
         .await
         .expect_err("the token's layout is not one this build recovers");
     let second = simulator
-        .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))
+        .cached_layout(Address::repeat_byte(3))
         .await
         .expect_err("the verdict is remembered");
 
@@ -330,22 +302,18 @@ async fn test_layout_cache_retries_after_a_node_failure() {
     let asserter = Asserter::new();
     let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
     let token = Address::repeat_byte(3);
-    let holder = Address::repeat_byte(1);
-    let spender = Address::repeat_byte(2);
     asserter.push_failure(ErrorPayload {
         code: -32005,
         message: "limit exceeded".into(),
         data: None,
     });
-    push_successful_discovery(&asserter, token, holder, spender);
+    push_solidity_discovery(&asserter, token, 0, 0);
 
     let refused = simulator
-        .cached_layout(token, holder, spender)
+        .cached_layout(token)
         .await
         .expect_err("the node refused the trace");
-    let resolved = simulator
-        .cached_layout(token, holder, spender)
-        .await;
+    let resolved = simulator.cached_layout(token).await;
 
     assert!(refused.contains("discovery failed"), "{refused}");
     assert!(resolved.is_ok(), "the retry resolves: {resolved:?}");
