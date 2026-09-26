@@ -180,31 +180,32 @@ async fn discover_balance(
     holder: Address,
 ) -> Result<(Address, MappingPosition), DiscoveryError> {
     let probes = [
-        IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode(),
-        ISharesToken::sharesOfCall { account: holder }.abi_encode(),
+        ("balanceOf", IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode()),
+        ("sharesOf", ISharesToken::sharesOfCall { account: holder }.abi_encode()),
     ];
-    let mut failure = DiscoveryError::Unsupported(format!(
-        "could not identify a balance storage slot for {token:#x}"
-    ));
-    for calldata in probes {
-        match find_accessed_slot(provider, token, &calldata).await {
+    // Every view's reason is kept: most tokens have no `sharesOf`, so its failure alone would
+    // hide why `balanceOf` did not resolve.
+    let mut failures = Vec::new();
+    for (view, calldata) in probes {
+        let reason = match find_accessed_slot(provider, token, &calldata).await {
             Ok((storage_contract, observed)) => {
                 if let Some(position) =
                     recover_position(observed, |position| balance_slot(holder, position))
                 {
                     return Ok((storage_contract, position));
                 }
-                failure = DiscoveryError::Unsupported(format!(
+                format!(
                     "could not recover a supported balance mapping for {token:#x}; observed slot {observed:#x}"
-                ));
+                )
             }
             // A node that refused to answer says nothing about the token, so it ends discovery
             // rather than sending the caller on to a view this token may not even have.
             Err(error @ DiscoveryError::Rpc(_)) => return Err(error),
-            Err(error) => failure = error,
-        }
+            Err(DiscoveryError::Unsupported(reason)) => reason,
+        };
+        failures.push(format!("{view}: {reason}"));
     }
-    Err(failure)
+    Err(DiscoveryError::Unsupported(failures.join("; ")))
 }
 
 /// Finds the slot a read-only call depends on, by overwriting each slot it touched in turn.

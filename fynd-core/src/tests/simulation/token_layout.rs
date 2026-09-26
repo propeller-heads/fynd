@@ -258,6 +258,33 @@ async fn test_discover_balance_falls_back_to_the_shares_view() {
     assert_eq!(position, solidity(0));
 }
 
+/// Most tokens have no `sharesOf`, so its failure must not replace why `balanceOf` failed.
+#[tokio::test]
+async fn test_discover_balance_reports_every_view() {
+    let contract = Address::repeat_byte(3);
+    let asserter = Asserter::new();
+    // `balanceOf` reads a slot that moves the answer but that no known convention produces.
+    asserter.push_success(&prestate(contract, &[B256::repeat_byte(0x99)]));
+    asserter.push_success(&Bytes::from(sentinel_word()));
+    // `sharesOf` reads nothing that moves the answer.
+    asserter.push_success(&prestate(contract, &[B256::repeat_byte(0xff)]));
+    asserter.push_failure(revert_payload());
+
+    let error = discover_balance(
+        &mocked_provider(&asserter),
+        Address::repeat_byte(9),
+        Address::repeat_byte(1),
+    )
+    .await
+    .expect_err("neither view places the mapping");
+
+    let DiscoveryError::Unsupported(reason) = error else {
+        panic!("expected an unsupported layout, got {error:?}");
+    };
+    assert!(reason.contains("balanceOf: could not recover"), "{reason}");
+    assert!(reason.contains("sharesOf: could not identify"), "{reason}");
+}
+
 /// Exercises the exact layouts that motivated the trace-guided path: USDT, whose storage the
 /// sentinel probe could not place, and stETH, whose balance is derived from shares.
 ///
