@@ -52,8 +52,8 @@ pub struct EthCallRunner {
     provider: Arc<RootProvider<Ethereum>>,
     /// Fixed sender used in all quotes — overridden in state to hold sufficient balance.
     sender: Address,
-    /// Per-(token, spender) storage layout (discovered once, cached for the run).
-    layouts: Arc<Mutex<HashMap<(Address, Address), TokenLayout>>>,
+    /// Per-token storage layout (discovered once, cached for the run).
+    layouts: Arc<Mutex<HashMap<Address, TokenLayout>>>,
     /// Set to `false` after the first `eth_simulateV1` "method not found" error so subsequent
     /// calls skip straight to the `eth_call` fallback without retrying.
     simulate_supported: Arc<AtomicBool>,
@@ -368,7 +368,7 @@ impl EthCallRunner {
         );
 
         if token_in != Address::ZERO {
-            let layout = self.layout(token_in, router).await?;
+            let layout = self.layout(token_in).await?;
 
             let mut state_diff = B256HashMap::default();
             state_diff.insert(layout.balance_slot(self.sender), max_val);
@@ -385,10 +385,10 @@ impl EthCallRunner {
         Ok(overrides)
     }
 
-    async fn layout(&self, token: Address, spender: Address) -> anyhow::Result<TokenLayout> {
+    async fn layout(&self, token: Address) -> anyhow::Result<TokenLayout> {
         {
             let cache = self.layouts.lock().await;
-            if let Some(layout) = cache.get(&(token, spender)) {
+            if let Some(layout) = cache.get(&token) {
                 return Ok(layout.clone());
             }
         }
@@ -396,7 +396,7 @@ impl EthCallRunner {
         self.layouts
             .lock()
             .await
-            .insert((token, spender), layout.clone());
+            .insert(token, layout.clone());
         Ok(layout)
     }
 }
