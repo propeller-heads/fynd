@@ -56,10 +56,15 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 
     // A `transfer_from` route pulls from the sender and a `use_vaults_funds` one from the router,
     // so both hold a balance and the sender approves both spenders a route can name.
-    assert!(state_diff.contains_key(&layout.balance_slot(sender)));
-    assert!(state_diff.contains_key(&layout.balance_slot(router)));
-    assert!(state_diff.contains_key(&layout.allowance_slot(sender, router)));
-    assert!(state_diff.contains_key(&layout.allowance_slot(sender, permit2)));
+    let writes = [
+        layout.encode_balance(sender, SIMULATION_FUNDING_VALUE),
+        layout.encode_balance(router, SIMULATION_FUNDING_VALUE),
+        layout.encode_allowance(sender, router, SIMULATION_FUNDING_VALUE),
+        layout.encode_allowance(sender, permit2, SIMULATION_FUNDING_VALUE),
+    ];
+    for (slot, word) in writes {
+        assert_eq!(state_diff.get(&slot), Some(&word), "slot {slot:#x}");
+    }
     assert_eq!(state_diff.len(), 4);
 }
 

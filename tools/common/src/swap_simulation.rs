@@ -354,8 +354,6 @@ impl EthCallRunner {
         token_in: Address,
         router: Address,
     ) -> anyhow::Result<StateOverride> {
-        // Use MAX >> 1: avoids triggering tokens that pack metadata into bit 255 (e.g. USDC).
-        let max_val = B256::from(U256::MAX >> 1);
         let eth_balance = U256::MAX >> 1;
 
         let mut overrides = StateOverride::default();
@@ -370,9 +368,10 @@ impl EthCallRunner {
         if token_in != Address::ZERO {
             let layout = self.layout(token_in).await?;
 
-            let mut state_diff = B256HashMap::default();
-            state_diff.insert(layout.balance_slot(self.sender), max_val);
-            state_diff.insert(layout.allowance_slot(self.sender, router), max_val);
+            let state_diff = B256HashMap::from_iter([
+                layout.encode_balance(self.sender, U256::MAX),
+                layout.encode_allowance(self.sender, router, U256::MAX),
+            ]);
 
             // A proxy keeps its balances somewhere other than the address the swap calls, so the
             // write goes to the contract discovery named rather than to the token.

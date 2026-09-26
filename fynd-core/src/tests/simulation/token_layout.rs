@@ -207,7 +207,7 @@ async fn test_find_accessed_slot_takes_the_candidate_that_moves_the_answer() {
         .await
         .expect("the second candidate answers");
 
-    assert_eq!(found, AccessedSlot { storage_contract: contract, slot: mapping });
+    assert_eq!(found, AccessedSlot { storage_contract: contract, slot: mapping, value_shift: 0 });
 }
 
 /// Every probe reverting means every candidate is genuinely wrong, which is a property of the
@@ -254,6 +254,51 @@ async fn test_find_accessed_slot_reports_rpc_when_the_trace_fails() {
         .expect_err("the trace failed");
 
     assert!(matches!(error, DiscoveryError::Rpc(_)), "{error:?}");
+}
+
+/// A token that keeps flags in the low byte reports the stored word shifted right, and the probe
+/// still has to recognise the slot.
+#[tokio::test]
+async fn test_find_accessed_slot_measures_a_shifted_value() {
+    let contract = Address::repeat_byte(3);
+    let mapping = B256::repeat_byte(0x99);
+    let asserter = Asserter::new();
+    asserter.push_success(&prestate(contract, &[mapping]));
+    asserter.push_success(&Bytes::from(B256::from(PROBE_SENTINEL >> 8).to_vec()));
+
+    let found = find_accessed_slot(&mocked_provider(&asserter), Address::repeat_byte(9), &[0x70])
+        .await
+        .expect("the shifted sentinel identifies the slot");
+
+    assert_eq!(found, AccessedSlot { storage_contract: contract, slot: mapping, value_shift: 8 });
+}
+
+#[rstest]
+#[case::exact(B256::from(PROBE_SENTINEL).to_vec(), Some(0))]
+#[case::low_byte_dropped(B256::from(PROBE_SENTINEL >> 8).to_vec(), Some(8))]
+#[case::other_value(B256::from(PROBE_SENTINEL * U256::from(3_u8)).to_vec(), None)]
+#[case::zero(vec![0_u8; 32], None)]
+#[case::short(vec![0xde, 0xad], None)]
+fn test_read_value_shift(#[case] response: Vec<u8>, #[case] expected: Option<u8>) {
+    assert_eq!(read_value_shift(&response), expected);
+}
+
+#[test]
+fn test_encode_shifts_the_amount_into_place() {
+    let mapping = Mapping::<1> { slot: SlotTemplate { steps: Vec::new() }, value_shift: 8 };
+    let amount = U256::from(1_000_u32);
+    assert_eq!(mapping.encode(amount), B256::from(amount << 8));
+}
+
+/// An amount too large for the shifted field is capped, and the cap keeps bit 255 clear.
+#[rstest]
+#[case::unshifted(0)]
+#[case::shifted(8)]
+fn test_encode_caps_below_the_top_bit(#[case] value_shift: u8) {
+    let mapping = Mapping::<1> { slot: SlotTemplate { steps: Vec::new() }, value_shift };
+    let stored = U256::from_be_bytes(mapping.encode(U256::MAX).0);
+    assert!(!stored.bit(255), "{stored:#x}");
+    assert_eq!(stored >> usize::from(value_shift), U256::MAX >> usize::from(value_shift + 1));
 }
 
 /// The input sits past the start of memory and between other steps, as a real trace has it.
@@ -364,13 +409,16 @@ async fn test_discover_balance_falls_back_to_the_shares_view() {
     let slot = keccak256(shares.last().expect("a mapping hashes"));
     push_mapping(&asserter, contract, slot, &shares);
 
-    let (storage_contract, template) =
+    let (storage_contract, mapping) =
         discover_balance(&mocked_provider(&asserter), Address::repeat_byte(9))
             .await
             .expect("the shares view places the mapping");
 
     assert_eq!(storage_contract, contract);
-    assert_eq!(template.slot(&[usdc()]), solidity_layout(Address::ZERO, 0, 0).balance_slot(usdc()));
+    assert_eq!(
+        mapping.slot.slot(&[usdc()]),
+        solidity_layout(Address::ZERO, 0, 0).balance_slot(usdc())
+    );
 }
 
 /// Most tokens have no `sharesOf`, so its failure must not replace why `balanceOf` failed.
@@ -403,8 +451,7 @@ async fn reported_with(
     token: Address,
     storage: Address,
     calldata: &[u8],
-    slot: B256,
-    word: B256,
+    (slot, word): (B256, B256),
 ) -> Option<U256> {
     match provider
         .call(token_call(token, calldata))
@@ -425,12 +472,13 @@ async fn reported_with(
 
 /// Exercises layouts that motivated the trace-guided path: USDT, whose storage the sentinel
 /// probe could not place; stETH, whose balance is derived from shares; mUSD, whose mappings sit
-/// under its own ERC-7201 namespace; and CULT, a Solady token.
+/// under its own ERC-7201 namespace; CULT, a Solady token; and AUSD, which keeps flags in the
+/// low byte of each balance word.
 ///
-/// Asserts the property the discovery exists for -- storing an amount in the discovered slot
-/// makes the token report that amount -- for holders other than the probe keys discovery traced,
-/// which is what the replayed template has to get right. Requires an endpoint serving
-/// `debug_traceCall`, so it stays opt-in.
+/// Asserts the property the discovery exists for -- storing the encoded amount makes the token
+/// report that amount -- for holders other than the probe keys discovery traced, which is what
+/// the replayed template has to get right. Requires an endpoint serving `debug_traceCall`, so it
+/// stays opt-in.
 #[tokio::test]
 #[ignore = "requires RPC_URL with debug_traceCall support"]
 async fn test_discovers_mainnet_layouts() {
@@ -449,6 +497,7 @@ async fn test_discovers_mainnet_layouts() {
         address!("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"),
         address!("0xacA92E438df0B2401fF60dA7E4337B687a2435DA"),
         address!("0x0000000000c5dc95539589fbD24BE07c6C14eCa4"),
+        address!("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a"),
     ];
 
     for token in tokens {
@@ -463,21 +512,18 @@ async fn test_discovers_mainnet_layouts() {
             IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode(),
             ISharesToken::sharesOfCall { account: holder }.abi_encode(),
         ];
-        let slot = layout.balance_slot(holder);
+        let write = layout.encode_balance(holder, amount);
         let mut funds = false;
         for calldata in balance_views {
-            funds |= reported_with(&provider, token, storage, &calldata, slot, B256::from(amount))
-                .await ==
-                Some(amount);
+            funds |=
+                reported_with(&provider, token, storage, &calldata, write).await == Some(amount);
         }
         assert!(funds, "{token:#x}: the discovered balance slot does not set the balance");
 
         let allowance_calldata =
             IERC20LayoutProbe::allowanceCall { owner: holder, spender }.abi_encode();
-        let slot = layout.allowance_slot(holder, spender);
-        let approved =
-            reported_with(&provider, token, storage, &allowance_calldata, slot, B256::from(amount))
-                .await;
+        let write = layout.encode_allowance(holder, spender, amount);
+        let approved = reported_with(&provider, token, storage, &allowance_calldata, write).await;
         assert_eq!(
             approved,
             Some(amount),

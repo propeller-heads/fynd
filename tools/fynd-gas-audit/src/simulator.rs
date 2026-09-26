@@ -7,7 +7,7 @@
 
 use alloy::{
     network::Ethereum,
-    primitives::{Address, Signature, B256, U256},
+    primitives::{Address, Signature, U256},
     providers::{Provider, RootProvider},
 };
 use bytes::Bytes;
@@ -23,12 +23,6 @@ use num_traits::ToPrimitive;
 /// exact division.
 const MAX_FEE_PER_GAS_WEI: u128 = 1_000_000_000_000;
 
-// U256::MAX >> 1 avoids clobbering tokens that pack metadata into bit 255
-// (e.g. USDC's blacklist flag).
-fn huge_balance() -> B256 {
-    B256::from(U256::MAX >> 1)
-}
-
 /// Discover the storage layout of `token_in`, then build `StorageOverrides` that give `sender`
 /// a huge ERC-20 balance + allowance to `router`, plus a huge native-ETH balance
 /// so the node accepts the `gas_limit * max_fee_per_gas` affordability check.
@@ -40,28 +34,23 @@ async fn build_fynd_overrides(
 ) -> anyhow::Result<StorageOverrides> {
     let layout = discover_layout(provider, token_in).await?;
 
-    let huge = huge_balance();
     let mut overrides = StorageOverrides::default();
     // A proxy keeps its balances somewhere other than the address the swap calls, so the write
     // goes to the contract discovery named rather than to the token.
     let storage = Bytes::copy_from_slice(layout.storage_contract().as_slice());
-    overrides.insert(
-        storage.clone(),
-        Bytes::copy_from_slice(layout.balance_slot(sender).as_slice()),
-        Bytes::copy_from_slice(huge.as_slice()),
-    );
-    overrides.insert(
-        storage,
-        Bytes::copy_from_slice(
-            layout
-                .allowance_slot(sender, router)
-                .as_slice(),
-        ),
-        Bytes::copy_from_slice(huge.as_slice()),
-    );
+    for (slot, word) in [
+        layout.encode_balance(sender, U256::MAX),
+        layout.encode_allowance(sender, router, U256::MAX),
+    ] {
+        overrides.insert(
+            storage.clone(),
+            Bytes::copy_from_slice(slot.as_slice()),
+            Bytes::copy_from_slice(word.as_slice()),
+        );
+    }
     overrides.set_native_balance(
         Bytes::copy_from_slice(sender.as_slice()),
-        BigUint::from_bytes_be(huge.as_slice()),
+        BigUint::from_bytes_be(&(U256::MAX >> 1_u8).to_be_bytes::<32>()),
     );
     Ok(overrides)
 }
