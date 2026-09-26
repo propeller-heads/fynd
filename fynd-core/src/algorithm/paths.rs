@@ -17,7 +17,10 @@ use super::{most_liquid::DepthAndPrice, NoPathReason};
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
     derived::types::TokenGasPrices,
-    feed::market_data::{MarketData, MarketDataView, MarketState},
+    feed::{
+        market_data::{MarketData, MarketDataView, MarketState},
+        market_maker::MarketMaker,
+    },
     graph::{GraphError, Path, RouteSearch, TokenPath, TopologyGraph},
     types::{ComponentId, Route, RouteResult, Swap},
     AlgorithmError, StateLabel,
@@ -47,6 +50,33 @@ pub fn find_paths<'a, D>(
     }
 
     Ok(paths)
+}
+
+/// The market makers `path` fills against, per `market_makers` (keyed by component).
+pub fn market_makers_on<'m, D>(
+    path: &Path<'_, D>,
+    market_makers: &'m FxHashMap<ComponentId, MarketMaker>,
+) -> impl Iterator<Item = &'m MarketMaker> {
+    path.edge_iter()
+        .iter()
+        .filter_map(|edge| market_makers.get(&edge.component_id))
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// Whether two legs of `path` fill against one market maker.
+pub fn fills_one_market_maker_twice<D>(
+    path: &Path<'_, D>,
+    market_makers: &FxHashMap<ComponentId, MarketMaker>,
+) -> bool {
+    let mut seen: Vec<&MarketMaker> = Vec::new();
+    for maker in market_makers_on(path, market_makers) {
+        if seen.contains(&maker) {
+            return true;
+        }
+        seen.push(maker);
+    }
+    false
 }
 
 /// Every route as a sequence of tokens, before any pool is chosen for its legs.
@@ -601,5 +631,31 @@ mod tests {
             BigUint::from(100u64),
         );
         assert!(matches!(result, Err(AlgorithmError::DataNotFound { kind: "component", .. })));
+    }
+
+    #[test]
+    fn test_fills_one_market_maker_twice() {
+        let (a, _, c, _) = addrs();
+        let m = linear_graph();
+        let paths = find_paths(
+            m.graph(),
+            &a,
+            &c,
+            RouteSearch { bounds: &hops(2, 2), exclusions: &RouteExclusions::default() },
+            None,
+        )
+        .unwrap();
+        let path = &paths[0];
+        let makers = |names: &[(&str, &str)]| -> FxHashMap<ComponentId, MarketMaker> {
+            names
+                .iter()
+                .map(|(component, maker)| (component.to_string(), MarketMaker::from(*maker)))
+                .collect()
+        };
+
+        assert!(fills_one_market_maker_twice(path, &makers(&[("ab", "mm1"), ("bc", "mm1")])));
+        assert!(!fills_one_market_maker_twice(path, &makers(&[("ab", "mm1"), ("bc", "mm2")])));
+        assert!(!fills_one_market_maker_twice(path, &makers(&[("ab", "mm1")])));
+        assert!(!fills_one_market_maker_twice(path, &makers(&[])));
     }
 }

@@ -638,8 +638,12 @@ impl MostLiquidAlgorithm {
             });
         }
 
-        let scored =
-            simulate_token_path(&legs, ctx.amount_in, winners, |leg, amount, component_id| {
+        let scored = simulate_token_path(
+            &legs,
+            ctx.amount_in,
+            winners,
+            market.market_makers(),
+            |leg, amount, component_id| {
                 if ctx
                     .exclusions
                     .excludes_pool(component_id)
@@ -674,11 +678,12 @@ impl MostLiquidAlgorithm {
                     None => BigInt::from(paid.amount_out.clone()),
                 };
                 Some(PoolQuote { paid, net })
-            })
-            .map_err(|FailedLegIx(leg_ix)| MostLiquidError::HopNotTradable {
-                from: legs[leg_ix].pair.0,
-                to: legs[leg_ix].pair.1,
-            })?;
+            },
+        )
+        .map_err(|FailedLegIx(leg_ix)| MostLiquidError::HopNotTradable {
+            from: legs[leg_ix].pair.0,
+            to: legs[leg_ix].pair.1,
+        })?;
 
         // The route pays out in its last leg's output token, so that is the token its gas is
         // charged in.
