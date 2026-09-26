@@ -7,11 +7,15 @@ use alloy::{
 };
 use rstest::rstest;
 
-use super::*;
+use super::{fixtures::*, *};
 
-/// Highest base the migrated sentinel-probe path searched. The vectors below walk it to show the
-/// namespaced layout collides with none of the small bases.
-const MAX_STANDARD_BASE: u16 = 20;
+/// OpenZeppelin v5's ERC-20 balances namespace, as ERC-7201 derives it from
+/// "openzeppelin.storage.ERC20".
+const OZ_V5_BALANCES_NS: [u8; 32] =
+    hex!("52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00");
+/// Solady's ERC-20 seeds: the last four bytes of the word its slot is hashed from.
+const SOLADY_BALANCE_SEED: [u8; 4] = hex!("87a211a2");
+const SOLADY_ALLOWANCE_SEED: [u8; 4] = hex!("7f5e9f20");
 
 fn usdc() -> Address {
     address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
@@ -21,12 +25,69 @@ fn weth() -> Address {
     address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 }
 
-fn solidity(base: u16) -> MappingPosition {
-    MappingPosition::Direct { base, key_order: KeyOrder::Solidity }
+/// The keccak256 inputs a Vyper mapping hashes: the base or the outer hash first, then the key.
+fn vyper_preimages(base: [u8; 32], keys: &[Address]) -> Vec<Vec<u8>> {
+    let mut preimages = Vec::new();
+    let mut outer = base;
+    for &key in keys {
+        let preimage = [outer, padded(key)].concat();
+        outer = keccak256(&preimage).0;
+        preimages.push(preimage);
+    }
+    preimages
 }
 
-/// Known-good hashes, computed outside this crate. They pin the mapping arithmetic itself, so a
-/// change to `solidity_mapping` fails here rather than only failing against a live token.
+/// Solady packs the holder, the seed and the spender into one input rather than nesting hashes.
+fn solady_preimages(keys: &[Address]) -> Vec<Vec<u8>> {
+    let seed = if keys.len() == 1 { SOLADY_BALANCE_SEED } else { SOLADY_ALLOWANCE_SEED };
+    let mut preimage = keys[0].to_vec();
+    preimage.extend([0_u8; 8]);
+    preimage.extend(seed);
+    if let Some(spender) = keys.get(1) {
+        preimage.extend(spender.as_slice());
+    }
+    vec![preimage]
+}
+
+/// A token that derives its namespace at runtime and reads an unrelated flag first: the chain
+/// has a link with no key, and the trace holds a hash the chain does not use.
+fn runtime_namespace_preimages(keys: &[Address]) -> Vec<Vec<u8>> {
+    let namespace = b"token.storage.balances".to_vec();
+    let mut preimages = vec![[padded(keys[0]), base_word(9)].concat(), namespace.clone()];
+    preimages.extend(solidity_preimages(keccak256(&namespace).0, keys));
+    preimages
+}
+
+/// Records the template whose slot is the last traced hash.
+fn record<const KEYS: usize>(
+    preimages: &[Vec<u8>],
+    keys: &[Address; KEYS],
+) -> Option<SlotTemplate<KEYS>> {
+    let slot = keccak256(
+        preimages
+            .last()
+            .expect("at least one hash"),
+    );
+    SlotTemplate::record(preimages, slot, keys)
+}
+
+fn assert_replays<const KEYS: usize>(
+    convention: fn(&[Address]) -> Vec<Vec<u8>>,
+    recorded: [Address; KEYS],
+    asked: [Address; KEYS],
+) {
+    let template = record(&convention(&recorded), &recorded)
+        .unwrap_or_else(|| panic!("the {KEYS}-key mapping records"));
+    let expected = keccak256(
+        convention(&asked)
+            .last()
+            .expect("at least one hash"),
+    );
+    assert_eq!(template.slot(&asked), expected, "{KEYS} keys");
+}
+
+/// Known-good hashes, computed outside this crate. They pin the replay arithmetic, so a slip in
+/// where a key is written fails here rather than only against a live token.
 #[rstest]
 #[case(Address::ZERO, 0, hex!("ad3228b676f7d3cd4284a5443f17f1962b36e491b30a40b2405849e597ba5fb5"))]
 #[case(usdc(), 0, hex!("c6521c8ea4247e8beb499344e591b9401fb2807ff9997dd598fd9e56c73a264d"))]
@@ -36,100 +97,88 @@ fn test_balance_slot_vectors(
     #[case] base: u16,
     #[case] expected: [u8; 32],
 ) {
-    assert_eq!(balance_slot(holder, solidity(base)).0, expected);
+    let layout = solidity_layout(Address::ZERO, base, 0);
+    assert_eq!(layout.balance_slot(holder).0, expected);
 }
 
 #[test]
 fn test_allowance_slot_vector() {
+    let layout = solidity_layout(Address::ZERO, 0, 0);
     assert_eq!(
-        allowance_slot(usdc(), weth(), solidity(0)).0,
+        layout.allowance_slot(usdc(), weth()).0,
         hex!("7b7d28f4178b11583278450af3b85d49a04fd0597c53f7ed3fbfac3750fde37d")
     );
 }
 
-/// An allowance is a nested mapping, so it must not collide with the balance of either key, and
-/// swapping owner and spender must move it.
-#[test]
-fn test_allowance_slot_is_distinct_and_ordered() {
-    assert_ne!(allowance_slot(usdc(), weth(), solidity(0)), balance_slot(usdc(), solidity(0)));
-    assert_ne!(
-        allowance_slot(usdc(), weth(), solidity(0)),
-        allowance_slot(weth(), usdc(), solidity(0))
-    );
-}
-
-#[test]
-fn test_openzeppelin_v5_slots_collide_with_no_standard_base() {
-    let balance = balance_slot(usdc(), MappingPosition::OpenZeppelinV5);
-    let allowance = allowance_slot(usdc(), weth(), MappingPosition::OpenZeppelinV5);
-    for base in 0..=MAX_STANDARD_BASE {
-        assert_ne!(balance, balance_slot(usdc(), solidity(base)));
-        assert_ne!(allowance, allowance_slot(usdc(), weth(), solidity(base)));
-    }
-}
-
-/// The namespace is a constant here but a derivation in OpenZeppelin, so it is re-derived rather
-/// than restated.
-#[test]
-fn test_openzeppelin_v5_namespaces_match_erc7201() {
-    let name_hash = keccak256(b"openzeppelin.storage.ERC20");
-    let encoded = (U256::from_be_bytes(*name_hash) - U256::from(1_u8)).to_be_bytes::<32>();
-    let mut derived = *keccak256(encoded);
-    derived[31] = 0;
-
-    assert_eq!(B256::new(derived), OZ_V5_BALANCES_NS);
-    // Allowances are the next field of the same struct.
-    assert_eq!(
-        U256::from_be_bytes(*OZ_V5_ALLOWANCES_NS),
-        U256::from_be_bytes(*OZ_V5_BALANCES_NS) + U256::from(1_u8)
-    );
-}
-
+/// A template recorded with one set of keys gives the slot the token itself hashes for another.
 #[rstest]
-#[case::deep_solidity(MappingPosition::Direct { base: 516, key_order: KeyOrder::Solidity })]
-#[case::shallow_solidity(solidity(0))]
-#[case::vyper(MappingPosition::Direct { base: 17, key_order: KeyOrder::Vyper })]
-#[case::openzeppelin_v5(MappingPosition::OpenZeppelinV5)]
-fn test_recover_position_round_trip(#[case] position: MappingPosition) {
-    let owner = Address::repeat_byte(0x11);
-    let spender = Address::repeat_byte(0x22);
-
-    assert_eq!(
-        recover_position(balance_slot(owner, position), |candidate| balance_slot(owner, candidate)),
-        Some(position)
-    );
-    assert_eq!(
-        recover_position(allowance_slot(owner, spender, position), |candidate| allowance_slot(
-            owner, spender, candidate
-        )),
-        Some(position)
-    );
+#[case::deep_solidity(|keys: &[Address]| solidity_preimages(base_word(516), keys))]
+#[case::vyper(|keys: &[Address]| vyper_preimages(base_word(17), keys))]
+#[case::openzeppelin_v5(|keys: &[Address]| solidity_preimages(OZ_V5_BALANCES_NS, keys))]
+#[case::solady(solady_preimages)]
+#[case::runtime_namespace(runtime_namespace_preimages)]
+fn test_record_replays_with_other_keys(#[case] convention: fn(&[Address]) -> Vec<Vec<u8>>) {
+    let recorded = [Address::repeat_byte(0x11), Address::repeat_byte(0x22)];
+    assert_replays(convention, [recorded[0]], [usdc()]);
+    assert_replays(convention, recorded, [usdc(), weth()]);
 }
 
 #[test]
-fn test_recover_position_of_a_slot_no_convention_produces() {
+fn test_record_of_a_slot_no_traced_hash_yields() {
+    let holder = Address::repeat_byte(0x11);
+    let preimages = solidity_preimages(base_word(0), &[holder]);
+    assert_eq!(SlotTemplate::record(&preimages, B256::repeat_byte(0x99), &[holder]), None);
+}
+
+/// A slot that does not depend on the holder would fund one address for every holder.
+#[test]
+fn test_record_of_a_hash_without_the_key() {
+    let preimages = vec![b"token.storage.supply".to_vec()];
+    assert_eq!(record(&preimages, &[Address::repeat_byte(0x11)]), None);
+}
+
+/// An allowance chain that never hashes the spender would approve the probe spender's slot for
+/// every real one.
+#[test]
+fn test_record_of_a_chain_without_the_spender() {
     let owner = Address::repeat_byte(0x11);
-    assert_eq!(
-        recover_position(B256::repeat_byte(0x99), |candidate| balance_slot(owner, candidate)),
-        None
-    );
+    let preimages = solidity_preimages(base_word(1), &[owner]);
+    assert_eq!(record(&preimages, &[owner, Address::repeat_byte(0x22)]), None);
+}
+
+/// Two earlier hashes in one input leave no single chain to replay.
+#[test]
+fn test_record_of_an_input_holding_two_earlier_hashes() {
+    let holder = Address::repeat_byte(0x11);
+    let first = b"first".to_vec();
+    let second = b"second".to_vec();
+    let combined = [padded(holder), keccak256(&first).0, keccak256(&second).0].concat();
+    assert_eq!(record(&[first, second, combined], &[holder]), None);
+}
+
+#[test]
+fn test_template_writes_every_occurrence_of_a_key() {
+    let holder = Address::repeat_byte(0x11);
+    let preimages = vec![[padded(holder), padded(holder)].concat()];
+    let template = record(&preimages, &[holder]).expect("the mapping records");
+    assert_eq!(template.slot(&[usdc()]), keccak256([padded(usdc()), padded(usdc())].concat()));
+}
+
+#[test]
+fn test_template_writes_every_occurrence_of_the_previous_hash() {
+    let convention = |key: Address| {
+        let inner = [padded(key), base_word(0)].concat();
+        let hash = keccak256(&inner).0;
+        vec![inner, [hash, hash].concat()]
+    };
+    let holder = Address::repeat_byte(0x11);
+    let template = record(&convention(holder), &[holder]).expect("the mapping records");
+    let expected = convention(usdc());
+    assert_eq!(template.slot(&[usdc()]), keccak256(&expected[1]));
 }
 
 fn mocked_provider(asserter: &Asserter) -> RootProvider<Ethereum> {
     RootProvider::new(RpcClient::mocked(asserter.clone()))
-}
-
-/// A prestate trace naming one account and the slots its read touched.
-fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
-    let storage: serde_json::Map<String, serde_json::Value> = slots
-        .iter()
-        .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
-        .collect();
-    serde_json::json!({ format!("{contract:#x}"): { "storage": storage } })
-}
-
-fn sentinel_word() -> Vec<u8> {
-    B256::from(PROBE_SENTINEL).to_vec()
 }
 
 fn revert_payload() -> ErrorPayload {
@@ -145,21 +194,20 @@ fn throttled_payload() -> ErrorPayload {
 /// to the second rather than stop at the first slot the trace named.
 #[tokio::test]
 async fn test_find_accessed_slot_takes_the_candidate_that_moves_the_answer() {
-    let holder = Address::repeat_byte(1);
     let contract = Address::repeat_byte(3);
-    let mapping = balance_slot(holder, solidity(2));
+    let mapping = B256::repeat_byte(0x99);
     // Sorted descending, so the decoy is probed first.
     let decoy = B256::repeat_byte(0xff);
     let asserter = Asserter::new();
     asserter.push_success(&prestate(contract, &[decoy, mapping]));
     asserter.push_success(&Bytes::from(vec![0_u8; 32]));
-    asserter.push_success(&Bytes::from(sentinel_word()));
+    asserter.push_success(&sentinel_response());
 
     let found = find_accessed_slot(&mocked_provider(&asserter), Address::repeat_byte(9), &[0x70])
         .await
         .expect("the second candidate answers");
 
-    assert_eq!(found, (contract, mapping));
+    assert_eq!(found, AccessedSlot { storage_contract: contract, slot: mapping });
 }
 
 /// Every probe reverting means every candidate is genuinely wrong, which is a property of the
@@ -208,23 +256,90 @@ async fn test_find_accessed_slot_reports_rpc_when_the_trace_fails() {
     assert!(matches!(error, DiscoveryError::Rpc(_)), "{error:?}");
 }
 
+/// The input sits past the start of memory and between other steps, as a real trace has it.
+#[tokio::test]
+async fn test_trace_hash_preimages_reads_the_hashed_range() {
+    let words =
+        [hex::encode([0xaa_u8; 32]), hex::encode([0xbb_u8; 32]), hex::encode([0xcc_u8; 32])];
+    let trace = serde_json::json!({
+        "failed": false, "gas": 0, "returnValue": "0x",
+        "structLogs": [
+            { "pc": 0, "op": "MSTORE", "gas": 0, "gasCost": 0, "depth": 1, "stack": [] },
+            { "pc": 1, "op": "KECCAK256", "gas": 0, "gasCost": 0, "depth": 1,
+              "stack": ["0x40", "0x10"], "memory": words },
+        ],
+    });
+    let asserter = Asserter::new();
+    asserter.push_success(&trace);
+
+    let preimages =
+        trace_hash_preimages(&mocked_provider(&asserter), Address::repeat_byte(9), &[0x70])
+            .await
+            .expect("the trace is readable");
+
+    let expected = [[0xaa_u8; 16].as_slice(), &[0xbb_u8; 32], &[0xcc_u8; 16]].concat();
+    assert_eq!(preimages, vec![expected]);
+}
+
+/// Memory past the last word the trace shows reads as zeros, as the EVM expands it.
+#[tokio::test]
+async fn test_trace_hash_preimages_pads_past_the_end_of_memory() {
+    let trace = serde_json::json!({
+        "failed": false, "gas": 0, "returnValue": "0x",
+        "structLogs": [
+            { "pc": 1, "op": "KECCAK256", "gas": 0, "gasCost": 0, "depth": 1,
+              "stack": ["0x40", "0x0"], "memory": [hex::encode([0xaa_u8; 32])] },
+        ],
+    });
+    let asserter = Asserter::new();
+    asserter.push_success(&trace);
+
+    let preimages =
+        trace_hash_preimages(&mocked_provider(&asserter), Address::repeat_byte(9), &[0x70])
+            .await
+            .expect("the trace is readable");
+
+    assert_eq!(preimages, vec![[[0xaa_u8; 32], [0_u8; 32]].concat()]);
+}
+
+/// A node that ignores `enableMemory` says nothing about the token, so the token stays
+/// undecided rather than being remembered as unsupported.
+#[tokio::test]
+async fn test_trace_hash_preimages_reports_rpc_without_memory() {
+    let trace = serde_json::json!({
+        "failed": false, "gas": 0, "returnValue": "0x",
+        "structLogs": [
+            { "pc": 1, "op": "KECCAK256", "gas": 0, "gasCost": 0, "depth": 1,
+              "stack": ["0x40", "0x0"] },
+        ],
+    });
+    let asserter = Asserter::new();
+    asserter.push_success(&trace);
+
+    let error = trace_hash_preimages(&mocked_provider(&asserter), Address::repeat_byte(9), &[0x70])
+        .await
+        .expect_err("the trace has no memory");
+
+    assert!(matches!(error, DiscoveryError::Rpc(_)), "{error:?}");
+}
+
 /// Funding a token whose allowance lives in another contract would write the balance to one
 /// address and the approval to another, so the layout is refused rather than half-applied.
 #[tokio::test]
 async fn test_discover_layout_refuses_split_storage() {
-    let holder = Address::repeat_byte(1);
-    let spender = Address::repeat_byte(2);
-    let token = Address::repeat_byte(9);
+    let balance = solidity_preimages(base_word(0), &[PROBE_OWNER]);
+    let allowance = solidity_preimages(base_word(1), &[PROBE_OWNER, PROBE_SPENDER]);
     let asserter = Asserter::new();
-    asserter.push_success(&prestate(Address::repeat_byte(3), &[balance_slot(holder, solidity(0))]));
-    asserter.push_success(&Bytes::from(sentinel_word()));
-    asserter.push_success(&prestate(
-        Address::repeat_byte(4),
-        &[allowance_slot(holder, spender, solidity(1))],
-    ));
-    asserter.push_success(&Bytes::from(sentinel_word()));
+    for (contract, preimages) in [(3, balance), (4, allowance)] {
+        let slot = keccak256(
+            preimages
+                .last()
+                .expect("a mapping hashes"),
+        );
+        push_mapping(&asserter, Address::repeat_byte(contract), slot, &preimages);
+    }
 
-    let error = discover_layout(&mocked_provider(&asserter), token, holder, spender)
+    let error = discover_layout(&mocked_provider(&asserter), Address::repeat_byte(9))
         .await
         .expect_err("split storage is not fundable");
 
@@ -238,24 +353,24 @@ async fn test_discover_layout_refuses_split_storage() {
 /// the shares trace finds the mapping. The fallback is what keeps the module off an address list.
 #[tokio::test]
 async fn test_discover_balance_falls_back_to_the_shares_view() {
-    let holder = Address::repeat_byte(1);
     let contract = Address::repeat_byte(3);
-    let shares = balance_slot(holder, solidity(0));
+    let shares = solidity_preimages(base_word(0), &[PROBE_OWNER]);
     let asserter = Asserter::new();
     // The balance trace names a slot that does not key the answer.
+    asserter.push_success(&hash_trace(&[]));
     asserter.push_success(&prestate(contract, &[B256::repeat_byte(0xff)]));
     asserter.push_failure(revert_payload());
     // The shares trace names the mapping itself.
-    asserter.push_success(&prestate(contract, &[shares]));
-    asserter.push_success(&Bytes::from(sentinel_word()));
+    let slot = keccak256(shares.last().expect("a mapping hashes"));
+    push_mapping(&asserter, contract, slot, &shares);
 
-    let (storage_contract, position) =
-        discover_balance(&mocked_provider(&asserter), Address::repeat_byte(9), holder)
+    let (storage_contract, template) =
+        discover_balance(&mocked_provider(&asserter), Address::repeat_byte(9))
             .await
             .expect("the shares view places the mapping");
 
     assert_eq!(storage_contract, contract);
-    assert_eq!(position, solidity(0));
+    assert_eq!(template.slot(&[usdc()]), solidity_layout(Address::ZERO, 0, 0).balance_slot(usdc()));
 }
 
 /// Most tokens have no `sharesOf`, so its failure must not replace why `balanceOf` failed.
@@ -263,20 +378,16 @@ async fn test_discover_balance_falls_back_to_the_shares_view() {
 async fn test_discover_balance_reports_every_view() {
     let contract = Address::repeat_byte(3);
     let asserter = Asserter::new();
-    // `balanceOf` reads a slot that moves the answer but that no known convention produces.
-    asserter.push_success(&prestate(contract, &[B256::repeat_byte(0x99)]));
-    asserter.push_success(&Bytes::from(sentinel_word()));
+    // `balanceOf` reads a slot that moves the answer but that no traced hash yields.
+    push_mapping(&asserter, contract, B256::repeat_byte(0x99), &[]);
     // `sharesOf` reads nothing that moves the answer.
+    asserter.push_success(&hash_trace(&[]));
     asserter.push_success(&prestate(contract, &[B256::repeat_byte(0xff)]));
     asserter.push_failure(revert_payload());
 
-    let error = discover_balance(
-        &mocked_provider(&asserter),
-        Address::repeat_byte(9),
-        Address::repeat_byte(1),
-    )
-    .await
-    .expect_err("neither view places the mapping");
+    let error = discover_balance(&mocked_provider(&asserter), Address::repeat_byte(9))
+        .await
+        .expect_err("neither view places the mapping");
 
     let DiscoveryError::Unsupported(reason) = error else {
         panic!("expected an unsupported layout, got {error:?}");
@@ -285,58 +396,92 @@ async fn test_discover_balance_reports_every_view() {
     assert!(reason.contains("sharesOf: could not identify"), "{reason}");
 }
 
-/// Exercises the exact layouts that motivated the trace-guided path: USDT, whose storage the
-/// sentinel probe could not place, and stETH, whose balance is derived from shares.
+/// What the token reports for `calldata` with `word` stored at `slot`, or `None` when the call
+/// reverts, as a view the token does not have does.
+async fn reported_with(
+    provider: &RootProvider<Ethereum>,
+    token: Address,
+    storage: Address,
+    calldata: &[u8],
+    slot: B256,
+    word: B256,
+) -> Option<U256> {
+    match provider
+        .call(token_call(token, calldata))
+        .overrides(state_override_single(storage, slot, word))
+        .await
+    {
+        Ok(response) => Some(U256::from_be_slice(&response[..32])),
+        Err(error)
+            if error
+                .as_error_resp()
+                .is_some_and(is_revert) =>
+        {
+            None
+        }
+        Err(error) => panic!("{token:#x} read-back call failed: {error}"),
+    }
+}
+
+/// Exercises layouts that motivated the trace-guided path: USDT, whose storage the sentinel
+/// probe could not place; stETH, whose balance is derived from shares; mUSD, whose mappings sit
+/// under its own ERC-7201 namespace; and CULT, a Solady token.
 ///
-/// Asserts the property the discovery exists for -- writing the discovered slot changes what the
-/// token reports -- rather than that two slots differ, which two keccak hashes always do.
-/// Requires an endpoint serving `debug_traceCall`, so it stays opt-in.
+/// Asserts the property the discovery exists for -- storing an amount in the discovered slot
+/// makes the token report that amount -- for holders other than the probe keys discovery traced,
+/// which is what the replayed template has to get right. Requires an endpoint serving
+/// `debug_traceCall`, so it stays opt-in.
 #[tokio::test]
 #[ignore = "requires RPC_URL with debug_traceCall support"]
-async fn test_discovers_mainnet_usdt_and_steth_layouts() {
+async fn test_discovers_mainnet_layouts() {
     let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL for the live layout test");
     let provider = ProviderBuilder::default().connect_http(
         rpc_url
             .parse()
             .expect("RPC_URL must be a valid HTTP URL"),
     );
+    // Short addresses, which the probe keys are chosen to avoid, so the replay is what places them.
     let holder = address!("0x0000000000000000000000000000000000000001");
     let spender = address!("0x0000000000000000000000000000000000000002");
-    let usdt = address!("0xdAC17F958D2ee523a2206206994597C13D831ec7");
-    let steth = address!("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84");
+    let amount = U256::from(123_456_789_000_u64);
+    let tokens = [
+        address!("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+        address!("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"),
+        address!("0xacA92E438df0B2401fF60dA7E4337B687a2435DA"),
+        address!("0x0000000000c5dc95539589fbD24BE07c6C14eCa4"),
+    ];
 
-    for token in [usdt, steth] {
-        let layout = discover_layout(&provider, token, holder, spender)
+    for token in tokens {
+        let layout = discover_layout(&provider, token)
             .await
             .unwrap_or_else(|error| panic!("{token:#x} layout discovery failed: {error}"));
         let storage = layout.storage_contract();
 
         // A rebasing token keys its mapping on shares, so the slot answers `sharesOf` rather than
-        // `balanceOf`; either view proving the write is what the funding override needs.
+        // `balanceOf`; either view reporting the amount is what the funding override needs.
         let balance_views = [
             IERC20LayoutProbe::balanceOfCall { account: holder }.abi_encode(),
             ISharesToken::sharesOfCall { account: holder }.abi_encode(),
         ];
+        let slot = layout.balance_slot(holder);
         let mut funds = false;
         for calldata in balance_views {
-            funds |=
-                slot_matches(&provider, token, storage, &calldata, layout.balance_slot(holder))
-                    .await
-                    .unwrap_or_else(|error| panic!("{token:#x} balance probe failed: {error}"));
+            funds |= reported_with(&provider, token, storage, &calldata, slot, B256::from(amount))
+                .await ==
+                Some(amount);
         }
         assert!(funds, "{token:#x}: the discovered balance slot does not set the balance");
 
         let allowance_calldata =
             IERC20LayoutProbe::allowanceCall { owner: holder, spender }.abi_encode();
-        let approves = slot_matches(
-            &provider,
-            token,
-            storage,
-            &allowance_calldata,
-            layout.allowance_slot(holder, spender),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{token:#x} allowance probe failed: {error}"));
-        assert!(approves, "{token:#x}: the discovered allowance slot does not set the allowance");
+        let slot = layout.allowance_slot(holder, spender);
+        let approved =
+            reported_with(&provider, token, storage, &allowance_calldata, slot, B256::from(amount))
+                .await;
+        assert_eq!(
+            approved,
+            Some(amount),
+            "{token:#x}: the discovered slot does not set the allowance"
+        );
     }
 }

@@ -388,15 +388,15 @@ impl EthCallRunner {
     async fn layout(&self, token: Address, spender: Address) -> anyhow::Result<TokenLayout> {
         {
             let cache = self.layouts.lock().await;
-            if let Some(&layout) = cache.get(&(token, spender)) {
-                return Ok(layout);
+            if let Some(layout) = cache.get(&(token, spender)) {
+                return Ok(layout.clone());
             }
         }
-        let layout = discover_layout(&self.provider, token, self.sender, spender).await?;
+        let layout = discover_layout(&self.provider, token).await?;
         self.layouts
             .lock()
             .await
-            .insert((token, spender), layout);
+            .insert((token, spender), layout.clone());
         Ok(layout)
     }
 }

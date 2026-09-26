@@ -112,7 +112,7 @@ async fn build_dry_run_overrides(
     spender: Address,
 ) -> anyhow::Result<StorageOverrides> {
     info!("Detecting storage slots for {sell_token:#x}...");
-    let layout = discover_layout(provider, sell_token, sender, spender).await?;
+    let layout = discover_layout(provider, sell_token).await?;
     let balance_slot = layout.balance_slot(sender);
     let allowance_slot = layout.allowance_slot(sender, spender);
     info!(

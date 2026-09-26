@@ -282,10 +282,8 @@ impl QuoteSimulator {
         let permit2: Address = PERMIT2_ADDRESS
             .parse()
             .map_err(|error| format!("invalid Permit2 address: {error}"))?;
-        let layout = self
-            .cached_layout(token, sender, router)
-            .await?;
-        Ok(token_overrides(sender, router, permit2, layout))
+        let layout = self.cached_layout(token).await?;
+        Ok(token_overrides(sender, router, permit2, &layout))
     }
 
     /// The token's storage layout, discovering it on the first quote that needs it.
@@ -294,12 +292,7 @@ impl QuoteSimulator {
     /// is a property of the token, and rediscovering it would spend a trace and its probes on
     /// every quote that touches it. A node that failed to answer decides nothing, so the cell
     /// stays empty and the next quote tries again.
-    async fn cached_layout(
-        &self,
-        token: Address,
-        holder: Address,
-        spender: Address,
-    ) -> Result<TokenLayout, String> {
+    async fn cached_layout(&self, token: Address) -> Result<TokenLayout, String> {
         let cell = Arc::clone(
             self.layout_cache
                 .lock()
@@ -307,7 +300,7 @@ impl QuoteSimulator {
                 .entry(token)
                 .or_default(),
         );
-        cell.get_or_try_init(|| self.discover_once(token, holder, spender))
+        cell.get_or_try_init(|| self.discover_once(token))
             .await?
             .clone()
             .map_err(|reason| format!("simulation token layout discovery failed: {reason}"))
@@ -316,15 +309,10 @@ impl QuoteSimulator {
     /// Runs discovery once, separating a verdict worth remembering from a node that failed.
     ///
     /// The outer `Err` leaves the cell empty, so only the inner one is cached.
-    async fn discover_once(
-        &self,
-        token: Address,
-        holder: Address,
-        spender: Address,
-    ) -> Result<Result<TokenLayout, String>, String> {
+    async fn discover_once(&self, token: Address) -> Result<Result<TokenLayout, String>, String> {
         let discovered = timeout(
             SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
-            discover_layout(&self.provider, token, holder, spender),
+            discover_layout(&self.provider, token),
         )
         .await
         .map_err(|_| {
@@ -602,7 +590,7 @@ fn token_overrides(
     sender: Address,
     router: Address,
     permit2: Address,
-    layout: TokenLayout,
+    layout: &TokenLayout,
 ) -> StateOverride {
     let funding = B256::from(SIMULATION_FUNDING_VALUE);
     let mut state_diff = B256HashMap::default();

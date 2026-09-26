@@ -38,7 +38,7 @@ async fn build_fynd_overrides(
     token_in: Address,
     router: Address,
 ) -> anyhow::Result<StorageOverrides> {
-    let layout = discover_layout(provider, token_in, sender, router).await?;
+    let layout = discover_layout(provider, token_in).await?;
 
     let huge = huge_balance();
     let mut overrides = StorageOverrides::default();
