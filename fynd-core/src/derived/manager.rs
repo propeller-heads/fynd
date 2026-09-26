@@ -215,7 +215,7 @@ impl Default for ComputationManagerConfig {
         Self {
             gas_token: Address::zero(20),
             max_hop: crate::solver::defaults::PRICING_MAX_HOPS,
-            depth_slippage_threshold: 0.01,
+            depth_slippage_threshold: 0.015,
             pricing_pass_budget: None,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
