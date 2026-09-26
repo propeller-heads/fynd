@@ -7,9 +7,14 @@
 //! carry over between blocks, as they do under `ComputationManager`. Computations run one at a
 //! time, pool depths after the spot prices they read, so each time is for that computation alone.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 use tycho_simulation::{
     protocol::models::Update,
@@ -39,6 +44,31 @@ pub struct DerivedBenchSettings {
     pub pricing_max_hops: usize,
     /// The recorded gas price, or `None` for 10 gwei.
     pub gas_price_wei: Option<BigUint>,
+    /// Reads the heap of the process running the bench, or `None` to measure time only. The
+    /// global allocator lives in the binary, so the binary supplies this.
+    pub heap_probe: Option<HeapProbe>,
+}
+
+/// Returns the live heap now, and the peak since the previous call, and starts a new peak.
+pub type HeapProbe = fn() -> HeapSample;
+
+/// The heap of the process at one point of a replay.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeapSample {
+    /// Bytes allocated and not yet freed.
+    pub live_bytes: usize,
+    /// The largest `live_bytes` since the previous sample.
+    pub peak_bytes: usize,
+}
+
+/// What one computation cost on one block.
+#[derive(Debug, Clone, Copy)]
+pub struct ComputationRun {
+    /// Wall-clock time of `compute`.
+    pub elapsed: Duration,
+    /// The heap after the computation stored its output, and its peak while it ran. `None`
+    /// without a heap probe.
+    pub heap: Option<HeapSample>,
 }
 
 /// The computations to time, built as `ComputationManager::new` builds them.
@@ -46,6 +76,7 @@ struct TimedComputations {
     spot_prices: SpotPriceComputation,
     token_prices: TokenGasPriceComputation,
     pool_depths: ComponentDepthComputation,
+    heap_probe: Option<HeapProbe>,
 }
 
 /// What every computation on one block reads, and where it stores its output.
@@ -61,49 +92,161 @@ impl TimedComputations {
         let gas_token =
             native_token(&settings.chain).expect("the recording's chain has a native token");
         // A 24-hour budget acts as no deadline: a pass cut short would report less time than the
-        // full pass takes.
+        // full pass takes. No token cap and no pass interval, so each block prices every token
+        // whose dependencies changed. The timings then measure pricing, not the throttle.
         let config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(settings.pricing_max_hops)
-            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60));
+            .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60))
+            .with_pricing_max_tokens_per_pass(usize::MAX)
+            .with_pricing_min_pass_interval(Duration::ZERO);
         Self {
             spot_prices: SpotPriceComputation::new(),
             token_prices: config.build_token_price_computation(),
             pool_depths: ComponentDepthComputation::new(config.depth_slippage_threshold())
                 .expect("the default depth slippage threshold is valid"),
+            heap_probe: settings.heap_probe,
         }
     }
 
-    /// Runs every computation on one block, pool depths after the spot prices they read.
-    async fn run_block(&self, run: &BlockRun<'_>) {
-        time_computation(&self.spot_prices, run, |out| out.len()).await;
-        time_computation(&self.token_prices, run, |out| out.len()).await;
-        time_computation(&self.pool_depths, run, |out| out.len()).await;
+    /// Runs every computation on one block, pool depths after the spot prices they read, and
+    /// returns what each cost.
+    async fn run_block(&self, run: &BlockRun<'_>) -> [(&'static str, ComputationRun); 3] {
+        let probe = self.heap_probe;
+        [
+            (
+                SpotPriceComputation::ID,
+                time_computation(&self.spot_prices, run, probe, |out| out.len()).await,
+            ),
+            (
+                TokenGasPriceComputation::ID,
+                time_computation(&self.token_prices, run, probe, |out| out.len()).await,
+            ),
+            (
+                ComponentDepthComputation::ID,
+                time_computation(&self.pool_depths, run, probe, |out| out.len()).await,
+            ),
+        ]
     }
 }
 
-/// Runs one computation, prints its time and output size, and persists the output so the next
-/// block's incremental run reads it.
+/// What each computation cost on one replay: on the first block, and on each later block.
+#[derive(Debug, Default)]
+pub struct DerivedBenchRuns {
+    /// Computation id → its cost on the first block, where every component is new.
+    pub first_block: BTreeMap<&'static str, ComputationRun>,
+    /// Computation id → its cost on each later block, in replay order.
+    pub later_blocks: BTreeMap<&'static str, Vec<ComputationRun>>,
+    /// The heap after the snapshot replay, before any computation ran: the market alone.
+    pub market_heap: Option<HeapSample>,
+}
+
+/// The token prices and pool depths the store holds at one point of a replay, for comparing two
+/// versions of the computations. A value too large for an `f64` is left out.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct DerivedValues {
+    /// Token address → price, in token units per gas token unit.
+    pub token_prices: BTreeMap<String, f64>,
+    /// `component_id/token_in/token_out` → pool depth, in `token_in`'s smallest unit.
+    pub pool_depths: BTreeMap<String, f64>,
+}
+
+/// The token prices and pool depths of one replay, after its first and its last block.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ReplayValues {
+    /// The values after the first block, the market snapshot.
+    pub after_first_block: DerivedValues,
+    /// The values after the last block.
+    pub after_last_block: DerivedValues,
+}
+
+/// The computation times of one replay, and its token prices and pool depths.
+#[derive(Debug, Default)]
+pub struct DerivedBenchReport {
+    /// The cost of each computation on the first block and on each later block.
+    pub runs: DerivedBenchRuns,
+    /// The token prices and pool depths after the first and the last block.
+    pub values: ReplayValues,
+}
+
+/// Reads the token prices and pool depths the store holds now.
+async fn read_derived_values(store: &SharedDerivedDataRef) -> DerivedValues {
+    let guard = store.read().await;
+    let mut values = DerivedValues::default();
+    for (token, price) in guard
+        .token_prices()
+        .into_iter()
+        .flatten()
+    {
+        let ratio = to_f64(&price.numerator) / to_f64(&price.denominator);
+        if ratio.is_finite() {
+            values
+                .token_prices
+                .insert(token.to_string(), ratio);
+        }
+    }
+    for ((component_id, token_in, token_out), depth) in guard
+        .component_depths()
+        .into_iter()
+        .flatten()
+    {
+        let depth = to_f64(depth);
+        if depth.is_finite() {
+            values
+                .pool_depths
+                .insert(format!("{component_id}/{token_in}/{token_out}"), depth);
+        }
+    }
+    values
+}
+
+/// `value` as an `f64`. A value past `f64::MAX` gives infinity.
+fn to_f64(value: &BigUint) -> f64 {
+    value.to_f64().unwrap_or(f64::INFINITY)
+}
+
+/// Runs one computation, prints its time, heap and output size, and persists the output so the
+/// next block's incremental run reads it.
 async fn time_computation<C: DerivedComputation>(
     computation: &C,
     run: &BlockRun<'_>,
+    heap_probe: Option<HeapProbe>,
     output_len: impl Fn(&C::Output) -> usize,
-) {
+) -> ComputationRun {
     let block = run.block;
+    // Starts a new peak, so the sample after the computation holds its own peak.
+    let heap_before = heap_probe.map(|probe| probe());
     let start = Instant::now();
     let output = computation
         .compute(run.market, run.store, run.changed)
         .await
         .unwrap_or_else(|error| panic!("{} failed on block {block}: {error}", C::ID));
     let elapsed = start.elapsed();
+    let items = output_len(&output.data);
+    let failed = output.failed_items.len();
+    C::persist(&mut *run.store.write().await, output, block, run.changed.is_full_recompute);
+    let heap = heap_probe.map(|probe| probe());
+    let heap_text = match (heap_before, heap) {
+        (Some(before), Some(after)) => format!(
+            "  live {:>7.1} MB ({:+.1})  peak {:>7.1} MB (+{:.1})",
+            megabytes(after.live_bytes),
+            megabytes(after.live_bytes) - megabytes(before.live_bytes),
+            megabytes(after.peak_bytes),
+            megabytes(after.peak_bytes) - megabytes(before.live_bytes),
+        ),
+        _ => String::new(),
+    };
     println!(
-        "block {block} {:<17} {:>10.1} ms  items={} failed={}",
+        "block {block} {:<17} {:>10.1} ms  items={items} failed={failed}{heap_text}",
         C::ID,
         elapsed.as_secs_f64() * 1000.0,
-        output_len(&output.data),
-        output.failed_items.len(),
     );
-    C::persist(&mut *run.store.write().await, output, block, run.changed.is_full_recompute);
+    ComputationRun { elapsed, heap }
+}
+
+/// `bytes` in megabytes, for printing.
+pub fn megabytes(bytes: usize) -> f64 {
+    bytes as f64 / 1_000_000.0
 }
 
 /// Returns every market event the feed broadcast since the last call.
@@ -144,13 +287,18 @@ async fn read_current_block(market: &MarketData) -> u64 {
 }
 
 /// Replays `updates` into a new market and store, and prints the time and output size of every
-/// derived computation on each block.
+/// derived computation on each block. Returns the times, and the token prices and pool depths
+/// after the first and the last block.
 ///
 /// # Panics
 ///
 /// If `updates` is empty, an update does not replay, or a computation fails. A timing run cannot
 /// go on after any of them.
-pub async fn time_derived_computations(settings: &DerivedBenchSettings, updates: Vec<Update>) {
+pub async fn time_derived_computations(
+    settings: &DerivedBenchSettings,
+    updates: Vec<Update>,
+) -> DerivedBenchReport {
+    let mut report = DerivedBenchReport::default();
     let computations = TimedComputations::build(settings);
     let market = MarketData::new_shared();
     let feed = TychoFeed::new(
@@ -180,11 +328,18 @@ pub async fn time_derived_computations(settings: &DerivedBenchSettings, updates:
         start.elapsed().as_secs_f64()
     );
 
+    report.runs.market_heap = settings.heap_probe.map(|probe| probe());
+    if let Some(heap) = report.runs.market_heap {
+        println!("heap after the snapshot replay: live {:.1} MB", megabytes(heap.live_bytes));
+    }
+
     let full_recompute = ChangedComponents { is_full_recompute: true, ..Default::default() };
     let block = read_current_block(&market).await;
-    computations
+    let times = computations
         .run_block(&BlockRun { market: &market, store: &store, changed: &full_recompute, block })
         .await;
+    report.runs.first_block = times.into_iter().collect();
+    report.values.after_first_block = read_derived_values(&store).await;
 
     for update in updates {
         feed.handle_tycho_message(update)
@@ -213,9 +368,20 @@ pub async fn time_derived_computations(settings: &DerivedBenchSettings, updates:
                 changed.removed.len(),
                 changed.updated.len()
             );
-            computations
+            let times = computations
                 .run_block(&BlockRun { market: &market, store: &store, changed: &changed, block })
                 .await;
+            for (id, computation_run) in times {
+                report
+                    .runs
+                    .later_blocks
+                    .entry(id)
+                    .or_default()
+                    .push(computation_run);
+            }
         }
     }
+
+    report.values.after_last_block = read_derived_values(&store).await;
+    report
 }

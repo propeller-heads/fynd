@@ -20,6 +20,7 @@
 
 pub mod bench;
 pub mod derived;
+pub mod heap;
 pub(crate) mod live;
 pub mod profile;
 pub(crate) mod trades;

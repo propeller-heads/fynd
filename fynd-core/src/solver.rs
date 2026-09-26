@@ -108,7 +108,7 @@ pub mod defaults {
 
 // Internal-only defaults not shared with downstream crates.
 const DEFAULT_TYCHO_USE_TLS: bool = true;
-const DEFAULT_DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
+const DEFAULT_DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.015;
 /// Generous router timeout for standalone (non-server) use. HTTP services should
 /// override this to a tighter value appropriate for their SLA.
 const DEFAULT_ROUTER_TIMEOUT: Duration = Duration::from_secs(10);

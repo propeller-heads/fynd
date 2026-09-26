@@ -207,16 +207,14 @@ impl ProtocolSim for MockProtocolSim {
         let token_out = params.token_out();
 
         match params.swap_constraint() {
-            SwapConstraint::TradeLimitPrice { .. } => {
+            // The mock's price never moves with size, so a pool target price and a trade limit
+            // price are both reached only by swapping everything it holds.
+            SwapConstraint::TradeLimitPrice { .. } | SwapConstraint::PoolTargetPrice { .. } => {
                 let (sell_limit, _) =
                     self.get_limits(token_in.address.clone(), token_out.address.clone())?;
                 let result = self.get_amount_out(sell_limit.clone(), token_in, token_out)?;
                 Ok(PoolSwap::new(sell_limit, result.amount, result.new_state, None))
             }
-            _ => Err(SimulationError::InvalidInput(
-                "MockProtocolSim only supports TradeLimitPrice".to_string(),
-                None,
-            )),
         }
     }
 
@@ -299,6 +297,80 @@ impl ProtocolSim for DivByZeroSim {
         _balances: &Balances,
     ) -> Result<(), TransitionError> {
         unimplemented!("delta_transition not implemented in DivByZeroSim")
+    }
+
+    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn eq(&self, other: &dyn ProtocolSim) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some()
+    }
+}
+
+/// ProtocolSim whose spot price from the larger-address token to the smaller one is off by
+/// `reverse_spot_factor`, so `spot(a→b) * spot(b→a)` is that factor. Swaps and every other method
+/// delegate to a [`MockProtocolSim`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SkewedSpotSim {
+    /// The pool every method delegates to.
+    pub inner: MockProtocolSim,
+    /// The factor on the spot price from the larger-address token to the smaller one.
+    pub reverse_spot_factor: f64,
+}
+
+#[typetag::serde]
+impl ProtocolSim for SkewedSpotSim {
+    fn fee(&self) -> f64 {
+        self.inner.fee()
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        let spot_price = self.inner.spot_price(base, quote)?;
+        if base.address < quote.address {
+            Ok(spot_price)
+        } else {
+            Ok(spot_price * self.reverse_spot_factor)
+        }
+    }
+
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        self.inner
+            .get_amount_out(amount_in, token_in, token_out)
+    }
+
+    fn get_limits(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.inner
+            .get_limits(sell_token, buy_token)
+    }
+
+    fn delta_transition(
+        &mut self,
+        _delta: ProtocolStateDelta,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
+        _balances: &Balances,
+    ) -> Result<(), TransitionError> {
+        unimplemented!("delta_transition not implemented in SkewedSpotSim")
     }
 
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
