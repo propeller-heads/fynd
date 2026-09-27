@@ -1269,10 +1269,39 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
-    /// Overrides the output amount (used by `combine_with_surplus` to pin to the committed
-    /// reference).
-    pub(crate) fn set_amount_out(&mut self, value: BigUint) {
+    /// Overrides the input amount.
+    ///
+    /// For a caller that solved a different amount than the order charges: a fee-on-transfer
+    /// token delivers only part of what the sender pays, so the route is solved for what
+    /// arrives while the calldata must still pull the full amount.
+    pub fn set_amount_in(&mut self, value: BigUint) {
+        self.amount_in = value;
+    }
+
+    /// Overrides the output amount.
+    ///
+    /// Used by `combine_with_surplus` to pin to the committed reference, and by callers that
+    /// know the receiver gets less than the route produces (a fee-on-transfer output token).
+    pub fn set_amount_out(&mut self, value: BigUint) {
         self.amount_out = value;
+    }
+
+    /// Withdraws a solved quote, leaving `status` and nothing a caller could execute.
+    ///
+    /// Drops the route, transaction, fee breakdown, simulation result and surplus, and zeroes
+    /// the output and gas, matching the router's own no-route placeholder. `amount_in` stays:
+    /// it is the order's amount. For a caller whose policy refuses a route the solver found.
+    pub fn retract(&mut self, status: QuoteStatus) {
+        self.status = status;
+        self.route = None;
+        self.transaction = None;
+        self.fee_breakdown = None;
+        self.simulation_result = None;
+        self.surplus = None;
+        self.price_impact_bps = None;
+        self.amount_out = BigUint::ZERO;
+        self.amount_out_net_gas = BigUint::ZERO;
+        self.gas_estimate = BigUint::ZERO;
     }
 
     /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).
@@ -2495,6 +2524,47 @@ mod tests {
 
         assert_eq!(quote.surplus_amount(), Some(&surplus));
         assert_eq!(quote.committed_amount_out(), Some(&committed));
+    }
+
+    fn make_executable_quote() -> OrderQuote {
+        let mut quote = make_quote(990)
+            .with_route(make_route(vec![(0x01, 0x02)]))
+            .with_price_impact_bps(5)
+            .with_surplus(SurplusInfo::new(BigUint::from(15u64), BigUint::from(975u64)));
+        quote.set_transaction(Transaction::new(Bytes::default(), BigUint::ZERO, vec![1, 2, 3]));
+        quote.set_simulation_result(SimulationResult::Failure { reason: "test".to_string() });
+        quote
+    }
+
+    #[test]
+    fn test_retract_leaves_only_the_status_and_the_input() {
+        let mut quote = make_executable_quote();
+        let amount_in = quote.amount_in().clone();
+
+        quote.retract(QuoteStatus::NoRouteFound);
+
+        assert_eq!(quote.status(), QuoteStatus::NoRouteFound);
+        assert!(quote.route().is_none());
+        assert!(quote.transaction().is_none());
+        assert!(quote.fee_breakdown().is_none());
+        assert!(quote.simulation_result().is_none());
+        assert!(quote.surplus_amount().is_none());
+        assert!(quote.price_impact_bps().is_none());
+        assert_eq!(*quote.amount_out(), BigUint::ZERO);
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::ZERO);
+        assert_eq!(*quote.gas_estimate(), BigUint::ZERO);
+        assert_eq!(*quote.amount_in(), amount_in);
+    }
+
+    #[test]
+    fn test_set_amounts_replace_the_quoted_amounts() {
+        let mut quote = make_executable_quote();
+
+        quote.set_amount_in(BigUint::from(1_053u64));
+        quote.set_amount_out(BigUint::from(950u64));
+
+        assert_eq!(*quote.amount_in(), BigUint::from(1_053u64));
+        assert_eq!(*quote.amount_out(), BigUint::from(950u64));
     }
 
     #[test]
