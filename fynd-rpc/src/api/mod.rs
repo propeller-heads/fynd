@@ -293,6 +293,15 @@ impl AppState {
         &self.worker_router
     }
 
+    /// Returns the market data this instance solves against.
+    ///
+    /// For route overrides that need what a quote is solved on, such as the token registry.
+    #[cfg(feature = "experimental")]
+    #[must_use]
+    pub fn market_data(&self) -> &MarketData {
+        &self.market_data
+    }
+
     /// Returns the health tracker backing `GET /v1/health`.
     #[must_use]
     pub fn health_tracker(&self) -> &HealthTracker {
@@ -519,6 +528,21 @@ mod configure_app_tests {
             #[cfg(feature = "experimental")]
             market_data,
         )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[tokio::test]
+    async fn test_app_state_exposes_the_market_it_serves() {
+        let state = test_state();
+
+        state
+            .market_data()
+            .write()
+            .await
+            .upsert_tokens([fynd_core::algorithm::test_utils::token(0x01, "TKN")]);
+
+        let view = state.market_data().read().await;
+        assert_eq!(view.base_market_state().token_count(), 1);
     }
 
     async fn override_info(_state: web::Data<AppState>) -> HttpResponse {
