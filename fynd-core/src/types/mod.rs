@@ -30,5 +30,5 @@ pub use quote::{
     Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote,
     QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
     RouteResult, RouteValidationError, SimulationResult, SingleOrderQuote, SolveParams,
-    SurplusInfo, Swap, Transaction, UserTransferType,
+    SurplusInfo, Swap, TokenTransfer, Transaction, UserTransferType,
 };

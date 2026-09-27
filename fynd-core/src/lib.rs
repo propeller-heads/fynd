@@ -99,7 +99,7 @@ pub use types::{
     Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote,
     QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
     RouteValidationError, SimulationResult, SingleOrderQuote, SolveError, SolveParams, SolveResult,
-    SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
+    SurplusInfo, Swap, TaskId, TokenTransfer, Transaction, UserTransferType,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},

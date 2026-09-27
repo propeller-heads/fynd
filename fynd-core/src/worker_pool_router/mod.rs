@@ -1812,7 +1812,7 @@ mod tests {
         let simulated = quote.orders()[0]
             .simulation_result()
             .expect("a successful quote carries a simulation result");
-        assert!(matches!(simulated, SimulationResult::Success { amount_out, gas_used }
+        assert!(matches!(simulated, SimulationResult::Success { amount_out, gas_used, .. }
                 if amount_out == &BigUint::from(4_242u64) && *gas_used == 123_456));
     }
 
@@ -1861,7 +1861,7 @@ mod tests {
         let simulated = quote.orders()[0]
             .simulation_result()
             .expect("a reverted call still produces a simulation result");
-        assert!(matches!(simulated, SimulationResult::Failure { .. }));
+        assert!(matches!(simulated, SimulationResult::Reverted { .. }));
         assert!(asserter.read_q().is_empty(), "the revert is reported from the single call");
     }
 
@@ -3732,6 +3732,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
             gas_used: 120_000,
+            transfers: Vec::new(),
         });
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -3798,6 +3799,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(1001u64),
             gas_used: 120_000,
+            transfers: Vec::new(),
         });
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -3835,6 +3837,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
             gas_used: 120_000,
+            transfers: Vec::new(),
         });
 
         let payloads = capture_winning_protocols(&quote);

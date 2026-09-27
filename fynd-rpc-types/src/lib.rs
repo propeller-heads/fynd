@@ -2099,9 +2099,10 @@ mod conversions {
     impl From<fynd_core::SimulationResult> for SimulationResult {
         fn from(core: fynd_core::SimulationResult) -> Self {
             match core {
-                fynd_core::SimulationResult::Success { amount_out, gas_used } => {
+                fynd_core::SimulationResult::Success { amount_out, gas_used, .. } => {
                     Self::Success { amount_out, gas_used }
                 }
+                fynd_core::SimulationResult::Reverted { reason } |
                 fynd_core::SimulationResult::Failure { reason } => Self::Failure { reason },
             }
         }
@@ -2319,6 +2320,29 @@ mod conversions {
             assert!(
                 matches!(decoded, SimulationResult::Failure { reason } if reason == "execution reverted")
             );
+        }
+
+        #[test]
+        fn test_core_revert_reaches_the_wire_as_a_failure() {
+            let core = fynd_core::SimulationResult::Reverted { reason: "K".to_string() };
+            let wire = SimulationResult::from(core);
+            assert!(matches!(wire, SimulationResult::Failure { reason } if reason == "K"));
+        }
+
+        #[test]
+        fn test_core_success_drops_its_transfers_on_the_wire() {
+            let core = fynd_core::SimulationResult::Success {
+                amount_out: BigUint::from(990_u64),
+                gas_used: 1,
+                transfers: vec![fynd_core::TokenTransfer {
+                    token: tycho_simulation::tycho_common::Bytes::from([0xCC_u8; 20]),
+                    from: tycho_simulation::tycho_common::Bytes::from([0xAA_u8; 20]),
+                    to: tycho_simulation::tycho_common::Bytes::from([0xBB_u8; 20]),
+                    amount: BigUint::from(990_u64),
+                }],
+            };
+            let json = serde_json::to_string(&SimulationResult::from(core)).unwrap();
+            assert_eq!(json, r#"{"status":"success","amount_out":"990","gas_used":1}"#);
         }
 
         #[test]

@@ -1449,6 +1449,19 @@ impl OrderQuote {
     }
 }
 
+/// One ERC-20 `Transfer` event a simulated call emitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenTransfer {
+    /// The token contract that emitted the event.
+    pub token: Bytes,
+    /// The account the tokens left.
+    pub from: Bytes,
+    /// The account the tokens reached.
+    pub to: Bytes,
+    /// The amount the event reports, in token units.
+    pub amount: BigUint,
+}
+
 /// Outcome of simulating an encoded quote on the latest block.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1461,10 +1474,22 @@ pub enum SimulationResult {
         amount_out: BigUint,
         /// Gas consumed by the simulated call.
         gas_used: u64,
+        /// The call's ERC-20 `Transfer` events, in emission order.
+        ///
+        /// Shows what each account actually sent and received, which a token that takes a fee
+        /// on transfer makes different from what the route priced. Not serialized: the wire
+        /// format does not change.
+        #[serde(skip)]
+        transfers: Vec<TokenTransfer>,
     },
-    /// The simulated router call could not complete.
+    /// The simulated router call ran and reverted.
+    Reverted {
+        /// Readable reason the simulated call reverted.
+        reason: String,
+    },
+    /// The simulated router call could not be run: setup, transport or timeout.
     Failure {
-        /// Readable reason the simulated call failed.
+        /// Readable reason the simulation did not run.
         reason: String,
     },
 }
