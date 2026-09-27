@@ -633,6 +633,16 @@ impl EncodingOptions {
         self
     }
 
+    /// Replaces the slippage tolerance, keeping every other option.
+    ///
+    /// For a caller that must widen the floor for one quote of a request: a fee-on-transfer
+    /// output token delivers less than the router pays out, so the floor the router checks at
+    /// the receiver has to sit below what the router is told to expect.
+    pub fn with_slippage(mut self, slippage: f64) -> Self {
+        self.slippage = slippage;
+        self
+    }
+
     /// Returns the slippage tolerance.
     pub fn slippage(&self) -> f64 {
         self.slippage
@@ -2590,6 +2600,18 @@ mod tests {
 
         assert_eq!(*quote.amount_in(), BigUint::from(1_053u64));
         assert_eq!(*quote.amount_out(), BigUint::from(950u64));
+    }
+
+    #[test]
+    fn test_with_slippage_keeps_the_other_options() {
+        let options = EncodingOptions::new(0.005)
+            .with_simulation()
+            .with_calldata_watermark(b"fee".to_vec())
+            .with_slippage(0.02);
+
+        assert_eq!(options.slippage(), 0.02);
+        assert!(options.simulate());
+        assert_eq!(options.calldata_watermark(), Some(&b"fee"[..]));
     }
 
     #[test]
