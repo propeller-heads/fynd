@@ -29,7 +29,7 @@ fn test_success_reports_amount_out_and_gas_used() {
     let result = SimulationAttempt::Success {
         amount_out: BigUint::from(42_u8),
         gas_used: 123_456,
-        transfers: Vec::new(),
+        logs: Vec::new(),
     }
     .into_result();
     assert!(
@@ -49,41 +49,11 @@ fn test_failure_stays_apart_from_a_revert() {
     assert!(matches!(result, SimulationResult::Failure { reason } if reason == "timed out"));
 }
 
-fn transfer_log(token: Address, from: Address, to: Address, value: u64) -> alloy::rpc::types::Log {
-    let event = Transfer { from, to, value: U256::from(value) };
-    alloy::rpc::types::Log {
-        inner: alloy::primitives::Log { address: token, data: event.encode_log_data() },
-        ..Default::default()
-    }
-}
-
-#[test]
-fn test_erc20_transfers_decodes_only_transfer_events() {
-    let token = Address::repeat_byte(0xCC);
-    let from = Address::repeat_byte(0xAA);
-    let to = Address::repeat_byte(0xBB);
-    let unrelated = alloy::rpc::types::Log {
-        inner: alloy::primitives::Log::new_unchecked(token, vec![B256::ZERO], Bytes::new()),
-        ..Default::default()
-    };
-
-    let transfers = erc20_transfers(&[transfer_log(token, from, to, 950), unrelated]);
-
-    assert_eq!(
-        transfers,
-        vec![TokenTransfer {
-            token: token.to_vec().into(),
-            from: from.to_vec().into(),
-            to: to.to_vec().into(),
-            amount: BigUint::from(950_u64),
-        }]
-    );
-}
-
 #[tokio::test]
-async fn test_simulated_call_returns_its_transfers() {
-    let token = Address::repeat_byte(0xCC);
-    let pool = Address::repeat_byte(0xDD);
+async fn test_simulated_call_returns_its_logs_undecoded() {
+    let emitter = Address::repeat_byte(0xCC);
+    let topics = vec![B256::repeat_byte(0x11), B256::repeat_byte(0x22)];
+    let data = Bytes::from(vec![0x33; 64]);
     let mut response = simulated_response(
         U256::from(123_u64)
             .to_be_bytes::<32>()
@@ -91,10 +61,10 @@ async fn test_simulated_call_returns_its_transfers() {
         true,
         87_654,
     );
-    response[0].calls[0].logs = vec![
-        transfer_log(token, Address::repeat_byte(1), pool, 1_000),
-        transfer_log(token, pool, Address::repeat_byte(1), 990),
-    ];
+    response[0].calls[0].logs = vec![alloy::rpc::types::Log {
+        inner: alloy::primitives::Log::new_unchecked(emitter, topics.clone(), data.clone()),
+        ..Default::default()
+    }];
     let asserter = Asserter::new();
     asserter.push_success(&response);
 
@@ -112,14 +82,20 @@ async fn test_simulated_call_returns_its_transfers() {
     )
     .await;
 
-    let CallOutcome::Success { transfers, .. } = result else {
+    let CallOutcome::Success { logs, .. } = result else {
         panic!("the call succeeded");
     };
-    let amounts: Vec<BigUint> = transfers
-        .into_iter()
-        .map(|transfer| transfer.amount)
-        .collect();
-    assert_eq!(amounts, vec![BigUint::from(1_000_u64), BigUint::from(990_u64)]);
+    assert_eq!(
+        logs,
+        vec![EventLog {
+            address: emitter.to_vec().into(),
+            topics: topics
+                .iter()
+                .map(|topic| topic.to_vec().into())
+                .collect(),
+            data: data.to_vec().into(),
+        }]
+    );
 }
 
 #[test]
@@ -561,7 +537,7 @@ fn test_record_outcome_success() {
             &SimulationAttempt::Success {
                 amount_out: BigUint::from(999_000u64),
                 gas_used: 120_000,
-                transfers: Vec::new(),
+                logs: Vec::new(),
             },
         );
     });

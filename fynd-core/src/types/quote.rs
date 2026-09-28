@@ -1459,17 +1459,15 @@ impl OrderQuote {
     }
 }
 
-/// One ERC-20 `Transfer` event a simulated call emitted.
+/// One event log a simulated call emitted, undecoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TokenTransfer {
-    /// The token contract that emitted the event.
-    pub token: Bytes,
-    /// The account the tokens left.
-    pub from: Bytes,
-    /// The account the tokens reached.
-    pub to: Bytes,
-    /// The amount the event reports, in token units.
-    pub amount: BigUint,
+pub struct EventLog {
+    /// The contract that emitted the event.
+    pub address: Bytes,
+    /// The indexed topics, the event signature first.
+    pub topics: Vec<Bytes>,
+    /// The ABI-encoded non-indexed fields.
+    pub data: Bytes,
 }
 
 /// Outcome of simulating an encoded quote on the latest block.
@@ -1484,13 +1482,13 @@ pub enum SimulationResult {
         amount_out: BigUint,
         /// Gas consumed by the simulated call.
         gas_used: u64,
-        /// The call's ERC-20 `Transfer` events, in emission order.
+        /// Every event the call emitted, in emission order.
         ///
-        /// Shows what each account actually sent and received, which a token that takes a fee
-        /// on transfer makes different from what the route priced. Not serialized: the wire
-        /// format does not change.
+        /// Shows what each account actually sent and received, and what each pool priced, which
+        /// a token that takes a fee on transfer makes different. Not serialized: the wire format
+        /// does not change.
         #[serde(skip)]
-        transfers: Vec<TokenTransfer>,
+        logs: Vec<EventLog>,
     },
     /// The simulated router call ran and reverted.
     Reverted {

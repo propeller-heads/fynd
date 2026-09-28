@@ -3732,7 +3732,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
             gas_used: 120_000,
-            transfers: Vec::new(),
+            logs: Vec::new(),
         });
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -3799,7 +3799,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(1001u64),
             gas_used: 120_000,
-            transfers: Vec::new(),
+            logs: Vec::new(),
         });
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -3837,7 +3837,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
             gas_used: 120_000,
-            transfers: Vec::new(),
+            logs: Vec::new(),
         });
 
         let payloads = capture_winning_protocols(&quote);

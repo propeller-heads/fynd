@@ -2330,15 +2330,14 @@ mod conversions {
         }
 
         #[test]
-        fn test_core_success_drops_its_transfers_on_the_wire() {
+        fn test_core_success_drops_its_logs_on_the_wire() {
             let core = fynd_core::SimulationResult::Success {
                 amount_out: BigUint::from(990_u64),
                 gas_used: 1,
-                transfers: vec![fynd_core::TokenTransfer {
-                    token: tycho_simulation::tycho_common::Bytes::from([0xCC_u8; 20]),
-                    from: tycho_simulation::tycho_common::Bytes::from([0xAA_u8; 20]),
-                    to: tycho_simulation::tycho_common::Bytes::from([0xBB_u8; 20]),
-                    amount: BigUint::from(990_u64),
+                logs: vec![fynd_core::EventLog {
+                    address: tycho_simulation::tycho_common::Bytes::from([0xCC_u8; 20]),
+                    topics: vec![tycho_simulation::tycho_common::Bytes::from([0xAA_u8; 32])],
+                    data: tycho_simulation::tycho_common::Bytes::from([0xBB_u8; 32]),
                 }],
             };
             let json = serde_json::to_string(&SimulationResult::from(core)).unwrap();

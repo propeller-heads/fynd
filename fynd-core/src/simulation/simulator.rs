@@ -19,8 +19,6 @@ use alloy::{
         },
         BlockOverrides, TransactionRequest,
     },
-    sol,
-    sol_types::SolEvent,
 };
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
@@ -38,13 +36,8 @@ use crate::{
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
     solver::defaults::SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
-    OrderQuote, SimulationResult, TokenTransfer,
+    EventLog, OrderQuote, SimulationResult,
 };
-
-sol! {
-    /// The ERC-20 `Transfer` event.
-    event Transfer(address indexed from, address indexed to, uint256 value);
-}
 
 /// Balance and allowance every simulated account is given.
 ///
@@ -151,7 +144,7 @@ impl SimulationEnvelope {
 
 pub(crate) enum SimulationAttempt {
     /// The simulated call completed.
-    Success { amount_out: BigUint, gas_used: u64, transfers: Vec<TokenTransfer> },
+    Success { amount_out: BigUint, gas_used: u64, logs: Vec<EventLog> },
     /// The simulated call reverted.
     Reverted { reason: String },
     /// Simulation could not be completed.
@@ -254,8 +247,8 @@ impl QuoteSimulator {
         )
         .await
         {
-            CallOutcome::Success { amount_out, gas_used, transfers } => {
-                SimulationAttempt::Success { amount_out, gas_used, transfers }
+            CallOutcome::Success { amount_out, gas_used, logs } => {
+                SimulationAttempt::Success { amount_out, gas_used, logs }
             }
             CallOutcome::Reverted { reason } => {
                 SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
@@ -351,8 +344,8 @@ impl QuoteSimulator {
 impl SimulationAttempt {
     pub(crate) fn into_result(self) -> SimulationResult {
         match self {
-            Self::Success { amount_out, gas_used, transfers } => {
-                SimulationResult::Success { amount_out, gas_used, transfers }
+            Self::Success { amount_out, gas_used, logs } => {
+                SimulationResult::Success { amount_out, gas_used, logs }
             }
             Self::Reverted { reason } => SimulationResult::Reverted { reason },
             Self::Failure { reason } => SimulationResult::Failure { reason },
@@ -556,28 +549,25 @@ async fn simulate_with_overrides(
     CallOutcome::Success {
         amount_out: BigUint::from_bytes_be(&amount.to_be_bytes::<32>()),
         gas_used: result.gas_used,
-        transfers: erc20_transfers(&result.logs),
+        logs: event_logs(&result.logs),
     }
 }
 
-/// The ERC-20 transfers among `logs`, in emission order.
-///
-/// A log that is not a well-formed `Transfer` (another event, or an ERC-721 `Transfer` with a
-/// third indexed topic) is skipped: it moved nothing a quote's amounts are measured in.
-fn erc20_transfers(logs: &[alloy::rpc::types::Log]) -> Vec<TokenTransfer> {
-    let mut transfers = Vec::new();
+/// `logs` as the simulation result carries them, in emission order.
+fn event_logs(logs: &[alloy::rpc::types::Log]) -> Vec<EventLog> {
+    let mut events = Vec::with_capacity(logs.len());
     for log in logs {
-        let Ok(decoded) = Transfer::decode_log(&log.inner) else {
-            continue;
-        };
-        transfers.push(TokenTransfer {
-            token: log.address().to_vec().into(),
-            from: decoded.from.to_vec().into(),
-            to: decoded.to.to_vec().into(),
-            amount: BigUint::from_bytes_be(&decoded.value.to_be_bytes::<32>()),
+        let mut topics = Vec::with_capacity(log.topics().len());
+        for topic in log.topics() {
+            topics.push(topic.to_vec().into());
+        }
+        events.push(EventLog {
+            address: log.address().to_vec().into(),
+            topics,
+            data: log.data().data.to_vec().into(),
         });
     }
-    transfers
+    events
 }
 
 /// What one simulated call came back with.
@@ -585,7 +575,7 @@ enum CallOutcome {
     Success {
         amount_out: BigUint,
         gas_used: u64,
-        transfers: Vec<TokenTransfer>,
+        logs: Vec<EventLog>,
     },
     /// The call reverted, with the best reason available: the payload's own error, or the one the
     /// trace recovered, or the node's message.
