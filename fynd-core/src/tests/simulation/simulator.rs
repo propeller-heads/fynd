@@ -327,13 +327,13 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
     );
 }
 
-/// A prestate trace naming one account and the slots its read touched.
+/// A prestate trace naming one contract and the slots its read touched.
 fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
     let storage: serde_json::Map<String, serde_json::Value> = slots
         .iter()
         .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
         .collect();
-    serde_json::json!({ format!("{contract:#x}"): { "storage": storage } })
+    serde_json::json!({ format!("{contract:#x}"): { "code": "0x6080604052", "storage": storage } })
 }
 
 /// Queues one full discovery: a balance trace and probe, then an allowance trace and probe.
@@ -386,11 +386,13 @@ async fn test_layout_cache_remembers_an_unsupported_token() {
     let asserter = Asserter::new();
     let simulator = mocked_simulator(&asserter, TEST_TIMEOUT);
     // Both balance views name a slot no convention produces, so recovery fails on the token
-    // itself rather than on the node.
+    // itself rather than on the node. The scaled probe traces once more and finds no mapping
+    // slot to write.
     for _ in 0..2 {
         asserter.push_success(&prestate(Address::repeat_byte(3), &[B256::repeat_byte(0x99)]));
         asserter.push_success(&Bytes::from(B256::from(PROBE_SENTINEL).to_vec()));
     }
+    asserter.push_success(&prestate(Address::repeat_byte(3), &[B256::repeat_byte(0x99)]));
 
     let first = simulator
         .cached_layout(Address::repeat_byte(3), Address::repeat_byte(1), Address::repeat_byte(2))

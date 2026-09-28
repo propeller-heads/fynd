@@ -633,9 +633,10 @@ fn token_overrides(
     layout: TokenLayout,
 ) -> StateOverride {
     let funding = B256::from(SIMULATION_FUNDING_VALUE);
+    let balance = B256::from(layout.balance_word(SIMULATION_FUNDING_VALUE));
     let mut state_diff = B256HashMap::default();
     for holder in [sender, router] {
-        state_diff.insert(layout.balance_slot(holder), funding);
+        state_diff.insert(layout.balance_slot(holder), balance);
     }
     for spender in [router, permit2] {
         state_diff.insert(layout.allowance_slot(sender, spender), funding);
