@@ -9,6 +9,7 @@ use rustc_hash::FxHashSet;
 use super::{
     computation::{ComputationId, ComputationRequirements},
     events::DerivedDataEvent,
+    store::DerivedData,
 };
 
 /// Tracks which derived data computations are ready based on freshness requirements.
@@ -219,6 +220,34 @@ impl ReadinessTracker {
     #[cfg(test)]
     pub fn current_block(&self) -> Option<u64> {
         self.current_block
+    }
+
+    /// Marks `allow_stale` computations that already have an output in `store` as computed.
+    ///
+    /// A worker rebuilt mid-run (respawn after a panic) starts with an empty tracker while the
+    /// shared store already holds results; without seeding, `allow_stale` requirements would
+    /// fail tasks as not-ready until the next broadcast event arrives.
+    ///
+    /// `require_fresh` computations are not seeded: a stored output was computed for whatever
+    /// block the store held it at, not necessarily the worker's current block, so treating it as
+    /// fresh could mark a `require_fresh` requirement ready with outdated data. Fresh readiness
+    /// is established the normal way, from the next `ComputationComplete` event.
+    ///
+    /// Only `ever_computed` is touched. The block a stored output carries can be well behind the
+    /// chain head, so adopting it as `current_block` would make the tracker drop a
+    /// `ComputationFailed` for the real head block and wait out the algorithm timeout instead of
+    /// failing fast.
+    pub fn seed_from_store(&mut self, store: &DerivedData) {
+        for id in self
+            .requirements
+            .stale_requirements()
+            .iter()
+            .copied()
+        {
+            if store.output_block(id).is_some() {
+                self.ever_computed.insert(id);
+            }
+        }
     }
 }
 
@@ -529,6 +558,27 @@ mod tests {
 
         assert!(!tracker.is_blocked_for_current_block());
         assert!(tracker.is_ready());
+    }
+
+    #[test]
+    fn seed_from_store_satisfies_stale_requirements() {
+        let mut tracker = ReadinessTracker::new(stale_requirements(&["token_prices"]));
+        assert!(!tracker.is_ready());
+
+        let mut store = DerivedData::new();
+        store.set_output("token_prices", 42u32, 5);
+        tracker.seed_from_store(&store);
+
+        assert!(tracker.is_ready());
+    }
+
+    #[test]
+    fn seed_from_store_ignores_missing_outputs() {
+        let mut tracker = ReadinessTracker::new(stale_requirements(&["token_prices"]));
+
+        tracker.seed_from_store(&DerivedData::new());
+
+        assert!(!tracker.is_ready());
     }
 
     #[test]
