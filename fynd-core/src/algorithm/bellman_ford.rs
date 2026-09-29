@@ -1207,7 +1207,15 @@ impl Algorithm for BellmanFordAlgorithm {
         "bellman_ford"
     }
 
-    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
+    #[instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            order_id = %request.order().id(),
+            token_in = %request.order().token_in(),
+            token_out = %request.order().token_out()
+        )
+    )]
     async fn find_best_route(
         &self,
         request: SolveRequest<'_, Self::GraphType>,
