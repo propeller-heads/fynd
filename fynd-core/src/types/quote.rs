@@ -1284,15 +1284,38 @@ impl OrderQuote {
     /// For a caller that solved a different amount than the order charges: a fee-on-transfer
     /// token delivers only part of what the sender pays, so the route is solved for what
     /// arrives while the calldata must still pull the full amount.
+    ///
+    /// Calldata encoded for the old amount would pull the wrong amount, so the transaction, the
+    /// fee breakdown and the simulation result are dropped: encode the quote again after this.
     pub fn set_amount_in(&mut self, value: BigUint) {
         self.amount_in = value;
+        self.transaction = None;
+        self.fee_breakdown = None;
+        self.simulation_result = None;
     }
 
-    /// Overrides the output amount.
+    /// Overrides the output amount, and moves the gas-adjusted output by the same difference.
     ///
     /// Used by `combine_with_surplus` to pin to the committed reference, and by callers that
     /// know the receiver gets less than the route produces (a fee-on-transfer output token).
+    ///
+    /// The gas cost does not change, so the net output moves with the output. A net output at
+    /// zero hides how far the gas cost exceeds the output, and stays at zero. The transaction and
+    /// the fee breakdown are left as they are: they describe what the router enforces, which is
+    /// the caller's to keep consistent.
     pub fn set_amount_out(&mut self, value: BigUint) {
+        if value >= self.amount_out {
+            if self.amount_out_net_gas > BigUint::ZERO {
+                self.amount_out_net_gas += &value - &self.amount_out;
+            }
+        } else {
+            let lost = &self.amount_out - &value;
+            self.amount_out_net_gas = if self.amount_out_net_gas > lost {
+                &self.amount_out_net_gas - lost
+            } else {
+                BigUint::ZERO
+            };
+        }
         self.amount_out = value;
     }
 
@@ -2601,14 +2624,35 @@ mod tests {
     }
 
     #[test]
-    fn test_set_amounts_replace_the_quoted_amounts() {
+    fn test_set_amount_in_drops_what_was_encoded_for_the_old_amount() {
         let mut quote = make_executable_quote();
 
         quote.set_amount_in(BigUint::from(1_053u64));
-        quote.set_amount_out(BigUint::from(950u64));
 
         assert_eq!(*quote.amount_in(), BigUint::from(1_053u64));
-        assert_eq!(*quote.amount_out(), BigUint::from(950u64));
+        assert!(quote.transaction().is_none(), "the calldata pulled the old amount");
+        assert!(quote.simulation_result().is_none());
+        assert!(quote.route().is_some(), "the route still holds");
+    }
+
+    #[test]
+    fn test_set_amount_out_moves_the_net_output_with_it() {
+        // 990 out, 40 of it spent on gas.
+        let mut quote = make_executable_quote();
+        quote.set_amount_out_net_gas(BigUint::from(950u64));
+
+        quote.set_amount_out(BigUint::from(970u64));
+        assert_eq!(*quote.amount_out(), BigUint::from(970u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::from(930u64));
+        assert!(quote.transaction().is_some(), "the calldata is the caller's to keep");
+
+        quote.set_amount_out(BigUint::from(990u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::from(950u64));
+
+        quote.set_amount_out(BigUint::from(10u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::ZERO, "gas exceeds the output");
+        quote.set_amount_out(BigUint::from(20u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::ZERO, "by an amount no longer known");
     }
 
     #[test]
