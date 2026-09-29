@@ -151,7 +151,7 @@ pub fn two_equal_weth_usdc(gas_price: u64) -> WeightedSplitMarket {
     token_prices.insert(weth.address.clone(), unit_price.clone());
     token_prices.insert(usdc.address.clone(), unit_price);
     let mut derived = DerivedData::new();
-    derived.set_token_prices(token_prices, vec![], 1, true);
+    derived.set_token_prices(token_prices, vec![], 1);
 
     WeightedSplitMarket {
         weth: weth.address.clone(),
@@ -304,7 +304,7 @@ impl TestScenario {
         }
 
         let mut derived = DerivedData::new();
-        derived.set_token_prices(token_prices, vec![], 1, true);
+        derived.set_token_prices(token_prices, vec![], 1);
         Arc::new(RwLock::new(derived))
     }
 }

@@ -1300,7 +1300,7 @@ mod tests {
         }
 
         let mut derived_data = DerivedData::new();
-        derived_data.set_token_prices(token_prices, vec![], 1, true);
+        derived_data.set_token_prices(token_prices, vec![], 1);
         Arc::new(RwLock::new(derived_data))
     }
 

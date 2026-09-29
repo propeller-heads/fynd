@@ -779,7 +779,7 @@ mod tests {
             prices.insert(token.address.clone(), price.clone());
         }
         let mut derived = DerivedData::new();
-        derived.set_token_prices(prices, vec![], 1, true);
+        derived.set_token_prices(prices, vec![], 1);
         Arc::new(RwLock::new(derived))
     }
 

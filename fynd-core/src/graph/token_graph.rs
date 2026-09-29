@@ -1003,9 +1003,9 @@ mod tests {
             );
         }
         let mut derived = DerivedData::new();
-        derived.set_spot_prices(Default::default(), vec![], 10, true);
-        derived.set_component_depths(Default::default(), vec![], 10, true);
-        derived.set_token_prices(token_prices, vec![], 10, true);
+        derived.set_spot_prices(Default::default(), vec![], 10);
+        derived.set_component_depths(Default::default(), vec![], 10);
+        derived.set_token_prices(token_prices, vec![], 10);
 
         manager.update_edge_weights_with_derived(market_read(&market), &derived);
 
