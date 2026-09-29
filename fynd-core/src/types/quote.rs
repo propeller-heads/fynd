@@ -1470,10 +1470,14 @@ pub struct EventLog {
     pub data: Bytes,
 }
 
-/// Outcome of simulating an encoded quote on the latest block.
+/// Outcome of simulating an encoded quote on the block it was priced on.
+///
+/// Non-exhaustive: a caller matching on it handles outcomes added later, such as
+/// [`SimulationResult::BlockUnavailable`], with a fallback arm.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SimulationResult {
     /// The simulated router call returned an amount and consumed gas.
     Success {

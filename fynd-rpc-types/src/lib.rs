@@ -2107,6 +2107,8 @@ mod conversions {
                 fynd_core::SimulationResult::BlockUnavailable { reason } => {
                     Self::Failure { reason }
                 }
+                // Fallback for future variants added to fynd_core::SimulationResult.
+                _ => Self::Failure { reason: "unrecognised simulation outcome".to_string() },
             }
         }
     }
