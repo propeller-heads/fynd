@@ -228,3 +228,11 @@ debug = true
 # for derived data. The workspace's own code keeps the debug settings.
 [profile.dev.package."*"]
 opt-level = 2
+
+# The Metric and Bebop fallback routers, propeller-heads/tycho#1518. Remove once released.
+[patch.crates-io]
+tycho-client = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
+tycho-common = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
+tycho-ethereum = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
