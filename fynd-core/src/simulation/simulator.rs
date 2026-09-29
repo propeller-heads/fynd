@@ -88,14 +88,17 @@ type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
 
 /// The call a simulation runs.
 ///
-/// The four travel together and always come from the same quote, so they are passed as one rather
-/// than as four parameters a caller could pair up wrongly.
+/// The five travel together and always come from the same quote, so they are passed as one rather
+/// than as five parameters a caller could pair up wrongly.
 #[derive(Clone, Copy)]
 pub(crate) struct SimulatedCall<'a> {
     pub(crate) sender: Address,
     pub(crate) router: Address,
     pub(crate) value: U256,
     pub(crate) data: &'a [u8],
+    /// The block whose state the call runs on: the one the quote was priced on. On a later
+    /// block the pools have moved, and the simulated amount differs from the quote by that move.
+    pub(crate) block: BlockNumberOrTag,
 }
 
 /// Simulates encoded quote transactions with temporary sender funding.
@@ -224,7 +227,13 @@ impl QuoteSimulator {
                 .as_slice(),
         );
         self.simulate_within_timeout(
-            SimulatedCall { sender, router, value, data: transaction.data() },
+            SimulatedCall {
+                sender,
+                router,
+                value,
+                data: transaction.data(),
+                block: BlockNumberOrTag::Number(quote.block().number()),
+            },
             overrides,
             SimulationEnvelope::for_quote(quote),
         )
@@ -438,9 +447,9 @@ fn failure_with(reason: String) -> SimulationAttempt {
 
 /// Block environment for a simulated call.
 ///
-/// `eth_simulateV1` builds on the real head, so the block number, timestamp, base fee, chain id and
-/// the ancestor hashes `blockhash` reads are already the ones the next block will carry. What it
-/// leaves at zero is what a pool can read to recognise a simulation, so those are set here.
+/// `eth_simulateV1` builds on the block it is given, so the block number, timestamp, base fee,
+/// chain id and the ancestor hashes `blockhash` reads are already the ones the next block carries.
+/// What it leaves at zero is what a pool can read to recognise a simulation, so those are set here.
 fn block_overrides() -> BlockOverrides {
     BlockOverrides {
         coinbase: Some(SIMULATION_COINBASE),
@@ -452,10 +461,9 @@ fn block_overrides() -> BlockOverrides {
 
 /// The same environment, reporting the height and clock a simulated block actually carried.
 ///
-/// `eth_simulateV1` numbers its own block on top of the head, so the number cannot be set in
-/// advance: a block landing between the solve and the simulation makes any prediction collide
-/// with the head, which the node refuses outright. It reports what it used, so the trace is
-/// pinned to that rather than to a guess.
+/// `eth_simulateV1` numbers its own block on top of the one it is given, and refuses a number that
+/// collides with a block it already has, so the number is not set in advance. It reports what it
+/// used, so the trace is pinned to that rather than to a guess.
 fn executed_in(environment: BlockOverrides, number: u64, timestamp: u64) -> BlockOverrides {
     BlockOverrides { number: Some(U256::from(number)), time: Some(timestamp), ..environment }
 }
@@ -491,7 +499,14 @@ async fn simulate_with_overrides(
             .with_block_overrides(environment.clone())
             .call(call.clone()),
     );
-    let response = match timeout(request_timeout, provider.simulate(&payload)).await {
+    let response = match timeout(
+        request_timeout,
+        provider
+            .simulate(&payload)
+            .block_id(simulated.block.into()),
+    )
+    .await
+    {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
             return CallOutcome::Failure(format!(
@@ -530,6 +545,7 @@ async fn simulate_with_overrides(
             traced_revert_reason(
                 provider,
                 call,
+                simulated.block,
                 overrides,
                 executed_in(environment, block.inner.header.number, block.inner.header.timestamp),
             ),
@@ -648,6 +664,7 @@ fn token_overrides(
 async fn traced_revert_reason(
     provider: &RootProvider<Ethereum>,
     call: TransactionRequest,
+    block: BlockNumberOrTag,
     overrides: StateOverride,
     environment: BlockOverrides,
 ) -> Option<String> {
@@ -663,7 +680,7 @@ async fn traced_revert_reason(
         .with_block_overrides(environment);
 
     match provider
-        .debug_trace_call_callframe(call, BlockNumberOrTag::Latest.into(), options)
+        .debug_trace_call_callframe(call, block.into(), options)
         .await
     {
         Ok(frame) => revert::reason_from_frame(&frame),
