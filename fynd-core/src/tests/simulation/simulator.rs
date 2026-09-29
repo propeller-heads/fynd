@@ -252,6 +252,175 @@ impl wiremock::Respond for SimulatesOn {
     }
 }
 
+/// Answers every request with the error geth gives for a block it does not have.
+struct HeaderNotFound;
+
+impl wiremock::Respond for HeaderNotFound {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .map(|body| body["id"].clone())
+            .unwrap_or_default();
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32000, "message": "header not found"},
+        }))
+    }
+}
+
+fn http_simulator(
+    server: &wiremock::MockServer,
+    block_time: Duration,
+    request_timeout: Duration,
+) -> QuoteSimulator {
+    QuoteSimulator::with_provider(
+        RootProvider::new_http(server.uri().parse().unwrap()),
+        Address::repeat_byte(9),
+        request_timeout,
+    )
+    .with_block_time(block_time)
+}
+
+fn call_on_block(number: u64) -> SimulatedCall<'static> {
+    SimulatedCall {
+        sender: Address::repeat_byte(1),
+        router: Address::repeat_byte(2),
+        value: U256::ZERO,
+        data: &[0x12],
+        block: BlockNumberOrTag::Number(number),
+    }
+}
+
+#[tokio::test]
+async fn test_simulation_waits_for_a_node_that_does_not_have_the_block_yet() {
+    let server = wiremock::MockServer::start().await;
+    let response = serde_json::to_value(simulated_response(
+        U256::from(123_u64)
+            .to_be_bytes::<32>()
+            .to_vec(),
+        true,
+        87_654,
+    ))
+    .unwrap();
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(HeaderNotFound)
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(SimulatesOn { block: "0x4d2", response: response.clone() })
+        .respond_with(SimulatesOn { block: "0x4d2", response })
+        .mount(&server)
+        .await;
+    let simulator = http_simulator(&server, Duration::from_secs(2), TEST_TIMEOUT);
+    let started = std::time::Instant::now();
+
+    let attempt = simulator
+        .simulate_within_timeout(
+            call_on_block(1_234),
+            native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
+        )
+        .await;
+
+    assert!(matches!(attempt, SimulationAttempt::Success { .. }), "found on the third try");
+    assert!(started.elapsed() >= Duration::from_millis(1_500), "waited 500 ms, then 1 s");
+}
+
+#[tokio::test]
+async fn test_simulation_gives_up_on_the_block_after_two_block_times() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(HeaderNotFound)
+        .mount(&server)
+        .await;
+    let simulator = http_simulator(&server, Duration::from_millis(400), TEST_TIMEOUT);
+    let started = std::time::Instant::now();
+
+    let attempt = simulator
+        .simulate_within_timeout(
+            call_on_block(1_234),
+            native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
+        )
+        .await;
+
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(&attempt, SimulationAttempt::BlockUnavailable { reason } if reason.contains("header not found")),
+        "a node failure, not a failed or reverted call"
+    );
+    assert!(elapsed >= Duration::from_millis(800), "waited two block times: {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(1_500), "and no longer: {elapsed:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .len();
+    assert_eq!(requests, 3, "asked at 0, 500 ms and 800 ms");
+}
+
+#[tokio::test]
+async fn test_waiting_for_the_block_stays_within_the_request_timeout() {
+    // Two Ethereum block times would be 24 s; the request allows 1 s.
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(HeaderNotFound)
+        .mount(&server)
+        .await;
+    let simulator = http_simulator(&server, Duration::from_secs(12), Duration::from_millis(1_000));
+    let started = std::time::Instant::now();
+
+    let attempt = simulator
+        .simulate_within_timeout(
+            call_on_block(1_234),
+            native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
+        )
+        .await;
+
+    let elapsed = started.elapsed();
+    assert!(matches!(attempt, SimulationAttempt::BlockUnavailable { .. }));
+    assert!(elapsed < Duration::from_millis(1_000), "within the request timeout: {elapsed:?}");
+    let requests = server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .len();
+    assert_eq!(requests, 2, "asked at 0 and 500 ms; a 1 s wait would outlast the request");
+}
+
+#[tokio::test]
+async fn test_other_node_errors_are_not_retried() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0", "id": 0,
+            "error": {"code": -32601, "message": "the method eth_simulateV1 does not exist"},
+        })))
+        .mount(&server)
+        .await;
+    let simulator = http_simulator(&server, Duration::from_secs(2), TEST_TIMEOUT);
+
+    let attempt = simulator
+        .simulate_within_timeout(
+            call_on_block(1_234),
+            native_balance_override(Address::repeat_byte(1)),
+            test_envelope(),
+        )
+        .await;
+
+    assert!(matches!(attempt, SimulationAttempt::Failure { .. }));
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn test_simulation_runs_on_the_block_it_is_given() {
     let server = wiremock::MockServer::start().await;
@@ -750,6 +919,7 @@ async fn test_live_simulate_and_trace() {
             CallOutcome::Reverted { reason } => format!("reverted: {reason}"),
             CallOutcome::Success { amount_out, .. } => format!("success: {amount_out}"),
             CallOutcome::Failure(reason) => format!("failed: {reason}"),
+            CallOutcome::BlockUnavailable(reason) => format!("block unavailable: {reason}"),
         };
         println!("  {name} -> {described}");
         assert!(

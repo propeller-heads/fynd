@@ -331,6 +331,7 @@ fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
         None => ("", None),
         Some(SimulationResult::Reverted { .. }) => ("reverted", None),
         Some(SimulationResult::Failure { .. }) => ("failed", None),
+        Some(SimulationResult::BlockUnavailable { .. }) => ("block_unavailable", None),
         Some(SimulationResult::Success { amount_out, .. }) => {
             ("success", deviation_bps(quote, amount_out))
         }

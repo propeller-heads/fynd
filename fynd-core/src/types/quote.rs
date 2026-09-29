@@ -1500,6 +1500,13 @@ pub enum SimulationResult {
         /// Readable reason the simulation did not run.
         reason: String,
     },
+    /// The node did not have the block the quote was priced on, even after waiting for it.
+    ///
+    /// Says nothing about the route or its tokens: the node was behind the market data.
+    BlockUnavailable {
+        /// Readable reason the node gave.
+        reason: String,
+    },
 }
 
 /// Status of an order solution.

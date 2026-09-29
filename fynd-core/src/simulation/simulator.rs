@@ -24,7 +24,10 @@ use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
-use tokio::{sync::OnceCell, time::timeout};
+use tokio::{
+    sync::OnceCell,
+    time::{sleep, timeout, Instant},
+};
 use tracing::debug;
 use tycho_simulation::tycho_common::models::Chain;
 
@@ -111,7 +114,17 @@ pub struct QuoteSimulator {
     layout_cache: Mutex<FxHashMap<Address, LayoutCell>>,
     native_token: Address,
     request_timeout: std::time::Duration,
+    /// How often the chain makes a block, which sets how long to wait for a node that does not
+    /// have a quote's block yet.
+    block_time: Duration,
 }
+
+/// The first wait for a node that does not have a quote's block yet. Each later wait doubles.
+const BLOCK_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
+/// How many block times to wait in total for a node to have a quote's block.
+const BLOCK_RETRY_BLOCKS: u32 = 2;
+/// The block time of a simulator built without a chain: Ethereum's.
+const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(12);
 
 /// The transaction envelope a simulated call runs under.
 ///
@@ -152,6 +165,8 @@ pub(crate) enum SimulationAttempt {
     Reverted { reason: String },
     /// Simulation could not be completed.
     Failure { reason: String },
+    /// The node did not have the quote's block, even after waiting for it.
+    BlockUnavailable { reason: String },
 }
 
 impl QuoteSimulator {
@@ -159,7 +174,8 @@ impl QuoteSimulator {
     ///
     /// # Errors
     ///
-    /// Returns an error when `rpc_url` is not a valid URL or the chain has no native token.
+    /// Returns an error when `rpc_url` is not a valid URL, or the chain has no native token or no
+    /// block time.
     pub fn new(
         rpc_url: &str,
         chain: Chain,
@@ -171,11 +187,15 @@ impl QuoteSimulator {
         let native_token = chain
             .try_native_token()
             .map_err(|error| format!("native token for {chain:?}: {error}"))?;
+        let block_time = chain
+            .try_block_time_secs()
+            .map_err(|error| format!("block time for {chain:?}: {error}"))?;
         Ok(Self::with_provider(
             ProviderBuilder::default().connect_http(url),
             Address::from_slice(native_token.address.as_ref()),
             request_timeout,
-        ))
+        )
+        .with_block_time(Duration::from_secs(block_time)))
     }
 
     /// Simulates an encoded quote and reports its returned amount and gas used or a failure.
@@ -241,29 +261,63 @@ impl QuoteSimulator {
     }
 
     /// Runs one simulated call, reporting a timeout as a failure rather than waiting forever.
+    ///
+    /// A node that does not have the call's block yet is asked again: after 500 ms, then after
+    /// twice as long each time, until the waits add up to two block times. The block a quote was
+    /// priced on can reach the Tycho feed before it reaches the node, and usually reaches the
+    /// node within one block.
+    ///
+    /// All attempts and waits together stay within the request timeout, so a node that is
+    /// behind cannot hold a quote longer than one that does not answer.
     pub(crate) async fn simulate_within_timeout(
         &self,
         call: SimulatedCall<'_>,
         overrides: StateOverride,
         envelope: SimulationEnvelope,
     ) -> SimulationAttempt {
-        match simulate_with_overrides(
-            &self.provider,
-            call,
-            overrides,
-            envelope,
-            self.request_timeout,
-        )
-        .await
-        {
-            CallOutcome::Success { amount_out, gas_used, logs } => {
-                SimulationAttempt::Success { amount_out, gas_used, logs }
+        let deadline = Instant::now() + self.request_timeout;
+        let budget = self.block_time * BLOCK_RETRY_BLOCKS;
+        let mut waited = Duration::ZERO;
+        let mut delay = BLOCK_RETRY_FIRST_DELAY;
+        loop {
+            let outcome = simulate_with_overrides(
+                &self.provider,
+                call,
+                overrides.clone(),
+                envelope,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await;
+            let CallOutcome::BlockUnavailable(reason) = outcome else {
+                return outcome.into_attempt();
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let pause = delay
+                .min(budget.saturating_sub(waited))
+                .min(remaining);
+            // A pause that leaves no time to ask again ends the wait.
+            if pause.is_zero() || pause >= remaining {
+                return SimulationAttempt::BlockUnavailable {
+                    reason: format!("{reason} (waited {waited:?})"),
+                };
             }
-            CallOutcome::Reverted { reason } => {
-                SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
-            }
-            CallOutcome::Failure(reason) => SimulationAttempt::Failure { reason },
+            debug!(
+                target: SIMULATION_OUTCOME_TARGET,
+                block = ?call.block,
+                ?waited,
+                ?pause,
+                "node does not have the block yet; asking again"
+            );
+            sleep(pause).await;
+            waited += pause;
+            delay *= 2;
         }
+    }
+
+    /// The same simulator, waiting for a block for two of `block_time`.
+    pub(crate) fn with_block_time(mut self, block_time: Duration) -> Self {
+        self.block_time = block_time;
+        self
     }
 
     pub(crate) fn with_provider(
@@ -276,6 +330,7 @@ impl QuoteSimulator {
             layout_cache: Mutex::new(FxHashMap::default()),
             native_token,
             request_timeout,
+            block_time: DEFAULT_BLOCK_TIME,
         }
     }
 
@@ -358,6 +413,7 @@ impl SimulationAttempt {
             }
             Self::Reverted { reason } => SimulationResult::Reverted { reason },
             Self::Failure { reason } => SimulationResult::Failure { reason },
+            Self::BlockUnavailable { reason } => SimulationResult::BlockUnavailable { reason },
         }
     }
 }
@@ -407,6 +463,9 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
         }
         SimulationAttempt::Reverted { reason } => log_outcome(quote, "reverted", reason),
         SimulationAttempt::Failure { reason } => log_outcome(quote, "failed", reason),
+        SimulationAttempt::BlockUnavailable { reason } => {
+            log_outcome(quote, "block_unavailable", reason)
+        }
     };
     counter!(
         "quote_simulations_total",
@@ -509,10 +568,11 @@ async fn simulate_with_overrides(
     {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
-            return CallOutcome::Failure(format!(
-                "simulation eth_simulateV1 failed: {}",
-                rpc_error_reason(&error)
-            ))
+            let reason = format!("simulation eth_simulateV1 failed: {}", rpc_error_reason(&error));
+            if is_block_unavailable(&error) {
+                return CallOutcome::BlockUnavailable(reason);
+            }
+            return CallOutcome::Failure(reason);
         }
         Err(_) => {
             return CallOutcome::Failure(format!(
@@ -599,6 +659,39 @@ enum CallOutcome {
         reason: String,
     },
     Failure(String),
+    /// The node does not have the block the call is to run on.
+    BlockUnavailable(String),
+}
+
+impl CallOutcome {
+    fn into_attempt(self) -> SimulationAttempt {
+        match self {
+            Self::Success { amount_out, gas_used, logs } => {
+                SimulationAttempt::Success { amount_out, gas_used, logs }
+            }
+            Self::Reverted { reason } => {
+                SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
+            }
+            Self::Failure(reason) => SimulationAttempt::Failure { reason },
+            Self::BlockUnavailable(reason) => SimulationAttempt::BlockUnavailable { reason },
+        }
+    }
+}
+
+/// Whether the node refused because it does not have the requested block.
+///
+/// Nodes word this differently: geth and its forks say "header not found", others "block not
+/// found" or "unknown block".
+fn is_block_unavailable(
+    error: &alloy::transports::RpcError<alloy::transports::TransportErrorKind>,
+) -> bool {
+    let Some(response) = error.as_error_resp() else {
+        return false;
+    };
+    let message = response.message.to_ascii_lowercase();
+    ["header not found", "block not found", "unknown block"]
+        .iter()
+        .any(|phrase| message.contains(phrase))
 }
 
 fn rpc_error_reason(
