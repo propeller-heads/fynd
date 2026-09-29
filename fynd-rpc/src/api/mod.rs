@@ -35,6 +35,8 @@ use std::{
 use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
 pub use error::{ApiError, RequestValidationError};
+#[cfg(feature = "experimental")]
+use fynd_core::feed::market_data::MarketReader;
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData, types::BlockInfo,
     worker_pool_router::WorkerPoolRouter,
@@ -293,13 +295,14 @@ impl AppState {
         &self.worker_router
     }
 
-    /// Returns the market data this instance solves against.
+    /// Returns a read-only handle on the market data this instance solves against.
     ///
-    /// For route overrides that need what a quote is solved on, such as the token registry.
+    /// For route overrides that need what a quote is solved on, such as the token registry. It
+    /// cannot write, so an override cannot change or lock the market every solve reads.
     #[cfg(feature = "experimental")]
     #[must_use]
-    pub fn market_data(&self) -> &MarketData {
-        &self.market_data
+    pub fn market_reader(&self) -> MarketReader {
+        self.market_data.reader()
     }
 
     /// Returns the health tracker backing `GET /v1/health`.
@@ -505,7 +508,10 @@ mod configure_app_tests {
     use super::*;
 
     fn test_state() -> AppState {
-        let market_data: MarketData = MarketData::new_shared();
+        test_state_on(MarketData::new_shared())
+    }
+
+    fn test_state_on(market_data: MarketData) -> AppState {
         let derived_data: SharedDerivedDataRef =
             Arc::new(tokio::sync::RwLock::new(Default::default()));
         let registry = SwapEncoderRegistry::new(Chain::Ethereum)
@@ -533,16 +539,17 @@ mod configure_app_tests {
     #[cfg(feature = "experimental")]
     #[tokio::test]
     async fn test_app_state_exposes_the_market_it_serves() {
-        let state = test_state();
+        let market = MarketData::new_shared();
+        let state = test_state_on(market.clone());
 
-        state
-            .market_data()
+        market
             .write()
             .await
             .upsert_tokens([fynd_core::algorithm::test_utils::token(0x01, "TKN")]);
 
-        let view = state.market_data().read().await;
-        assert_eq!(view.base_market_state().token_count(), 1);
+        let reader = state.market_reader();
+        let view = reader.read().await;
+        assert_eq!(view.base_market_state().token_count(), 1, "reads what the feed wrote");
     }
 
     async fn override_info(_state: web::Data<AppState>) -> HttpResponse {
