@@ -533,9 +533,23 @@ impl Algorithm for WaterFillAlgorithm {
             if split_won { "split candidate" } else { "single path" }
         );
         match best {
-            Some((net, cand)) => Ok(RouteResult::new(cand.route, net, input.gas_price.clone())),
+            Some((net, cand)) => {
+                let mut res = RouteResult::new(cand.route, net, input.gas_price.clone());
+                if let Some(b) = input.market.last_updated() {
+                    res = res.with_block_info(b.clone());
+                }
+                Ok(res)
+            }
             // No split won: return the single path if there is one, else nothing fills the order.
-            None => best_single.ok_or(AlgorithmError::InsufficientLiquidity),
+            None => match best_single {
+                Some(mut res) => {
+                    if let Some(b) = input.market.last_updated() {
+                        res = res.with_block_info(b.clone());
+                    }
+                    Ok(res)
+                }
+                None => Err(AlgorithmError::InsufficientLiquidity),
+            },
         }
     }
 

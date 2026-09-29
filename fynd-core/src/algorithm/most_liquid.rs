@@ -567,7 +567,11 @@ impl MostLiquidAlgorithm {
                     None
                 } else {
                     let amount_out = swap_on_route(&route, ctx.token_prices, ctx.gas_price);
-                    Some(RouteResult::new(route, amount_out, ctx.gas_price.clone()))
+                    let mut res = RouteResult::new(route, amount_out, ctx.gas_price.clone());
+                    if let Some(b) = ctx.market.last_updated() {
+                        res = res.with_block_info(b.clone());
+                    }
+                    Some(res)
                 }
             }
             None => None,
