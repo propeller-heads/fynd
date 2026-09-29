@@ -138,6 +138,7 @@ its own registration function in `feed/protocol_registry.rs`:
 | Entry | Registered by | Stream |
 |---|---|---|
 | `rfq:<protocol>` | `register_rfq` | RFQ client, driven by a supervised task writing into an mpsc channel |
+| `fallback:rfq:<protocol>` | `register_rfq` | The same RFQ client, labelling its components `fallback:rfq:<protocol>` so they execute through Tycho's fallback router for that protocol |
 | `pricelevelstream:<venue>` | `open_price_level_stream` | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
 
 `register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
@@ -160,6 +161,11 @@ between the two non-Tycho sources: the price level stream serves it on Ethereum
 on the chains `METRIC_CHAINS` names (executing through `MetricExecutor`). `METRIC_CHAINS` and
 `PRICE_LEVEL_STREAM_CHAIN` are disjoint, so no deployment can stream the same Metric inventory
 twice.
+
+A `fallback:rfq:` entry (`fallback:rfq:metric`, `fallback:rfq:bebop`) is rejected at registration
+unless tycho-execution's default `executor_addresses.json` lists that exact entry for the chain.
+Its components are in the `fallback:` family, so the fallback module gives their legs a fallback
+pool like a pAMM's.
 
 Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
 is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The

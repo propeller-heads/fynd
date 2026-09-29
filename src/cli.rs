@@ -99,6 +99,8 @@ pub struct ServeArgs {
     /// e.g., --protocols all_onchain,exclude:vm:fermiswap.
     /// Use "pricelevelstream:<venue>" to serve a pAMM from the Titan price level stream,
     /// e.g., --protocols all_onchain,exclude:vm:fermiswap,pricelevelstream:fermiswap.
+    /// Prefix an RFQ protocol with "fallback:" to execute it through its Tycho fallback router,
+    /// e.g., --protocols all_onchain,fallback:rfq:metric.
     #[arg(short, long, value_delimiter = ',', value_name = "PROTO1,PROTO2")]
     pub protocols: Vec<String>,
 
