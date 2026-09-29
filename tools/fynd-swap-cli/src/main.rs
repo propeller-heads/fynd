@@ -459,7 +459,7 @@ async fn main() -> anyhow::Result<()> {
         .swap_payload(quote, &signing_hints)
         .await?;
     let order_sig = signer
-        .sign_hash(&payload.signing_hash())
+        .sign_hash(&payload.signing_hash()?)
         .await?;
     let signed = SignedSwap::assemble(payload, order_sig);
 
