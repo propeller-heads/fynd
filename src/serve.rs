@@ -471,7 +471,7 @@ pub async fn serve_with(
     // Run with graceful shutdown
     // The shutdown signal stops the server, which causes solver.run() to complete
     // and automatically clean up workers and feed (see Fynd::run() in builder.rs)
-    let server_handle = solver.server_handle();
+    let shutdown_handle = solver.shutdown_handle();
     let shutdown_signal = tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
         let mut sigterm = match signal(SignalKind::terminate()) {
@@ -494,7 +494,7 @@ pub async fn serve_with(
             }
         }
 
-        server_handle.stop(true).await;
+        shutdown_handle.stop().await;
         Ok::<(), SolverError>(())
     });
 

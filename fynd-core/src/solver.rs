@@ -356,6 +356,14 @@ pub enum SolverBuildError {
          exclusive access would be served by no pool. Configure at least one public_only pool"
     )]
     NoPublicPool,
+    /// [`FyndBuilder::reserve_worker_pool`] named a worker pool that is not configured.
+    #[error("reserved worker pool {0:?} is not configured")]
+    UnknownReservedPool(String),
+    /// Every public worker pool is reserved, so a request naming no pool would be served by none.
+    #[error(
+        "every public worker pool is reserved; configure at least one unreserved public_only pool"
+    )]
+    NoUnreservedPool,
     /// A recorded update failed to replay through the feed.
     #[cfg(feature = "test-utils")]
     #[error("replay failed: {0}")]
@@ -506,6 +514,9 @@ pub struct FyndBuilder {
     encoder: Option<Encoder>,
     calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
+    /// Worker pools served only to requests that name them; see
+    /// [`FyndBuilder::reserve_worker_pool`].
+    reserved_pools: FxHashSet<String>,
     price_guard_enabled: bool,
     simulation_enabled: bool,
     price_providers: Vec<Box<dyn PriceProvider>>,
@@ -546,6 +557,7 @@ impl FyndBuilder {
             encoder: None,
             calldata_watermark: None,
             pools: Vec::new(),
+            reserved_pools: FxHashSet::default(),
             price_guard_enabled: false,
             simulation_enabled: false,
             price_providers: Vec::new(),
@@ -670,6 +682,18 @@ impl FyndBuilder {
     /// Sets the minimum number of solver responses before early return (default: 0).
     pub fn worker_router_min_responses(mut self, min: usize) -> Self {
         self.router_min_responses = min;
+        self
+    }
+
+    /// Reserves the named worker pool for requests that name it in
+    /// [`QuoteOptions::with_worker_pools`](crate::QuoteOptions::with_worker_pools).
+    ///
+    /// Other requests are never allocated to it, so a background workload sent there (such as a
+    /// depth stream) cannot queue ahead of them, and they cannot queue ahead of it. The build
+    /// fails when the name matches no configured pool, or when no public pool is left
+    /// unreserved.
+    pub fn reserve_worker_pool(mut self, name: impl Into<String>) -> Self {
+        self.reserved_pools.insert(name.into());
         self
     }
 
@@ -840,6 +864,30 @@ impl FyndBuilder {
 
     /// Constructs all components shared between [`build`](Self::build) and
     /// [`build_with_pending`](Self::build_with_pending).
+    /// Checks that every reserved name is a configured pool and that a request naming no pool
+    /// still has a public pool to go to.
+    fn validate_reserved_pools(&self) -> Result<(), SolverBuildError> {
+        for reserved in &self.reserved_pools {
+            if !self
+                .pools
+                .iter()
+                .any(|pool| pool.name() == reserved)
+            {
+                return Err(SolverBuildError::UnknownReservedPool(reserved.clone()));
+            }
+        }
+        let has_unreserved_public_pool = self.pools.iter().any(|pool| {
+            !self
+                .reserved_pools
+                .contains(pool.name()) &&
+                pool.liquidity_scope() != Some(LiquidityScope::IncludeExclusive)
+        });
+        if !has_unreserved_public_pool {
+            return Err(SolverBuildError::NoUnreservedPool);
+        }
+        Ok(())
+    }
+
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
         if self.pools.is_empty() {
             return Err(SolverBuildError::NoPools);
@@ -855,6 +903,7 @@ impl FyndBuilder {
         {
             return Err(SolverBuildError::NoPublicPool);
         }
+        self.validate_reserved_pools()?;
 
         // Warned rather than refused: the shipped worker_pools.toml carries a budget above the
         // service's router default, so refusing here would stop a deployment that works today.
@@ -1011,9 +1060,13 @@ impl FyndBuilder {
                 }
             };
 
+            let reserved = self
+                .reserved_pools
+                .contains(worker_pool.name());
             solver_pool_handles.push(
                 SolverPoolHandle::new(worker_pool.name(), task_handle)
-                    .with_liquidity_scope(pool_scope),
+                    .with_liquidity_scope(pool_scope)
+                    .with_reserved(reserved),
             );
             worker_pools.push(worker_pool);
         }
@@ -1345,6 +1398,12 @@ impl Solver {
     /// Receivers created after a block has been processed will miss that block's event.
     pub fn subscribe_market_events(&self) -> broadcast::Receiver<crate::feed::events::MarketEvent> {
         self.market_event_tx.subscribe()
+    }
+
+    /// Returns a handle that subscribes to market events on demand without keeping the channel
+    /// open: once the feed stops, [`broadcast::WeakSender::upgrade`] returns `None`.
+    pub fn market_event_sender(&self) -> broadcast::WeakSender<crate::feed::events::MarketEvent> {
+        self.market_event_tx.downgrade()
     }
 
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
@@ -1797,6 +1856,35 @@ mod tests {
         .build();
 
         assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
+    }
+
+    fn two_pool_builder() -> FyndBuilder {
+        FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+        .add_pool("quotes", &PoolConfig::new("most_liquid"))
+        .and_then(|builder| builder.add_pool("depth", &PoolConfig::new("most_liquid")))
+        .expect("add_pool should accept the config")
+    }
+
+    #[test]
+    fn test_build_reserved_pool_validation() {
+        let unknown = two_pool_builder()
+            .reserve_worker_pool("missing")
+            .build();
+        assert!(
+            matches!(&unknown, Err(SolverBuildError::UnknownReservedPool(name)) if name == "missing")
+        );
+
+        let all_reserved = two_pool_builder()
+            .reserve_worker_pool("quotes")
+            .reserve_worker_pool("depth")
+            .build();
+        assert!(matches!(all_reserved, Err(SolverBuildError::NoUnreservedPool)));
     }
 
     /// A pool budget above the router deadline cannot take effect for a request that does not

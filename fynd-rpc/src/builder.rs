@@ -16,9 +16,10 @@ use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Cha
 use crate::{
     api::{
         configure_app, record_emitter::spawn_record_sender, AppState, HealthTracker,
-        RouteConfigurator,
+        RouteConfigurator, WorkerPoolInfo,
     },
     config::{defaults, PoolConfig},
+    shutdown::{ShutdownHandle, ShutdownSignal},
 };
 
 /// Builder that assembles Fynd and returns a running server handle.
@@ -318,6 +319,18 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Reserves the named worker pool for requests that name it in their worker pool allowlist.
+    ///
+    /// See [`FyndBuilder::reserve_worker_pool`](fynd_core::FyndBuilder::reserve_worker_pool). An
+    /// embedder that sends a background workload to one pool reserves it here, so
+    /// `POST /v1/quote` never shares its queue.
+    pub fn reserve_worker_pool(mut self, name: impl Into<String>) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .reserve_worker_pool(name);
+        self
+    }
+
     /// Enables or disables the price guard.
     ///
     /// When enabled, default providers are auto-registered if none were added
@@ -350,12 +363,14 @@ impl FyndRPCBuilder {
             "starting fynd"
         );
 
-        let parts = self
+        let solver = self
             .fynd_builder
             .build()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .into_parts();
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let market_event_sender = solver.market_event_sender();
+        let parts = solver.into_parts();
 
+        let mut worker_pool_infos = Vec::with_capacity(parts.worker_pools().len());
         for pool in parts.worker_pools() {
             info!(
                 name = %pool.name(),
@@ -363,6 +378,11 @@ impl FyndRPCBuilder {
                 num_workers = pool.num_workers(),
                 "worker pool started"
             );
+            worker_pool_infos.push(WorkerPoolInfo::new(
+                pool.name().to_owned(),
+                pool.algorithm().to_owned(),
+                pool.num_workers(),
+            ));
         }
 
         let chain = parts.chain();
@@ -390,7 +410,7 @@ impl FyndRPCBuilder {
         let (
             router,
             worker_pools,
-            _market_data,
+            market_data,
             _derived_data,
             feed_handle,
             gas_price_handle,
@@ -421,9 +441,12 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
-            _market_data.clone(),
-        );
+            market_data,
+        )
+        .with_market_event_sender(market_event_sender)
+        .with_worker_pools(worker_pool_infos);
+        let shutdown_signal = ShutdownSignal::new();
+        let app_state = app_state.with_shutdown_signal(shutdown_signal.clone());
 
         let hosted_swagger_url = self.hosted_swagger_url;
         let route_overrides = self.route_overrides;
@@ -446,7 +469,7 @@ impl FyndRPCBuilder {
         .context("failed to bind HTTP server")?
         .run();
 
-        let server_handle = server.handle();
+        let shutdown = ShutdownHandle::new(server.handle(), shutdown_signal);
         let server_task = tokio::spawn(async move {
             if let Err(e) = server.await {
                 tracing::error!(error = %e, "HTTP server error");
@@ -454,7 +477,7 @@ impl FyndRPCBuilder {
         });
 
         Ok(FyndRPC {
-            server_handle,
+            shutdown,
             server_task,
             worker_pools,
             feed_handle,
@@ -471,7 +494,7 @@ impl FyndRPCBuilder {
 /// Running Fynd RPC server. Call `run` to block until shutdown and perform cleanup.
 #[must_use]
 pub struct FyndRPC {
-    server_handle: ServerHandle,
+    shutdown: ShutdownHandle,
     server_task: JoinHandle<()>,
     worker_pools: Vec<WorkerPool>,
     feed_handle: JoinHandle<()>,
@@ -485,15 +508,23 @@ pub struct FyndRPC {
 }
 
 impl FyndRPC {
-    /// Returns a handle to the HTTP server for graceful shutdown.
+    /// Returns a handle to the HTTP server.
+    ///
+    /// Stopping through it leaves the [`ShutdownSignal`] unfired, so the stop waits for open
+    /// streams up to actix's shutdown timeout; prefer [`Self::shutdown_handle`].
     pub fn server_handle(&self) -> ServerHandle {
-        self.server_handle.clone()
+        self.shutdown.server().clone()
+    }
+
+    /// Returns a handle that ends long-lived responses and then stops the server gracefully.
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        self.shutdown.clone()
     }
 
     /// Runs the solver until shutdown. Performs cleanup on exit.
     pub async fn run(self) -> std::io::Result<()> {
         let FyndRPC {
-            server_handle,
+            shutdown,
             mut server_task,
             worker_pools,
             mut feed_handle,
@@ -518,6 +549,7 @@ impl FyndRPC {
                     error!(error = %e, "Server task error");
                 }
                 info!("shutting down: HTTP server stopped, aborting feed and computation");
+                shutdown.signal().trigger();
                 feed_handle.abort();
                 gas_price_worker_handle.abort();
                 let _ = computation_shutdown_tx.send(());
@@ -526,22 +558,24 @@ impl FyndRPC {
             _ = &mut feed_handle => {
                 // Feed handle completed, which means it errored (feed.run() only returns on error)
                 error!("Tycho feed error detected, shutting down solver");
-                server_handle.stop(true).await;
+                shutdown.stop().await;
                 server_task.await.ok();
                 gas_price_worker_handle.abort();
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
                 info!("shutting down: feed error path");
+                fatal_error = Some(std::io::Error::other("Tycho feed stopped unexpectedly"));
             }
             _ = &mut gas_price_worker_handle => {
                 // Gas price worker completed, which means it errored
                 error!("Gas price worker error detected, shutting down solver");
-                server_handle.stop(true).await;
+                shutdown.stop().await;
                 server_task.await.ok();
                 feed_handle.abort();
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
                 info!("shutting down: gas price error path");
+                fatal_error = Some(std::io::Error::other("gas price worker stopped unexpectedly"));
             }
             _ = &mut computation_manager_handle => {
                 // The derived-data pipeline task ended (event channel closed, shutdown, or a
@@ -550,7 +584,7 @@ impl FyndRPC {
                 // mirroring the feed/gas arms: stop the server gracefully and exit non-zero so
                 // the orchestrator restarts the instance (crash-only).
                 error!("Computation manager stopped unexpectedly, shutting down solver");
-                server_handle.stop(true).await;
+                shutdown.stop().await;
                 server_task.await.ok();
                 feed_handle.abort();
                 gas_price_worker_handle.abort();
@@ -589,5 +623,102 @@ impl FyndRPC {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use rstest::rstest;
+
+    use super::*;
+
+    /// Which background task ends first in [`running_with`].
+    #[derive(Debug, Clone, Copy)]
+    enum Stopped {
+        None,
+        Feed,
+        GasPrice,
+        ComputationManager,
+    }
+
+    /// A server on an ephemeral port whose background tasks run forever, except `stopped`.
+    fn running_with(stopped: Stopped) -> FyndRPC {
+        let server = HttpServer::new(App::new)
+            .workers(1)
+            .bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port")
+            .run();
+        let shutdown = ShutdownHandle::new(server.handle(), ShutdownSignal::new());
+        let server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+        let task = |ends: bool| {
+            tokio::spawn(async move {
+                if !ends {
+                    pending::<()>().await;
+                }
+            })
+        };
+        let (computation_shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+        FyndRPC {
+            shutdown,
+            server_task,
+            worker_pools: Vec::new(),
+            feed_handle: task(matches!(stopped, Stopped::Feed)),
+            gas_price_worker_handle: task(matches!(stopped, Stopped::GasPrice)),
+            metrics_sampler_handle: task(false),
+            router_fee_worker_handle: task(false),
+            computation_manager_handle: task(matches!(stopped, Stopped::ComputationManager)),
+            computation_shutdown_tx,
+            record_sender_handle: None,
+        }
+    }
+
+    #[rstest]
+    #[case::feed(Stopped::Feed)]
+    #[case::gas_price(Stopped::GasPrice)]
+    #[case::computation_manager(Stopped::ComputationManager)]
+    #[actix_web::test]
+    async fn test_run_fails_when_a_background_task_stops(#[case] stopped: Stopped) {
+        let result = tokio::time::timeout(Duration::from_secs(10), running_with(stopped).run())
+            .await
+            .expect("run returns once the task stops");
+
+        assert!(result.is_err(), "{stopped:?} stopping must fail the run");
+    }
+
+    #[rstest]
+    #[case::feed(Stopped::Feed)]
+    #[case::gas_price(Stopped::GasPrice)]
+    #[case::computation_manager(Stopped::ComputationManager)]
+    #[actix_web::test]
+    async fn test_fatal_stop_fires_the_shutdown_signal(#[case] stopped: Stopped) {
+        let solver = running_with(stopped);
+        let signal = solver
+            .shutdown_handle()
+            .signal()
+            .clone();
+
+        let _ = solver.run().await;
+
+        assert!(signal.is_triggered());
+    }
+
+    #[actix_web::test]
+    async fn test_shutdown_handle_fires_the_signal_and_stops() {
+        let solver = running_with(Stopped::None);
+        let shutdown = solver.shutdown_handle();
+        let run = tokio::spawn(solver.run());
+
+        shutdown.stop().await;
+
+        let result = tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("run returns once the server stops")
+            .expect("run does not panic");
+        assert!(result.is_ok());
+        assert!(shutdown.signal().is_triggered());
     }
 }

@@ -471,7 +471,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against, exclusions) = {
+        let (block_info, solved_against, exclusions, market_revision) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -492,7 +492,12 @@ where
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
             let exclusions = resolve_exclusions(&view, &params);
-            (block_info, solved_against, exclusions)
+            // An overlay is not part of the revision, so only a base-state solve is attributed.
+            let market_revision = params.state_label().is_none().then(|| {
+                view.base_market_state()
+                    .market_revision()
+            });
+            (block_info, solved_against, exclusions, market_revision)
         };
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
@@ -505,6 +510,14 @@ where
             .algorithm
             .find_best_route(request)
             .await;
+        // The algorithm reads the market itself, so only a revision unchanged across the whole
+        // solve identifies the state it priced. `try_read` never waits: a writer holding or
+        // queued for the lock means the revision is changing, and the quote stays unattributed.
+        let solved_revision = market_revision.filter(|before| {
+            self.market_data
+                .try_read()
+                .is_some_and(|state| state.revision() == before.revision)
+        });
 
         let order_quote = match result {
             Ok(result) => {
@@ -634,6 +647,9 @@ where
                 if let Some(bps) = price_impact_bps {
                     quote = quote.with_price_impact_bps(bps);
                 }
+                if let Some(revision) = solved_revision {
+                    quote = quote.with_market_revision(revision);
+                }
                 quote
             }
             Err(err) => {
@@ -647,6 +663,17 @@ where
         record_quote_duration(&self.pool_name, quote_duration);
 
         Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
+    }
+
+    /// Returns whether `task` was dropped unsolved because its caller stopped waiting before the
+    /// deadline, counted under the `caller_gone` outcome of `worker_pool_task_duration_seconds`.
+    fn skip_abandoned(&self, task: &SolveTask, started: Instant) -> bool {
+        if !task.is_abandoned() {
+            return false;
+        }
+        debug!(self.worker_id, task_id = %task.id(), "caller stopped waiting; not solving");
+        record_task_duration(&self.pool_name, started.elapsed(), "caller_gone");
+        true
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -884,6 +911,9 @@ where
                                 task.respond(Err(SolveError::timeout(waited_ms)));
                                 continue;
                             };
+                            if self.skip_abandoned(&task, started) {
+                                continue;
+                            }
 
                             // Wait for derived data readiness before solving, bounded by what
                             // remains of the deadline as well as by the pool's own budget.
@@ -896,6 +926,10 @@ where
                                 );
                                 record_task_duration(&self.pool_name, started.elapsed(), e.label());
                                 task.respond(Err(e));
+                                continue;
+                            }
+                            // The readiness wait can outlast the caller's interest.
+                            if self.skip_abandoned(&task, started) {
                                 continue;
                             }
 
@@ -1123,6 +1157,83 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    /// Returns a one-swap A→B route, advancing the market revision mid-solve when it holds the
+    /// market.
+    struct RevisionAlgorithm {
+        advance_market: Option<MarketData>,
+    }
+
+    impl Algorithm for RevisionAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "revision_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            if let Some(market) = &self.advance_market {
+                market
+                    .apply_block_update(2, |state| state.advance_revision())
+                    .await;
+            }
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let swap = Swap::new(
+                "p1".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(100u64),
+                BigUint::from(90u64),
+                BigUint::from(1u64),
+                component("p1", &[token_a, token_b]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(90), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[rstest]
+    #[case::unchanged(false)]
+    #[case::moved(true)]
+    #[tokio::test]
+    async fn test_quote_market_revision(#[case] market_moves: bool) {
+        let ord = order(&token(0x01, "A"), &token(0x02, "B"), 100, OrderSide::Sell);
+        let (market, _) = setup_market_weighted(vec![]);
+        market
+            .apply_block_update(1, |state| state.advance_revision())
+            .await;
+        let before = market
+            .read()
+            .await
+            .base_market_state()
+            .market_revision();
+        let algorithm = RevisionAlgorithm { advance_market: market_moves.then(|| market.clone()) };
+        let mut worker =
+            SolverWorker::new(market, DerivedData::new_shared(), algorithm, 0, "p".to_string());
+
+        let quote = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("route found");
+
+        let expected = (!market_moves).then_some(before);
+        assert_eq!(quote.order().market_revision(), expected);
     }
 
     /// Deliberately ignores exclusions so the worker must enforce them on the result.
@@ -2279,6 +2390,102 @@ mod tests {
             .await
             .expect("worker should shutdown")
             .expect("worker task should not panic");
+    }
+
+    /// Counts the orders it is asked to solve, and finds no route for any of them.
+    struct CountingAlgorithm {
+        solved: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Algorithm for CountingAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "counting_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            self.solved
+                .lock()
+                .unwrap()
+                .push(request.order().id().to_string());
+            Err(AlgorithmError::Other("no route".to_string()))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_skips_abandoned_task() {
+        use tokio::sync::oneshot;
+
+        let (market, _) = setup_market_weighted(vec![]);
+        market
+            .apply_block_update(1, |state| {
+                state.update_last_updated(BlockInfo::new(1, "0x01".to_string(), 1))
+            })
+            .await;
+        let solved = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let algorithm = CountingAlgorithm { solved: std::sync::Arc::clone(&solved) };
+        let mut worker =
+            SolverWorker::new(market, DerivedData::new_shared(), algorithm, 0, "pool".to_string());
+
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (_derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (token_a, token_b) = (token(0x01, "A"), token(0x02, "B"));
+
+        let (abandoned_tx, abandoned_rx) = oneshot::channel();
+        drop(abandoned_rx);
+        let abandoned =
+            order(&token_a, &token_b, 100, OrderSide::Sell).with_id("abandoned".to_string());
+        task_tx
+            .send(crate::types::internal::SolveTask::new(
+                uuid::Uuid::new_v4(),
+                abandoned,
+                abandoned_tx,
+                deadline,
+            ))
+            .await
+            .unwrap();
+        let (live_tx, live_rx) = oneshot::channel();
+        let live = order(&token_a, &token_b, 100, OrderSide::Sell).with_id("live".to_string());
+        task_tx
+            .send(crate::types::internal::SolveTask::new(
+                uuid::Uuid::new_v4(),
+                live,
+                live_tx,
+                deadline,
+            ))
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            worker
+                .run(event_rx, derived_rx, task_rx, shutdown_rx)
+                .await;
+        });
+        let live_result = tokio::time::timeout(Duration::from_secs(1), live_rx)
+            .await
+            .expect("live task should be answered")
+            .expect("worker should respond");
+        assert!(live_result.is_err());
+        shutdown_tx.send(()).unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(*solved.lock().unwrap(), vec!["live".to_string()]);
     }
 
     /// Captures log output for assertions, shared between the subscriber and the test.

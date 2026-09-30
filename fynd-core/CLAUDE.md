@@ -67,7 +67,11 @@ Simulation is deployment-gated with `simulation_enabled(bool)` and attached to t
 Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
 pending-block support). `Solver::subscribe_market_events()` returns a broadcast receiver for
-`MarketEvent`s.
+`MarketEvent`s. `Solver::market_event_sender()` returns a `WeakSender` that subscribes on
+demand without keeping the channel open. `reserve_worker_pool(name)` keeps a pool out of default allocation: only
+requests naming it with `QuoteOptions::with_worker_pools` reach it (`SolverPoolHandle::with_reserved`);
+the build fails for an unknown name (`UnknownReservedPool`) or when no public pool is left
+unreserved (`NoUnreservedPool`). `FyndRPCBuilder::reserve_worker_pool` forwards to it.
 
 ## Adding a Custom Algorithm
 
@@ -106,6 +110,29 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 2. Broadcasts `MarketEvent` → workers update local graph via `GraphManager`
 3. Signals `GasPriceFetcher`
 4. Triggers `ComputationManager` → `DerivedData` → workers update edge weights
+
+`MarketState::revision()` is a process-local counter the feed advances (`advance_revision`, under
+the write lock) exactly when an update changes components, states or the Ready block header, and
+the feed broadcasts one `MarketEvent` per advance. A header-only update therefore broadcasts an
+event with empty component lists, which the `ComputationManager` skips. `market_revision()`
+returns the revision with its observation metadata as a `MarketRevision`: whether the header came
+from a partial (flashblock) update, the upstream flashblock index, and `block_started_at_ms`, the
+local time the block was first applied. `update_block_header` keeps the block start across the
+flashblocks and final header of one block and restarts it on a new block or a same-height reorg
+(two full headers with different hashes). At one height the feed prefers the Ready header whose
+kind matches the update, so a partial update keeps its index beside another synchronizer's full
+header.
+
+A worker stamps `OrderQuote::market_revision()` with the revision it read before solving, but only
+when that revision is unchanged after the solve (checked with a non-blocking `try_read`) and the
+solve used no state overlay; otherwise the quote carries none. Quotes sharing a revision priced
+identical states, so a caller batching orders judges coherence by it, even across flashblocks of
+one block.
+
+A worker drops a queued task unsolved when the router's deadline has passed (`abandoned`) or when
+its caller dropped the response channel before then (`caller_gone`, `SolveTask::is_abandoned`),
+checked at pickup and again after the readiness wait; both are outcomes of
+`worker_pool_task_duration_seconds`.
 
 **Solving** (`Solver::quote(request)`):
 

@@ -84,6 +84,13 @@ impl SolveTask {
         self.deadline
     }
 
+    /// Whether the requester stopped waiting before the deadline, e.g. because a streaming
+    /// client disconnected and dropped its batch. Solving such a task only delays the tasks
+    /// behind it.
+    pub fn is_abandoned(&self) -> bool {
+        self.response_tx.is_closed()
+    }
+
     /// Sends the result back to the requester.
     /// Consumes self because oneshot::Sender can only be used once.
     pub fn respond(self, result: SolveResult) {

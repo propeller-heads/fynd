@@ -70,8 +70,26 @@ annotations live in one place.
   URL. Unset by default, and then no queue and no sending task are built at all. A value that is not
   an `http`/`https` URL fails the build rather than dropping every record at runtime
 
+- `reserve_worker_pool(name)` forwards to `FyndBuilder::reserve_worker_pool`, so an embedder's
+  background workload sent to that pool never shares a queue with `POST /v1/quote`
+
 The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps the router in
-`AppState` → starts an Actix `HttpServer`.
+`AppState` → starts an Actix `HttpServer`. `FyndRPC::run()` returns an error (non-zero exit) when
+the feed, the gas price worker or the computation manager stops, so an orchestrator restarts the
+instance.
+
+`FyndRPC::shutdown_handle()` returns a `shutdown::ShutdownHandle` whose `stop()` fires the
+`shutdown::ShutdownSignal` before stopping the server gracefully; `fynd serve` uses it on
+SIGINT/SIGTERM and `run()` on every fatal path. `AppState::shutdown_signal()` hands the signal to
+handlers: a route an embedder adds through `configure_routes` that serves a long-lived response
+(an SSE stream) ends it when the signal fires, so a stop does not wait out actix's shutdown
+timeout. `FyndRPC::server_handle()` still stops the server without firing it.
+
+An embedder's `configure_routes` closure reads the rest of what a route needs from `AppState`:
+`worker_router()`, `health_tracker()`, `chain_id()`, `market_data()` (always present, not only
+with `experimental`), `market_event_sender()` (a `broadcast::WeakSender<MarketEvent>` taken from
+`Solver::market_event_sender()`, so holding it does not keep the feed's channel open) and
+`worker_pools()` (`WorkerPoolInfo`: name, algorithm, worker count, in configuration order).
 
 ## Defaults
 

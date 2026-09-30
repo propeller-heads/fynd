@@ -717,16 +717,29 @@ impl TychoFeed {
             .flat_map(|component| component.tokens.iter().cloned());
         // TODO: how do we handle delayed and stale states? Should the feed or the solvers handle
         // this?
-        let latest_block_info = sync_states
+        let is_partial = msg.is_partial;
+        let latest_header = sync_states
             .values()
             .filter_map(|status| {
                 if let SynchronizerState::Ready(header) = status {
-                    Some(BlockInfo::new(header.number, header.hash.to_string(), header.timestamp))
+                    Some(header)
                 } else {
                     None
                 }
             })
-            .max_by_key(|b| b.number());
+            // At one height, prefer the header whose kind matches this update, so a partial
+            // update keeps its flashblock index even when another synchronizer reports the full
+            // header of the same block.
+            .max_by_key(|header| {
+                (
+                    header.number,
+                    header.partial_block_index.is_some() == is_partial,
+                    header.partial_block_index,
+                )
+            });
+        let flashblock_index = latest_header.and_then(|header| header.partial_block_index);
+        let latest_block_info = latest_header
+            .map(|header| BlockInfo::new(header.number, header.hash.to_string(), header.timestamp));
         // Captured before `latest_block_info` moves into the `apply_block_update` closure below.
         let latest_block_fields = latest_block_info
             .as_ref()
@@ -744,8 +757,23 @@ impl TychoFeed {
         let update_start = Instant::now();
         let mut latest_component_count = 0;
         let mut token_count = 0;
+        let changes_components = !added_components.is_empty() ||
+            !removed_components.is_empty() ||
+            !updated_components_ids.is_empty();
+        let mut revision_advanced = false;
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
+                let changes_header = latest_block_info
+                    .as_ref()
+                    .is_some_and(|block_info| {
+                        market_data.last_updated() != Some(block_info) ||
+                            market_data.flashblock_index() != flashblock_index ||
+                            market_data.is_partial() != is_partial
+                    });
+                revision_advanced = changes_components || changes_header;
+                if revision_advanced {
+                    market_data.advance_revision();
+                }
                 market_data.upsert_components(
                     added_components
                         .clone()
@@ -776,10 +804,9 @@ impl TychoFeed {
                 market_data.update_states(updated_or_new_states);
                 market_data.update_protocol_sync_status(sync_states);
 
-                // Update the last updated block info if one of the protocols reported "Ready"
-                // status.
+                // Update the block header if one of the protocols reported "Ready" status.
                 if let Some(block_info) = latest_block_info {
-                    market_data.update_last_updated(block_info);
+                    market_data.update_block_header(block_info, is_partial, flashblock_index);
                 }
 
                 latest_component_count = market_data.component_count();
@@ -799,11 +826,9 @@ impl TychoFeed {
             gauge!("market_last_update_timestamp_seconds").set(block_timestamp as f64);
         }
 
-        // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
-            !removed_components.is_empty() ||
-            !updated_components_ids.is_empty()
-        {
+        // One event per revision, so a subscriber tracking revisions sees every one of them. A
+        // header-only update (a new block without state changes) carries empty component lists.
+        if revision_advanced {
             let market_update_event = MarketEvent::MarketUpdated {
                 added_components: added_components
                     .into_iter()
@@ -1461,6 +1486,100 @@ mod tests {
             Ok(_) => panic!("Should not broadcast event for empty update"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+
+    fn ready_header(number: u64, partial_block_index: Option<u32>) -> SynchronizerState {
+        SynchronizerState::Ready(tycho_simulation::tycho_client::feed::BlockHeader {
+            number,
+            hash: Bytes::from(vec![number as u8, partial_block_index.map_or(0xff, |i| i as u8)]),
+            timestamp: number,
+            partial_block_index,
+            ..Default::default()
+        })
+    }
+
+    fn header_update(number: u64, headers: &[(&str, SynchronizerState)]) -> Update {
+        let sync_states = headers
+            .iter()
+            .map(|(protocol, state)| (protocol.to_string(), state.clone()))
+            .collect();
+        Update::new(number, HashMap::new(), HashMap::new()).set_sync_states(sync_states)
+    }
+
+    async fn revision(market_data: &MarketData) -> u64 {
+        market_data
+            .read()
+            .await
+            .base_market_state()
+            .revision()
+    }
+
+    #[tokio::test]
+    async fn test_revision_advances_with_every_broadcast() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let mut event_rx = feed.subscribe();
+
+        feed.handle_tycho_message(Update::new(1, HashMap::new(), HashMap::new()))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 0);
+        assert!(event_rx.try_recv().is_err());
+
+        feed.handle_tycho_message(header_update(1, &[("uniswap_v2", ready_header(1, None))]))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 1);
+        assert!(event_rx.try_recv().is_ok());
+
+        feed.handle_tycho_message(header_update(1, &[("uniswap_v2", ready_header(1, None))]))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 1);
+        assert!(event_rx.try_recv().is_err());
+
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_pairs = HashMap::from([(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1, token2]),
+        )]);
+        feed.handle_tycho_message(Update::new(1, HashMap::new(), new_pairs))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 2);
+        assert!(event_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_partial_update_keeps_flashblock_index_beside_full_header() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let mut event_rx = feed.subscribe();
+        let headers =
+            [("uniswap_v2", ready_header(7, None)), ("uniswap_v3", ready_header(7, Some(3)))];
+
+        feed.handle_tycho_message(header_update(7, &headers).set_is_partial(true))
+            .await
+            .unwrap();
+        {
+            let market = market_data.read().await;
+            let state = market.base_market_state();
+            assert_eq!(state.flashblock_index(), Some(3));
+            assert!(state.is_partial());
+        }
+        assert!(event_rx.try_recv().is_ok());
+
+        feed.handle_tycho_message(header_update(7, &headers))
+            .await
+            .unwrap();
+        let market = market_data.read().await;
+        let state = market.base_market_state();
+        assert_eq!(state.flashblock_index(), None);
+        assert!(!state.is_partial());
+        assert_eq!(state.revision(), 2);
+        assert!(event_rx.try_recv().is_ok());
     }
 
     #[test]

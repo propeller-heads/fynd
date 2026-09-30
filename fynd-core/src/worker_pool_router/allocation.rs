@@ -153,9 +153,9 @@ pub(crate) fn validate_pool_allowlist(
 
 /// Selects the worker pools that serve `class`, preserving configuration order.
 ///
-/// `pool_allowlist` further restricts the selection to the named worker pools. Callers must
-/// validate it with [`validate_pool_allowlist`] first — this is a pure filter and does not
-/// re-check the names.
+/// `pool_allowlist` further restricts the selection to the named worker pools, and is the only
+/// way to reach a reserved one. Callers must validate it with [`validate_pool_allowlist`] first —
+/// this is a pure filter and does not re-check the names.
 pub(crate) fn allocate<'a>(
     worker_pools: &'a [SolverPoolHandle],
     class: OrderClass,
@@ -164,12 +164,11 @@ pub(crate) fn allocate<'a>(
     let worker_pools: Vec<&SolverPoolHandle> = worker_pools
         .iter()
         .filter(|worker_pool| worker_pool.serves(class))
-        .filter(|worker_pool| {
-            pool_allowlist.is_none_or(|allowlist| {
-                allowlist
-                    .iter()
-                    .any(|n| n == worker_pool.name())
-            })
+        .filter(|worker_pool| match pool_allowlist {
+            Some(allowlist) => allowlist
+                .iter()
+                .any(|n| n == worker_pool.name()),
+            None => !worker_pool.is_reserved(),
         })
         .collect();
 
@@ -234,6 +233,16 @@ mod tests {
         let pools = [handle("a"), handle("b")];
         let allocation = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), None);
         assert_eq!(names(&allocation), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_allocate_reserved_pool_only_when_named() {
+        let pools = [handle("quotes"), handle("depth").with_reserved(true)];
+        let class = OrderClass::new(ExclusiveAccess::Denied);
+
+        assert_eq!(names(&allocate(&pools, class, None)), vec!["quotes"]);
+        let allowlist = ["depth".to_string()];
+        assert_eq!(names(&allocate(&pools, class, Some(&allowlist))), vec!["depth"]);
     }
 
     #[test]

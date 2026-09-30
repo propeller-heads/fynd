@@ -3618,6 +3618,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "chrono",
+ "futures 0.3.32",
  "fynd-core",
  "fynd-rpc-types",
  "hex",
