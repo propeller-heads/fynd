@@ -125,6 +125,11 @@ solve used no state overlay; otherwise the quote carries none. Quotes sharing a 
 identical states, so a caller batching orders judges coherence by it, even across flashblocks of
 one block.
 
+A worker drops a queued task unsolved when the router's deadline has passed (`abandoned`) or when
+its caller dropped the response channel before then (`caller_gone`, `SolveTask::is_abandoned`),
+checked at pickup and again after the readiness wait; both are outcomes of
+`worker_pool_task_duration_seconds`.
+
 **Solving** (`Solver::quote(request)`):
 
 0. `WorkerPoolRouter` allocates the pools serving each order — today an exclusive-access pool is

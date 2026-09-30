@@ -665,6 +665,17 @@ where
         Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
     }
 
+    /// Returns whether `task` was dropped unsolved because its caller stopped waiting before the
+    /// deadline, counted under the `caller_gone` outcome of `worker_pool_task_duration_seconds`.
+    fn skip_abandoned(&self, task: &SolveTask, started: Instant) -> bool {
+        if !task.is_abandoned() {
+            return false;
+        }
+        debug!(self.worker_id, task_id = %task.id(), "caller stopped waiting; not solving");
+        record_task_duration(&self.pool_name, started.elapsed(), "caller_gone");
+        true
+    }
+
     /// Waits for required derived data to become ready, or until timeout.
     ///
     /// Uses a Notify pattern to know when it's available to solve.
@@ -900,6 +911,9 @@ where
                                 task.respond(Err(SolveError::timeout(waited_ms)));
                                 continue;
                             };
+                            if self.skip_abandoned(&task, started) {
+                                continue;
+                            }
 
                             // Wait for derived data readiness before solving, bounded by what
                             // remains of the deadline as well as by the pool's own budget.
@@ -912,6 +926,10 @@ where
                                 );
                                 record_task_duration(&self.pool_name, started.elapsed(), e.label());
                                 task.respond(Err(e));
+                                continue;
+                            }
+                            // The readiness wait can outlast the caller's interest.
+                            if self.skip_abandoned(&task, started) {
                                 continue;
                             }
 
@@ -2372,6 +2390,102 @@ mod tests {
             .await
             .expect("worker should shutdown")
             .expect("worker task should not panic");
+    }
+
+    /// Counts the orders it is asked to solve, and finds no route for any of them.
+    struct CountingAlgorithm {
+        solved: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Algorithm for CountingAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "counting_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            self.solved
+                .lock()
+                .unwrap()
+                .push(request.order().id().to_string());
+            Err(AlgorithmError::Other("no route".to_string()))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_skips_abandoned_task() {
+        use tokio::sync::oneshot;
+
+        let (market, _) = setup_market_weighted(vec![]);
+        market
+            .apply_block_update(1, |state| {
+                state.update_last_updated(BlockInfo::new(1, "0x01".to_string(), 1))
+            })
+            .await;
+        let solved = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let algorithm = CountingAlgorithm { solved: std::sync::Arc::clone(&solved) };
+        let mut worker =
+            SolverWorker::new(market, DerivedData::new_shared(), algorithm, 0, "pool".to_string());
+
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (_derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (token_a, token_b) = (token(0x01, "A"), token(0x02, "B"));
+
+        let (abandoned_tx, abandoned_rx) = oneshot::channel();
+        drop(abandoned_rx);
+        let abandoned =
+            order(&token_a, &token_b, 100, OrderSide::Sell).with_id("abandoned".to_string());
+        task_tx
+            .send(crate::types::internal::SolveTask::new(
+                uuid::Uuid::new_v4(),
+                abandoned,
+                abandoned_tx,
+                deadline,
+            ))
+            .await
+            .unwrap();
+        let (live_tx, live_rx) = oneshot::channel();
+        let live = order(&token_a, &token_b, 100, OrderSide::Sell).with_id("live".to_string());
+        task_tx
+            .send(crate::types::internal::SolveTask::new(
+                uuid::Uuid::new_v4(),
+                live,
+                live_tx,
+                deadline,
+            ))
+            .await
+            .unwrap();
+
+        let handle = tokio::spawn(async move {
+            worker
+                .run(event_rx, derived_rx, task_rx, shutdown_rx)
+                .await;
+        });
+        let live_result = tokio::time::timeout(Duration::from_secs(1), live_rx)
+            .await
+            .expect("live task should be answered")
+            .expect("worker should respond");
+        assert!(live_result.is_err());
+        shutdown_tx.send(()).unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(*solved.lock().unwrap(), vec!["live".to_string()]);
     }
 
     /// Captures log output for assertions, shared between the subscriber and the test.
