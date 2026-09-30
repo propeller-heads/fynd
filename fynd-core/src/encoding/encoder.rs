@@ -279,7 +279,7 @@ impl Encoder {
     /// [`QuoteStatus::NoRouteFound`] and [`QuoteStatus::PriceCheckFailed`].
     ///
     /// # Arguments
-    /// * `quotes` - The winning quote of every order in the request.
+    /// * `quotes` - One quote per order to encode.
     /// * `encoding_options` - Additional context needed for encoding.
     ///
     /// # Returns
