@@ -776,6 +776,7 @@ fn test_record_outcome_success() {
                 gas_used: 120_000,
                 logs: Vec::new(),
             },
+            SimulationPurpose::Quote,
         );
     });
 
@@ -798,6 +799,9 @@ fn test_record_outcome_success() {
         "{:?}",
         counted.1
     );
+    for (name, labels, _) in &recorded {
+        assert!(labels.contains(&"purpose=quote".to_string()), "{name}: {labels:?}");
+    }
 
     let (.., deviation) = recorded
         .iter()
@@ -834,6 +838,7 @@ fn test_record_outcome_reverted() {
         record_outcome(
             &quote_with_fees(1_000_000),
             &SimulationAttempt::Reverted { reason: "reverted".to_string() },
+            SimulationPurpose::Quote,
         );
     });
 
@@ -865,6 +870,7 @@ fn test_record_outcome_failed() {
         record_outcome(
             &quote_with_fees(1_000_000),
             &SimulationAttempt::Failure { reason: "timed out".to_string() },
+            SimulationPurpose::Quote,
         );
     });
 
@@ -872,6 +878,43 @@ fn test_record_outcome_failed() {
         .iter()
         .any(|(name, labels, _)| name == "quote_simulations_total" &&
             labels.contains(&"outcome=failed".to_string())));
+}
+
+/// A service's own simulations carry their purpose on every metric, so dashboards of client
+/// quotes can leave them out.
+#[test]
+fn test_record_outcome_labels_a_fee_token_sample() {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    metrics::with_local_recorder(&recorder, || {
+        record_outcome(
+            &quote_with_fees(1_000_000),
+            &SimulationAttempt::Success {
+                amount_out: BigUint::from(999_000u64),
+                gas_used: 120_000,
+                logs: Vec::new(),
+            },
+            SimulationPurpose::FeeTokenSample,
+        );
+    });
+
+    let recorded = recorded_metrics(&snapshotter);
+    let names: Vec<&str> = recorded
+        .iter()
+        .map(|(name, ..)| name.as_str())
+        .collect();
+    for metric in [
+        "quote_simulations_total",
+        "quote_simulation_deviation_bps",
+        "quote_simulation_gas_estimate",
+        "quote_simulation_gas_used",
+    ] {
+        assert!(names.contains(&metric), "{metric} is recorded: {names:?}");
+    }
+    for (name, labels, _) in &recorded {
+        assert!(labels.contains(&"purpose=fee_token_sample".to_string()), "{name}: {labels:?}");
+    }
 }
 
 /// Drives the real call path against a live node: the simulation must be accepted (the node

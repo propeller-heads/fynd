@@ -374,7 +374,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum(rate(quote_simulations_total[1m])) by (outcome)",
+          "expr": "sum(rate(quote_simulations_total{purpose=\"quote\"}[1m])) by (outcome)",
           "legendFormat": "{{outcome}}",
           "refId": "A"
         }
@@ -395,17 +395,17 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.10, sum by (le) (rate(quote_simulation_deviation_bps_bucket[5m])))",
+          "expr": "histogram_quantile(0.10, sum by (le) (rate(quote_simulation_deviation_bps_bucket{purpose=\"quote\"}[5m])))",
           "legendFormat": "p10",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(quote_simulation_deviation_bps_bucket[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(quote_simulation_deviation_bps_bucket{purpose=\"quote\"}[5m])))",
           "legendFormat": "p50",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.90, sum by (le) (rate(quote_simulation_deviation_bps_bucket[5m])))",
+          "expr": "histogram_quantile(0.90, sum by (le) (rate(quote_simulation_deviation_bps_bucket{purpose=\"quote\"}[5m])))",
           "legendFormat": "p90",
           "refId": "C"
         }

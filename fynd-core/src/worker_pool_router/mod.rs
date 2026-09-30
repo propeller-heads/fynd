@@ -50,11 +50,14 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    bps, encoding::encoder::Encoder, feed::exclusivity::is_exclusive,
-    price_guard::guard::PriceGuard, simulation::simulator::QuoteSimulator,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
-    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo, Swap,
+    bps,
+    encoding::encoder::Encoder,
+    feed::exclusivity::is_exclusive,
+    price_guard::guard::PriceGuard,
+    simulation::simulator::{QuoteSimulator, SimulationPurpose},
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -608,8 +611,28 @@ impl WorkerPoolRouter {
     /// started without `--enable-simulation`.
     pub async fn simulate_quotes(
         &self,
+        order_quotes: Vec<OrderQuote>,
+        encoding_options: &EncodingOptions,
+    ) -> Result<Vec<OrderQuote>, SolveError> {
+        self.simulate_quotes_for(order_quotes, encoding_options, SimulationPurpose::Quote)
+            .await
+    }
+
+    /// Simulates like [`Self::simulate_quotes`], and records the simulation metrics under
+    /// `purpose`.
+    ///
+    /// For a service that simulates quotes for itself, such as samples of a fee-on-transfer
+    /// token, so that they do not count as client quotes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolveError::Internal`] when the request asks for simulation and the server was
+    /// started without `--enable-simulation`.
+    pub async fn simulate_quotes_for(
+        &self,
         mut order_quotes: Vec<OrderQuote>,
         encoding_options: &EncodingOptions,
+        purpose: SimulationPurpose,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         if !encoding_options.simulate() {
             return Ok(order_quotes);
@@ -623,7 +646,7 @@ impl WorkerPoolRouter {
                 .map(|quote| async move {
                     if quote.status() == QuoteStatus::Success {
                         let result = simulator
-                            .simulate_attempt(quote)
+                            .simulate_attempt(quote, purpose)
                             .await
                             .into_result();
                         quote.set_simulation_result(result);

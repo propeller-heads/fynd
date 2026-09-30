@@ -77,6 +77,7 @@ pub use replay::{replay_route, ReplayError, RouteReplay};
 // Re-exported so an external implementor names the same types without matching our
 // `rustc-hash` version itself.
 pub use rustc_hash;
+pub use simulation::simulator::SimulationPurpose;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
