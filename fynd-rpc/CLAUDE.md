@@ -85,6 +85,12 @@ handlers: a route an embedder adds through `configure_routes` that serves a long
 (an SSE stream) ends it when the signal fires, so a stop does not wait out actix's shutdown
 timeout. `FyndRPC::server_handle()` still stops the server without firing it.
 
+An embedder's `configure_routes` closure reads the rest of what a route needs from `AppState`:
+`worker_router()`, `health_tracker()`, `chain_id()`, `market_data()` (always present, not only
+with `experimental`), `market_event_sender()` (a `broadcast::WeakSender<MarketEvent>` taken from
+`Solver::market_event_sender()`, so holding it does not keep the feed's channel open) and
+`worker_pools()` (`WorkerPoolInfo`: name, algorithm, worker count, in configuration order).
+
 ## Defaults
 
 The `config::defaults` module re-exports `fynd-core::solver::defaults::*` and adds HTTP-specific

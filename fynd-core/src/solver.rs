@@ -1400,6 +1400,12 @@ impl Solver {
         self.market_event_tx.subscribe()
     }
 
+    /// Returns a handle that subscribes to market events on demand without keeping the channel
+    /// open: once the feed stops, [`broadcast::WeakSender::upgrade`] returns `None`.
+    pub fn market_event_sender(&self) -> broadcast::WeakSender<crate::feed::events::MarketEvent> {
+        self.market_event_tx.downgrade()
+    }
+
     /// Submits a [`QuoteRequest`] to the worker pools and returns the best [`Quote`].
     ///
     /// Grants `ExclusiveAccess::Granted`: a library embedder configures its own pools, so there

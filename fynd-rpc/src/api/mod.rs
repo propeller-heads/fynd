@@ -37,9 +37,10 @@ pub use dto::HealthStatus;
 pub use error::{ApiError, RequestValidationError};
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData, types::BlockInfo,
-    worker_pool_router::WorkerPoolRouter,
+    worker_pool_router::WorkerPoolRouter, MarketEvent,
 };
 use handlers::configure_routes;
+use tokio::sync::broadcast;
 #[cfg(feature = "experimental")]
 use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
@@ -239,6 +240,38 @@ impl HealthTracker {
     }
 }
 
+/// A worker pool the server runs, as its configuration named and sized it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerPoolInfo {
+    name: String,
+    algorithm: String,
+    num_workers: usize,
+}
+
+impl WorkerPoolInfo {
+    pub(crate) fn new(name: String, algorithm: String, num_workers: usize) -> Self {
+        Self { name, algorithm, num_workers }
+    }
+
+    /// Returns the name the worker pools config gives the pool.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the name of the algorithm the pool runs.
+    #[must_use]
+    pub fn algorithm(&self) -> &str {
+        &self.algorithm
+    }
+
+    /// Returns how many workers the pool solves with.
+    #[must_use]
+    pub fn num_workers(&self) -> usize {
+        self.num_workers
+    }
+}
+
 /// Shared application state for HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -253,8 +286,9 @@ pub struct AppState {
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
     pub(crate) gas_token: Address,
-    #[cfg(feature = "experimental")]
     pub(crate) market_data: MarketData,
+    market_event_sender: broadcast::WeakSender<MarketEvent>,
+    worker_pools: Arc<[WorkerPoolInfo]>,
     #[cfg(feature = "experimental")]
     pub(crate) tokens_cache: Arc<tokio::sync::RwLock<Option<tokens::TokensCache>>>,
 }
@@ -271,7 +305,7 @@ impl AppState {
         record_emitter: Option<RecordEmitter>,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
-        #[cfg(feature = "experimental")] market_data: MarketData,
+        market_data: MarketData,
     ) -> Self {
         Self {
             worker_router: Arc::new(worker_router),
@@ -285,8 +319,10 @@ impl AppState {
             derived_data,
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
             market_data,
+            // Dead until the builder hands over the feed's: an upgrade finds no channel.
+            market_event_sender: broadcast::channel(1).0.downgrade(),
+            worker_pools: Arc::from([]),
             #[cfg(feature = "experimental")]
             tokens_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
@@ -326,6 +362,44 @@ impl AppState {
     #[must_use]
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
+    }
+
+    /// Uses `sender` as the one [`Self::market_event_sender`] returns.
+    pub(crate) fn with_market_event_sender(
+        mut self,
+        sender: broadcast::WeakSender<MarketEvent>,
+    ) -> Self {
+        self.market_event_sender = sender;
+        self
+    }
+
+    /// Records the worker pools [`Self::worker_pools`] reports.
+    pub(crate) fn with_worker_pools(mut self, worker_pools: Vec<WorkerPoolInfo>) -> Self {
+        self.worker_pools = worker_pools.into();
+        self
+    }
+
+    /// Returns the shared market state the feed writes and the workers solve against.
+    #[must_use]
+    pub fn market_data(&self) -> &MarketData {
+        &self.market_data
+    }
+
+    /// Returns a handle that subscribes to the feed's [`MarketEvent`]s on demand.
+    ///
+    /// It does not keep the channel open: once the feed stops,
+    /// [`broadcast::WeakSender::upgrade`] returns `None` and existing receivers see the channel
+    /// closed. A route that follows the market, such as a stream an embedder registers, holds this
+    /// rather than a receiver it would have to create per worker.
+    #[must_use]
+    pub fn market_event_sender(&self) -> &broadcast::WeakSender<MarketEvent> {
+        &self.market_event_sender
+    }
+
+    /// Returns the worker pools this server runs, in configuration order.
+    #[must_use]
+    pub fn worker_pools(&self) -> &[WorkerPoolInfo] {
+        &self.worker_pools
     }
 
     /// Uses `signal` as the one [`Self::shutdown_signal`] returns.
@@ -537,7 +611,6 @@ mod configure_app_tests {
             derived_data,
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
-            #[cfg(feature = "experimental")]
             market_data,
         )
     }
@@ -663,5 +736,38 @@ mod configure_app_tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["chain_id"], 1);
+    }
+
+    #[actix_web::test]
+    async fn test_market_event_sender_follows_the_feed() {
+        assert!(test_state()
+            .market_event_sender()
+            .upgrade()
+            .is_none());
+
+        let (feed_sender, _receiver) = broadcast::channel::<MarketEvent>(1);
+        let state = test_state().with_market_event_sender(feed_sender.downgrade());
+        assert!(state
+            .market_event_sender()
+            .upgrade()
+            .is_some());
+
+        drop(feed_sender);
+        assert!(state
+            .market_event_sender()
+            .upgrade()
+            .is_none());
+    }
+
+    #[actix_web::test]
+    async fn test_worker_pools() {
+        let pools = vec![
+            WorkerPoolInfo::new("quotes".into(), "most_liquid".into(), 2),
+            WorkerPoolInfo::new("depth".into(), "most_liquid".into(), 8),
+        ];
+        let state = test_state().with_worker_pools(pools.clone());
+
+        assert_eq!(state.worker_pools(), pools.as_slice());
+        assert_eq!(state.worker_pools()[1].num_workers(), 8);
     }
 }

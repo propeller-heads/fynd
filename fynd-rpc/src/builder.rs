@@ -16,7 +16,7 @@ use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Cha
 use crate::{
     api::{
         configure_app, record_emitter::spawn_record_sender, AppState, HealthTracker,
-        RouteConfigurator,
+        RouteConfigurator, WorkerPoolInfo,
     },
     config::{defaults, PoolConfig},
     shutdown::{ShutdownHandle, ShutdownSignal},
@@ -363,12 +363,14 @@ impl FyndRPCBuilder {
             "starting fynd"
         );
 
-        let parts = self
+        let solver = self
             .fynd_builder
             .build()
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-            .into_parts();
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let market_event_sender = solver.market_event_sender();
+        let parts = solver.into_parts();
 
+        let mut worker_pool_infos = Vec::with_capacity(parts.worker_pools().len());
         for pool in parts.worker_pools() {
             info!(
                 name = %pool.name(),
@@ -376,6 +378,11 @@ impl FyndRPCBuilder {
                 num_workers = pool.num_workers(),
                 "worker pool started"
             );
+            worker_pool_infos.push(WorkerPoolInfo::new(
+                pool.name().to_owned(),
+                pool.algorithm().to_owned(),
+                pool.num_workers(),
+            ));
         }
 
         let chain = parts.chain();
@@ -403,7 +410,7 @@ impl FyndRPCBuilder {
         let (
             router,
             worker_pools,
-            _market_data,
+            market_data,
             _derived_data,
             feed_handle,
             gas_price_handle,
@@ -434,9 +441,10 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
-            _market_data.clone(),
-        );
+            market_data,
+        )
+        .with_market_event_sender(market_event_sender)
+        .with_worker_pools(worker_pool_infos);
         let shutdown_signal = ShutdownSignal::new();
         let app_state = app_state.with_shutdown_signal(shutdown_signal.clone());
 
