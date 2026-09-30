@@ -14,7 +14,10 @@
 //! `MarketState` lock. This decouples overlay writes from base-state reads: a TychoFeed block
 //! update no longer stalls overlay registrations and vice versa.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
@@ -60,6 +63,17 @@ pub enum ReadLabeledError {
     /// The label is not registered as an overlay and does not match the current base-state label.
     #[error("label not found: {0}")]
     NotFound(StateLabel),
+}
+
+/// One feed observation of the market: the revision and the metadata recorded with it.
+///
+/// Two reads that return the same `revision` saw identical components, states and block header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarketRevision {
+    /// Process-local revision, see [`MarketState::revision`].
+    pub revision: u64,
+    /// Local time the revision was applied, in Unix milliseconds.
+    pub observed_at_ms: u64,
 }
 
 /// The main entry point for accessing market data.
@@ -386,6 +400,11 @@ pub struct MarketState {
     /// `extract_subset_with_overlay` when an overlay is active. Empty string until the first block
     /// is applied.
     label: StateLabel,
+    /// Advanced under the state lock by every feed update that changes components, states or
+    /// the block header. The feed broadcasts one `MarketEvent` per advance.
+    revision: u64,
+    /// Local time `revision` was applied, in Unix milliseconds.
+    observed_at_ms: u64,
     /// All components indexed by their ID.
     components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
@@ -437,6 +456,8 @@ impl MarketState {
     pub fn new() -> Self {
         Self {
             label: String::new(),
+            revision: 0,
+            observed_at_ms: 0,
             components: FxHashMap::default(),
             simulation_states: FxHashMap::default(),
             tokens: FxHashMap::default(),
@@ -446,6 +467,30 @@ impl MarketState {
             components_by_protocol: FxHashMap::default(),
             component_generation: 0,
         }
+    }
+
+    /// Returns the process-local feed revision.
+    ///
+    /// It advances with every update that changes components, states or the block header, so it
+    /// also tells apart updates within one block, such as flashblocks.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Starts a new revision observed now.
+    ///
+    /// The feed calls it under the write lock for every update that changes components, states or
+    /// the block header, and broadcasts one `MarketEvent` per call.
+    pub fn advance_revision(&mut self) {
+        self.revision += 1;
+        self.observed_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+    }
+
+    /// Returns the revision and the feed observation it identifies.
+    pub fn market_revision(&self) -> MarketRevision {
+        MarketRevision { revision: self.revision, observed_at_ms: self.observed_at_ms }
     }
 
     /// Returns the label identifying the block or overlay this state was produced from.
@@ -676,6 +721,8 @@ impl MarketState {
 
         MarketState {
             label: self.label.clone(),
+            revision: self.revision,
+            observed_at_ms: self.observed_at_ms,
             components,
             simulation_states,
             tokens,
@@ -722,6 +769,45 @@ mod tests {
     use crate::algorithm::test_utils::{
         component, component_with_protocol, token, MockProtocolSim,
     };
+
+    #[tokio::test]
+    async fn test_revision_survives_subset_extraction() {
+        let market = MarketData::new_shared();
+        let mut subsets = Vec::new();
+        for _update in 0..2 {
+            market
+                .apply_block_update(42, |state| state.advance_revision())
+                .await;
+            subsets.push(
+                market
+                    .read()
+                    .await
+                    .extract_subset(&FxHashSet::default()),
+            );
+        }
+
+        assert_eq!(subsets[0].revision(), 1);
+        assert_eq!(subsets[1].revision(), 2);
+        assert_eq!(subsets[0].label(), subsets[1].label());
+        let (first, second) = (subsets[0].market_revision(), subsets[1].market_revision());
+        assert!(first.observed_at_ms > 0);
+        assert!(second.observed_at_ms >= first.observed_at_ms);
+    }
+
+    #[tokio::test]
+    async fn test_apply_block_update_leaves_revision_to_the_update() {
+        let market = MarketData::new_shared();
+        market
+            .apply_block_update(42, |_state| {})
+            .await;
+
+        let revision = market
+            .read()
+            .await
+            .base_market_state()
+            .revision();
+        assert_eq!(revision, 0);
+    }
 
     #[test]
     fn test_resolve_route_filter_with_protocol_prefix() {

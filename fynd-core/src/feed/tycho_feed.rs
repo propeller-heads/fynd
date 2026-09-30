@@ -744,8 +744,19 @@ impl TychoFeed {
         let update_start = Instant::now();
         let mut latest_component_count = 0;
         let mut token_count = 0;
+        let changes_components = !added_components.is_empty() ||
+            !removed_components.is_empty() ||
+            !updated_components_ids.is_empty();
+        let mut revision_advanced = false;
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
+                let changes_header = latest_block_info
+                    .as_ref()
+                    .is_some_and(|block_info| market_data.last_updated() != Some(block_info));
+                revision_advanced = changes_components || changes_header;
+                if revision_advanced {
+                    market_data.advance_revision();
+                }
                 market_data.upsert_components(
                     added_components
                         .clone()
@@ -799,11 +810,9 @@ impl TychoFeed {
             gauge!("market_last_update_timestamp_seconds").set(block_timestamp as f64);
         }
 
-        // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
-            !removed_components.is_empty() ||
-            !updated_components_ids.is_empty()
-        {
+        // One event per revision, so a subscriber tracking revisions sees every one of them. A
+        // header-only update (a new block without state changes) carries empty component lists.
+        if revision_advanced {
             let market_update_event = MarketEvent::MarketUpdated {
                 added_components: added_components
                     .into_iter()
@@ -1461,6 +1470,66 @@ mod tests {
             Ok(_) => panic!("Should not broadcast event for empty update"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+
+    fn ready_header(number: u64, hash: u8) -> SynchronizerState {
+        SynchronizerState::Ready(tycho_simulation::tycho_client::feed::BlockHeader {
+            number,
+            hash: Bytes::from(vec![hash]),
+            timestamp: number,
+            ..Default::default()
+        })
+    }
+
+    fn header_update(number: u64, header: SynchronizerState) -> Update {
+        let sync_states = HashMap::from([("uniswap_v2".to_string(), header)]);
+        Update::new(number, HashMap::new(), HashMap::new()).set_sync_states(sync_states)
+    }
+
+    async fn revision(market_data: &MarketData) -> u64 {
+        market_data
+            .read()
+            .await
+            .base_market_state()
+            .revision()
+    }
+
+    #[tokio::test]
+    async fn test_revision_advances_with_every_broadcast() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let mut event_rx = feed.subscribe();
+
+        feed.handle_tycho_message(Update::new(1, HashMap::new(), HashMap::new()))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 0);
+        assert!(event_rx.try_recv().is_err());
+
+        feed.handle_tycho_message(header_update(1, ready_header(1, 1)))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 1);
+        assert!(event_rx.try_recv().is_ok());
+
+        feed.handle_tycho_message(header_update(1, ready_header(1, 1)))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 1);
+        assert!(event_rx.try_recv().is_err());
+
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_pairs = HashMap::from([(
+            component_id.to_string(),
+            create_test_component(component_id, vec![token1, token2]),
+        )]);
+        feed.handle_tycho_message(Update::new(1, HashMap::new(), new_pairs))
+            .await
+            .unwrap();
+        assert_eq!(revision(&market_data).await, 2);
+        assert!(event_rx.try_recv().is_ok());
     }
 
     #[test]

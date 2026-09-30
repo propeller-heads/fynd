@@ -1481,7 +1481,7 @@ impl From<AlgorithmError> for QuoteStatus {
 ///
 /// Quotes are only valid for the block at which they were computed. Market
 /// conditions may change in subsequent blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockInfo {
     /// Block number.
     number: u64,

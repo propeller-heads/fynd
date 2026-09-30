@@ -107,6 +107,12 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 3. Signals `GasPriceFetcher`
 4. Triggers `ComputationManager` → `DerivedData` → workers update edge weights
 
+`MarketState::revision()` is a process-local counter the feed advances (`advance_revision`, under
+the write lock) exactly when an update changes components, states or the Ready block header, and
+the feed broadcasts one `MarketEvent` per advance. A header-only update therefore broadcasts an
+event with empty component lists, which the `ComputationManager` skips. `market_revision()`
+returns the revision with its observation metadata as a `MarketRevision`.
+
 **Solving** (`Solver::quote(request)`):
 
 0. `WorkerPoolRouter` allocates the pools serving each order — today an exclusive-access pool is
