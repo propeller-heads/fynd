@@ -318,6 +318,18 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Reserves the named worker pool for requests that name it in their worker pool allowlist.
+    ///
+    /// See [`FyndBuilder::reserve_worker_pool`](fynd_core::FyndBuilder::reserve_worker_pool). An
+    /// embedder that sends a background workload to one pool reserves it here, so
+    /// `POST /v1/quote` never shares its queue.
+    pub fn reserve_worker_pool(mut self, name: impl Into<String>) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .reserve_worker_pool(name);
+        self
+    }
+
     /// Enables or disables the price guard.
     ///
     /// When enabled, default providers are auto-registered if none were added
@@ -591,3 +603,4 @@ impl FyndRPC {
         }
     }
 }
+

@@ -67,7 +67,10 @@ Simulation is deployment-gated with `simulation_enabled(bool)` and attached to t
 Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
 pending-block support). `Solver::subscribe_market_events()` returns a broadcast receiver for
-`MarketEvent`s.
+`MarketEvent`s. `reserve_worker_pool(name)` keeps a pool out of default allocation: only
+requests naming it with `QuoteOptions::with_worker_pools` reach it (`SolverPoolHandle::with_reserved`);
+the build fails for an unknown name (`UnknownReservedPool`) or when no public pool is left
+unreserved (`NoUnreservedPool`). `FyndRPCBuilder::reserve_worker_pool` forwards to it.
 
 ## Adding a Custom Algorithm
 

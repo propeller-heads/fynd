@@ -160,12 +160,30 @@ pub struct SolverPoolHandle {
     /// Which liquidity this worker pool routes through. Decides whether an order is dispatched
     /// to it ([`SolverPoolHandle::serves`]).
     liquidity_scope: LiquidityScope,
+    /// Whether only requests naming this worker pool in their allowlist are allocated to it.
+    reserved: bool,
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`LiquidityScope`].
+    /// Creates a new, unreserved solver pool handle with the default [`LiquidityScope`].
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
-        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
+        Self {
+            name: name.into(),
+            queue,
+            liquidity_scope: LiquidityScope::default(),
+            reserved: false,
+        }
+    }
+
+    /// Reserves the worker pool for requests that name it in their worker pool allowlist.
+    pub fn with_reserved(mut self, reserved: bool) -> Self {
+        self.reserved = reserved;
+        self
+    }
+
+    /// Returns whether only requests naming this worker pool are allocated to it.
+    pub fn is_reserved(&self) -> bool {
+        self.reserved
     }
 
     /// Sets the worker pool's liquidity scope.

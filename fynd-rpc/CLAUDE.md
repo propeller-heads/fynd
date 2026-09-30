@@ -70,6 +70,9 @@ annotations live in one place.
   URL. Unset by default, and then no queue and no sending task are built at all. A value that is not
   an `http`/`https` URL fails the build rather than dropping every record at runtime
 
+- `reserve_worker_pool(name)` forwards to `FyndBuilder::reserve_worker_pool`, so an embedder's
+  background workload sent to that pool never shares a queue with `POST /v1/quote`
+
 The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps the router in
 `AppState` → starts an Actix `HttpServer`.
 
