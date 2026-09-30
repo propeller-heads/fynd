@@ -11,6 +11,7 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address, Chain},
         simulation::{
             errors::{SimulationError, TransitionError},
+            indicatively_priced::IndicativelyPriced,
             protocol_sim::{
                 Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
                 SwapConstraint,
@@ -332,6 +333,88 @@ impl ProtocolSim for DivByZeroSim {
             .as_any()
             .downcast_ref::<Self>()
             .is_some()
+    }
+}
+
+// ==================== IndicativeSim ====================
+
+/// ProtocolSim that reports itself as indicatively priced, as an RFQ venue's state does.
+///
+/// Prices like the [`MockProtocolSim`] it wraps. It signs no quotes: `request_signed_quote` keeps
+/// the trait's default error.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct IndicativeSim {
+    inner: MockProtocolSim,
+}
+
+impl IndicativeSim {
+    /// Wraps `inner`, whose prices it reports.
+    pub fn new(inner: MockProtocolSim) -> Self {
+        Self { inner }
+    }
+}
+
+impl IndicativelyPriced for IndicativeSim {}
+
+#[typetag::serde]
+impl ProtocolSim for IndicativeSim {
+    fn fee(&self) -> f64 {
+        self.inner.fee()
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.inner.spot_price(base, quote)
+    }
+
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        self.inner
+            .get_amount_out(amount_in, token_in, token_out)
+    }
+
+    fn get_limits(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.inner
+            .get_limits(sell_token, buy_token)
+    }
+
+    fn delta_transition(
+        &mut self,
+        _delta: ProtocolStateDelta,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
+        _balances: &Balances,
+    ) -> Result<(), TransitionError> {
+        unimplemented!("delta_transition not implemented in IndicativeSim")
+    }
+
+    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn eq(&self, other: &dyn ProtocolSim) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some()
+    }
+
+    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
+        Ok(self)
     }
 }
 

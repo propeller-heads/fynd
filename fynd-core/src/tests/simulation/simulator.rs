@@ -14,6 +14,7 @@ use num_bigint::BigUint;
 
 use super::*;
 use crate::{
+    algorithm::test_utils::{component, token, IndicativeSim, MockProtocolSim},
     simulation::{
         deviation::fixtures::quote_with_fees,
         token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
@@ -573,6 +574,68 @@ fn test_record_outcome_failed() {
         .iter()
         .any(|(name, labels, _)| name == "quote_simulations_total" &&
             labels.contains(&"outcome=failed".to_string())));
+}
+
+/// A swap from token `A` to `B`, on an RFQ venue when `rfq` is set.
+fn swap(rfq: bool) -> Swap {
+    let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+    let price = MockProtocolSim::new(2.0);
+    let state: Box<dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim> =
+        if rfq { Box::new(IndicativeSim::new(price)) } else { Box::new(price) };
+    Swap::new(
+        "pool".to_string(),
+        "mock".to_string(),
+        a.address.clone(),
+        b.address.clone(),
+        BigUint::from(1_000u64),
+        BigUint::from(2_000u64),
+        BigUint::ZERO,
+        component("pool", &[a, b]),
+        state,
+    )
+}
+
+/// A fee-carrying quote whose route is `swaps`.
+fn routed_quote(swaps: Vec<Swap>) -> OrderQuote {
+    let route = crate::types::Route::new(swaps, rustc_hash::FxHashMap::default())
+        .expect("test route must not be empty");
+    quote_with_fees(1_000_000).with_route(route)
+}
+
+#[test]
+fn test_rfq_route() {
+    assert_eq!(rfq_route(&quote_with_fees(1_000_000)), "none", "no route");
+    assert_eq!(rfq_route(&routed_quote(vec![swap(false)])), "none");
+    assert_eq!(rfq_route(&routed_quote(vec![swap(true)])), "single_leg");
+    assert_eq!(rfq_route(&routed_quote(vec![swap(true), swap(false)])), "mixed");
+    assert_eq!(rfq_route(&routed_quote(vec![swap(true), swap(true)])), "mixed");
+}
+
+/// A single RFQ leg labels both the outcome and the deviation, so the level-to-signed gap can be
+/// read apart from every other route.
+#[test]
+fn test_record_outcome_rfq_label() {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    metrics::with_local_recorder(&recorder, || {
+        record_outcome(
+            &routed_quote(vec![swap(true)]),
+            &SimulationAttempt::Success {
+                amount_out: BigUint::from(999_000u64),
+                gas_used: 120_000,
+            },
+        );
+    });
+
+    let recorded = recorded_metrics(&snapshotter);
+    for metric in ["quote_simulations_total", "quote_simulation_deviation_bps"] {
+        let (_, labels, _) = recorded
+            .iter()
+            .find(|(name, ..)| name == metric)
+            .unwrap_or_else(|| panic!("{metric} is recorded"));
+        assert!(labels.contains(&"rfq=single_leg".to_string()), "{metric}: {labels:?}");
+    }
 }
 
 /// Drives the real call path against a live node: the simulation must be accepted (the node

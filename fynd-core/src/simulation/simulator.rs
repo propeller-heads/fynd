@@ -36,7 +36,7 @@ use crate::{
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
     solver::defaults::SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
-    OrderQuote, SimulationResult,
+    OrderQuote, SimulationResult, Swap,
 };
 
 /// Balance and allowance every simulated account is given.
@@ -368,6 +368,7 @@ fn log_outcome(quote: &OrderQuote, outcome: &'static str, reason: &str) -> &'sta
         order_id = quote.order_id(),
         pool = quote.worker_pool(),
         algorithm = quote.algorithm(),
+        rfq = rfq_route(quote),
         outcome,
         "{reason}"
     );
@@ -381,16 +382,23 @@ fn log_outcome(quote: &OrderQuote, outcome: &'static str, reason: &str) -> &'sta
 /// the route the solver priced does not execute, while a failure means the simulation itself did
 /// not run, so it says nothing about the route. Both carry the winning pool and algorithm, so a
 /// rise in either can be traced to the solver that produced the route.
+///
+/// The outcome and the deviation also carry `rfq` (see [`rfq_route`]). A route that is one RFQ
+/// swap executes the maker's signed quote and nothing else, so its deviation is the gap between
+/// the price levels it was quoted on and what the maker signed; a gap wider than the slippage
+/// shows as a revert instead.
 fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
     let pool = quote.worker_pool().to_string();
     let algorithm = quote.algorithm().to_string();
+    let rfq = rfq_route(quote);
     let outcome = match attempt {
         SimulationAttempt::Success { amount_out, gas_used } => {
             if let Some(deviation) = deviation_bps(quote, amount_out) {
                 histogram!(
                     "quote_simulation_deviation_bps",
                     "pool" => pool.clone(),
-                    "algorithm" => algorithm.clone()
+                    "algorithm" => algorithm.clone(),
+                    "rfq" => rfq
                 )
                 .record(deviation);
             }
@@ -404,9 +412,33 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
         "quote_simulations_total",
         "outcome" => outcome,
         "pool" => pool,
-        "algorithm" => algorithm
+        "algorithm" => algorithm,
+        "rfq" => rfq
     )
     .increment(1);
+}
+
+/// How the quote's route uses RFQ liquidity: `none`, `single_leg` when the route is one RFQ swap,
+/// or `mixed` for any other route with an RFQ swap.
+fn rfq_route(quote: &OrderQuote) -> &'static str {
+    let Some(route) = quote.route() else { return "none" };
+    let is_rfq = |swap: &&Swap| {
+        swap.protocol_state()
+            .as_indicatively_priced()
+            .is_ok()
+    };
+    match (
+        route.swaps().len(),
+        route
+            .swaps()
+            .iter()
+            .filter(is_rfq)
+            .count(),
+    ) {
+        (_, 0) => "none",
+        (1, 1) => "single_leg",
+        _ => "mixed",
+    }
 }
 
 /// Records the gas the quote estimated and the gas the simulated call used, as absolute values.
