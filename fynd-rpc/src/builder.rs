@@ -387,6 +387,9 @@ impl FyndRPCBuilder {
             native_token(&chain).context("gas token not configured for chain")?
         };
 
+        #[cfg(feature = "experimental")]
+        let market_events = parts.market_events();
+
         let (
             router,
             worker_pools,
@@ -423,6 +426,8 @@ impl FyndRPCBuilder {
             gas_token,
             #[cfg(feature = "experimental")]
             _market_data.clone(),
+            #[cfg(feature = "experimental")]
+            market_events,
         );
 
         let hosted_swagger_url = self.hosted_swagger_url;

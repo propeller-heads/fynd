@@ -1628,6 +1628,7 @@ impl Solver {
             computation_shutdown_tx: self.computation_shutdown_tx,
             chain: self.chain,
             router_address: self.router_address,
+            market_event_tx: self.market_event_tx,
         }
     }
 }
@@ -1662,9 +1663,16 @@ pub struct SolverParts {
     chain: Chain,
     /// Address of the Tycho Router contract on this chain, or `None` on a quote-only chain.
     router_address: Option<Bytes>,
+    /// Broadcasts a [`MarketEvent`] on every market update.
+    market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
 impl SolverParts {
+    /// Returns a handle that subscribes to the feed's market events.
+    pub fn market_events(&self) -> crate::feed::events::MarketEvents {
+        crate::feed::events::MarketEvents::new(self.market_event_tx.clone())
+    }
+
     /// Returns the chain this solver is configured for.
     pub fn chain(&self) -> Chain {
         self.chain

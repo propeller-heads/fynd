@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
+use tokio::sync::broadcast;
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{graph::GraphError, types::ComponentId};
@@ -23,6 +24,29 @@ pub enum MarketEvent {
         /// Component IDs whose state changed.
         updated_components: Vec<ComponentId>,
     },
+}
+
+/// A handle that subscribes to [`MarketEvent`]s but cannot send them.
+///
+/// For code outside the feed, such as a route override, that keeps its own view of the market
+/// in step with it. Cloning is cheap.
+#[derive(Clone)]
+pub struct MarketEvents(broadcast::Sender<MarketEvent>);
+
+impl MarketEvents {
+    /// Wraps the feed's sender.
+    pub fn new(sender: broadcast::Sender<MarketEvent>) -> Self {
+        Self(sender)
+    }
+
+    /// A new receiver of every event broadcast from now on.
+    ///
+    /// Events sent before this call are not received, so a caller that needs the full market
+    /// reads it after subscribing. A receiver that falls behind the channel's capacity loses
+    /// the oldest events and is told so with `RecvError::Lagged`.
+    pub fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
+        self.0.subscribe()
+    }
 }
 
 /// Errors that can occur when handling market events.
