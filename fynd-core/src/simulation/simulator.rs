@@ -31,7 +31,7 @@ use tycho_simulation::tycho_common::models::Chain;
 use crate::{
     encoding::encoder::PERMIT2_ADDRESS,
     simulation::{
-        deviation::deviation_bps,
+        deviation::{deviation_bps, quoted_after_fees},
         revert,
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
@@ -401,6 +401,9 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
                     "rfq" => rfq
                 )
                 .record(deviation);
+                if rfq == "single_leg" {
+                    log_signed_quote_gap(quote, amount_out, deviation);
+                }
             }
             record_gas(quote, *gas_used, &pool, &algorithm);
             "success"
@@ -416,6 +419,33 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
         "rfq" => rfq
     )
     .increment(1);
+}
+
+/// Logs one single-leg RFQ quote's gap between its price levels and the signed quote, with the
+/// pair and size the histogram cannot carry as labels, so the gap can be read per pair and against
+/// trade size. Both amounts are after router and client fees, as the deviation compares them.
+fn log_signed_quote_gap(quote: &OrderQuote, simulated_amount_out: &BigUint, deviation_bps: f64) {
+    let (Some(swap), Some(quoted_amount_out)) = (
+        quote
+            .route()
+            .and_then(|route| route.swaps().first()),
+        quoted_after_fees(quote),
+    ) else {
+        return;
+    };
+    debug!(
+        target: SIMULATION_OUTCOME_TARGET,
+        order_id = quote.order_id(),
+        protocol = swap.protocol(),
+        component_id = swap.component_id(),
+        token_in = %swap.token_in(),
+        token_out = %swap.token_out(),
+        amount_in = %swap.amount_in(),
+        quoted_amount_out = %quoted_amount_out,
+        simulated_amount_out = %simulated_amount_out,
+        deviation_bps,
+        "signed RFQ quote against its price levels"
+    );
 }
 
 /// How the quote's route uses RFQ liquidity: `none`, `single_leg` when the route is one RFQ swap,

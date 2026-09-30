@@ -638,6 +638,71 @@ fn test_record_outcome_rfq_label() {
     }
 }
 
+/// A log sink the formatter writes into, shared with the test that reads it back.
+#[derive(Clone, Default)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log buffer lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The simulation outcome lines `emit` logs, as the formatter renders them.
+fn simulation_logs(emit: impl FnOnce()) -> String {
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, emit);
+    let bytes = logs
+        .0
+        .lock()
+        .expect("log buffer lock")
+        .clone();
+    String::from_utf8(bytes).expect("utf-8 logs")
+}
+
+fn succeed(quote: &OrderQuote) {
+    record_outcome(
+        quote,
+        &SimulationAttempt::Success { amount_out: BigUint::from(999_000u64), gas_used: 120_000 },
+    );
+}
+
+/// A single RFQ leg logs its pair, size and gap, which the histogram cannot carry as labels.
+#[test]
+fn test_record_outcome_logs_signed_quote_gap() {
+    let logs = simulation_logs(|| succeed(&routed_quote(vec![swap(true)])));
+
+    let line = logs
+        .lines()
+        .find(|line| line.contains("signed RFQ quote against its price levels"))
+        .unwrap_or_else(|| panic!("no gap logged: {logs}"));
+    for field in ["amount_in=1000", "quoted_amount_out=1000000", "simulated_amount_out=999000"] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+    assert!(line.contains("deviation_bps=-10"), "{line}");
+}
+
+#[test]
+fn test_record_outcome_logs_no_gap_without_single_rfq_leg() {
+    for swaps in [vec![swap(false)], vec![swap(true), swap(false)]] {
+        let logs = simulation_logs(|| succeed(&routed_quote(swaps)));
+        assert!(!logs.contains("signed RFQ quote against its price levels"), "{logs}");
+    }
+}
+
 /// Drives the real call path against a live node: the simulation must be accepted (the node
 /// numbers its own block) and a reverting call must come back named by the trace.
 #[tokio::test]

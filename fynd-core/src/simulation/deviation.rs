@@ -16,8 +16,7 @@ use crate::OrderQuote;
 /// when the quote states no fees, when the quoted amount is zero and there is no ratio to take,
 /// or when an amount past the range of `f64` saturates the ratio to infinity.
 pub(crate) fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
-    let fees = quote.fee_breakdown()?;
-    let quoted = fees.min_amount_received() + fees.max_slippage();
+    let quoted = quoted_after_fees(quote)?;
     if quoted == BigUint::ZERO {
         return None;
     }
@@ -27,6 +26,13 @@ pub(crate) fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) 
     deviation
         .is_finite()
         .then_some(deviation)
+}
+
+/// The amount the quote promises the receiver after router and client fees, the quantity a
+/// simulation returns. `None` when the quote states no fees.
+pub(crate) fn quoted_after_fees(quote: &OrderQuote) -> Option<BigUint> {
+    let fees = quote.fee_breakdown()?;
+    Some(fees.min_amount_received() + fees.max_slippage())
 }
 
 /// Quote fixtures shared by this module's tests and the simulator's.
