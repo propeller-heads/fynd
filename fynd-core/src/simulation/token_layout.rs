@@ -136,9 +136,9 @@ impl TokenLayout {
     /// The word to write into a balance slot so that `balanceOf` reports at least a usable part
     /// of `balance`.
     ///
-    /// A scaled balance is multiplied up by its rate, and capped at [`MAX_SCALED_WORD`] when that
-    /// would not fit: the holder is then funded with less than `balance`, but still with far more
-    /// than one swap moves.
+    /// A scaled balance is multiplied up by its rate, and capped just below 2^250 when that would
+    /// not fit: the holder is then funded with less than `balance`, but still with far more than
+    /// one swap moves.
     pub fn balance_word(self, balance: U256) -> U256 {
         match self.balance_encoding {
             BalanceEncoding::Plain => balance,
