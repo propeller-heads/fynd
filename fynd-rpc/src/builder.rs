@@ -544,6 +544,7 @@ impl FyndRPC {
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
                 info!("shutting down: feed error path");
+                fatal_error = Some(std::io::Error::other("Tycho feed stopped unexpectedly"));
             }
             _ = &mut gas_price_worker_handle => {
                 // Gas price worker completed, which means it errored
@@ -554,6 +555,7 @@ impl FyndRPC {
                 let _ = computation_shutdown_tx.send(());
                 computation_manager_handle.abort();
                 info!("shutting down: gas price error path");
+                fatal_error = Some(std::io::Error::other("gas price worker stopped unexpectedly"));
             }
             _ = &mut computation_manager_handle => {
                 // The derived-data pipeline task ended (event channel closed, shutdown, or a
@@ -604,3 +606,65 @@ impl FyndRPC {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+
+    use rstest::rstest;
+
+    use super::*;
+
+    /// Which background task ends first in [`running_with`].
+    #[derive(Debug, Clone, Copy)]
+    enum Stopped {
+        Feed,
+        GasPrice,
+        ComputationManager,
+    }
+
+    /// A server on an ephemeral port whose background tasks run forever, except `stopped`.
+    fn running_with(stopped: Stopped) -> FyndRPC {
+        let server = HttpServer::new(App::new)
+            .workers(1)
+            .bind(("127.0.0.1", 0))
+            .expect("bind an ephemeral port")
+            .run();
+        let server_handle = server.handle();
+        let server_task = tokio::spawn(async move {
+            let _ = server.await;
+        });
+        let task = |ends: bool| {
+            tokio::spawn(async move {
+                if !ends {
+                    pending::<()>().await;
+                }
+            })
+        };
+        let (computation_shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+        FyndRPC {
+            server_handle,
+            server_task,
+            worker_pools: Vec::new(),
+            feed_handle: task(matches!(stopped, Stopped::Feed)),
+            gas_price_worker_handle: task(matches!(stopped, Stopped::GasPrice)),
+            metrics_sampler_handle: task(false),
+            router_fee_worker_handle: task(false),
+            computation_manager_handle: task(matches!(stopped, Stopped::ComputationManager)),
+            computation_shutdown_tx,
+            record_sender_handle: None,
+        }
+    }
+
+    #[rstest]
+    #[case::feed(Stopped::Feed)]
+    #[case::gas_price(Stopped::GasPrice)]
+    #[case::computation_manager(Stopped::ComputationManager)]
+    #[actix_web::test]
+    async fn test_run_fails_when_a_background_task_stops(#[case] stopped: Stopped) {
+        let result = tokio::time::timeout(Duration::from_secs(10), running_with(stopped).run())
+            .await
+            .expect("run returns once the task stops");
+
+        assert!(result.is_err(), "{stopped:?} stopping must fail the run");
+    }
+}

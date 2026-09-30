@@ -74,7 +74,9 @@ annotations live in one place.
   background workload sent to that pool never shares a queue with `POST /v1/quote`
 
 The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps the router in
-`AppState` → starts an Actix `HttpServer`.
+`AppState` → starts an Actix `HttpServer`. `FyndRPC::run()` returns an error (non-zero exit) when
+the feed, the gas price worker or the computation manager stops, so an orchestrator restarts the
+instance.
 
 ## Defaults
 
