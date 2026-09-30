@@ -471,7 +471,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against, exclusions) = {
+        let (block_info, solved_against, exclusions, market_revision) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -492,7 +492,12 @@ where
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
             let exclusions = resolve_exclusions(&view, &params);
-            (block_info, solved_against, exclusions)
+            // An overlay is not part of the revision, so only a base-state solve is attributed.
+            let market_revision = params.state_label().is_none().then(|| {
+                view.base_market_state()
+                    .market_revision()
+            });
+            (block_info, solved_against, exclusions, market_revision)
         };
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
@@ -505,6 +510,14 @@ where
             .algorithm
             .find_best_route(request)
             .await;
+        // The algorithm reads the market itself, so only a revision unchanged across the whole
+        // solve identifies the state it priced. `try_read` never waits: a writer holding or
+        // queued for the lock means the revision is changing, and the quote stays unattributed.
+        let solved_revision = market_revision.filter(|before| {
+            self.market_data
+                .try_read()
+                .is_some_and(|state| state.revision() == before.revision)
+        });
 
         let order_quote = match result {
             Ok(result) => {
@@ -633,6 +646,9 @@ where
                 .with_gas_price(gas_price);
                 if let Some(bps) = price_impact_bps {
                     quote = quote.with_price_impact_bps(bps);
+                }
+                if let Some(revision) = solved_revision {
+                    quote = quote.with_market_revision(revision);
                 }
                 quote
             }
@@ -1123,6 +1139,83 @@ mod tests {
             }
             other => panic!("expected AlgorithmError for invalid route, got {other:?}"),
         }
+    }
+
+    /// Returns a one-swap A→B route, advancing the market revision mid-solve when it holds the
+    /// market.
+    struct RevisionAlgorithm {
+        advance_market: Option<MarketData>,
+    }
+
+    impl Algorithm for RevisionAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "revision_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            if let Some(market) = &self.advance_market {
+                market
+                    .apply_block_update(2, |state| state.advance_revision())
+                    .await;
+            }
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let swap = Swap::new(
+                "p1".to_string(),
+                "mock".to_string(),
+                token_a.address.clone(),
+                token_b.address.clone(),
+                BigUint::from(100u64),
+                BigUint::from(90u64),
+                BigUint::from(1u64),
+                component("p1", &[token_a, token_b]),
+                Box::new(MockProtocolSim::new(2.0)),
+            );
+            let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
+            Ok(RouteResult::new(route, num_bigint::BigInt::from(90), BigUint::from(1u64)))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    #[rstest]
+    #[case::unchanged(false)]
+    #[case::moved(true)]
+    #[tokio::test]
+    async fn test_quote_market_revision(#[case] market_moves: bool) {
+        let ord = order(&token(0x01, "A"), &token(0x02, "B"), 100, OrderSide::Sell);
+        let (market, _) = setup_market_weighted(vec![]);
+        market
+            .apply_block_update(1, |state| state.advance_revision())
+            .await;
+        let before = market
+            .read()
+            .await
+            .base_market_state()
+            .market_revision();
+        let algorithm = RevisionAlgorithm { advance_market: market_moves.then(|| market.clone()) };
+        let mut worker =
+            SolverWorker::new(market, DerivedData::new_shared(), algorithm, 0, "p".to_string());
+
+        let quote = worker
+            .quote(&ord, SolveParams::default())
+            .await
+            .expect("route found");
+
+        let expected = (!market_moves).then_some(before);
+        assert_eq!(quote.order().market_revision(), expected);
     }
 
     /// Deliberately ignores exclusions so the worker must enforce them on the result.

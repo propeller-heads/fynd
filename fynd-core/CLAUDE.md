@@ -119,6 +119,12 @@ flashblocks and final header of one block and restarts it on a new block or a sa
 kind matches the update, so a partial update keeps its index beside another synchronizer's full
 header.
 
+A worker stamps `OrderQuote::market_revision()` with the revision it read before solving, but only
+when that revision is unchanged after the solve (checked with a non-blocking `try_read`) and the
+solve used no state overlay; otherwise the quote carries none. Quotes sharing a revision priced
+identical states, so a caller batching orders judges coherence by it, even across flashblocks of
+one block.
+
 **Solving** (`Solver::quote(request)`):
 
 0. `WorkerPoolRouter` allocates the pools serving each order — today an exclusive-access pool is

@@ -34,8 +34,11 @@ use uuid::Uuid;
 
 use super::{internal::SolveError, primitives::ComponentId};
 use crate::{
-    algorithm::NoPathReason, encoding::router_fees::LEGACY_BPS_DENOMINATOR,
-    feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError,
+    algorithm::NoPathReason,
+    encoding::router_fees::LEGACY_BPS_DENOMINATOR,
+    feed::market_data::{MarketRevision, StateLabel},
+    price_guard::config::PriceGuardConfig,
+    AlgorithmError,
 };
 
 // ============================================================================
@@ -1132,6 +1135,10 @@ pub struct OrderQuote {
     amount_out_net_gas: BigUint,
     /// Block at which this quote was computed.
     block: BlockInfo,
+    /// Market revision this quote was solved against, when the revision did not change during
+    /// the solve (internal use only).
+    #[serde(skip)]
+    market_revision: Option<MarketRevision>,
     /// Algorithm that found this solution.
     #[serde(skip)]
     algorithm: String,
@@ -1198,6 +1205,7 @@ impl OrderQuote {
             price_impact_bps: None,
             amount_out_net_gas,
             block,
+            market_revision: None,
             algorithm,
             worker_pool: String::new(),
             gas_price: None,
@@ -1250,6 +1258,12 @@ impl OrderQuote {
     /// Sets the effective gas price.
     pub(crate) fn with_gas_price(mut self, gas_price: BigUint) -> Self {
         self.gas_price = Some(gas_price);
+        self
+    }
+
+    /// Records the market revision the whole solve read.
+    pub(crate) fn with_market_revision(mut self, revision: MarketRevision) -> Self {
+        self.market_revision = Some(revision);
         self
     }
 
@@ -1333,6 +1347,17 @@ impl OrderQuote {
     /// Returns the block at which this solution was computed.
     pub fn block(&self) -> &BlockInfo {
         &self.block
+    }
+
+    /// Returns the market revision this solution was computed against, together with the feed
+    /// observation it identifies.
+    ///
+    /// `None` on a quote the router builds itself, on one solved against a state overlay, and on
+    /// a solve during which the market moved, whose swaps may then mix two states. Quotes sharing
+    /// a revision priced identical states, so a caller batching orders can judge coherence by it
+    /// even between flashblocks of one block, which share a block number.
+    pub fn market_revision(&self) -> Option<MarketRevision> {
+        self.market_revision
     }
 
     /// Returns the algorithm name that found this solution.
