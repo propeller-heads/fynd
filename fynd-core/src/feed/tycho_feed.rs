@@ -717,16 +717,29 @@ impl TychoFeed {
             .flat_map(|component| component.tokens.iter().cloned());
         // TODO: how do we handle delayed and stale states? Should the feed or the solvers handle
         // this?
-        let latest_block_info = sync_states
+        let is_partial = msg.is_partial;
+        let latest_header = sync_states
             .values()
             .filter_map(|status| {
                 if let SynchronizerState::Ready(header) = status {
-                    Some(BlockInfo::new(header.number, header.hash.to_string(), header.timestamp))
+                    Some(header)
                 } else {
                     None
                 }
             })
-            .max_by_key(|b| b.number());
+            // At one height, prefer the header whose kind matches this update, so a partial
+            // update keeps its flashblock index even when another synchronizer reports the full
+            // header of the same block.
+            .max_by_key(|header| {
+                (
+                    header.number,
+                    header.partial_block_index.is_some() == is_partial,
+                    header.partial_block_index,
+                )
+            });
+        let flashblock_index = latest_header.and_then(|header| header.partial_block_index);
+        let latest_block_info = latest_header
+            .map(|header| BlockInfo::new(header.number, header.hash.to_string(), header.timestamp));
         // Captured before `latest_block_info` moves into the `apply_block_update` closure below.
         let latest_block_fields = latest_block_info
             .as_ref()
@@ -752,7 +765,11 @@ impl TychoFeed {
             .apply_block_update(new_block_number, |market_data| {
                 let changes_header = latest_block_info
                     .as_ref()
-                    .is_some_and(|block_info| market_data.last_updated() != Some(block_info));
+                    .is_some_and(|block_info| {
+                        market_data.last_updated() != Some(block_info) ||
+                            market_data.flashblock_index() != flashblock_index ||
+                            market_data.is_partial() != is_partial
+                    });
                 revision_advanced = changes_components || changes_header;
                 if revision_advanced {
                     market_data.advance_revision();
@@ -787,10 +804,9 @@ impl TychoFeed {
                 market_data.update_states(updated_or_new_states);
                 market_data.update_protocol_sync_status(sync_states);
 
-                // Update the last updated block info if one of the protocols reported "Ready"
-                // status.
+                // Update the block header if one of the protocols reported "Ready" status.
                 if let Some(block_info) = latest_block_info {
-                    market_data.update_last_updated(block_info);
+                    market_data.update_block_header(block_info, is_partial, flashblock_index);
                 }
 
                 latest_component_count = market_data.component_count();
@@ -1472,17 +1488,21 @@ mod tests {
         }
     }
 
-    fn ready_header(number: u64, hash: u8) -> SynchronizerState {
+    fn ready_header(number: u64, partial_block_index: Option<u32>) -> SynchronizerState {
         SynchronizerState::Ready(tycho_simulation::tycho_client::feed::BlockHeader {
             number,
-            hash: Bytes::from(vec![hash]),
+            hash: Bytes::from(vec![number as u8, partial_block_index.map_or(0xff, |i| i as u8)]),
             timestamp: number,
+            partial_block_index,
             ..Default::default()
         })
     }
 
-    fn header_update(number: u64, header: SynchronizerState) -> Update {
-        let sync_states = HashMap::from([("uniswap_v2".to_string(), header)]);
+    fn header_update(number: u64, headers: &[(&str, SynchronizerState)]) -> Update {
+        let sync_states = headers
+            .iter()
+            .map(|(protocol, state)| (protocol.to_string(), state.clone()))
+            .collect();
         Update::new(number, HashMap::new(), HashMap::new()).set_sync_states(sync_states)
     }
 
@@ -1506,13 +1526,13 @@ mod tests {
         assert_eq!(revision(&market_data).await, 0);
         assert!(event_rx.try_recv().is_err());
 
-        feed.handle_tycho_message(header_update(1, ready_header(1, 1)))
+        feed.handle_tycho_message(header_update(1, &[("uniswap_v2", ready_header(1, None))]))
             .await
             .unwrap();
         assert_eq!(revision(&market_data).await, 1);
         assert!(event_rx.try_recv().is_ok());
 
-        feed.handle_tycho_message(header_update(1, ready_header(1, 1)))
+        feed.handle_tycho_message(header_update(1, &[("uniswap_v2", ready_header(1, None))]))
             .await
             .unwrap();
         assert_eq!(revision(&market_data).await, 1);
@@ -1529,6 +1549,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revision(&market_data).await, 2);
+        assert!(event_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_partial_update_keeps_flashblock_index_beside_full_header() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let mut event_rx = feed.subscribe();
+        let headers =
+            [("uniswap_v2", ready_header(7, None)), ("uniswap_v3", ready_header(7, Some(3)))];
+
+        feed.handle_tycho_message(header_update(7, &headers).set_is_partial(true))
+            .await
+            .unwrap();
+        {
+            let market = market_data.read().await;
+            let state = market.base_market_state();
+            assert_eq!(state.flashblock_index(), Some(3));
+            assert!(state.is_partial());
+        }
+        assert!(event_rx.try_recv().is_ok());
+
+        feed.handle_tycho_message(header_update(7, &headers))
+            .await
+            .unwrap();
+        let market = market_data.read().await;
+        let state = market.base_market_state();
+        assert_eq!(state.flashblock_index(), None);
+        assert!(!state.is_partial());
+        assert_eq!(state.revision(), 2);
         assert!(event_rx.try_recv().is_ok());
     }
 

@@ -74,6 +74,12 @@ pub struct MarketRevision {
     pub revision: u64,
     /// Local time the revision was applied, in Unix milliseconds.
     pub observed_at_ms: u64,
+    /// Whether the revision holds preconfirmation (partial block) data.
+    pub is_partial: bool,
+    /// Upstream partial block (flashblock) index, `None` for full blocks.
+    pub flashblock_index: Option<u32>,
+    /// Local time the revision's block was first applied, in Unix milliseconds.
+    pub block_started_at_ms: u64,
 }
 
 /// The main entry point for accessing market data.
@@ -405,6 +411,12 @@ pub struct MarketState {
     revision: u64,
     /// Local time `revision` was applied, in Unix milliseconds.
     observed_at_ms: u64,
+    /// Whether the last block header came from a partial (flashblock) update.
+    is_partial: bool,
+    /// Upstream partial block index of the last block header, `None` for full blocks.
+    flashblock_index: Option<u32>,
+    /// Local time the current block was first applied, in Unix milliseconds.
+    block_started_at_ms: u64,
     /// All components indexed by their ID.
     components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
     /// All states indexed by their component ID.
@@ -458,6 +470,9 @@ impl MarketState {
             label: String::new(),
             revision: 0,
             observed_at_ms: 0,
+            is_partial: false,
+            flashblock_index: None,
+            block_started_at_ms: 0,
             components: FxHashMap::default(),
             simulation_states: FxHashMap::default(),
             tokens: FxHashMap::default(),
@@ -490,7 +505,32 @@ impl MarketState {
 
     /// Returns the revision and the feed observation it identifies.
     pub fn market_revision(&self) -> MarketRevision {
-        MarketRevision { revision: self.revision, observed_at_ms: self.observed_at_ms }
+        MarketRevision {
+            revision: self.revision,
+            observed_at_ms: self.observed_at_ms,
+            is_partial: self.is_partial,
+            flashblock_index: self.flashblock_index,
+            block_started_at_ms: self.block_started_at_ms,
+        }
+    }
+
+    /// Whether the last block header came from a partial (flashblock) update.
+    pub fn is_partial(&self) -> bool {
+        self.is_partial
+    }
+
+    /// Returns the upstream partial block index of the last block header, `None` for full
+    /// blocks.
+    pub fn flashblock_index(&self) -> Option<u32> {
+        self.flashblock_index
+    }
+
+    /// Returns the local time the current block was first applied, in Unix milliseconds.
+    ///
+    /// It stays put across the flashblocks and the final header of one block, and moves on a new
+    /// block or a reorg.
+    pub fn block_started_at_ms(&self) -> u64 {
+        self.block_started_at_ms
     }
 
     /// Returns the label identifying the block or overlay this state was produced from.
@@ -674,9 +714,36 @@ impl MarketState {
         self.gas_price = Some(gas_price);
     }
 
-    /// Updates the last updated block info.
+    /// Updates the last updated block info, recording it as a full block header.
     pub fn update_last_updated(&mut self, block_info: BlockInfo) {
+        self.update_block_header(block_info, false, None);
+    }
+
+    /// Updates the last block header, recording whether it came from a partial (flashblock)
+    /// update and the upstream partial block index.
+    ///
+    /// Flashblocks of one block carry distinct hashes, so only two full headers at one height with
+    /// different hashes are a reorg. A new block or a reorg restarts
+    /// [`Self::block_started_at_ms`] at the current revision's observation time.
+    pub fn update_block_header(
+        &mut self,
+        block_info: BlockInfo,
+        is_partial: bool,
+        flashblock_index: Option<u32>,
+    ) {
+        let same_block = self
+            .last_updated
+            .as_ref()
+            .is_some_and(|last| {
+                last.number() == block_info.number() &&
+                    (last.hash() == block_info.hash() || self.is_partial || is_partial)
+            });
+        if !same_block {
+            self.block_started_at_ms = self.observed_at_ms;
+        }
         self.last_updated = Some(block_info);
+        self.is_partial = is_partial;
+        self.flashblock_index = flashblock_index;
     }
 
     /// Creates a filtered subset containing only data needed for the given components.
@@ -723,6 +790,9 @@ impl MarketState {
             label: self.label.clone(),
             revision: self.revision,
             observed_at_ms: self.observed_at_ms,
+            is_partial: self.is_partial,
+            flashblock_index: self.flashblock_index,
+            block_started_at_ms: self.block_started_at_ms,
             components,
             simulation_states,
             tokens,
@@ -792,6 +862,49 @@ mod tests {
         let (first, second) = (subsets[0].market_revision(), subsets[1].market_revision());
         assert!(first.observed_at_ms > 0);
         assert!(second.observed_at_ms >= first.observed_at_ms);
+    }
+
+    #[test]
+    fn test_block_start_across_flashblocks() {
+        let mut state = MarketState::new();
+        state.observed_at_ms = 1000;
+        state.update_block_header(BlockInfo::new(42, "partial-0".into(), 100), true, Some(0));
+        state.observed_at_ms = 1800;
+        state.update_block_header(BlockInfo::new(42, "partial-4".into(), 100), true, Some(4));
+        let snapshot = state.extract_subset(&FxHashSet::default());
+        assert_eq!(
+            snapshot
+                .market_revision()
+                .flashblock_index,
+            Some(4)
+        );
+        assert!(snapshot.is_partial());
+        assert_eq!(snapshot.block_started_at_ms(), 1000);
+
+        state.observed_at_ms = 2000;
+        state.update_last_updated(BlockInfo::new(42, "sealed".into(), 100));
+        assert_eq!(state.block_started_at_ms(), 1000);
+        assert_eq!(state.flashblock_index(), None);
+        assert!(!state.is_partial());
+
+        state.observed_at_ms = 2200;
+        state.update_block_header(BlockInfo::new(43, "next-0".into(), 102), true, Some(0));
+        assert_eq!(state.block_started_at_ms(), 2200);
+        assert_eq!(state.flashblock_index(), Some(0));
+    }
+
+    #[test]
+    fn test_block_start_resets_on_same_height_reorg() {
+        let mut state = MarketState::new();
+        state.observed_at_ms = 1000;
+        state.update_last_updated(BlockInfo::new(42, "sealed-a".into(), 100));
+        state.observed_at_ms = 1500;
+        state.update_last_updated(BlockInfo::new(42, "sealed-a".into(), 100));
+        assert_eq!(state.block_started_at_ms(), 1000);
+
+        state.observed_at_ms = 2000;
+        state.update_last_updated(BlockInfo::new(42, "sealed-b".into(), 100));
+        assert_eq!(state.block_started_at_ms(), 2000);
     }
 
     #[tokio::test]

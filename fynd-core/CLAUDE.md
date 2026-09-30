@@ -111,7 +111,13 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 the write lock) exactly when an update changes components, states or the Ready block header, and
 the feed broadcasts one `MarketEvent` per advance. A header-only update therefore broadcasts an
 event with empty component lists, which the `ComputationManager` skips. `market_revision()`
-returns the revision with its observation metadata as a `MarketRevision`.
+returns the revision with its observation metadata as a `MarketRevision`: whether the header came
+from a partial (flashblock) update, the upstream flashblock index, and `block_started_at_ms`, the
+local time the block was first applied. `update_block_header` keeps the block start across the
+flashblocks and final header of one block and restarts it on a new block or a same-height reorg
+(two full headers with different hashes). At one height the feed prefers the Ready header whose
+kind matches the update, so a partial update keeps its index beside another synchronizer's full
+header.
 
 **Solving** (`Solver::quote(request)`):
 
