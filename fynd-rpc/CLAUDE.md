@@ -78,6 +78,13 @@ The builder calls `FyndBuilder::build()` → `Solver::into_parts()` → wraps th
 the feed, the gas price worker or the computation manager stops, so an orchestrator restarts the
 instance.
 
+`FyndRPC::shutdown_handle()` returns a `shutdown::ShutdownHandle` whose `stop()` fires the
+`shutdown::ShutdownSignal` before stopping the server gracefully; `fynd serve` uses it on
+SIGINT/SIGTERM and `run()` on every fatal path. `AppState::shutdown_signal()` hands the signal to
+handlers: a route an embedder adds through `configure_routes` that serves a long-lived response
+(an SSE stream) ends it when the signal fires, so a stop does not wait out actix's shutdown
+timeout. `FyndRPC::server_handle()` still stops the server without firing it.
+
 ## Defaults
 
 The `config::defaults` module re-exports `fynd-core::solver::defaults::*` and adds HTTP-specific

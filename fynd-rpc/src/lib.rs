@@ -49,6 +49,8 @@ pub mod builder;
 pub mod config;
 /// Protocol discovery via the Tycho RPC.
 pub mod protocols;
+/// Graceful shutdown: the signal long-lived responses end on, and the handle that stops the server.
+pub mod shutdown;
 
 // Re-export parse_chain so tools that depend on fynd-rpc (not fynd-core) can use it.
 use std::path::Path;

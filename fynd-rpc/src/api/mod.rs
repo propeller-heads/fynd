@@ -45,7 +45,10 @@ use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 use utoipa::OpenApi;
 
-use crate::api::{error::ErrorResponse, record_emitter::RecordEmitter};
+use crate::{
+    api::{error::ErrorResponse, record_emitter::RecordEmitter},
+    shutdown::ShutdownSignal,
+};
 
 /// Adds caller routes to the `/v1` scope ahead of the defaults. Paths are relative to `/v1`
 /// (e.g. `"/quote"`) — the closure owns the whole `/v1` [`actix_web::Scope`], so it may add
@@ -245,6 +248,7 @@ pub struct AppState {
     router_address: Option<Bytes>,
     permit2_address: Bytes,
     record_emitter: Option<RecordEmitter>,
+    shutdown_signal: ShutdownSignal,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
     #[cfg(feature = "experimental")]
@@ -276,6 +280,7 @@ impl AppState {
             router_address,
             permit2_address,
             record_emitter,
+            shutdown_signal: ShutdownSignal::new(),
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
@@ -321,6 +326,22 @@ impl AppState {
     #[must_use]
     pub fn permit2_address(&self) -> &Bytes {
         &self.permit2_address
+    }
+
+    /// Uses `signal` as the one [`Self::shutdown_signal`] returns.
+    pub(crate) fn with_shutdown_signal(mut self, signal: ShutdownSignal) -> Self {
+        self.shutdown_signal = signal;
+        self
+    }
+
+    /// Returns the signal that fires when the server begins a graceful shutdown.
+    ///
+    /// A route serving a long-lived response, such as a stream an embedder registers through
+    /// [`FyndRPCBuilder::configure_routes`](crate::builder::FyndRPCBuilder::configure_routes),
+    /// ends it once the signal fires, so the stop does not wait out actix's shutdown timeout.
+    #[must_use]
+    pub fn shutdown_signal(&self) -> &ShutdownSignal {
+        &self.shutdown_signal
     }
 
     /// Returns the record queue the quote handler feeds, when this instance emits records.
