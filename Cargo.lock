@@ -4149,7 +4149,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5716,7 +5716,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5754,7 +5754,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -7953,7 +7953,7 @@ dependencies = [
 [[package]]
 name = "tycho-client"
 version = "0.430.1"
-source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#25c82d0cbed684862ecdd3073552c687c3f7f293"
+source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#1e909bed73d8a8c5d3e5a4867bc77a793ed41258"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7982,7 +7982,7 @@ dependencies = [
 [[package]]
 name = "tycho-common"
 version = "0.430.1"
-source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#25c82d0cbed684862ecdd3073552c687c3f7f293"
+source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#1e909bed73d8a8c5d3e5a4867bc77a793ed41258"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8010,7 +8010,7 @@ dependencies = [
 [[package]]
 name = "tycho-ethereum"
 version = "0.430.1"
-source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#25c82d0cbed684862ecdd3073552c687c3f7f293"
+source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#1e909bed73d8a8c5d3e5a4867bc77a793ed41258"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8031,7 +8031,7 @@ dependencies = [
 [[package]]
 name = "tycho-execution"
 version = "0.430.1"
-source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#25c82d0cbed684862ecdd3073552c687c3f7f293"
+source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#1e909bed73d8a8c5d3e5a4867bc77a793ed41258"
 dependencies = [
  "alloy",
  "chrono",
@@ -8054,7 +8054,7 @@ dependencies = [
 [[package]]
 name = "tycho-simulation"
 version = "0.430.1"
-source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#25c82d0cbed684862ecdd3073552c687c3f7f293"
+source = "git+https://github.com/propeller-heads/tycho?branch=tnl%2Ffallback-router-base#1e909bed73d8a8c5d3e5a4867bc77a793ed41258"
 dependencies = [
  "alloy",
  "alloy-chains",

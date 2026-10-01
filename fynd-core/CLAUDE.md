@@ -162,10 +162,9 @@ on the chains `METRIC_CHAINS` names (executing through `MetricExecutor`). `METRI
 `PRICE_LEVEL_STREAM_CHAIN` are disjoint, so the price level stream and the RFQ clients never
 stream the same Metric inventory twice.
 
-A `fallback:rfq:` entry (`fallback:rfq:metric`, `fallback:rfq:bebop`) is rejected at registration
-unless tycho-execution's default `executor_addresses.json` lists that exact protocol system for the
-chain. `fallback:rfq:metric` must also pass the `METRIC_CHAINS` gate. `fallback:rfq:hashflow` is
-always rejected, because Hashflow has no fallback router. A list that names one RFQ protocol both
+A `fallback:rfq:` entry (`fallback:rfq:metric`, `fallback:rfq:bebop`, `fallback:rfq:hashflow`) is
+rejected at registration unless tycho-execution's default `executor_addresses.json` lists that exact
+protocol system for the chain. `fallback:rfq:metric` must also pass the `METRIC_CHAINS` gate. A list that names one RFQ protocol both
 with and without `fallback:` is rejected too: both clients would emit the same component ids under
 different labels. The components are in the `fallback:` family, so the fallback module gives
 their legs a fallback pool like a pAMM's, and a `fallback:` exclusion removes them.
