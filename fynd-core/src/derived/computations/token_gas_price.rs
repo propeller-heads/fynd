@@ -98,9 +98,10 @@
 //! # Spacing pricing passes
 //!
 //! `min_pass_interval` defaults to 1 s. The interval starts with a pricing pass over all eligible
-//! tokens, not one for arrivals only. Before expiry, added components allow a capped pricing pass
-//! for pending arrivals without prices; it does not restart the interval. Otherwise, `compute`
-//! returns stored prices, or seeds prices if no price map exists.
+//! tokens, not one for arrivals only. Such a pass also waits for a new block. Before expiry, added
+//! components allow a capped pricing pass for pending arrivals without prices; it does not restart
+//! the interval. Otherwise, `compute` returns stored prices, or seeds prices if no price map
+//! exists.
 //!
 //! # Seeding prices
 //!
@@ -786,6 +787,8 @@ struct PassHistory {
     passes: u64,
     /// When the last whole pass started, for `min_pass_interval`.
     last_pass_started: Option<Instant>,
+    /// The block of the last whole pass.
+    last_pass_block: Option<u64>,
     /// The pass each token was last attempted in, whether or not the attempt priced it. This
     /// is the only stamp a token that cannot be priced has, and it is what stops such a token
     /// from holding a slot in every pass.
@@ -802,8 +805,8 @@ struct PassHistory {
 /// How much of a pass the interval allows right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PassSlot {
-    /// The interval has elapsed. A pass over every candidate runs and starts the interval
-    /// again.
+    /// The interval has elapsed on a new block. A pass over every candidate runs and starts the
+    /// interval again.
     Due,
     /// Inside the interval, but a component arrived. Only the tokens it carries that have no
     /// price are priced, and the interval keeps running: a chain that lists a pool on most
@@ -1034,18 +1037,26 @@ impl TokenGasPriceComputation {
 
     /// Says how much of a pass may run now, and starts the interval again for a whole one.
     ///
+    /// A whole pass also waits for a block other than `last_pass_block`, unless the interval is
+    /// zero.
+    ///
     /// `must_solve` runs a whole pass whatever the interval says, for a caller that has nothing
     /// stored to serve instead. `arrivals` only earns the tokens that arrived: those cannot be
     /// quoted until they are priced, but pricing them is not a reason to start the interval
     /// again or to rank the rest of the market again.
-    fn start_pass(&self, arrivals: bool, must_solve: bool) -> PassSlot {
+    fn start_pass(&self, block: u64, arrivals: bool, must_solve: bool) -> PassSlot {
         let mut state = self.lock_pass_history();
         let now = Instant::now();
-        let due = state
+        let interval_elapsed = state
             .last_pass_started
             .is_none_or(|started| now.duration_since(started) >= self.min_pass_interval);
-        if due || must_solve {
+        let new_block = self.min_pass_interval.is_zero() ||
+            state
+                .last_pass_block
+                .is_none_or(|last_block| last_block != block);
+        if (interval_elapsed && new_block) || must_solve {
             state.last_pass_started = Some(now);
+            state.last_pass_block = Some(block);
             return PassSlot::Due;
         }
         if arrivals {
@@ -1530,27 +1541,33 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        let block = market
+            .read()
+            .await
+            .last_updated()
+            .map_or(0, |block| block.number());
         // A component arriving earns a pass inside the interval, but only for the tokens it
         // carries; a full recompute earns a whole one, having nothing stored to serve instead.
-        let scope = match self.start_pass(!changed.added.is_empty(), changed.is_full_recompute) {
-            PassSlot::Due => PassScope::Whole,
-            PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
-            PassSlot::Deferred => {
-                let stored = {
-                    let store_guard = store.read().await;
-                    store_guard.token_prices().cloned()
-                };
-                // Nothing stored means nothing to serve, so the interval cannot defer this
-                // block: seeding runs instead.
-                let Some(prices) = stored else {
-                    return self
-                        .seed_all_prices(market, store)
-                        .await;
-                };
-                Span::current().record("updated_token_prices", prices.len());
-                return Ok(ComputationOutput::with_failures(prices, Vec::new()));
-            }
-        };
+        let scope =
+            match self.start_pass(block, !changed.added.is_empty(), changed.is_full_recompute) {
+                PassSlot::Due => PassScope::Whole,
+                PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,
+                PassSlot::Deferred => {
+                    let stored = {
+                        let store_guard = store.read().await;
+                        store_guard.token_prices().cloned()
+                    };
+                    // Nothing stored means nothing to serve, so the interval cannot defer this
+                    // block: seeding runs instead.
+                    let Some(prices) = stored else {
+                        return self
+                            .seed_all_prices(market, store)
+                            .await;
+                    };
+                    Span::current().record("updated_token_prices", prices.len());
+                    return Ok(ComputationOutput::with_failures(prices, Vec::new()));
+                }
+            };
 
         // Startup and lag recovery have nothing stored to select from, so they offer every token
         // to the pass. So does a block whose selection finds nothing stored. Every other block
@@ -2443,26 +2460,26 @@ mod tests {
             .with_min_pass_interval(Duration::from_millis(400));
 
         assert_eq!(
-            computation.start_pass(false, false),
+            computation.start_pass(1, false, false),
             PassSlot::Due,
             "the first pass is due, nothing has run"
         );
         assert_eq!(
-            computation.start_pass(false, false),
+            computation.start_pass(2, false, false),
             PassSlot::Deferred,
             "a block straight after one inside the interval waits"
         );
 
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(
-            computation.start_pass(true, false),
+            computation.start_pass(3, true, false),
             PassSlot::ArrivalsOnly,
             "an arrival inside the interval earns a pass for its own tokens"
         );
 
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(
-            computation.start_pass(false, false),
+            computation.start_pass(4, false, false),
             PassSlot::Due,
             "450ms after the only whole pass the interval has elapsed, so the arrival in the \
              middle of it did not restart it"
@@ -2476,13 +2493,25 @@ mod tests {
         let computation = TokenGasPriceComputation::new(eth, 1, BigUint::from(PROBE_AMOUNT))
             .with_min_pass_interval(Duration::from_secs(3600));
 
-        assert_eq!(computation.start_pass(false, false), PassSlot::Due);
-        assert_eq!(computation.start_pass(false, false), PassSlot::Deferred);
+        assert_eq!(computation.start_pass(1, false, false), PassSlot::Due);
+        assert_eq!(computation.start_pass(2, false, false), PassSlot::Deferred);
         assert_eq!(
-            computation.start_pass(false, true),
+            computation.start_pass(2, false, true),
             PassSlot::Due,
             "a full recompute has nothing to serve instead, so it runs a whole pass"
         );
+    }
+
+    #[test]
+    fn test_a_whole_pass_waits_for_a_new_block() {
+        let eth = token(0, "ETH").address;
+        let computation = TokenGasPriceComputation::new(eth, 1, BigUint::from(PROBE_AMOUNT))
+            .with_min_pass_interval(Duration::from_millis(1));
+
+        assert_eq!(computation.start_pass(5, false, false), PassSlot::Due);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(computation.start_pass(5, false, false), PassSlot::Deferred);
+        assert_eq!(computation.start_pass(6, false, false), PassSlot::Due);
     }
 
     /// Tokens that can never be priced must not hold a slot in every pass.

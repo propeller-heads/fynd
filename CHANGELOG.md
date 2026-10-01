@@ -1,4 +1,33 @@
 
+## [0.110.7](https://github.com/propeller-heads/fynd/compare/0.110.6...0.110.7) (2026-09-30)
+
+### Features
+
+* support Pons hooks and Gigadex V3 on Robinhood ([c4be598](https://github.com/propeller-heads/fynd/commit/c4be598a46d19ef7f4938cb6ab3db88426ac4345))
+
+
+## [0.110.6](https://github.com/propeller-heads/fynd/compare/0.110.5...0.110.6) (2026-09-30)
+
+### Features
+
+* register Ethereum protocol decoders ([2b81db7](https://github.com/propeller-heads/fynd/commit/2b81db7934f36dfd5f0d852a5a60169898ab92f2))
+
+### Bug Fixes
+
+* use Balancer V3 public state export ([7c9a4b7](https://github.com/propeller-heads/fynd/commit/7c9a4b7836b3b04a8d67b82218fe744fbad8f37c))
+
+
+## [0.110.5](https://github.com/propeller-heads/fynd/compare/0.110.4...0.110.5) (2026-09-30)
+
+### Features
+
+* **core:** build a solver with pending state and a step controller ([2a49a82](https://github.com/propeller-heads/fynd/commit/2a49a82ec1c12a17574ba34c81f77b5046f3f7bf))
+
+### Bug Fixes
+
+* **token-prices:** run at most one pricing pass per block ([15763f9](https://github.com/propeller-heads/fynd/commit/15763f98fff5ccf2d6a7abe75ab83dfde4f2632f))
+
+
 ## [0.110.4](https://github.com/propeller-heads/fynd/compare/0.110.3...0.110.4) (2026-09-30)
 
 ### Features

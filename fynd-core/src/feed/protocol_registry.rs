@@ -8,19 +8,24 @@ use tycho_simulation::{
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
+            balancer_v3::BalancerV3State,
             curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State,
             erc4626::state::ERC4626State,
+            etherfi::state::EtherfiState,
             filters::{
-                balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter,
-                ekubo_v3_extension_filter_with_signed_exclusive_swap, erc4626_filter,
-                fluid_v1_paused_pools_filter,
+                balancer_v2_pool_filter, balancer_v3_pool_filter, curve_filter,
+                ekubo_v3_extension_filter, ekubo_v3_extension_filter_with_signed_exclusive_swap,
+                erc4626_filter, fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
             fluid::FluidV1,
+            lido_v4::state::LidoV4State,
             lunarbase::state::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
+            ring_swap_v2::state::RingSwapV2State,
+            sky::state::SkyState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -344,6 +349,7 @@ fn register_exchange(
         "robinswap_v3" => {
             builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
         }
+        "gigadex_v3" => builder.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None),
         "ramses_v3" => builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None),
         "pancakeswap_v3" => {
             builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
@@ -352,6 +358,11 @@ fn register_exchange(
             "vm:balancer_v2",
             tvl_filter.clone(),
             Some(balancer_v2_pool_filter),
+        ),
+        "vm:balancer_v3" => builder.exchange::<BalancerV3State>(
+            "vm:balancer_v3",
+            tvl_filter.clone(),
+            Some(balancer_v3_pool_filter),
         ),
         "uniswap_v4" => builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None),
         "ekubo_v2" => builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None),
@@ -370,6 +381,11 @@ fn register_exchange(
             "vm:maverick_v2",
             tvl_filter.clone(),
             None,
+        ),
+        "vm:liquidityparty" => builder.exchange::<EVMPoolState<PreCachedDB>>(
+            "vm:liquidityparty",
+            tvl_filter.clone(),
+            Some(liquidityparty_killed_pools_filter),
         ),
         "vm:bopamm" => {
             builder.exchange::<EVMPoolState<PreCachedDB>>("vm:bopamm", tvl_filter.clone(), None)
@@ -417,6 +433,12 @@ fn register_exchange(
         "quickswap_v2" => {
             builder.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
         }
+        "ring_swap_v2" => {
+            builder.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None)
+        }
+        "sky" => builder.exchange::<SkyState>("sky", tvl_filter.clone(), None),
+        "lido_v4" => builder.exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None),
+        "etherfi" => builder.exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None),
         "lunarbase" => builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None),
         _ => return Registration::NoDecoder(builder),
     };
@@ -1018,6 +1040,8 @@ mod tests {
             "uniswap_v2",
             "ekubo_v3",
             "up_v3",
+            "uniswap_v4_hooks",
+            "gigadex_v3",
         ];
         let skipped = skipped_unknown_protocols(&robinhood_protocols);
         assert!(
@@ -1025,6 +1049,18 @@ mod tests {
             "expected every Robinhood protocol to register, but got unknown-protocol warnings \
              for: {skipped:?}"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::liquidityparty("vm:liquidityparty")]
+    #[case::ring_swap_v2("ring_swap_v2")]
+    #[case::balancer_v3("vm:balancer_v3")]
+    #[case::sky("sky")]
+    #[case::lido_v4("lido_v4")]
+    #[case::etherfi("etherfi")]
+    fn test_register_exchange_supports_protocol(#[case] protocol: &str) {
+        let skipped = skipped_unknown_protocols(&[protocol]);
+        assert!(skipped.is_empty(), "expected {protocol} to register, but got {skipped:?}");
     }
 
     #[test]
