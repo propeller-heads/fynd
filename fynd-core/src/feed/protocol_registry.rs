@@ -194,16 +194,18 @@ fn require_executor(chain: Chain, protocol_system: &str) -> Result<(), DataFeedE
     )))
 }
 
-/// Rejects an RFQ protocol requested both with and without the `fallback:` prefix.
+/// The RFQ entries in `protocols`, each with the entry it was parsed from. Rejects an RFQ
+/// protocol requested both with and without the `fallback:` prefix.
 ///
 /// Both clients would emit the same component ids under different protocol systems, so each poll
 /// would overwrite the other client's label.
-fn require_one_rfq_variant(protocols: &[String]) -> Result<(), DataFeedError> {
+fn parse_rfq_entries(protocols: &[String]) -> Result<Vec<(&str, RfqEntry<'_>)>, DataFeedError> {
     let mut variants: HashMap<&str, RfqEntry> = HashMap::new();
-    for rfq_entry in protocols
-        .iter()
-        .filter_map(|protocol| RfqEntry::parse(protocol))
-    {
+    let mut rfq_entries = Vec::new();
+    for protocol in protocols {
+        let Some(rfq_entry) = RfqEntry::parse(protocol) else {
+            continue;
+        };
         if variants
             .insert(rfq_entry.protocol(), rfq_entry)
             .is_some_and(|previous| previous != rfq_entry)
@@ -213,8 +215,9 @@ fn require_one_rfq_variant(protocols: &[String]) -> Result<(), DataFeedError> {
                 rfq_entry.protocol()
             )));
         }
+        rfq_entries.push((protocol.as_str(), rfq_entry));
     }
-    Ok(())
+    Ok(rfq_entries)
 }
 
 /// Whether any requested protocol is streamed from Tycho.
@@ -532,11 +535,7 @@ pub(crate) fn register_rfq(
     protocols: &[String],
     rfq_tokens: std::collections::HashSet<Bytes>,
 ) -> Result<RFQStreamBuilder, DataFeedError> {
-    require_one_rfq_variant(protocols)?;
-    for protocol in protocols {
-        let Some(rfq_entry) = RfqEntry::parse(protocol) else {
-            continue;
-        };
+    for (protocol, rfq_entry) in parse_rfq_entries(protocols)? {
         match rfq_entry.protocol() {
             "rfq:bebop" => {
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
