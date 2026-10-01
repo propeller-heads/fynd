@@ -1,5 +1,8 @@
 //! Picks the pool each pAMM leg falls back to, and prices the route through those fallbacks.
 //!
+//! "pAMM" in this module means any `fallback:` component: a price level stream pAMM, or an RFQ
+//! venue that a `fallback:rfq:` entry streams. Both execute through a fallback router.
+//!
 //! A pAMM quote only reaches the chain in the block the maker quotes for, so a pAMM swap that
 //! lands late reverts. Tycho's `TychoFallbackRouter` catches that revert and runs the leg on a
 //! fallback pool instead, so the solver names the fallback pool in the swap data.
@@ -29,12 +32,13 @@ use crate::{
     types::{ComponentId, FallbackLeg, Route, RouteExclusionFilter, RouteRejection, Swap},
 };
 
-/// Marks a component the `TychoFallbackRouter` executes, e.g. `fallback:fermiswap`.
+/// Marks a component that a fallback router executes, e.g. `fallback:fermiswap` or
+/// `fallback:rfq:metric`.
 ///
 /// tycho-simulation's price level stream labels every pAMM's components with this prefix; the
 /// direct `pricelevelstream:` label is only for a stream built `without_fallback_router`. Fynd
 /// requests the venue by its `pricelevelstream:{venue}` entry and the stream decides the
-/// label.
+/// label. The Metric and Bebop RFQ clients use this prefix when built `with_fallback_router`.
 pub const FALLBACK_PREFIX: &str = tycho_execution::encoding::evm::FALLBACK_PREFIX;
 
 /// Whether `route` has a leg the `TychoFallbackRouter` executes (`fallback:` protocol family).
@@ -48,8 +52,11 @@ pub(crate) fn has_fallback_leg(route: &Route) -> bool {
     })
 }
 
-/// Whether `component` is a pAMM: a proprietary AMM that publishes a quote ladder per block, and
-/// that the `TychoFallbackRouter` executes with a fallback pool of the solver's choosing.
+/// Whether `component` is a pAMM: a venue that a fallback router executes with a fallback pool of
+/// the solver's choosing.
+///
+/// This is a price level stream pAMM, which the `TychoFallbackRouter` executes, or a
+/// `fallback:rfq:` RFQ venue, which `MetricFallbackRouter` or `BebopFallbackRouter` executes.
 pub(crate) fn is_pamm(component: &ProtocolComponent) -> bool {
     component
         .protocol_system
