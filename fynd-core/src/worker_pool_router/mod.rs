@@ -618,11 +618,7 @@ impl WorkerPoolRouter {
             .await
     }
 
-    /// Simulates like [`Self::simulate_quotes`], and records the simulation metrics under
-    /// `purpose`.
-    ///
-    /// For a service that simulates quotes for itself, such as samples of a fee-on-transfer
-    /// token, so that they do not count as client quotes.
+    /// Simulates quotes like [`Self::simulate_quotes`] and records the metrics under `purpose`.
     ///
     /// # Errors
     ///

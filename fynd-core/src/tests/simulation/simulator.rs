@@ -880,8 +880,6 @@ fn test_record_outcome_failed() {
             labels.contains(&"outcome=failed".to_string())));
 }
 
-/// A service's own simulations carry their purpose on every metric, so dashboards of client
-/// quotes can leave them out.
 #[test]
 fn test_record_outcome_labels_a_fee_token_sample() {
     let recorder = metrics_util::debugging::DebuggingRecorder::new();

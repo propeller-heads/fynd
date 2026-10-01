@@ -39,11 +39,10 @@ const MAX_BASE_SLOT: u16 = 640;
 const MAX_SLOTS_TO_VERIFY: usize = 48;
 /// A value that survives common packed-balance flags and narrow integer casts.
 pub(crate) const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef_cafe_babe, 0, 0, 0]);
-/// The value a scaled-balance probe writes: large enough that a reflection token, which divides
-/// the stored word by a rate near 10^51, still reports a balance above zero.
+/// Value the scaled-balance probe writes into a slot.
 const SCALE_PROBE: U256 = U256::from_limbs([0, 0, 0, 1 << 8]);
-/// Largest word written to fund a scaled balance. Leaves headroom below `U256::MAX` for the token's
-/// own arithmetic on the stored word.
+/// Largest word written to fund a scaled balance. Stays below `U256::MAX` to leave room for the
+/// token's own arithmetic.
 const MAX_SCALED_WORD: U256 = U256::from_limbs([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 6]);
 /// OpenZeppelin v5's ERC-20 balances mapping, under the namespace ERC-7201 prescribes.
 ///
@@ -99,10 +98,9 @@ pub enum MappingPosition {
 pub enum BalanceEncoding {
     /// The slot holds the balance itself.
     Plain,
-    /// The slot holds the balance times `rate`, which `balanceOf` divides by: a reflection token,
-    /// whose holders' balances grow as the rate falls.
+    /// The slot holds the balance times `rate`, and `balanceOf` divides by `rate`.
     Scaled {
-        /// Stored word per reported token unit, as far as the probe could resolve it.
+        /// Stored word per reported token unit, as measured by the probe.
         rate: U256,
     },
 }
@@ -133,12 +131,10 @@ impl TokenLayout {
         self
     }
 
-    /// The word to write into a balance slot so that `balanceOf` reports at least a usable part
-    /// of `balance`.
+    /// Returns the word to write into a balance slot for `balanceOf` to report `balance`.
     ///
-    /// A scaled balance is multiplied up by its rate, and capped just below 2^250 when that would
-    /// not fit: the holder is then funded with less than `balance`, but still with far more than
-    /// one swap moves.
+    /// A scaled balance is multiplied by its rate and capped just below 2^250, so a very large
+    /// `balance` reports less.
     pub fn balance_word(self, balance: U256) -> U256 {
         match self.balance_encoding {
             BalanceEncoding::Plain => balance,
@@ -218,8 +214,7 @@ pub async fn discover_layout(
 /// A rebasing token multiplies shares by a pooled rate inside `balanceOf`, so tracing that call
 /// finds the arithmetic and not the mapping; `sharesOf` reads the mapping directly. The retry
 /// replaces a list of addresses, which would name only the tokens already known to need it and
-/// would have to be kept per chain. A reflection token has neither view: it divides its stored
-/// word by a rate, so no written sentinel is ever read back, and only a scaled probe places it.
+/// would have to be kept per chain.
 async fn discover_balance(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -262,13 +257,10 @@ async fn discover_balance(
     }
 }
 
-/// The slots of a traced call, in the order they are probed: only accounts with code, highest
-/// keys first. The caller caps the list at [`MAX_SLOTS_TO_VERIFY`].
+/// Returns the slots of a traced call in probe order: accounts with code only, highest keys
+/// first. The caller caps the list at [`MAX_SLOTS_TO_VERIFY`].
 ///
-/// A mapping slot is a keccak hash and lands near the top of the key order, while a contract's
-/// fixed fields sit at 0, 1, 2 and sort to the bottom. An account without code cannot hold a
-/// token's storage; on an Arbitrum chain it is the ArbOS state every call reads, which a node
-/// refuses to override, so probing it would end discovery before the token's own slots.
+/// Mapping slots are keccak hashes, so they sort above a contract's fixed fields.
 fn candidates(trace: &PreStateFrame) -> Vec<(Address, B256)> {
     let mut candidates: Vec<(Address, B256)> = Vec::new();
     for (&storage_contract, account) in trace.pre_state() {
@@ -290,14 +282,10 @@ fn candidates(trace: &PreStateFrame) -> Vec<(Address, B256)> {
     candidates
 }
 
-/// Finds a mapping slot that `calldata` reports scaled down, and the rate it divides by.
+/// Finds a mapping slot that `calldata` reports divided by a rate. Returns the slot and the rate.
 ///
-/// Writes [`SCALE_PROBE`] into each slot `is_mapping` accepts, and keeps the one whose answer is
-/// above zero and below the probe. The filter runs before the cap: it is local arithmetic, and a
-/// token that loops over its holders in `balanceOf` reads more slots than the cap, with its own
-/// mapping among the lower keys. Writing twice the probe must then double the answer, give or
-/// take the rounding of the division, or the slot feeds something other than a proportional
-/// balance.
+/// Writes [`SCALE_PROBE`] into each slot that `is_mapping` accepts. Keeps the slot whose answer
+/// is above zero, below the probe, and doubles when the written value doubles.
 async fn find_scaled_slot(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -392,8 +380,7 @@ fn token_call(token: Address, calldata: &[u8]) -> TransactionRequest {
     }
 }
 
-/// Whether overwriting one slot with the sentinel makes the token report the sentinel, which is
-/// what identifies a plain mapping.
+/// Returns whether the token reports the sentinel after the sentinel is written into one slot.
 async fn slot_matches(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -406,8 +393,8 @@ async fn slot_matches(
     Ok(answer == Some(PROBE_SENTINEL))
 }
 
-/// What the token reports with `value` written into one slot, or `None` when the call reverts or
-/// runs out of gas, which proves the slot is not the mapping.
+/// Returns what the token reports with `value` written into one slot, or `None` when the call
+/// reverts or runs out of gas.
 async fn probe_slot(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -423,9 +410,7 @@ async fn probe_slot(
     {
         Ok(response) => Ok((response.len() >= 32).then(|| U256::from_be_slice(&response[..32]))),
         Err(error) => match error.as_error_resp() {
-            // A guarded proxy reverts when its implementation slot is overwritten, and a
-            // reflection token loops over a list whose length the probe just made enormous. Both
-            // prove the slot is not the mapping.
+            // A revert or an out-of-gas result proves the slot is not the mapping.
             Some(payload) if is_revert(payload) || is_out_of_gas(payload) => Ok(None),
             // Every other error response -- a rate limit, a compute budget, a head that moved --
             // proves nothing about the slot. Counting it as a miss would end discovery in
@@ -440,8 +425,7 @@ async fn probe_slot(
     }
 }
 
-/// Whether an error response is the call exhausting its gas: the probe's value, not the node, made
-/// the call too expensive.
+/// Returns whether the error response says that the call ran out of gas.
 fn is_out_of_gas(payload: &ErrorPayload) -> bool {
     payload.message.contains("out of gas")
 }

@@ -99,21 +99,17 @@ pub(crate) struct SimulatedCall<'a> {
     pub(crate) router: Address,
     pub(crate) value: U256,
     pub(crate) data: &'a [u8],
-    /// The block whose state the call runs on: the one the quote was priced on. On a later
-    /// block the pools have moved, and the simulated amount differs from the quote by that move.
+    /// The block whose state the call runs on: the block the quote was priced on.
     pub(crate) block: BlockNumberOrTag,
 }
 
-/// Why a quote is simulated, recorded as the `purpose` label of the simulation metrics.
-///
-/// A service that simulates quotes for its own ends, not for a client, records them apart, so
-/// they do not skew what the metrics show about client quotes.
+/// Why a quote is simulated. Recorded as the `purpose` label of the simulation metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SimulationPurpose {
     /// A quote a client asked to simulate.
     Quote,
-    /// A sample a service takes to learn what a fee-on-transfer token takes.
+    /// A sample that measures the transfer fee of a token.
     FeeTokenSample,
 }
 
@@ -137,16 +133,15 @@ pub struct QuoteSimulator {
     layout_cache: Mutex<FxHashMap<Address, LayoutCell>>,
     native_token: Address,
     request_timeout: std::time::Duration,
-    /// How often the chain makes a block, which sets how long to wait for a node that does not
-    /// have a quote's block yet.
+    /// Block time of the chain. Sets how long to wait for a block the node does not have yet.
     block_time: Duration,
 }
 
-/// The first wait for a node that does not have a quote's block yet. Each later wait doubles.
+/// First wait before asking again for a missing block. Each later wait doubles.
 const BLOCK_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
-/// How many block times to wait in total for a node to have a quote's block.
+/// Total wait for a missing block, in block times.
 const BLOCK_RETRY_BLOCKS: u32 = 2;
-/// The block time of a simulator built without a chain: Ethereum's.
+/// Block time used when the simulator is built without a chain.
 const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(12);
 
 /// The transaction envelope a simulated call runs under.
@@ -290,13 +285,9 @@ impl QuoteSimulator {
 
     /// Runs one simulated call, reporting a timeout as a failure rather than waiting forever.
     ///
-    /// A node that does not have the call's block yet is asked again: after 500 ms, then after
-    /// twice as long each time, until the waits add up to two block times. The block a quote was
-    /// priced on can reach the Tycho feed before it reaches the node, and usually reaches the
-    /// node within one block.
-    ///
-    /// All attempts and waits together stay within the request timeout, so a node that is
-    /// behind cannot hold a quote longer than one that does not answer.
+    /// If the node does not have the call's block, asks again after 500 ms and doubles the wait
+    /// each time, until the waits add up to two block times. All attempts and waits stay within
+    /// the request timeout.
     pub(crate) async fn simulate_within_timeout(
         &self,
         call: SimulatedCall<'_>,
@@ -342,7 +333,7 @@ impl QuoteSimulator {
         }
     }
 
-    /// The same simulator, waiting for a block for two of `block_time`.
+    /// Sets the block time, which sets how long to wait for a missing block.
     pub(crate) fn with_block_time(mut self, block_time: Duration) -> Self {
         self.block_time = block_time;
         self
@@ -472,9 +463,8 @@ fn log_outcome(quote: &OrderQuote, outcome: &'static str, reason: &str) -> &'sta
 /// A revert and a failure are counted apart because they call for different work: a revert means
 /// the route the solver priced does not execute, while a failure means the simulation itself did
 /// not run, so it says nothing about the route. Both carry the winning pool and algorithm, so a
-/// rise in either can be traced to the solver that produced the route. Every metric carries the
-/// `purpose` too, so a dashboard of client quotes can leave out what a service simulates for
-/// itself.
+/// rise in either can be traced to the solver that produced the route. Every metric also carries
+/// the `purpose` label.
 fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt, purpose: SimulationPurpose) {
     let pool = quote.worker_pool().to_string();
     let algorithm = quote.algorithm().to_string();
@@ -670,7 +660,7 @@ async fn simulate_with_overrides(
     }
 }
 
-/// `logs` as the simulation result carries them, in emission order.
+/// Converts the node's logs to `EventLog`s, in emission order.
 fn event_logs(logs: &[alloy::rpc::types::Log]) -> Vec<EventLog> {
     let mut events = Vec::with_capacity(logs.len());
     for log in logs {
@@ -719,10 +709,7 @@ impl CallOutcome {
     }
 }
 
-/// Whether the node refused because it does not have the requested block.
-///
-/// Nodes word this differently: geth and its forks say "header not found", others "block not
-/// found" or "unknown block".
+/// Returns whether the error says that the node does not have the requested block.
 fn is_block_unavailable(
     error: &alloy::transports::RpcError<alloy::transports::TransportErrorKind>,
 ) -> bool {

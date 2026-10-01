@@ -304,20 +304,15 @@ impl AppState {
     }
 
     /// Returns a read-only handle on the market data this instance solves against.
-    ///
-    /// For route overrides that need what a quote is solved on, such as the token registry. It
-    /// cannot write, so an override cannot change or lock the market every solve reads.
     #[cfg(feature = "experimental")]
     #[must_use]
     pub fn market_reader(&self) -> MarketReader {
         self.market_data.reader()
     }
 
-    /// Returns a new receiver of the market events the feed broadcasts on every update.
+    /// Returns a new receiver of the market events the feed sends on each update.
     ///
-    /// For route overrides that keep their own view of the market in step with it. Events sent
-    /// before the call are not received: read the market through [`Self::market_reader`] after
-    /// subscribing.
+    /// The receiver gets only events sent after this call.
     #[cfg(feature = "experimental")]
     #[must_use]
     pub fn subscribe_market_events(&self) -> tokio::sync::broadcast::Receiver<MarketEvent> {

@@ -280,8 +280,6 @@ async fn test_discover_balance_falls_back_to_the_shares_view() {
     assert_eq!(encoding, BalanceEncoding::Plain);
 }
 
-/// On an Arbitrum chain every call reads ArbOS state, an account without code that the node
-/// refuses to override. It is never probed, so the token's own slot is reached.
 #[tokio::test]
 async fn test_find_accessed_slot_skips_accounts_without_code() {
     let holder = Address::repeat_byte(1);
@@ -305,9 +303,6 @@ async fn test_find_accessed_slot_skips_accounts_without_code() {
     assert!(asserter.read_q().is_empty(), "no response left over");
 }
 
-/// A reflection token loops over a list in `balanceOf`; the sentinel written into that list's
-/// length slot runs the call out of gas. That says the slot is not the mapping, and the probe
-/// goes on.
 #[tokio::test]
 async fn test_find_accessed_slot_takes_out_of_gas_as_a_miss() {
     let holder = Address::repeat_byte(1);
@@ -325,9 +320,6 @@ async fn test_find_accessed_slot_takes_out_of_gas_as_a_miss() {
     assert_eq!(found, (contract, mapping));
 }
 
-/// A reflection token divides its stored word by a rate, so the sentinel reads back as zero and
-/// neither view places the mapping. A large write reads back scaled down, and twice that write
-/// reads back twice as much: that places the mapping and gives the rate.
 #[tokio::test]
 async fn test_discover_balance_places_a_scaled_mapping() {
     let holder = Address::repeat_byte(1);
@@ -361,9 +353,6 @@ async fn test_discover_balance_places_a_scaled_mapping() {
     assert!(relative_error < U256::from(1_u8), "rate {found} for {rate}");
 }
 
-/// A token that loops over its holders reads more slots than the cap, with its mapping below
-/// them in key order. The scaled probe keeps only slots that are the holder's mapping, so the cap
-/// cannot push the mapping out.
 #[tokio::test]
 async fn test_discover_balance_reaches_a_scaled_mapping_behind_many_slots() {
     let holder = Address::repeat_byte(1);
@@ -396,8 +385,6 @@ async fn test_discover_balance_reaches_a_scaled_mapping_behind_many_slots() {
     assert_eq!(encoding, BalanceEncoding::Scaled { rate });
 }
 
-/// A slot whose write does not scale the answer in proportion feeds something other than the
-/// balance, so it is not taken as one.
 #[tokio::test]
 async fn test_discover_balance_refuses_a_slot_that_does_not_scale_in_proportion() {
     let holder = Address::repeat_byte(1);

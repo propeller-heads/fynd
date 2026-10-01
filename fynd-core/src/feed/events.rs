@@ -26,10 +26,7 @@ pub enum MarketEvent {
     },
 }
 
-/// A handle that subscribes to [`MarketEvent`]s but cannot send them.
-///
-/// For code outside the feed, such as a route override, that keeps its own view of the market
-/// in step with it. Cloning is cheap.
+/// A handle that can subscribe to [`MarketEvent`]s but cannot send them. Cloning is cheap.
 #[derive(Clone)]
 pub struct MarketEvents(broadcast::Sender<MarketEvent>);
 
@@ -39,11 +36,10 @@ impl MarketEvents {
         Self(sender)
     }
 
-    /// A new receiver of every event broadcast from now on.
+    /// Returns a new receiver of the events sent after this call.
     ///
-    /// Events sent before this call are not received, so a caller that needs the full market
-    /// reads it after subscribing. A receiver that falls behind the channel's capacity loses
-    /// the oldest events and is told so with `RecvError::Lagged`.
+    /// A receiver that falls behind the channel capacity loses the oldest events and gets
+    /// `RecvError::Lagged`.
     pub fn subscribe(&self) -> broadcast::Receiver<MarketEvent> {
         self.0.subscribe()
     }

@@ -633,11 +633,7 @@ impl EncodingOptions {
         self
     }
 
-    /// Replaces the slippage tolerance, keeping every other option.
-    ///
-    /// For a caller that must widen the floor for one quote of a request: a fee-on-transfer
-    /// output token delivers less than the router pays out, so the floor the router checks at
-    /// the receiver has to sit below what the router is told to expect.
+    /// Replaces the slippage tolerance and keeps every other option.
     pub fn with_slippage(mut self, slippage: f64) -> Self {
         self.slippage = slippage;
         self
@@ -1279,14 +1275,10 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
-    /// Overrides the input amount.
+    /// Sets the input amount.
     ///
-    /// For a caller that solved a different amount than the order charges: a fee-on-transfer
-    /// token delivers only part of what the sender pays, so the route is solved for what
-    /// arrives while the calldata must still pull the full amount.
-    ///
-    /// Calldata encoded for the old amount would pull the wrong amount, so the transaction, the
-    /// fee breakdown and the simulation result are dropped: encode the quote again after this.
+    /// Clears the transaction, the fee breakdown and the simulation result, which were built for
+    /// the previous amount. Encode the quote again after this call.
     pub fn set_amount_in(&mut self, value: BigUint) {
         self.amount_in = value;
         self.transaction = None;
@@ -1294,15 +1286,9 @@ impl OrderQuote {
         self.simulation_result = None;
     }
 
-    /// Overrides the output amount, and moves the gas-adjusted output by the same difference.
+    /// Sets the output amount and shifts `amount_out_net_gas` by the same difference.
     ///
-    /// Used by `combine_with_surplus` to pin to the committed reference, and by callers that
-    /// know the receiver gets less than the route produces (a fee-on-transfer output token).
-    ///
-    /// The gas cost does not change, so the net output moves with the output. A net output at
-    /// zero hides how far the gas cost exceeds the output, and stays at zero. The transaction and
-    /// the fee breakdown are left as they are: they describe what the router enforces, which is
-    /// the caller's to keep consistent.
+    /// A net output of zero stays zero. The transaction and the fee breakdown do not change.
     pub fn set_amount_out(&mut self, value: BigUint) {
         if value >= self.amount_out {
             if self.amount_out_net_gas > BigUint::ZERO {
@@ -1319,11 +1305,10 @@ impl OrderQuote {
         self.amount_out = value;
     }
 
-    /// Withdraws a solved quote, leaving `status` and nothing a caller could execute.
+    /// Withdraws a solved quote and sets its status to `status`.
     ///
-    /// Drops the route, transaction, fee breakdown, simulation result and surplus, and zeroes
-    /// the output and gas, matching the router's own no-route placeholder. `amount_in` stays:
-    /// it is the order's amount. For a caller whose policy refuses a route the solver found.
+    /// Clears the route, transaction, fee breakdown, simulation result and surplus, and sets the
+    /// output and gas to zero, as for a quote with no route. `amount_in` does not change.
     pub fn retract(&mut self, status: QuoteStatus) {
         self.status = status;
         self.route = None;
@@ -1494,9 +1479,6 @@ pub struct EventLog {
 }
 
 /// Outcome of simulating an encoded quote on the block it was priced on.
-///
-/// Non-exhaustive: a caller matching on it handles outcomes added later, such as
-/// [`SimulationResult::BlockUnavailable`], with a fallback arm.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -1509,11 +1491,7 @@ pub enum SimulationResult {
         amount_out: BigUint,
         /// Gas consumed by the simulated call.
         gas_used: u64,
-        /// Every event the call emitted, in emission order.
-        ///
-        /// Shows what each account actually sent and received, and what each pool priced, which
-        /// a token that takes a fee on transfer makes different. Not serialized: the wire format
-        /// does not change.
+        /// Every event the call emitted, in emission order. Not serialized.
         #[serde(skip)]
         logs: Vec<EventLog>,
     },
@@ -1527,9 +1505,7 @@ pub enum SimulationResult {
         /// Readable reason the simulation did not run.
         reason: String,
     },
-    /// The node did not have the block the quote was priced on, even after waiting for it.
-    ///
-    /// Says nothing about the route or its tokens: the node was behind the market data.
+    /// The node did not have the block the quote was priced on, even after the retries.
     BlockUnavailable {
         /// Readable reason the node gave.
         reason: String,
