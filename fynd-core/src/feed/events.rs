@@ -31,7 +31,7 @@ pub enum MarketEvent {
 pub struct MarketEvents(broadcast::Sender<MarketEvent>);
 
 impl MarketEvents {
-    /// Wraps the feed's sender.
+    /// Returns a handle that subscribes to the events that `sender` broadcasts.
     pub fn new(sender: broadcast::Sender<MarketEvent>) -> Self {
         Self(sender)
     }

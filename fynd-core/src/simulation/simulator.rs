@@ -89,32 +89,36 @@ const SIMULATION_TRACE_TIMEOUT: Duration = Duration::from_millis(500);
 /// One token's layout, or the reason this build cannot resolve one, resolved once per token.
 type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
 
-/// The call a simulation runs.
-///
-/// The five travel together and always come from the same quote, so they are passed as one rather
-/// than as five parameters a caller could pair up wrongly.
+/// The call that a simulation runs. All fields come from one quote.
 #[derive(Clone, Copy)]
 pub(crate) struct SimulatedCall<'a> {
+    /// The account that sends the call.
     pub(crate) sender: Address,
+    /// The router contract that the call goes to.
     pub(crate) router: Address,
+    /// The amount of native token that the call sends.
     pub(crate) value: U256,
+    /// The encoded router call.
     pub(crate) data: &'a [u8],
-    /// The block whose state the call runs on: the block the quote was priced on.
+    /// The block whose state the call runs on: the block that the quote was priced on.
     pub(crate) block: BlockNumberOrTag,
 }
 
-/// Why a quote is simulated. Recorded as the `purpose` label of the simulation metrics.
+/// Why a quote is simulated.
+///
+/// The simulation metrics carry it as the `purpose` label, so that dashboards can show client
+/// quotes apart from other simulations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SimulationPurpose {
-    /// A quote a client asked to simulate.
+    /// A client asked to simulate the quote.
     Quote,
-    /// A sample that measures the transfer fee of a token.
+    /// The service simulates the quote to measure the transfer fee of a token.
     FeeTokenSample,
 }
 
 impl SimulationPurpose {
-    /// The value of the `purpose` label.
+    /// Returns the value of the `purpose` label.
     fn label(self) -> &'static str {
         match self {
             Self::Quote => "quote",
@@ -133,15 +137,17 @@ pub struct QuoteSimulator {
     layout_cache: Mutex<FxHashMap<Address, LayoutCell>>,
     native_token: Address,
     request_timeout: std::time::Duration,
-    /// Block time of the chain. Sets how long to wait for a block the node does not have yet.
+    /// Time between two blocks of the chain. It sets the longest wait for a block that the node
+    /// does not have yet.
     block_time: Duration,
 }
 
-/// First wait before asking again for a missing block. Each later wait doubles.
+/// Wait before the first retry when the node does not have the quote's block. Each later wait is
+/// twice as long.
 const BLOCK_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
-/// Total wait for a missing block, in block times.
+/// Longest total wait for a block that the node does not have, in block times.
 const BLOCK_RETRY_BLOCKS: u32 = 2;
-/// Block time used when the simulator is built without a chain.
+/// Block time of a simulator that is built without a chain.
 const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(12);
 
 /// The transaction envelope a simulated call runs under.
@@ -183,17 +189,24 @@ pub(crate) enum SimulationAttempt {
     Reverted { reason: String },
     /// Simulation could not be completed.
     Failure { reason: String },
-    /// The node did not have the quote's block, even after waiting for it.
+    /// The node did not have the quote's block, also after the retries.
     BlockUnavailable { reason: String },
 }
 
 impl QuoteSimulator {
-    /// Creates a simulator that sends requests to `rpc_url` for `chain`.
+    /// Creates a simulator that sends its requests to `rpc_url`.
+    ///
+    /// # Arguments
+    ///
+    /// * `rpc_url` - The URL of a node that supports `eth_simulateV1` and `debug_traceCall`.
+    /// * `chain` - The chain of the node. It sets the native token and the block time.
+    /// * `request_timeout` - The time limit for the `eth_simulateV1` calls of one simulation,
+    ///   retries included.
     ///
     /// # Errors
     ///
-    /// Returns an error when `rpc_url` is not a valid URL, or the chain has no native token or no
-    /// block time.
+    /// Returns an error when `rpc_url` is not a valid URL, or when the chain has no native token or
+    /// no block time.
     pub fn new(
         rpc_url: &str,
         chain: Chain,
@@ -216,11 +229,15 @@ impl QuoteSimulator {
         .with_block_time(Duration::from_secs(block_time)))
     }
 
-    /// Simulates an encoded quote and reports its returned amount and gas used or a failure.
+    /// Simulates an encoded quote, and records the metrics of the result.
     ///
-    /// Records the outcome and, on success, how far the simulated amount sits from what the quote
-    /// promised, under `purpose`. Instrumenting here rather than at the call site keeps every
-    /// caller measured.
+    /// The metrics carry `purpose` as a label. For a successful simulation, they also record how
+    /// far the simulated output is from the quoted output, and the gas that the call used.
+    ///
+    /// # Arguments
+    ///
+    /// * `quote` - The encoded quote to simulate.
+    /// * `purpose` - Why the quote is simulated.
     pub(crate) async fn simulate_attempt(
         &self,
         quote: &OrderQuote,
@@ -283,11 +300,22 @@ impl QuoteSimulator {
         .await
     }
 
-    /// Runs one simulated call, reporting a timeout as a failure rather than waiting forever.
+    /// Runs one simulated call on `call.block`, within the request timeout.
     ///
-    /// If the node does not have the call's block, asks again after 500 ms and doubles the wait
-    /// each time, until the waits add up to two block times. All attempts and waits stay within
-    /// the request timeout.
+    /// When the node does not have that block yet, waits and tries again. The first wait is 500 ms,
+    /// and each later wait is twice as long. The retries stop when the waits add up to two block
+    /// times, or when the request timeout leaves no time for one more try.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The call to simulate.
+    /// * `overrides` - The state overrides that fund the sender.
+    /// * `envelope` - The gas limit and the gas price of the call.
+    ///
+    /// # Returns
+    ///
+    /// The result of the call, or [`SimulationAttempt::BlockUnavailable`] when the node still does
+    /// not have the block after the retries.
     pub(crate) async fn simulate_within_timeout(
         &self,
         call: SimulatedCall<'_>,
@@ -333,7 +361,9 @@ impl QuoteSimulator {
         }
     }
 
-    /// Sets the block time, which sets how long to wait for a missing block.
+    /// Returns this simulator with `block_time` as the time between two blocks.
+    ///
+    /// The block time sets the longest wait for a block that the node does not have yet.
     pub(crate) fn with_block_time(mut self, block_time: Duration) -> Self {
         self.block_time = block_time;
         self
@@ -535,11 +565,11 @@ fn failure_with(reason: String) -> SimulationAttempt {
     SimulationAttempt::Failure { reason }
 }
 
-/// Block environment for a simulated call.
+/// Returns the block fields that the simulation sets itself.
 ///
-/// `eth_simulateV1` builds on the block it is given, so the block number, timestamp, base fee,
-/// chain id and the ancestor hashes `blockhash` reads are already the ones the next block carries.
-/// What it leaves at zero is what a pool can read to recognise a simulation, so those are set here.
+/// `eth_simulateV1` takes the other block fields from the block that it runs on. It leaves the
+/// coinbase and `prevrandao` at zero, and a pool can read these to detect a simulation. This sets
+/// them, and the block gas limit, to realistic values.
 fn block_overrides() -> BlockOverrides {
     BlockOverrides {
         coinbase: Some(SIMULATION_COINBASE),
@@ -549,11 +579,11 @@ fn block_overrides() -> BlockOverrides {
     }
 }
 
-/// The same environment, reporting the height and clock a simulated block actually carried.
+/// Returns `environment` with the block number and the timestamp that the simulated block used.
 ///
-/// `eth_simulateV1` numbers its own block on top of the one it is given, and refuses a number that
-/// collides with a block it already has, so the number is not set in advance. It reports what it
-/// used, so the trace is pinned to that rather than to a guess.
+/// The trace of a revert must run in the same block environment as the simulation.
+/// `eth_simulateV1` picks the number of its block itself, so the caller takes `number` and
+/// `timestamp` from its response.
 fn executed_in(environment: BlockOverrides, number: u64, timestamp: u64) -> BlockOverrides {
     BlockOverrides { number: Some(U256::from(number)), time: Some(timestamp), ..environment }
 }
@@ -660,7 +690,8 @@ async fn simulate_with_overrides(
     }
 }
 
-/// Converts the node's logs to `EventLog`s, in emission order.
+/// Converts the logs that the node returned to `EventLog`s, in the order that the call emitted
+/// them.
 fn event_logs(logs: &[alloy::rpc::types::Log]) -> Vec<EventLog> {
     let mut events = Vec::with_capacity(logs.len());
     for log in logs {
@@ -695,6 +726,7 @@ enum CallOutcome {
 }
 
 impl CallOutcome {
+    /// Converts this outcome to the [`SimulationAttempt`] that a caller gets.
     fn into_attempt(self) -> SimulationAttempt {
         match self {
             Self::Success { amount_out, gas_used, logs } => {
@@ -709,7 +741,9 @@ impl CallOutcome {
     }
 }
 
-/// Returns whether the error says that the node does not have the requested block.
+/// Returns whether `error` says that the node does not have the requested block.
+///
+/// Matches the messages "header not found", "block not found" and "unknown block".
 fn is_block_unavailable(
     error: &alloy::transports::RpcError<alloy::transports::TransportErrorKind>,
 ) -> bool {

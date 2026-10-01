@@ -39,10 +39,12 @@ const MAX_BASE_SLOT: u16 = 640;
 const MAX_SLOTS_TO_VERIFY: usize = 48;
 /// A value that survives common packed-balance flags and narrow integer casts.
 pub(crate) const PROBE_SENTINEL: U256 = U256::from_limbs([0xdead_beef_cafe_babe, 0, 0, 0]);
-/// Value the scaled-balance probe writes into a slot.
+/// Value written into a slot to test whether `balanceOf` divides the slot value by a rate.
 const SCALE_PROBE: U256 = U256::from_limbs([0, 0, 0, 1 << 8]);
-/// Largest word written to fund a scaled balance. Stays below `U256::MAX` to leave room for the
-/// token's own arithmetic.
+/// Largest value written into a scaled balance slot.
+///
+/// It stays below `U256::MAX` so that the token's own arithmetic on the slot value does not
+/// overflow.
 const MAX_SCALED_WORD: U256 = U256::from_limbs([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 6]);
 /// OpenZeppelin v5's ERC-20 balances mapping, under the namespace ERC-7201 prescribes.
 ///
@@ -93,14 +95,15 @@ pub enum MappingPosition {
     OpenZeppelinV5,
 }
 
-/// How a balance mapping stores what `balanceOf` reports.
+/// How a token stores a balance in its balance slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BalanceEncoding {
-    /// The slot holds the balance itself.
+    /// The slot holds the balance.
     Plain,
-    /// The slot holds the balance times `rate`, and `balanceOf` divides by `rate`.
+    /// The slot holds the balance multiplied by `rate`. `balanceOf` divides the slot value by
+    /// `rate`.
     Scaled {
-        /// Stored word per reported token unit, as measured by the probe.
+        /// Slot value per token unit that `balanceOf` reports.
         rate: U256,
     },
 }
@@ -124,17 +127,21 @@ impl TokenLayout {
         Self { storage_contract, balance, allowance, balance_encoding: BalanceEncoding::Plain }
     }
 
-    /// The same layout, with balances stored as `encoding` says.
+    /// Returns this layout with `encoding` as the way that balances are stored.
     #[must_use]
     pub const fn with_balance_encoding(mut self, encoding: BalanceEncoding) -> Self {
         self.balance_encoding = encoding;
         self
     }
 
-    /// Returns the word to write into a balance slot for `balanceOf` to report `balance`.
+    /// Returns the value to write into a balance slot so that `balanceOf` reports `balance`.
     ///
-    /// A scaled balance is multiplied by its rate and capped just below 2^250, so a very large
-    /// `balance` reports less.
+    /// For a plain encoding, this is `balance`. For a scaled encoding, it is `balance * rate`,
+    /// capped just below 2^250. When the cap applies, `balanceOf` reports less than `balance`.
+    ///
+    /// # Arguments
+    ///
+    /// * `balance` - The balance that `balanceOf` must report.
     pub fn balance_word(self, balance: U256) -> U256 {
         match self.balance_encoding {
             BalanceEncoding::Plain => balance,
@@ -208,13 +215,29 @@ pub async fn discover_layout(
     Ok(TokenLayout::new(storage_contract, balance, allowance).with_balance_encoding(encoding))
 }
 
-/// Places the balance mapping, trying the plain balance view before the share-accounted one, and
-/// last a mapping `balanceOf` reports scaled down.
+/// Finds the contract and the mapping that hold the balance of `holder`.
 ///
-/// A rebasing token multiplies shares by a pooled rate inside `balanceOf`, so tracing that call
-/// finds the arithmetic and not the mapping; `sharesOf` reads the mapping directly. The retry
-/// replaces a list of addresses, which would name only the tokens already known to need it and
-/// would have to be kept per chain.
+/// Tries three probes, in this order:
+/// 1. `balanceOf(holder)`, for a token that stores each balance as it is.
+/// 2. `sharesOf(holder)`, for a rebasing token that stores shares. Its `balanceOf` computes the
+///    balance from the shares, so the first probe cannot find the mapping.
+/// 3. `balanceOf(holder)` again, for a token that stores each balance multiplied by a rate.
+///
+/// # Arguments
+///
+/// * `provider` - The node to trace and call. It must support `debug_traceCall`.
+/// * `token` - The token contract.
+/// * `holder` - The account whose balance slot to find.
+///
+/// # Returns
+///
+/// The contract that holds the balances, the position of the balance mapping, and how the
+/// mapping stores a balance.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::Rpc`] when the node does not answer a probe, and
+/// [`DiscoveryError::Unsupported`] when no probe finds the mapping.
 async fn discover_balance(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -257,10 +280,15 @@ async fn discover_balance(
     }
 }
 
-/// Returns the slots of a traced call in probe order: accounts with code only, highest keys
-/// first. The caller caps the list at [`MAX_SLOTS_TO_VERIFY`].
+/// Returns the storage slots that a traced call read, in the order in which to test them.
 ///
-/// Mapping slots are keccak hashes, so they sort above a contract's fixed fields.
+/// Leaves out accounts without code, because they cannot hold token storage. Puts the highest
+/// slot keys first, because a mapping slot is a hash and sorts above the fixed fields of a
+/// contract.
+///
+/// # Arguments
+///
+/// * `trace` - The prestate trace of the call.
 fn candidates(trace: &PreStateFrame) -> Vec<(Address, B256)> {
     let mut candidates: Vec<(Address, B256)> = Vec::new();
     for (&storage_contract, account) in trace.pre_state() {
@@ -282,10 +310,28 @@ fn candidates(trace: &PreStateFrame) -> Vec<(Address, B256)> {
     candidates
 }
 
-/// Finds a mapping slot that `calldata` reports divided by a rate. Returns the slot and the rate.
+/// Finds a balance slot whose value `balanceOf` divides by a rate.
 ///
-/// Writes [`SCALE_PROBE`] into each slot that `is_mapping` accepts. Keeps the slot whose answer
-/// is above zero, below the probe, and doubles when the written value doubles.
+/// Traces the call, then tests each slot that `is_mapping` accepts, up to
+/// [`MAX_SLOTS_TO_VERIFY`] slots. A test writes [`SCALE_PROBE`] into the slot, and then twice
+/// that value. The slot passes when the first answer is above zero and below the written value,
+/// and the second answer is twice the first.
+///
+/// # Arguments
+///
+/// * `provider` - The node to trace and call.
+/// * `token` - The token contract.
+/// * `calldata` - The encoded `balanceOf` call.
+/// * `is_mapping` - Returns the mapping position of a slot, or `None` when the slot is not a
+///   balance slot of the holder.
+///
+/// # Returns
+///
+/// The contract that holds the slot, the slot, and the rate, or `None` when no slot passes.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::Rpc`] when the node does not answer.
 async fn find_scaled_slot(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -321,6 +367,11 @@ async fn find_scaled_slot(
     Ok(None)
 }
 
+/// Returns the prestate trace of `calldata` sent to `token` on the latest block.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::Rpc`] when the node does not answer.
 async fn trace_call(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -342,7 +393,26 @@ async fn trace_call(
         })
 }
 
-/// Finds the slot a read-only call depends on, by overwriting each slot it touched in turn.
+/// Finds the storage slot that the value returned by `calldata` comes from.
+///
+/// Traces the call, then writes [`PROBE_SENTINEL`] into each slot that the call read, up to
+/// [`MAX_SLOTS_TO_VERIFY`] slots. The first slot for which the call returns the sentinel is the
+/// result.
+///
+/// # Arguments
+///
+/// * `provider` - The node to trace and call.
+/// * `token` - The token contract.
+/// * `calldata` - The encoded `balanceOf`, `sharesOf` or `allowance` call.
+///
+/// # Returns
+///
+/// The contract that holds the slot, and the slot.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::Rpc`] when the node does not answer, and
+/// [`DiscoveryError::Unsupported`] when no slot returns the sentinel.
 async fn find_accessed_slot(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -380,7 +450,12 @@ fn token_call(token: Address, calldata: &[u8]) -> TransactionRequest {
     }
 }
 
-/// Returns whether the token reports the sentinel after the sentinel is written into one slot.
+/// Returns whether `calldata` returns [`PROBE_SENTINEL`] after the sentinel is written into
+/// `slot` of `storage_contract`.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::Rpc`] when the node does not answer.
 async fn slot_matches(
     provider: &RootProvider<Ethereum>,
     token: Address,
@@ -393,8 +468,25 @@ async fn slot_matches(
     Ok(answer == Some(PROBE_SENTINEL))
 }
 
-/// Returns what the token reports with `value` written into one slot, or `None` when the call
-/// reverts or runs out of gas.
+/// Calls `token` with `value` written into one storage slot, and returns the result.
+///
+/// # Arguments
+///
+/// * `provider` - The node to call.
+/// * `token` - The token contract to call.
+/// * `storage_contract` - The contract whose storage gets the value.
+/// * `calldata` - The encoded call.
+/// * `slot` - The slot that gets the value.
+/// * `value` - The value to write.
+///
+/// # Returns
+///
+/// The first 32 bytes that the call returns, or `None` when the call reverts, runs out of gas,
+/// or returns fewer than 32 bytes.
+///
+/// # Errors
+///
+/// Returns [`DiscoveryError::Rpc`] for any other error from the node.
 async fn probe_slot(
     provider: &RootProvider<Ethereum>,
     token: Address,

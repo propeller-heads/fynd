@@ -633,7 +633,12 @@ impl EncodingOptions {
         self
     }
 
-    /// Replaces the slippage tolerance and keeps every other option.
+    /// Returns these options with `slippage` as the slippage tolerance. The other options do not
+    /// change.
+    ///
+    /// # Arguments
+    ///
+    /// * `slippage` - The slippage tolerance, as a fraction: `0.005` is 0.5%.
     pub fn with_slippage(mut self, slippage: f64) -> Self {
         self.slippage = slippage;
         self
@@ -1277,8 +1282,12 @@ impl OrderQuote {
 
     /// Sets the input amount.
     ///
-    /// Clears the transaction, the fee breakdown and the simulation result, which were built for
-    /// the previous amount. Encode the quote again after this call.
+    /// Clears the transaction, the fee breakdown and the simulation result, because they were built
+    /// for the previous amount. Encode the quote again after this call.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The new input amount, in the smallest unit of the input token.
     pub fn set_amount_in(&mut self, value: BigUint) {
         self.amount_in = value;
         self.transaction = None;
@@ -1286,9 +1295,14 @@ impl OrderQuote {
         self.simulation_result = None;
     }
 
-    /// Sets the output amount and shifts `amount_out_net_gas` by the same difference.
+    /// Sets the output amount, and changes `amount_out_net_gas` by the same difference.
     ///
-    /// A net output of zero stays zero. The transaction and the fee breakdown do not change.
+    /// When `amount_out_net_gas` is zero, it stays zero. The transaction and the fee breakdown do
+    /// not change, so the caller must keep them consistent with the new amount.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The new output amount, in the smallest unit of the output token.
     pub fn set_amount_out(&mut self, value: BigUint) {
         if value >= self.amount_out {
             if self.amount_out_net_gas > BigUint::ZERO {
@@ -1305,10 +1319,15 @@ impl OrderQuote {
         self.amount_out = value;
     }
 
-    /// Withdraws a solved quote and sets its status to `status`.
+    /// Changes a solved quote into a quote without a route.
     ///
-    /// Clears the route, transaction, fee breakdown, simulation result and surplus, and sets the
-    /// output and gas to zero, as for a quote with no route. `amount_in` does not change.
+    /// Sets the status to `status`. Clears the route, the transaction, the fee breakdown, the
+    /// simulation result and the surplus, and sets the output amounts and the gas to zero. The
+    /// input amount does not change.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The status to report, for example [`QuoteStatus::NoRouteFound`].
     pub fn retract(&mut self, status: QuoteStatus) {
         self.status = status;
         self.route = None;

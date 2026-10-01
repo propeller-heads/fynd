@@ -618,11 +618,18 @@ impl WorkerPoolRouter {
             .await
     }
 
-    /// Simulates quotes like [`Self::simulate_quotes`] and records the metrics under `purpose`.
+    /// Simulates quotes like [`Self::simulate_quotes`], and records the metrics under `purpose`.
+    ///
+    /// # Arguments
+    ///
+    /// * `order_quotes` - The encoded quotes to simulate.
+    /// * `encoding_options` - The encoding options of the request. Simulation runs only when they
+    ///   ask for it.
+    /// * `purpose` - Why the quotes are simulated.
     ///
     /// # Errors
     ///
-    /// Returns [`SolveError::Internal`] when the request asks for simulation and the server was
+    /// Returns [`SolveError::Internal`] when the options ask for simulation and the server was
     /// started without `--enable-simulation`.
     pub async fn simulate_quotes_for(
         &self,
