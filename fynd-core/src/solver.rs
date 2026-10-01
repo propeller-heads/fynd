@@ -225,7 +225,7 @@ impl PoolConfig {
 
     /// Sets the protocol systems this worker pool never routes through. An entry names a protocol
     /// system exactly (`"uniswap_v2"`), or the whole family under a prefix when it ends with `:`
-    /// (`"fallback:"` covers every pAMM the TychoFallbackRouter executes).
+    /// (`"fallback:"` covers every `fallback:` venue: pAMMs and `fallback:rfq:` RFQ venues).
     pub fn with_exclude_protocols(mut self, exclude_protocols: Vec<String>) -> Self {
         self.exclude_protocols = Some(exclude_protocols);
         self
