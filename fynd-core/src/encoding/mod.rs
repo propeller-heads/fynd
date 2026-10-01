@@ -18,6 +18,7 @@ pub mod encoder;
 pub mod exclusive_swap;
 pub mod fee_fetcher;
 pub mod router_fees;
+pub(crate) mod signed_quote_gap;
 
 /// Validity window for a server-signed payload, in seconds.
 ///

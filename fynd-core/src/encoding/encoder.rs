@@ -1270,6 +1270,205 @@ mod tests {
         assert!(result[0].transaction().is_none(), "an unsigned exclusive leg must not be encoded");
     }
 
+    /// A Hashflow pool that signs every request with `quote_attributes`, as the RFQ client does.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct HashflowSigningSim {
+        inner: MockProtocolSim,
+        quote_attributes: std::collections::HashMap<String, Bytes>,
+        signed_amount_out: u64,
+    }
+
+    #[typetag::serde]
+    impl tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim for HashflowSigningSim {
+        fn fee(&self) -> f64 {
+            self.inner.fee()
+        }
+        fn spot_price(
+            &self,
+            base: &Token,
+            quote: &Token,
+        ) -> Result<f64, tycho_simulation::tycho_core::simulation::errors::SimulationError>
+        {
+            self.inner.spot_price(base, quote)
+        }
+        fn get_amount_out(
+            &self,
+            amount_in: BigUint,
+            token_in: &Token,
+            token_out: &Token,
+        ) -> Result<
+            tycho_simulation::tycho_core::simulation::protocol_sim::GetAmountOutResult,
+            tycho_simulation::tycho_core::simulation::errors::SimulationError,
+        > {
+            self.inner
+                .get_amount_out(amount_in, token_in, token_out)
+        }
+        fn get_limits(
+            &self,
+            sell_token: Bytes,
+            buy_token: Bytes,
+        ) -> Result<
+            (BigUint, BigUint),
+            tycho_simulation::tycho_core::simulation::errors::SimulationError,
+        > {
+            self.inner
+                .get_limits(sell_token, buy_token)
+        }
+        fn delta_transition(
+            &mut self,
+            _delta: tycho_simulation::tycho_core::dto::ProtocolStateDelta,
+            _tokens: &std::collections::HashMap<Bytes, Token>,
+            _balances: &tycho_simulation::tycho_core::simulation::protocol_sim::Balances,
+        ) -> Result<(), tycho_simulation::tycho_core::simulation::errors::TransitionError> {
+            unimplemented!("HashflowSigningSim holds a fixed state")
+        }
+        fn clone_box(
+            &self,
+        ) -> Box<dyn tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+        fn eq(
+            &self,
+            _other: &dyn tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim,
+        ) -> bool {
+            false
+        }
+        fn as_indicatively_priced(
+            &self,
+        ) -> Result<
+            &dyn tycho_simulation::tycho_core::simulation::indicatively_priced::IndicativelyPriced,
+            tycho_simulation::tycho_core::simulation::errors::SimulationError,
+        > {
+            Ok(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl tycho_simulation::tycho_core::simulation::indicatively_priced::IndicativelyPriced
+        for HashflowSigningSim
+    {
+        async fn request_signed_quote(
+            &self,
+            params: tycho_simulation::tycho_core::models::protocol::GetAmountOutParams,
+        ) -> Result<
+            tycho_simulation::tycho_core::simulation::indicatively_priced::SignedQuote,
+            tycho_simulation::tycho_core::simulation::errors::SimulationError,
+        > {
+            Ok(tycho_simulation::tycho_core::simulation::indicatively_priced::SignedQuote {
+                base_token: params.token_in,
+                quote_token: params.token_out,
+                amount_in: params.amount_in,
+                amount_out: BigUint::from(self.signed_amount_out),
+                quote_attributes: self.quote_attributes.clone(),
+            })
+        }
+    }
+
+    fn u256_bytes(value: u64) -> Bytes {
+        let mut word = [0u8; 32];
+        word[24..].copy_from_slice(&value.to_be_bytes());
+        Bytes::from(word.to_vec())
+    }
+
+    /// Encodes a USDC -> WETH Hashflow leg through the real tycho-execution router encoder and
+    /// reads the maker's signed amounts back out of the calldata. This is what breaks if
+    /// tycho-execution changes how it packs Hashflow's quote.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_encoded_hashflow_leg_carries_signed_amounts() {
+        use std::str::FromStr;
+
+        let usdc = Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let weth = Address::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+        let (level_in, level_out, signed_out) =
+            (3_000_000_000u64, 1_000_000_000_000_000_000u64, 990_000_000_000_000_000u64);
+        let address = |hex: &str| Bytes::from_str(hex).unwrap();
+        let quote_attributes = std::collections::HashMap::from([
+            ("pool".to_string(), address("0x478eca1b93865dca0b9f325935eb123c8a4af011")),
+            ("external_account".to_string(), address("0xbee3211ab312a8d065c4fef0247448e17a8da000")),
+            ("trader".to_string(), address("0xcd09f75e2bf2a4d11f3ab23f1389fcc1621c0cc2")),
+            ("effective_trader".to_string(), address("0x1111111111111111111111111111111111111111")),
+            ("base_token".to_string(), Bytes::from(usdc.as_ref())),
+            ("quote_token".to_string(), Bytes::from(weth.as_ref())),
+            ("base_token_amount".to_string(), u256_bytes(level_in)),
+            ("quote_token_amount".to_string(), u256_bytes(signed_out)),
+            ("quote_expiry".to_string(), u256_bytes(1_755_610_328)),
+            ("nonce".to_string(), u256_bytes(1_755_610_283_723)),
+            ("tx_id".to_string(), Bytes::from(vec![0x12; 32])),
+            ("signature".to_string(), Bytes::from(vec![0x6d; 65])),
+        ]);
+        let state = HashflowSigningSim {
+            inner: MockProtocolSim::new(1.0),
+            quote_attributes,
+            signed_amount_out: signed_out,
+        };
+        let (token_in, token_out) = (make_token(usdc.clone()), make_token(weth.clone()));
+        let swap = crate::types::Swap::new(
+            "hashflow-usdc-weth".to_string(),
+            "rfq:hashflow".to_string(),
+            usdc.clone(),
+            weth.clone(),
+            BigUint::from(level_in),
+            BigUint::from(level_out),
+            BigUint::from(100_000u64),
+            component_with_protocol("hashflow-usdc-weth", "rfq:hashflow", &[token_in, token_out]),
+            Box::new(state),
+        );
+        let quote = OrderQuote::new(
+            "hashflow-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(level_in),
+            BigUint::from(level_out),
+            BigUint::from(100_000u64),
+            BigUint::from(level_out),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(single_swap_route(swap));
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .unwrap();
+        let tycho_encoder = TychoRouterEncoderBuilder::new()
+            .chain(Chain::Ethereum)
+            .swap_encoder_registry(registry)
+            .build()
+            .unwrap();
+        let encoder = encoder_with(Chain::Ethereum, Arc::from(tycho_encoder));
+
+        let encoded = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .unwrap();
+        assert_eq!(encoded[0].status(), QuoteStatus::Success, "the Hashflow leg encodes");
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            crate::encoding::signed_quote_gap::record_signed_quote_gaps(&encoded);
+        });
+
+        let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
+        let (.., deviation) = recorded
+            .iter()
+            .find(|(name, ..)| name == "rfq_signed_quote_deviation_bps")
+            .unwrap_or_else(|| {
+                panic!("the signed amounts are read from the calldata: {recorded:?}")
+            });
+        assert!(
+            matches!(deviation, metrics_util::debugging::DebugValue::Histogram(values)
+                if values.len() == 1 && (values[0].into_inner() - -100.0).abs() < 1e-6),
+            "0.99 WETH signed against 1 WETH levels is -100 bps: {deviation:?}"
+        );
+    }
+
     #[test]
     fn test_encoder_authorizes_the_router_as_locker() {
         // nextest runs each test in its own process, so setting the key here affects no other test.

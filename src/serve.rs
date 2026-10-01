@@ -112,8 +112,9 @@ fn create_tracing_subscriber() -> Option<TracerProvider> {
 /// global `chain` label so multi-chain fleets can aggregate without pod-name regexes.
 /// All `*_seconds` histograms render as bucketed Prometheus histograms (aggregatable
 /// across pods, unlike summary quantiles); `worker_router_solver_responses` is a count
-/// distribution and gets its own 0..=6 buckets; `quote_simulation_deviation_bps` is a signed
-/// basis-point distribution and gets buckets that span both sides of zero;
+/// distribution and gets its own 0..=6 buckets; `quote_simulation_deviation_bps` and
+/// `rfq_signed_quote_deviation_bps` are signed basis-point distributions and get buckets that span
+/// both sides of zero;
 /// `quote_simulation_gas_estimate` and `quote_simulation_gas_used` share one set of gas buckets.
 /// Compiled only when the `metrics` feature is enabled.
 #[cfg(feature = "metrics")]
@@ -161,6 +162,11 @@ fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::J
         .expect("static bucket list is non-empty")
         .set_buckets_for_metric(
             Matcher::Full("quote_simulation_deviation_bps".to_string()),
+            SIMULATION_DEVIATION_BPS_BUCKETS,
+        )
+        .expect("static bucket list is non-empty")
+        .set_buckets_for_metric(
+            Matcher::Full("rfq_signed_quote_deviation_bps".to_string()),
             SIMULATION_DEVIATION_BPS_BUCKETS,
         )
         .expect("static bucket list is non-empty")
