@@ -2,3 +2,4 @@ packages:
   - client
   - examples/tutorial
   - examples/swap-client-fee
+  - wdk-swidge
