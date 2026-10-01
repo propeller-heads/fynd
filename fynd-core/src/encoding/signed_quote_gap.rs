@@ -3,8 +3,9 @@
 //! The encoder requests the signed quote itself and keeps only the calldata, so the signed amounts
 //! never reach the quote. Hashflow's executor data carries them, packed as
 //! `… | base_token | quote_token | base_token_amount | quote_token_amount | …` (addresses 20 bytes,
-//! amounts 32-byte big-endian), so they are read back from the encoded transaction. A leg is found
-//! by its token pair; two legs on one pair take the pair's occurrences in route order.
+//! amounts 32-byte big-endian, then `quote_expiry`), so they are read back from the encoded
+//! transaction. A leg is found by its token pair followed by that shape; two Hashflow legs on one
+//! pair take the pair's occurrences in route order.
 //!
 //! The gap compares rates rather than amounts, so a maker that signs for a different input than
 //! the leg asked for still yields the price difference. A leg whose data cannot be found counts in
@@ -65,28 +66,54 @@ struct SignedAmounts {
     amount_out: BigUint,
 }
 
-/// Finds `pair` (base token then quote token) in `calldata` at or after `start`, and reads the two
-/// amounts that follow it. Returns the pair's offset with them.
+/// Finds `pair` (base token then quote token) in `calldata` at or after `start`, followed by the
+/// shape of Hashflow's quote, and reads the two signed amounts. Returns the pair's offset with
+/// them.
+///
+/// Another leg's data can hold the same pair back to back too: a Uniswap V3 swap packs
+/// `token_in | token_out | fee | …`. So a match counts only when the three words after it read as
+/// Hashflow's two amounts and its `quote_expiry`; otherwise the search moves on.
 fn read_signed_amounts(
     calldata: &[u8],
     pair: &[u8],
     start: usize,
 ) -> Option<(usize, SignedAmounts)> {
-    let needed = pair.len() + 2 * AMOUNT_LEN;
-    let offset = calldata
-        .get(start..)?
-        .windows(pair.len())
-        .position(|window| window == pair)? +
-        start;
-    let block = calldata.get(offset..offset + needed)?;
-    let amounts = &block[pair.len()..];
-    Some((
-        offset,
-        SignedAmounts {
-            amount_in: BigUint::from_bytes_be(&amounts[..AMOUNT_LEN]),
-            amount_out: BigUint::from_bytes_be(&amounts[AMOUNT_LEN..]),
-        },
-    ))
+    let mut from = start;
+    loop {
+        let offset = calldata
+            .get(from..)?
+            .windows(pair.len())
+            .position(|window| window == pair)? +
+            from;
+        let words = calldata.get(offset + pair.len()..offset + pair.len() + 3 * AMOUNT_LEN)?;
+        let (amount_in, rest) = words.split_at(AMOUNT_LEN);
+        let (amount_out, expiry) = rest.split_at(AMOUNT_LEN);
+        if is_amount(amount_in) && is_amount(amount_out) && is_unix_time(expiry) {
+            return Some((
+                offset,
+                SignedAmounts {
+                    amount_in: BigUint::from_bytes_be(amount_in),
+                    amount_out: BigUint::from_bytes_be(amount_out),
+                },
+            ));
+        }
+        from = offset + 1;
+    }
+}
+
+/// A non-zero token amount below 2^128: any real amount fits, while the address and fee bytes of
+/// another protocol's data fill the high half of the word.
+fn is_amount(word: &[u8]) -> bool {
+    word[..AMOUNT_LEN / 2]
+        .iter()
+        .all(|byte| *byte == 0) &&
+        word.iter().any(|byte| *byte != 0)
+}
+
+/// A unix time in seconds between 2001 and 2286, as Hashflow's `quote_expiry` is.
+fn is_unix_time(word: &[u8]) -> bool {
+    let value = BigUint::from_bytes_be(word);
+    value >= BigUint::from(1_000_000_000u64) && value < BigUint::from(10_000_000_000u64)
 }
 
 fn record_leg(quote: &OrderQuote, swap: &Swap, signed: &SignedAmounts) {
@@ -151,6 +178,7 @@ mod tests {
             token_out.to_vec(),
             amount(signed_in),
             amount(signed_out),
+            amount(1_755_610_328),
             vec![0x22; 64],
         ]
         .concat()
@@ -263,7 +291,7 @@ mod tests {
     fn test_record_signed_quote_gaps_unread() {
         let swap = hashflow_swap(1_000, 2_000);
         let mut truncated = hashflow_block(swap.token_in(), swap.token_out(), 1_000, 1_980);
-        truncated.truncate(80 + 40 + AMOUNT_LEN);
+        truncated.truncate(80 + 40 + 2 * AMOUNT_LEN);
 
         for calldata in [vec![0x33; 256], truncated] {
             let recorded = record(&encoded_quote(
@@ -280,6 +308,29 @@ mod tests {
                 "{recorded:?}"
             );
         }
+    }
+
+    /// An AMM leg of the same pair packs `token_in | token_out | fee | receiver …` ahead of the
+    /// Hashflow block. Its bytes are not read as amounts.
+    #[test]
+    fn test_record_signed_quote_gaps_skips_amm_leg_on_same_pair() {
+        let swap = hashflow_swap(1_000, 2_000);
+        let uniswap_v3_leg = [
+            swap.token_in().to_vec(),
+            swap.token_out().to_vec(),
+            vec![0x00, 0x01, 0xf4],
+            vec![0x44; 40],
+        ]
+        .concat();
+        let calldata =
+            [uniswap_v3_leg, hashflow_block(swap.token_in(), swap.token_out(), 1_000, 1_980)]
+                .concat();
+
+        let recorded = record(&encoded_quote(vec![swap], calldata, QuoteStatus::Success));
+
+        let gaps = deviations(&recorded);
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert!((gaps[0] - -100.0).abs() < 1e-9, "{gaps:?}");
     }
 
     #[test]
