@@ -4,7 +4,7 @@ use tokio_stream::Stream;
 use tracing::{info, warn};
 use tycho_execution::encoding::evm::{
     swap_encoder::swap_encoder_registry::SwapEncoderRegistry, BEBOP_FALLBACK_PROTOCOL_SYSTEM,
-    METRIC_FALLBACK_PROTOCOL_SYSTEM,
+    HASHFLOW_FALLBACK_PROTOCOL_SYSTEM, METRIC_FALLBACK_PROTOCOL_SYSTEM,
 };
 use tycho_simulation::{
     evm::{
@@ -558,17 +558,19 @@ pub(crate) fn register_rfq(
             }
             "rfq:hashflow" => {
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
-                    return Err(DataFeedError::Config(format!(
-                        "{protocol} is not supported: rfq:hashflow has no fallback router"
-                    )));
+                    require_executor(chain, HASHFLOW_FALLBACK_PROTOCOL_SYSTEM)?;
                 }
                 let user = get_env("HASHFLOW_USER")?;
                 let key = get_env("HASHFLOW_KEY")?;
                 info!("Adding {protocol} RFQ client...");
-                let hashflow_client = HashflowClientBuilder::new(chain, user, key)
+                let mut hashflow_builder = HashflowClientBuilder::new(chain, user, key)
                     .tokens(rfq_tokens.clone())
                     .tvl_threshold(min_tvl)
-                    .poll_time(Duration::from_secs(30))
+                    .poll_time(Duration::from_secs(30));
+                if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
+                    hashflow_builder = hashflow_builder.with_fallback_router();
+                }
+                let hashflow_client = hashflow_builder
                     .build()
                     .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
                 rfq_stream_builder = rfq_stream_builder
@@ -1315,7 +1317,7 @@ mod tests {
         };
         assert!(
             err.to_string()
-                .contains("rfq:hashflow has no fallback router"),
+                .contains("fallback:rfq:hashflow has no executor on ethereum"),
             "got {err}"
         );
     }
