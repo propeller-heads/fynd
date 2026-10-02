@@ -5,7 +5,6 @@ use alloy::{
     sol_types::SolValue,
 };
 use futures::{StreamExt, TryStreamExt};
-use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -345,9 +344,8 @@ impl Encoder {
             tracing::warn!(
                 order_id = %quotes[quote_index].order_id(),
                 %error,
-                "encoding failed for this quote; it is returned without a transaction"
+                "this candidate failed to encode"
             );
-            counter!("encoding_failures_total").increment(1);
             quotes[quote_index].set_status(QuoteStatus::EncodingFailed);
         }
 
