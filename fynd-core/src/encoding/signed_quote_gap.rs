@@ -10,8 +10,10 @@
 //!   points; negative means the maker signed for less than its levels advertised. Comparing rates
 //!   keeps the figure right when a maker signs for a different input than the leg asked for.
 //! - `rfq_signed_quote_refusals_total{protocol}`: requests the maker did not sign.
-//! - A `fynd::rfq_signed_quote` debug line per signed leg, with the order, component, pair, and the
-//!   level and signed amounts.
+//! - A `fynd::rfq_signed_quote` debug line per signed leg, with the order, component, pair, the
+//!   level and signed amounts, and the makers: `level_maker`, whose price levels the leg was solved
+//!   on, and `signed_maker`, who signed. Either is `unknown` where the venue does not say: Bebop's
+//!   levels are one book per pair, and only its single-order settlement calldata names the maker.
 
 use std::{any::Any, collections::HashMap};
 
@@ -21,17 +23,21 @@ use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
-use tycho_simulation::tycho_common::{
-    dto::ProtocolStateDelta,
-    models::{protocol::GetAmountOutParams, token::Token},
-    simulation::{
-        errors::{SimulationError, TransitionError},
-        indicatively_priced::{IndicativelyPriced, SignedQuote},
-        protocol_sim::{
-            Balances, BlockContext, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+use tycho_simulation::{
+    rfq::protocols::hashflow::state::HashflowState,
+    tycho_common::{
+        dto::ProtocolStateDelta,
+        models::{protocol::GetAmountOutParams, token::Token},
+        simulation::{
+            errors::{SimulationError, TransitionError},
+            indicatively_priced::{IndicativelyPriced, SignedQuote},
+            protocol_sim::{
+                Balances, BlockContext, GetAmountOutResult, PoolSwap, ProtocolSim,
+                QueryPoolSwapParams,
+            },
         },
+        Bytes,
     },
-    Bytes,
 };
 
 use crate::Swap;
@@ -39,10 +45,15 @@ use crate::Swap;
 /// Log target for one line per signed leg, off unless enabled (`fynd::rfq_signed_quote=debug`).
 const SIGNED_QUOTE_TARGET: &str = "fynd::rfq_signed_quote";
 
+/// Bebop settlement's `swapSingle`, whose calldata is a fixed-size order struct.
+const BEBOP_SWAP_SINGLE: [u8; 4] = [0x4d, 0xce, 0xbc, 0xba];
+
 /// What one RFQ leg was priced at when the route was solved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LegLevels {
     order_id: String,
+    /// The maker whose price levels the leg was priced on, where the state names one.
+    level_maker: Option<String>,
     protocol: String,
     component_id: String,
     token_in: Bytes,
@@ -68,9 +79,9 @@ pub(crate) fn encoder_state(order_id: &str, swap: &Swap) -> Box<dyn ProtocolSim>
         return state;
     }
     Box::new(SignedQuoteRecorder {
-        inner: state,
         levels: LegLevels {
             order_id: order_id.to_string(),
+            level_maker: level_maker(state.as_ref()),
             protocol: swap.protocol().to_string(),
             component_id: swap.component_id().to_string(),
             token_in: swap.token_in().clone(),
@@ -78,6 +89,7 @@ pub(crate) fn encoder_state(order_id: &str, swap: &Swap) -> Box<dyn ProtocolSim>
             amount_in: swap.amount_in().clone(),
             amount_out: swap.amount_out().clone(),
         },
+        inner: state,
     })
 }
 
@@ -102,6 +114,8 @@ impl SignedQuoteRecorder {
             component_id = levels.component_id,
             token_in = %levels.token_in,
             token_out = %levels.token_out,
+            level_maker = levels.level_maker.as_deref().unwrap_or("unknown"),
+            signed_maker = signed_maker(&levels.protocol, signed).as_deref().unwrap_or("unknown"),
             level_amount_in = %levels.amount_in,
             level_amount_out = %levels.amount_out,
             signed_amount_in = %signed.amount_in,
@@ -109,6 +123,39 @@ impl SignedQuoteRecorder {
             deviation_bps,
             "signed RFQ quote against its price levels"
         );
+    }
+}
+
+/// The maker whose price levels `state` holds: Hashflow keeps one maker's levels per state. Other
+/// venues' levels name no maker (Bebop streams one book per pair).
+fn level_maker(state: &dyn ProtocolSim) -> Option<String> {
+    state
+        .as_any()
+        .downcast_ref::<HashflowState>()
+        .map(|state| state.market_maker.clone())
+}
+
+/// Who signed the quote: Hashflow names the maker's pool, and Bebop's single-order settlement call
+/// names the maker in the third word of its order struct. Bebop's aggregate and router-mode calls
+/// lay the order out differently and name no single maker there.
+fn signed_maker(protocol: &str, signed: &SignedQuote) -> Option<String> {
+    match protocol {
+        "rfq:hashflow" => signed
+            .quote_attributes
+            .get("pool")
+            .map(|pool| pool.to_string()),
+        "rfq:bebop" => {
+            let calldata = signed
+                .quote_attributes
+                .get("calldata")?;
+            let (selector, words) = calldata.as_ref().split_at_checked(4)?;
+            if selector != BEBOP_SWAP_SINGLE {
+                return None;
+            }
+            let maker_word = words.get(64..96)?;
+            Some(Bytes::from(maker_word[12..].to_vec()).to_string())
+        }
+        _ => None,
     }
 }
 
@@ -214,85 +261,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component, token, MockProtocolSim},
+        algorithm::test_utils::{component, token, MockProtocolSim, SigningSim},
         tests::metrics::recorded_metrics,
     };
-
-    /// An RFQ maker priced like `MockProtocolSim` that signs for `signs`, or refuses on `None`.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct SigningSim {
-        inner: MockProtocolSim,
-        signs: Option<(u64, u64)>,
-    }
-
-    #[typetag::serde]
-    impl ProtocolSim for SigningSim {
-        fn fee(&self) -> f64 {
-            self.inner.fee()
-        }
-        fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
-            self.inner.spot_price(base, quote)
-        }
-        fn get_amount_out(
-            &self,
-            amount_in: BigUint,
-            token_in: &Token,
-            token_out: &Token,
-        ) -> Result<GetAmountOutResult, SimulationError> {
-            self.inner
-                .get_amount_out(amount_in, token_in, token_out)
-        }
-        fn get_limits(
-            &self,
-            sell_token: Bytes,
-            buy_token: Bytes,
-        ) -> Result<(BigUint, BigUint), SimulationError> {
-            self.inner
-                .get_limits(sell_token, buy_token)
-        }
-        fn delta_transition(
-            &mut self,
-            _delta: ProtocolStateDelta,
-            _tokens: &HashMap<Bytes, Token>,
-            _balances: &Balances,
-        ) -> Result<(), TransitionError> {
-            unimplemented!("SigningSim holds a fixed state")
-        }
-        fn clone_box(&self) -> Box<dyn ProtocolSim> {
-            Box::new(self.clone())
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
-        }
-        fn eq(&self, _other: &dyn ProtocolSim) -> bool {
-            false
-        }
-        fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
-            Ok(self)
-        }
-    }
-
-    #[async_trait]
-    impl IndicativelyPriced for SigningSim {
-        async fn request_signed_quote(
-            &self,
-            params: GetAmountOutParams,
-        ) -> Result<SignedQuote, SimulationError> {
-            let (amount_in, amount_out) = self
-                .signs
-                .ok_or_else(|| SimulationError::FatalError("maker withdrew".to_string()))?;
-            Ok(SignedQuote {
-                base_token: params.token_in,
-                quote_token: params.token_out,
-                amount_in: BigUint::from(amount_in),
-                amount_out: BigUint::from(amount_out),
-                quote_attributes: HashMap::new(),
-            })
-        }
-    }
 
     /// A 1_000 -> 2_000 leg on `protocol`, whose state is `state`.
     fn leg(protocol: &str, state: Box<dyn ProtocolSim>) -> Swap {
@@ -311,7 +282,7 @@ mod tests {
     }
 
     fn rfq_leg(signs: Option<(u64, u64)>) -> Swap {
-        leg("rfq:bebop", Box::new(SigningSim { inner: MockProtocolSim::new(2.0), signs }))
+        leg("rfq:bebop", Box::new(SigningSim::new(MockProtocolSim::new(2.0), signs)))
     }
 
     async fn request(state: &dyn ProtocolSim) -> Result<SignedQuote, SimulationError> {
@@ -416,10 +387,113 @@ mod tests {
         );
     }
 
+    fn signed_with(attributes: &[(&str, Bytes)]) -> SignedQuote {
+        SignedQuote {
+            base_token: Bytes::default(),
+            quote_token: Bytes::default(),
+            amount_in: BigUint::from(1_000u64),
+            amount_out: BigUint::from(1_980u64),
+            quote_attributes: attributes
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect(),
+        }
+    }
+
+    /// `swapSingle` calldata whose order struct names `maker` in its third word.
+    fn bebop_single_calldata(selector: [u8; 4], maker: [u8; 20]) -> Bytes {
+        let mut calldata = selector.to_vec();
+        calldata.extend_from_slice(&[0x01; 32]); // expiry
+        calldata.extend_from_slice(&[0x02; 32]); // taker_address
+        calldata.extend_from_slice(&[0u8; 12]);
+        calldata.extend_from_slice(&maker);
+        calldata.extend_from_slice(&[0x03; 32]); // maker_nonce, and more of the order
+        Bytes::from(calldata)
+    }
+
+    #[test]
+    fn test_signed_maker() {
+        let hashflow = signed_with(&[("pool", Bytes::from(vec![0xAB; 20]))]);
+        assert_eq!(
+            signed_maker("rfq:hashflow", &hashflow),
+            Some(Bytes::from(vec![0xAB; 20]).to_string())
+        );
+
+        let single =
+            signed_with(&[("calldata", bebop_single_calldata(BEBOP_SWAP_SINGLE, [0xCD; 20]))]);
+        assert_eq!(
+            signed_maker("rfq:bebop", &single),
+            Some(Bytes::from(vec![0xCD; 20]).to_string())
+        );
+
+        let router_mode = signed_with(&[(
+            "calldata",
+            bebop_single_calldata([0x95, 0x86, 0xd0, 0xe8], [0xCD; 20]),
+        )]);
+        assert_eq!(
+            signed_maker("rfq:bebop", &router_mode),
+            None,
+            "router mode names no maker there"
+        );
+
+        let truncated = signed_with(&[("calldata", Bytes::from(BEBOP_SWAP_SINGLE.to_vec()))]);
+        assert_eq!(signed_maker("rfq:bebop", &truncated), None);
+
+        assert_eq!(signed_maker("rfq:liquorice", &hashflow), None);
+    }
+
+    /// A Hashflow state decoded from a stream snapshot, as fynd's feed builds it, names the maker
+    /// whose levels it holds.
+    #[test]
+    fn test_level_maker() {
+        use tycho_simulation::{
+            protocol::models::{DecoderContext, TryFromWithBlock},
+            rfq::models::TimestampHeader,
+            tycho_client::feed::synchronizer::ComponentWithState,
+            tycho_common::models::protocol::{ProtocolComponent, ProtocolComponentState},
+        };
+
+        // nextest runs each test in its own process, so setting these here affects no other test.
+        std::env::set_var("HASHFLOW_USER", "user");
+        std::env::set_var("HASHFLOW_KEY", "key");
+        let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+        let snapshot = ComponentWithState {
+            state: ProtocolComponentState::new(
+                "hashflow-a-b",
+                HashMap::from([
+                    ("mm".to_string(), Bytes::from("mm-acme".as_bytes().to_vec())),
+                    ("levels".to_string(), Bytes::from("[]".as_bytes().to_vec())),
+                ]),
+                HashMap::new(),
+            ),
+            component: ProtocolComponent {
+                id: "hashflow-a-b".to_string(),
+                protocol_system: "rfq:hashflow".to_string(),
+                tokens: vec![a.address.clone(), b.address.clone()],
+                ..Default::default()
+            },
+            component_tvl: None,
+            entrypoints: Vec::new(),
+        };
+        let tokens = HashMap::from([(a.address.clone(), a), (b.address.clone(), b)]);
+        let hashflow = futures::executor::block_on(HashflowState::try_from_with_header(
+            snapshot,
+            TimestampHeader::default(),
+            &HashMap::new(),
+            &tokens,
+            &DecoderContext::default(),
+        ))
+        .expect("a valid Hashflow snapshot");
+
+        assert_eq!(level_maker(&hashflow), Some("mm-acme".to_string()));
+        assert_eq!(level_maker(&MockProtocolSim::new(2.0)), None);
+    }
+
     #[test]
     fn test_rate_deviation_bps() {
         let levels = LegLevels {
             order_id: String::new(),
+            level_maker: None,
             protocol: String::new(),
             component_id: String::new(),
             token_in: Bytes::default(),

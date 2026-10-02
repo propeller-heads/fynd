@@ -1273,106 +1273,6 @@ mod tests {
         assert!(result[0].transaction().is_none(), "an unsigned exclusive leg must not be encoded");
     }
 
-    /// A Hashflow pool that signs every request with `quote_attributes`, as the RFQ client does.
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-    struct HashflowSigningSim {
-        inner: MockProtocolSim,
-        quote_attributes: std::collections::HashMap<String, Bytes>,
-        signed_amount_out: u64,
-    }
-
-    #[typetag::serde]
-    impl tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim for HashflowSigningSim {
-        fn fee(&self) -> f64 {
-            self.inner.fee()
-        }
-        fn spot_price(
-            &self,
-            base: &Token,
-            quote: &Token,
-        ) -> Result<f64, tycho_simulation::tycho_core::simulation::errors::SimulationError>
-        {
-            self.inner.spot_price(base, quote)
-        }
-        fn get_amount_out(
-            &self,
-            amount_in: BigUint,
-            token_in: &Token,
-            token_out: &Token,
-        ) -> Result<
-            tycho_simulation::tycho_core::simulation::protocol_sim::GetAmountOutResult,
-            tycho_simulation::tycho_core::simulation::errors::SimulationError,
-        > {
-            self.inner
-                .get_amount_out(amount_in, token_in, token_out)
-        }
-        fn get_limits(
-            &self,
-            sell_token: Bytes,
-            buy_token: Bytes,
-        ) -> Result<
-            (BigUint, BigUint),
-            tycho_simulation::tycho_core::simulation::errors::SimulationError,
-        > {
-            self.inner
-                .get_limits(sell_token, buy_token)
-        }
-        fn delta_transition(
-            &mut self,
-            _delta: tycho_simulation::tycho_core::dto::ProtocolStateDelta,
-            _tokens: &std::collections::HashMap<Bytes, Token>,
-            _balances: &tycho_simulation::tycho_core::simulation::protocol_sim::Balances,
-        ) -> Result<(), tycho_simulation::tycho_core::simulation::errors::TransitionError> {
-            unimplemented!("HashflowSigningSim holds a fixed state")
-        }
-        fn clone_box(
-            &self,
-        ) -> Box<dyn tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim> {
-            Box::new(self.clone())
-        }
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
-        }
-        fn eq(
-            &self,
-            _other: &dyn tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim,
-        ) -> bool {
-            false
-        }
-        fn as_indicatively_priced(
-            &self,
-        ) -> Result<
-            &dyn tycho_simulation::tycho_core::simulation::indicatively_priced::IndicativelyPriced,
-            tycho_simulation::tycho_core::simulation::errors::SimulationError,
-        > {
-            Ok(self)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl tycho_simulation::tycho_core::simulation::indicatively_priced::IndicativelyPriced
-        for HashflowSigningSim
-    {
-        async fn request_signed_quote(
-            &self,
-            params: tycho_simulation::tycho_core::models::protocol::GetAmountOutParams,
-        ) -> Result<
-            tycho_simulation::tycho_core::simulation::indicatively_priced::SignedQuote,
-            tycho_simulation::tycho_core::simulation::errors::SimulationError,
-        > {
-            Ok(tycho_simulation::tycho_core::simulation::indicatively_priced::SignedQuote {
-                base_token: params.token_in,
-                quote_token: params.token_out,
-                amount_in: params.amount_in,
-                amount_out: BigUint::from(self.signed_amount_out),
-                quote_attributes: self.quote_attributes.clone(),
-            })
-        }
-    }
-
     fn u256_bytes(value: u64) -> Bytes {
         let mut word = [0u8; 32];
         word[24..].copy_from_slice(&value.to_be_bytes());
@@ -1410,11 +1310,11 @@ mod tests {
             ("tx_id".to_string(), Bytes::from(vec![0x12; 32])),
             ("signature".to_string(), Bytes::from(vec![0x6d; 65])),
         ]);
-        let state = HashflowSigningSim {
-            inner: MockProtocolSim::new(1.0),
-            quote_attributes,
-            signed_amount_out: signed_out,
-        };
+        let state = crate::algorithm::test_utils::SigningSim::new(
+            MockProtocolSim::new(1.0),
+            Some((level_in, signed_out)),
+        )
+        .with_quote_attributes(quote_attributes);
         let (token_in, token_out) = (make_token(usdc.clone()), make_token(weth.clone()));
         let swap = crate::types::Swap::new(
             "hashflow-usdc-weth".to_string(),

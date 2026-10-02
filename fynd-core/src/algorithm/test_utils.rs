@@ -8,9 +8,14 @@ use rustc_hash::FxHashMap;
 use tycho_simulation::{
     tycho_core::{
         dto::ProtocolStateDelta,
-        models::{protocol::ProtocolComponent, token::Token, Address, Chain},
+        models::{
+            protocol::{GetAmountOutParams, ProtocolComponent},
+            token::Token,
+            Address, Chain,
+        },
         simulation::{
             errors::{SimulationError, TransitionError},
+            indicatively_priced::{IndicativelyPriced, SignedQuote},
             protocol_sim::{
                 Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
                 SwapConstraint,
@@ -332,6 +337,114 @@ impl ProtocolSim for DivByZeroSim {
             .as_any()
             .downcast_ref::<Self>()
             .is_some()
+    }
+}
+
+// ==================== SigningSim ====================
+
+/// An RFQ maker's state: priced like the [`MockProtocolSim`] it wraps, and indicatively priced, so
+/// fynd and the encoder treat it as an RFQ leg.
+///
+/// A signed-quote request returns `signs` as `(amount_in, amount_out)` with `quote_attributes`, or
+/// fails when `signs` is `None`, standing in for a maker that withdrew its quote.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SigningSim {
+    inner: MockProtocolSim,
+    signs: Option<(u64, u64)>,
+    quote_attributes: std::collections::HashMap<String, Bytes>,
+}
+
+impl SigningSim {
+    /// A maker priced like `inner` that signs for `signs`, or refuses when it is `None`.
+    pub fn new(inner: MockProtocolSim, signs: Option<(u64, u64)>) -> Self {
+        Self { inner, signs, quote_attributes: std::collections::HashMap::new() }
+    }
+
+    /// Attaches the protocol-specific attributes every signed quote carries.
+    pub fn with_quote_attributes(
+        mut self,
+        quote_attributes: std::collections::HashMap<String, Bytes>,
+    ) -> Self {
+        self.quote_attributes = quote_attributes;
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl IndicativelyPriced for SigningSim {
+    async fn request_signed_quote(
+        &self,
+        params: GetAmountOutParams,
+    ) -> Result<SignedQuote, SimulationError> {
+        let (amount_in, amount_out) = self
+            .signs
+            .ok_or_else(|| SimulationError::FatalError("maker withdrew".to_string()))?;
+        Ok(SignedQuote {
+            base_token: params.token_in,
+            quote_token: params.token_out,
+            amount_in: BigUint::from(amount_in),
+            amount_out: BigUint::from(amount_out),
+            quote_attributes: self.quote_attributes.clone(),
+        })
+    }
+}
+
+#[typetag::serde]
+impl ProtocolSim for SigningSim {
+    fn fee(&self) -> f64 {
+        self.inner.fee()
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.inner.spot_price(base, quote)
+    }
+
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        self.inner
+            .get_amount_out(amount_in, token_in, token_out)
+    }
+
+    fn get_limits(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.inner
+            .get_limits(sell_token, buy_token)
+    }
+
+    fn delta_transition(
+        &mut self,
+        _delta: ProtocolStateDelta,
+        _tokens: &std::collections::HashMap<Bytes, Token>,
+        _balances: &Balances,
+    ) -> Result<(), TransitionError> {
+        unimplemented!("SigningSim holds a fixed state")
+    }
+
+    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn eq(&self, _other: &dyn ProtocolSim) -> bool {
+        false
+    }
+
+    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
+        Ok(self)
     }
 }
 
