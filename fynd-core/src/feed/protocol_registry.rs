@@ -65,9 +65,9 @@ const EXCLUSIVE_CAPABLE_PROTOCOLS: &[&str] = &["ekubo_v3"];
 /// Tycho, e.g. `pricelevelstream:fermiswap`.
 const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 
-/// Marks a `--protocols` entry served from an RFQ client rather than from Tycho, e.g.
-/// `rfq:bebop`.
-const RFQ_PREFIX: &str = "rfq:";
+/// Marks a protocol served from an RFQ client rather than from Tycho, e.g. `rfq:bebop`: both its
+/// `--protocols` entry and the protocol system of the components the client streams.
+pub(crate) const RFQ_PREFIX: &str = "rfq:";
 
 /// Marks a `--protocols` entry that drops a protocol system from the list rather than adding one,
 /// e.g. `exclude:vm:fermiswap`.
