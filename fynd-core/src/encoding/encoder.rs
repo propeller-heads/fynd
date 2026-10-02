@@ -144,7 +144,10 @@ fn solution_from_quote(
                 s.gas_estimate().clone(),
             )
             .with_split(*s.split())
-            .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
+            .with_protocol_state(Arc::from(crate::encoding::signed_quote_gap::encoder_state(
+                quote.order_id(),
+                s,
+            )))
             .with_estimated_amount_in(s.amount_in().clone());
             // `TychoFallbackRouter` refuses a swap that does not name its fallback, and the
             // fallback pool goes in `user_data`.
@@ -1376,12 +1379,17 @@ mod tests {
         Bytes::from(word.to_vec())
     }
 
-    /// Encodes a USDC -> WETH Hashflow leg through the real tycho-execution router encoder and
-    /// reads the maker's signed amounts back out of the calldata. This is what breaks if
-    /// tycho-execution changes how it packs Hashflow's quote.
+    /// Encodes a USDC -> WETH Hashflow leg through the real tycho-execution router encoder: the
+    /// encoder's own signed-quote request goes through the recording state fynd hands it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_encoded_hashflow_leg_carries_signed_amounts() {
+    async fn test_encoded_rfq_leg_records_signed_quote() {
         use std::str::FromStr;
+
+        // The encoder requests the quote on its own blocking threads, which a thread-local recorder
+        // does not see. nextest runs each test in its own process, so the global one is free.
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::set_global_recorder(recorder).expect("no other recorder in this process");
 
         let usdc = Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         let weth = Address::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
@@ -1448,12 +1456,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(encoded[0].status(), QuoteStatus::Success, "the Hashflow leg encodes");
-
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
-            crate::encoding::signed_quote_gap::record_signed_quote_gaps(&encoded);
-        });
 
         let recorded = crate::tests::metrics::recorded_metrics(&snapshotter);
         let (.., deviation) = recorded

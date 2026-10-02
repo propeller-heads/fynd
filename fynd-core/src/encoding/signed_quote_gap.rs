@@ -1,144 +1,121 @@
-//! Measures how far each Hashflow leg's signed quote lands from the price levels it was solved on.
+//! Measures how far each RFQ leg's signed quote lands from the price levels it was solved on.
 //!
-//! The encoder requests the signed quote itself and keeps only the calldata, so the signed amounts
-//! never reach the quote. Hashflow's executor data carries them, packed as
-//! `… | base_token | quote_token | base_token_amount | quote_token_amount | …` (addresses 20 bytes,
-//! amounts 32-byte big-endian, then `quote_expiry`), so they are read back from the encoded
-//! transaction. A leg is found by its token pair followed by that shape; two Hashflow legs on one
-//! pair take the pair's occurrences in route order.
+//! The tycho-execution encoder asks an RFQ leg's state for a signed quote and keeps only the
+//! calldata it builds from it. [`SignedQuoteRecorder`] wraps the state the encoder is handed: it
+//! forwards everything to the real state, and when the encoder requests the signed quote it
+//! compares the maker's answer with the amounts the leg was priced at. That covers every RFQ
+//! protocol (Hashflow, Bebop, Liquorice, Native, Metric) without reading any protocol's calldata.
 //!
-//! The gap compares rates rather than amounts, so a maker that signs for a different input than
-//! the leg asked for still yields the price difference. A leg whose data cannot be found counts in
-//! `rfq_signed_quote_unread_total`, which is what shows the packing has changed.
+//! - `rfq_signed_quote_deviation_bps{protocol}`: signed rate against the price-level rate, in basis
+//!   points; negative means the maker signed for less than its levels advertised. Comparing rates
+//!   keeps the figure right when a maker signs for a different input than the leg asked for.
+//! - `rfq_signed_quote_refusals_total{protocol}`: requests the maker did not sign.
+//! - A `fynd::rfq_signed_quote` debug line per signed leg, with the order, component, pair, and the
+//!   level and signed amounts.
 
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
+use async_trait::async_trait;
 use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
+use tycho_simulation::tycho_common::{
+    dto::ProtocolStateDelta,
+    models::{protocol::GetAmountOutParams, token::Token},
+    simulation::{
+        errors::{SimulationError, TransitionError},
+        indicatively_priced::{IndicativelyPriced, SignedQuote},
+        protocol_sim::{
+            Balances, BlockContext, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams,
+        },
+    },
+    Bytes,
+};
 
-use crate::{OrderQuote, QuoteStatus, Swap};
+use crate::Swap;
 
-const HASHFLOW: &str = "rfq:hashflow";
-
-/// Log target for one line per measured leg, off unless enabled (`fynd::rfq_signed_quote=debug`).
+/// Log target for one line per signed leg, off unless enabled (`fynd::rfq_signed_quote=debug`).
 const SIGNED_QUOTE_TARGET: &str = "fynd::rfq_signed_quote";
 
-const AMOUNT_LEN: usize = 32;
-
-/// Records the signed-quote gap of every Hashflow leg in the encoded quotes.
-pub(crate) fn record_signed_quote_gaps(quotes: &[OrderQuote]) {
-    for quote in quotes {
-        if quote.status() == QuoteStatus::Success {
-            record_quote(quote);
-        }
-    }
-}
-
-fn record_quote(quote: &OrderQuote) {
-    let (Some(route), Some(transaction)) = (quote.route(), quote.transaction()) else { return };
-    let calldata = transaction.data();
-    // Where the next search for each pair starts, so a second leg on a pair reads the next
-    // occurrence rather than the first leg's again.
-    let mut next_search: HashMap<Vec<u8>, usize> = HashMap::new();
-    for swap in route.swaps() {
-        if swap.protocol() != HASHFLOW {
-            continue;
-        }
-        let pair = [swap.token_in().as_ref(), swap.token_out().as_ref()].concat();
-        let start = next_search
-            .get(&pair)
-            .copied()
-            .unwrap_or(0);
-        let Some((offset, signed)) = read_signed_amounts(calldata, &pair, start) else {
-            counter!("rfq_signed_quote_unread_total", "protocol" => HASHFLOW).increment(1);
-            continue;
-        };
-        next_search.insert(pair, offset + 1);
-        record_leg(quote, swap, &signed);
-    }
-}
-
-/// The amounts a maker signed for one leg.
-struct SignedAmounts {
+/// What one RFQ leg was priced at when the route was solved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegLevels {
+    order_id: String,
+    protocol: String,
+    component_id: String,
+    token_in: Bytes,
+    token_out: Bytes,
     amount_in: BigUint,
     amount_out: BigUint,
 }
 
-/// Finds `pair` (base token then quote token) in `calldata` at or after `start`, followed by the
-/// shape of Hashflow's quote, and reads the two signed amounts. Returns the pair's offset with
-/// them.
+/// An RFQ leg's state that records the maker's signed quote against the leg's price levels.
 ///
-/// Another leg's data can hold the same pair back to back too: a Uniswap V3 swap packs
-/// `token_in | token_out | fee | …`. So a match counts only when the three words after it read as
-/// Hashflow's two amounts and its `quote_expiry`; otherwise the search moves on.
-fn read_signed_amounts(
-    calldata: &[u8],
-    pair: &[u8],
-    start: usize,
-) -> Option<(usize, SignedAmounts)> {
-    let mut from = start;
-    loop {
-        let offset = calldata
-            .get(from..)?
-            .windows(pair.len())
-            .position(|window| window == pair)? +
-            from;
-        let words = calldata.get(offset + pair.len()..offset + pair.len() + 3 * AMOUNT_LEN)?;
-        let (amount_in, rest) = words.split_at(AMOUNT_LEN);
-        let (amount_out, expiry) = rest.split_at(AMOUNT_LEN);
-        if is_amount(amount_in) && is_amount(amount_out) && is_unix_time(expiry) {
-            return Some((
-                offset,
-                SignedAmounts {
-                    amount_in: BigUint::from_bytes_be(amount_in),
-                    amount_out: BigUint::from_bytes_be(amount_out),
-                },
-            ));
-        }
-        from = offset + 1;
+/// Every [`ProtocolSim`] call goes to the wrapped state; only `request_signed_quote` is observed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SignedQuoteRecorder {
+    inner: Box<dyn ProtocolSim>,
+    levels: LegLevels,
+}
+
+/// The state to hand the encoder for `swap`: wrapped in a recorder when it is an RFQ leg, so its
+/// signed quote is measured, and a plain copy otherwise.
+pub(crate) fn encoder_state(order_id: &str, swap: &Swap) -> Box<dyn ProtocolSim> {
+    let state = swap.protocol_state().clone_box();
+    if state.as_indicatively_priced().is_err() {
+        return state;
     }
+    Box::new(SignedQuoteRecorder {
+        inner: state,
+        levels: LegLevels {
+            order_id: order_id.to_string(),
+            protocol: swap.protocol().to_string(),
+            component_id: swap.component_id().to_string(),
+            token_in: swap.token_in().clone(),
+            token_out: swap.token_out().clone(),
+            amount_in: swap.amount_in().clone(),
+            amount_out: swap.amount_out().clone(),
+        },
+    })
 }
 
-/// A non-zero token amount below 2^128: any real amount fits, while the address and fee bytes of
-/// another protocol's data fill the high half of the word.
-fn is_amount(word: &[u8]) -> bool {
-    word[..AMOUNT_LEN / 2]
-        .iter()
-        .all(|byte| *byte == 0) &&
-        word.iter().any(|byte| *byte != 0)
-}
-
-/// A unix time in seconds between 2001 and 2286, as Hashflow's `quote_expiry` is.
-fn is_unix_time(word: &[u8]) -> bool {
-    let value = BigUint::from_bytes_be(word);
-    value >= BigUint::from(1_000_000_000u64) && value < BigUint::from(10_000_000_000u64)
-}
-
-fn record_leg(quote: &OrderQuote, swap: &Swap, signed: &SignedAmounts) {
-    let Some(deviation_bps) = rate_deviation_bps(swap, signed) else { return };
-    histogram!("rfq_signed_quote_deviation_bps", "protocol" => HASHFLOW).record(deviation_bps);
-    debug!(
-        target: SIGNED_QUOTE_TARGET,
-        order_id = quote.order_id(),
-        protocol = swap.protocol(),
-        component_id = swap.component_id(),
-        token_in = %swap.token_in(),
-        token_out = %swap.token_out(),
-        level_amount_in = %swap.amount_in(),
-        level_amount_out = %swap.amount_out(),
-        signed_amount_in = %signed.amount_in,
-        signed_amount_out = %signed.amount_out,
-        deviation_bps,
-        "signed RFQ quote against its price levels"
-    );
+impl SignedQuoteRecorder {
+    fn record(&self, result: &Result<SignedQuote, SimulationError>) {
+        let levels = &self.levels;
+        let signed = match result {
+            Ok(signed) => signed,
+            Err(_) => {
+                counter!("rfq_signed_quote_refusals_total", "protocol" => levels.protocol.clone())
+                    .increment(1);
+                return;
+            }
+        };
+        let Some(deviation_bps) = rate_deviation_bps(levels, signed) else { return };
+        histogram!("rfq_signed_quote_deviation_bps", "protocol" => levels.protocol.clone())
+            .record(deviation_bps);
+        debug!(
+            target: SIGNED_QUOTE_TARGET,
+            order_id = levels.order_id,
+            protocol = levels.protocol,
+            component_id = levels.component_id,
+            token_in = %levels.token_in,
+            token_out = %levels.token_out,
+            level_amount_in = %levels.amount_in,
+            level_amount_out = %levels.amount_out,
+            signed_amount_in = %signed.amount_in,
+            signed_amount_out = %signed.amount_out,
+            deviation_bps,
+            "signed RFQ quote against its price levels"
+        );
+    }
 }
 
 /// How far the signed rate lands from the price-level rate, in basis points. Negative means the
 /// maker signed for less than its levels advertised.
-fn rate_deviation_bps(swap: &Swap, signed: &SignedAmounts) -> Option<f64> {
-    let level_rate = swap.amount_out().to_f64()? / swap.amount_in().to_f64()?;
+fn rate_deviation_bps(levels: &LegLevels, signed: &SignedQuote) -> Option<f64> {
+    let level_rate = levels.amount_out.to_f64()? / levels.amount_in.to_f64()?;
     let signed_rate = signed.amount_out.to_f64()? / signed.amount_in.to_f64()?;
     let deviation = (signed_rate / level_rate - 1.0) * 10_000.0;
     deviation
@@ -146,200 +123,321 @@ fn rate_deviation_bps(swap: &Swap, signed: &SignedAmounts) -> Option<f64> {
         .then_some(deviation)
 }
 
+#[async_trait]
+impl IndicativelyPriced for SignedQuoteRecorder {
+    async fn request_signed_quote(
+        &self,
+        params: GetAmountOutParams,
+    ) -> Result<SignedQuote, SimulationError> {
+        let result = self
+            .inner
+            .as_indicatively_priced()?
+            .request_signed_quote(params)
+            .await;
+        self.record(&result);
+        result
+    }
+}
+
+#[typetag::serde]
+impl ProtocolSim for SignedQuoteRecorder {
+    fn fee(&self) -> f64 {
+        self.inner.fee()
+    }
+
+    fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+        self.inner.spot_price(base, quote)
+    }
+
+    fn get_amount_out(
+        &self,
+        amount_in: BigUint,
+        token_in: &Token,
+        token_out: &Token,
+    ) -> Result<GetAmountOutResult, SimulationError> {
+        self.inner
+            .get_amount_out(amount_in, token_in, token_out)
+    }
+
+    fn get_limits(
+        &self,
+        sell_token: Bytes,
+        buy_token: Bytes,
+    ) -> Result<(BigUint, BigUint), SimulationError> {
+        self.inner
+            .get_limits(sell_token, buy_token)
+    }
+
+    fn delta_transition(
+        &mut self,
+        delta: ProtocolStateDelta,
+        tokens: &HashMap<Bytes, Token>,
+        balances: &Balances,
+    ) -> Result<(), TransitionError> {
+        self.inner
+            .delta_transition(delta, tokens, balances)
+    }
+
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        self.inner.query_pool_swap(params)
+    }
+
+    fn clone_box(&self) -> Box<dyn ProtocolSim> {
+        Box::new(self.clone())
+    }
+
+    /// The wrapped state, so a downcast reaches the real protocol type.
+    fn as_any(&self) -> &dyn Any {
+        self.inner.as_any()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self.inner.as_any_mut()
+    }
+
+    fn eq(&self, other: &dyn ProtocolSim) -> bool {
+        self.inner.eq(other)
+    }
+
+    fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
+        Ok(self)
+    }
+
+    fn apply_block(&mut self, block: &BlockContext) -> bool {
+        self.inner.apply_block(block)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
-    use rustc_hash::FxHashMap;
-    use tycho_simulation::tycho_common::Bytes;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{component, token, MockProtocolSim},
         tests::metrics::recorded_metrics,
-        types::{BlockInfo, Route, Transaction},
     };
 
-    fn amount(value: u64) -> Vec<u8> {
-        let mut word = vec![0u8; AMOUNT_LEN];
-        word[AMOUNT_LEN - 8..].copy_from_slice(&value.to_be_bytes());
-        word
+    /// An RFQ maker priced like `MockProtocolSim` that signs for `signs`, or refuses on `None`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SigningSim {
+        inner: MockProtocolSim,
+        signs: Option<(u64, u64)>,
     }
 
-    /// Hashflow's packed quote for one leg, padded on both sides as in a router call.
-    fn hashflow_block(
-        token_in: &Bytes,
-        token_out: &Bytes,
-        signed_in: u64,
-        signed_out: u64,
-    ) -> Vec<u8> {
-        [
-            vec![0x11; 80],
-            token_in.to_vec(),
-            token_out.to_vec(),
-            amount(signed_in),
-            amount(signed_out),
-            amount(1_755_610_328),
-            vec![0x22; 64],
-        ]
-        .concat()
+    #[typetag::serde]
+    impl ProtocolSim for SigningSim {
+        fn fee(&self) -> f64 {
+            self.inner.fee()
+        }
+        fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+            self.inner.spot_price(base, quote)
+        }
+        fn get_amount_out(
+            &self,
+            amount_in: BigUint,
+            token_in: &Token,
+            token_out: &Token,
+        ) -> Result<GetAmountOutResult, SimulationError> {
+            self.inner
+                .get_amount_out(amount_in, token_in, token_out)
+        }
+        fn get_limits(
+            &self,
+            sell_token: Bytes,
+            buy_token: Bytes,
+        ) -> Result<(BigUint, BigUint), SimulationError> {
+            self.inner
+                .get_limits(sell_token, buy_token)
+        }
+        fn delta_transition(
+            &mut self,
+            _delta: ProtocolStateDelta,
+            _tokens: &HashMap<Bytes, Token>,
+            _balances: &Balances,
+        ) -> Result<(), TransitionError> {
+            unimplemented!("SigningSim holds a fixed state")
+        }
+        fn clone_box(&self) -> Box<dyn ProtocolSim> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn eq(&self, _other: &dyn ProtocolSim) -> bool {
+            false
+        }
+        fn as_indicatively_priced(&self) -> Result<&dyn IndicativelyPriced, SimulationError> {
+            Ok(self)
+        }
     }
 
-    fn hashflow_swap(amount_in: u64, level_out: u64) -> Swap {
+    #[async_trait]
+    impl IndicativelyPriced for SigningSim {
+        async fn request_signed_quote(
+            &self,
+            params: GetAmountOutParams,
+        ) -> Result<SignedQuote, SimulationError> {
+            let (amount_in, amount_out) = self
+                .signs
+                .ok_or_else(|| SimulationError::FatalError("maker withdrew".to_string()))?;
+            Ok(SignedQuote {
+                base_token: params.token_in,
+                quote_token: params.token_out,
+                amount_in: BigUint::from(amount_in),
+                amount_out: BigUint::from(amount_out),
+                quote_attributes: HashMap::new(),
+            })
+        }
+    }
+
+    /// A 1_000 -> 2_000 leg on `protocol`, whose state is `state`.
+    fn leg(protocol: &str, state: Box<dyn ProtocolSim>) -> Swap {
         let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
         Swap::new(
-            "hashflow".to_string(),
-            HASHFLOW.to_string(),
+            "pool".to_string(),
+            protocol.to_string(),
             a.address.clone(),
             b.address.clone(),
-            BigUint::from(amount_in),
-            BigUint::from(level_out),
+            BigUint::from(1_000u64),
+            BigUint::from(2_000u64),
             BigUint::ZERO,
-            component("hashflow", &[a, b]),
-            Box::new(MockProtocolSim::new(1.0)),
+            component("pool", &[a, b]),
+            state,
         )
     }
 
-    fn encoded_quote(swaps: Vec<Swap>, calldata: Vec<u8>, status: QuoteStatus) -> OrderQuote {
-        let mut quote = OrderQuote::new(
-            "order".to_string(),
-            status,
-            BigUint::from(1_000u64),
-            BigUint::from(1_000u64),
-            BigUint::ZERO,
-            BigUint::from(1_000u64),
-            BlockInfo::new(1, "0x1".to_string(), 1),
-            "algo".to_string(),
-            Bytes::from(vec![0xAA; 20]),
-            Bytes::from(vec![0xBB; 20]),
-            "1".to_string(),
-        )
-        .with_route(Route::new(swaps, FxHashMap::default()).expect("non-empty route"));
-        quote.set_transaction(Transaction::new(Bytes::from(vec![0; 20]), BigUint::ZERO, calldata));
-        quote
+    fn rfq_leg(signs: Option<(u64, u64)>) -> Swap {
+        leg("rfq:bebop", Box::new(SigningSim { inner: MockProtocolSim::new(2.0), signs }))
     }
 
-    fn record(quote: &OrderQuote) -> Vec<(String, Vec<String>, DebugValue)> {
+    async fn request(state: &dyn ProtocolSim) -> Result<SignedQuote, SimulationError> {
+        let params = GetAmountOutParams {
+            amount_in: BigUint::from(1_000u64),
+            token_in: Bytes::from(vec![0x0A; 20]),
+            token_out: Bytes::from(vec![0x0B; 20]),
+            sender: Bytes::from(vec![0x11; 20]),
+            receiver: Bytes::from(vec![0x11; 20]),
+        };
+        state
+            .as_indicatively_priced()?
+            .request_signed_quote(params)
+            .await
+    }
+
+    type Recorded = Vec<(String, Vec<String>, DebugValue)>;
+
+    /// Requests a signed quote through the state the encoder would be handed, under a recorder.
+    fn record(swap: &Swap) -> (Result<SignedQuote, SimulationError>, Recorded) {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        metrics::with_local_recorder(&recorder, || {
-            record_signed_quote_gaps(std::slice::from_ref(quote))
+        let state = encoder_state("order", swap);
+        let result = metrics::with_local_recorder(&recorder, || {
+            futures::executor::block_on(request(state.as_ref()))
         });
-        recorded_metrics(&snapshotter)
+        (result, recorded_metrics(&snapshotter))
     }
 
-    fn deviations(recorded: &[(String, Vec<String>, DebugValue)]) -> Vec<f64> {
+    fn deviation(recorded: &Recorded) -> Option<f64> {
         recorded
             .iter()
-            .filter(|(name, ..)| name == "rfq_signed_quote_deviation_bps")
-            .flat_map(|(.., value)| match value {
-                DebugValue::Histogram(values) => values
-                    .iter()
-                    .map(|v| v.into_inner())
-                    .collect(),
-                _ => Vec::new(),
+            .find(|(name, ..)| name == "rfq_signed_quote_deviation_bps")
+            .and_then(|(.., value)| match value {
+                DebugValue::Histogram(values) => values.first().map(|v| v.into_inner()),
+                _ => None,
             })
-            .collect()
+    }
+
+    #[test]
+    fn test_encoder_state_records_signed_quote() {
+        let (result, recorded) = record(&rfq_leg(Some((1_000, 1_980))));
+
+        assert_eq!(
+            result.unwrap().amount_out,
+            BigUint::from(1_980u64),
+            "the maker's answer passes through"
+        );
+        let gap = deviation(&recorded).expect("the signed quote is recorded");
+        assert!((gap - -100.0).abs() < 1e-9, "1_980 signed against 2_000 levels: {gap}");
+        assert!(
+            recorded
+                .iter()
+                .any(|(name, labels, _)| name == "rfq_signed_quote_deviation_bps" &&
+                    labels.contains(&"protocol=rfq:bebop".to_string())),
+            "{recorded:?}"
+        );
+    }
+
+    #[test]
+    fn test_encoder_state_records_refusal() {
+        let (result, recorded) = record(&rfq_leg(None));
+
+        assert!(result.is_err(), "the refusal still reaches the encoder");
+        assert!(deviation(&recorded).is_none());
+        assert!(
+            recorded
+                .iter()
+                .any(|(name, ..)| name == "rfq_signed_quote_refusals_total"),
+            "{recorded:?}"
+        );
+    }
+
+    #[test]
+    fn test_encoder_state_leaves_amm_leg_unwrapped() {
+        let swap = leg("uniswap_v2", Box::new(MockProtocolSim::new(2.0)));
+
+        let state = encoder_state("order", &swap);
+
+        assert!(state.as_indicatively_priced().is_err());
+    }
+
+    /// The encoder prices and inspects the wrapped state exactly as it would the real one.
+    #[test]
+    fn test_encoder_state_forwards_to_the_real_state() {
+        let swap = rfq_leg(Some((1_000, 1_980)));
+        let (a, b) = (token(0x0A, "A"), token(0x0B, "B"));
+
+        let state = encoder_state("order", &swap);
+
+        let out = state
+            .get_amount_out(BigUint::from(1_000u64), &a, &b)
+            .unwrap()
+            .amount;
+        assert_eq!(out, BigUint::from(2_000u64));
+        assert!(
+            state
+                .as_any()
+                .downcast_ref::<SigningSim>()
+                .is_some(),
+            "a downcast reaches the real state"
+        );
     }
 
     #[test]
     fn test_rate_deviation_bps() {
-        let swap = hashflow_swap(1_000, 2_000);
-        let signed = |amount_in: u64, amount_out: u64| SignedAmounts {
+        let levels = LegLevels {
+            order_id: String::new(),
+            protocol: String::new(),
+            component_id: String::new(),
+            token_in: Bytes::default(),
+            token_out: Bytes::default(),
+            amount_in: BigUint::from(1_000u64),
+            amount_out: BigUint::from(2_000u64),
+        };
+        let signed = |amount_in: u64, amount_out: u64| SignedQuote {
+            base_token: Bytes::default(),
+            quote_token: Bytes::default(),
             amount_in: BigUint::from(amount_in),
             amount_out: BigUint::from(amount_out),
+            quote_attributes: HashMap::new(),
         };
 
-        assert_eq!(rate_deviation_bps(&swap, &signed(1_000, 2_000)), Some(0.0));
-        let below = rate_deviation_bps(&swap, &signed(1_000, 1_980)).unwrap();
-        assert!((below - -100.0).abs() < 1e-9, "{below}");
-        let partial = rate_deviation_bps(&swap, &signed(500, 990)).unwrap();
-        assert!((partial - -100.0).abs() < 1e-9, "a smaller fill at the same rate: {partial}");
-        assert_eq!(rate_deviation_bps(&swap, &signed(0, 0)), None, "no rate to compare");
-    }
-
-    #[test]
-    fn test_record_signed_quote_gaps_reads_leg() {
-        let swap = hashflow_swap(1_000, 2_000);
-        let calldata = hashflow_block(swap.token_in(), swap.token_out(), 1_000, 1_980);
-
-        let recorded = record(&encoded_quote(vec![swap], calldata, QuoteStatus::Success));
-
-        let gaps = deviations(&recorded);
-        assert_eq!(gaps.len(), 1);
-        assert!((gaps[0] - -100.0).abs() < 1e-9, "{gaps:?}");
-    }
-
-    /// Two legs on one pair, e.g. a split across two makers, each read their own block.
-    #[test]
-    fn test_record_signed_quote_gaps_same_pair_twice() {
-        let (first, second) = (hashflow_swap(1_000, 2_000), hashflow_swap(1_000, 2_000));
-        let calldata = [
-            hashflow_block(first.token_in(), first.token_out(), 1_000, 1_980),
-            hashflow_block(second.token_in(), second.token_out(), 1_000, 2_000),
-        ]
-        .concat();
-
-        let recorded = record(&encoded_quote(vec![first, second], calldata, QuoteStatus::Success));
-
-        let gaps = deviations(&recorded);
-        assert_eq!(gaps.len(), 2, "{gaps:?}");
-        assert!((gaps[0] - -100.0).abs() < 1e-9 && gaps[1].abs() < 1e-9, "{gaps:?}");
-    }
-
-    /// A leg whose pair is missing, or whose amounts are cut off, is counted as unread.
-    #[test]
-    fn test_record_signed_quote_gaps_unread() {
-        let swap = hashflow_swap(1_000, 2_000);
-        let mut truncated = hashflow_block(swap.token_in(), swap.token_out(), 1_000, 1_980);
-        truncated.truncate(80 + 40 + 2 * AMOUNT_LEN);
-
-        for calldata in [vec![0x33; 256], truncated] {
-            let recorded = record(&encoded_quote(
-                vec![hashflow_swap(1_000, 2_000)],
-                calldata,
-                QuoteStatus::Success,
-            ));
-
-            assert!(deviations(&recorded).is_empty());
-            assert!(
-                recorded
-                    .iter()
-                    .any(|(name, ..)| name == "rfq_signed_quote_unread_total"),
-                "{recorded:?}"
-            );
-        }
-    }
-
-    /// An AMM leg of the same pair packs `token_in | token_out | fee | receiver …` ahead of the
-    /// Hashflow block. Its bytes are not read as amounts.
-    #[test]
-    fn test_record_signed_quote_gaps_skips_amm_leg_on_same_pair() {
-        let swap = hashflow_swap(1_000, 2_000);
-        let uniswap_v3_leg = [
-            swap.token_in().to_vec(),
-            swap.token_out().to_vec(),
-            vec![0x00, 0x01, 0xf4],
-            vec![0x44; 40],
-        ]
-        .concat();
-        let calldata =
-            [uniswap_v3_leg, hashflow_block(swap.token_in(), swap.token_out(), 1_000, 1_980)]
-                .concat();
-
-        let recorded = record(&encoded_quote(vec![swap], calldata, QuoteStatus::Success));
-
-        let gaps = deviations(&recorded);
-        assert_eq!(gaps.len(), 1, "{gaps:?}");
-        assert!((gaps[0] - -100.0).abs() < 1e-9, "{gaps:?}");
-    }
-
-    #[test]
-    fn test_record_signed_quote_gaps_skips_unencoded_quote() {
-        let swap = hashflow_swap(1_000, 2_000);
-        let calldata = hashflow_block(swap.token_in(), swap.token_out(), 1_000, 1_980);
-
-        let recorded = record(&encoded_quote(vec![swap], calldata, QuoteStatus::EncodingFailed));
-
-        assert!(recorded.is_empty(), "{recorded:?}");
+        assert_eq!(rate_deviation_bps(&levels, &signed(1_000, 2_000)), Some(0.0));
+        let partial = rate_deviation_bps(&levels, &signed(500, 990)).unwrap();
+        assert!((partial - -100.0).abs() < 1e-9, "a smaller fill at a worse rate: {partial}");
+        assert_eq!(rate_deviation_bps(&levels, &signed(0, 0)), None, "no rate to compare");
     }
 }

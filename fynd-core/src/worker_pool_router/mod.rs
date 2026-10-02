@@ -331,8 +331,7 @@ impl RankedQuotes {
     }
 }
 
-/// Encodes successful order quotes into router calldata and records `encoding_duration_seconds`,
-/// and how far each Hashflow leg's signed quote landed from its price levels.
+/// Encodes successful order quotes into router calldata and records `encoding_duration_seconds`.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
@@ -347,9 +346,6 @@ pub async fn encode_quotes(
         .encode(order_quotes, encoding_options.clone())
         .await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
-    if let Ok(quotes) = &encoded {
-        crate::encoding::signed_quote_gap::record_signed_quote_gaps(quotes);
-    }
     encoded
 }
 
