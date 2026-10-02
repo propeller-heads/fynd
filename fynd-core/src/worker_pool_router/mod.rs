@@ -370,7 +370,7 @@ async fn encode_with_fallbacks(
         let mut candidates = candidates.into_iter();
         // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
         best.extend(candidates.next());
-        fallbacks.push(candidates);
+        fallbacks.push(candidates.filter(|candidate| !has_rfq_leg(candidate)));
     }
     let mut quotes = encoder
         .encode(best, encoding_options.clone())
@@ -383,9 +383,7 @@ async fn encode_with_fallbacks(
             if quote.status() != QuoteStatus::EncodingFailed {
                 continue;
             }
-            if let Some(candidate) =
-                fallbacks[order_index].find(|candidate| !has_rfq_leg(candidate))
-            {
+            if let Some(candidate) = fallbacks[order_index].next() {
                 order_indices.push(order_index);
                 next_candidates.push(candidate);
             }
