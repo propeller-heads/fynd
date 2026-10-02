@@ -46,10 +46,10 @@ pub mod replay;
 mod rpc;
 /// On-chain quote simulation and state override helpers.
 pub mod simulation;
-/// [`FyndBuilder`](solver::FyndBuilder) assembles the full pipeline and returns a
-/// [`Solver`](solver::Solver).
+/// [`FyndBuilder`] assembles the full pipeline and returns a
+/// [`Solver`].
 pub mod solver;
-/// Core domain types: [`Order`](types::Order), [`Route`](types::Route), [`Quote`](types::Quote),
+/// Core domain types: [`Order`], [`Route`], [`Quote`],
 /// etc.
 pub mod types;
 /// Multi-threaded solver pool management with pluggable algorithm registry.
