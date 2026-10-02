@@ -4,7 +4,8 @@ use std::collections::HashSet;
 
 use anyhow::{bail, Result};
 use fynd_core::feed::protocol_registry::{
-    is_tycho_system, parse_exclusion, ProtocolSpec, EXCLUDE_PREFIX,
+    is_tycho_system, parse_exclusion, ProtocolSpec, EXCLUDE_PREFIX, PRICE_LEVEL_STREAM_AUTO,
+    PRICE_LEVEL_STREAM_PREFIX,
 };
 use tracing::{info, warn};
 use tycho_simulation::{
@@ -155,12 +156,29 @@ fn split_requested(entries: &[String]) -> Result<(Vec<ProtocolSpec>, Vec<String>
 }
 
 /// Rejects a list naming the same protocol system as both streamed and excluded.
+///
+/// Also rejects a price level stream venue excluded next to [`PRICE_LEVEL_STREAM_AUTO`]: the
+/// exclusion only drops a `--protocols` entry, so auto-detection would still serve the venue.
 fn reject_requested_and_excluded(streamed: &[ProtocolSpec], excluded: &[String]) -> Result<()> {
     for protocol in streamed {
         if excluded.contains(&protocol.system) {
             bail!(
                 "protocol '{}' is both requested and excluded with '{EXCLUDE_PREFIX}'",
                 protocol.system
+            );
+        }
+    }
+    if !streamed
+        .iter()
+        .any(|protocol| protocol.system == PRICE_LEVEL_STREAM_AUTO)
+    {
+        return Ok(());
+    }
+    for system in excluded {
+        if system.starts_with(PRICE_LEVEL_STREAM_PREFIX) {
+            bail!(
+                "'{EXCLUDE_PREFIX}{system}' has no effect with '{PRICE_LEVEL_STREAM_AUTO}', which \
+                 serves every price level venue; name the venues to serve instead"
             );
         }
     }
@@ -312,6 +330,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(merged, strings(&["uniswap_v3", "pricelevelstream:fermiswap"]));
+    }
+
+    #[test]
+    fn test_price_level_stream_auto_is_kept() {
+        let merged = merge(&["uniswap_v3"], &[ALL_ONCHAIN, PRICE_LEVEL_STREAM_AUTO]).unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3", PRICE_LEVEL_STREAM_AUTO]));
+    }
+
+    #[test]
+    fn test_excluding_a_venue_with_price_level_stream_auto_is_rejected() {
+        let merged = merge(
+            &["uniswap_v3"],
+            &[ALL_ONCHAIN, PRICE_LEVEL_STREAM_AUTO, "exclude:pricelevelstream:kipseli"],
+        );
+        let Err(err) = merged else {
+            panic!("expected a venue exclusion next to auto-detection to be rejected");
+        };
+        assert!(
+            err.to_string()
+                .contains("has no effect with 'pricelevelstream:auto'"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn test_excluding_a_tycho_system_with_price_level_stream_auto() {
+        let merged = merge(
+            &["uniswap_v3", "vm:fermiswap"],
+            &[ALL_ONCHAIN, PRICE_LEVEL_STREAM_AUTO, "exclude:vm:fermiswap"],
+        )
+        .unwrap();
+        assert_eq!(merged, strings(&["uniswap_v3", PRICE_LEVEL_STREAM_AUTO]));
     }
 
     #[test]
