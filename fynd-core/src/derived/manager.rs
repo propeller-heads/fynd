@@ -14,12 +14,19 @@ use std::{
 use async_trait::async_trait;
 use futures::future::join_all;
 use metrics::{counter, gauge, histogram};
+use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, trace, warn};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::models::{Address, Chain},
+    tycho_core::simulation::protocol_sim::Price,
+};
 
-use crate::types::ComponentId;
+use crate::types::{
+    constants::{gas_token_config, GasTokenConfig, UnsupportedChainError},
+    ComponentId,
+};
 
 /// Information about which components changed in a market update.
 ///
@@ -122,6 +129,10 @@ pub type SharedDerivedDataRef = Arc<RwLock<DerivedData>>;
 pub struct ComputationManagerConfig {
     /// Gas token address (e.g., WETH) for token price computation.
     gas_token: Address,
+    /// Routable gas-token amount used by each token-price probe.
+    pricing_probe_amount: BigUint,
+    /// Routable gas-token raw units with the same economic value as one native gas raw unit.
+    native_to_routable_unit: Price,
     /// Max hop count for token gas price computation.
     max_hop: usize,
     /// The share by which a pool's net marginal price falls at its depth (0.0 < drop < 1.0).
@@ -183,10 +194,29 @@ impl ComputationManagerConfig {
         self
     }
 
-    /// Sets the gas token address.
+    /// Sets only the gas-token address, retaining the default 10^18 probe and 1:1 unit scale.
+    /// Prefer [`Self::with_chain_gas_token`] when the chain is known so shared-balance native
+    /// assets receive their complete precision configuration.
     pub fn with_gas_token(mut self, gas_token: Address) -> Self {
         self.gas_token = gas_token;
         self
+    }
+
+    /// Sets the complete native-gas pricing configuration.
+    pub fn with_gas_token_config(mut self, gas_token: GasTokenConfig) -> Self {
+        self.gas_token = gas_token.address;
+        self.pricing_probe_amount = gas_token.probe_amount;
+        self.native_to_routable_unit = gas_token.native_to_routable_unit;
+        self
+    }
+
+    /// Resolves and applies the complete native-gas pricing configuration for `chain`.
+    ///
+    /// # Errors
+    /// Returns [`UnsupportedChainError`] when the chain has no routable native-asset
+    /// representation.
+    pub fn with_chain_gas_token(self, chain: &Chain) -> Result<Self, UnsupportedChainError> {
+        Ok(self.with_gas_token_config(gas_token_config(chain)?))
     }
 
     /// Returns the gas token address.
@@ -207,8 +237,12 @@ impl ComputationManagerConfig {
     /// Builds the token price computation this configuration describes.
     pub(crate) fn build_token_price_computation(&self) -> TokenGasPriceComputation {
         let mut token_prices = TokenGasPriceComputation::default()
-            .with_max_hops(self.max_hop)
-            .with_gas_token(self.gas_token.clone());
+            .with_gas_token_config(GasTokenConfig {
+                address: self.gas_token.clone(),
+                probe_amount: self.pricing_probe_amount.clone(),
+                native_to_routable_unit: self.native_to_routable_unit.clone(),
+            })
+            .with_max_hops(self.max_hop);
         if let Some(pass_budget) = self.pricing_pass_budget {
             token_prices = token_prices.with_pass_budget(pass_budget);
         }
@@ -229,6 +263,11 @@ impl Default for ComputationManagerConfig {
     fn default() -> Self {
         Self {
             gas_token: Address::zero(20),
+            pricing_probe_amount: BigUint::from(10u64).pow(18),
+            native_to_routable_unit: Price {
+                numerator: BigUint::from(1u8),
+                denominator: BigUint::from(1u8),
+            },
             max_hop: crate::solver::defaults::PRICING_MAX_HOPS,
             depth_marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP,
             pricing_pass_budget: None,
@@ -678,9 +717,12 @@ impl MarketEventHandler for ComputationManager {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+    use std::{
+        str::FromStr,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
     };
 
     use tokio::sync::broadcast;
@@ -712,6 +754,26 @@ mod tests {
     #[test]
     fn coalesce_empty_batch_returns_none() {
         assert!(coalesce_market_events(&[]).is_none());
+    }
+
+    #[test]
+    fn chain_gas_configuration_applies_arc_probe_and_unit_scale() {
+        let config = ComputationManagerConfig::new()
+            .with_chain_gas_token(&tycho_simulation::tycho_common::models::Chain::Arc)
+            .unwrap();
+
+        assert_eq!(
+            config.gas_token,
+            Address::from_str("0x3600000000000000000000000000000000000000").unwrap()
+        );
+        assert_eq!(config.pricing_probe_amount, BigUint::from(1_000_000u64));
+        assert_eq!(config.native_to_routable_unit.numerator, BigUint::from(1_000_000u64));
+        assert_eq!(
+            config
+                .native_to_routable_unit
+                .denominator,
+            BigUint::from(10u8).pow(18)
+        );
     }
 
     #[test]
