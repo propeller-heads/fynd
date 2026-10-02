@@ -341,7 +341,7 @@ impl Encoder {
         }
 
         for (quote_index, error) in failures {
-            tracing::debug!(
+            tracing::warn!(
                 order_id = %quotes[quote_index].order_id(),
                 %error,
                 "this candidate failed to encode"

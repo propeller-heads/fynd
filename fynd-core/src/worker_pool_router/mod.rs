@@ -337,12 +337,12 @@ impl RankedQuotes {
 /// Encodes the best candidate of every order into router calldata and records
 /// `encoding_duration_seconds`.
 ///
-/// When an order's best candidate fails to encode, the next candidate in its ranking is encoded
-/// instead, until one encodes or none remain. An order whose candidates all fail keeps its best
-/// candidate with [`QuoteStatus::EncodingFailed`]. With the price guard enabled, every order has
-/// one candidate, so no fallback is possible.
+/// When an order's best candidate fails to encode, the next candidate in its ranking without an
+/// RFQ leg is encoded instead, until one encodes or none remain. An order whose candidates all
+/// fail keeps its best candidate with [`QuoteStatus::EncodingFailed`]. With the price guard
+/// enabled, every order has one candidate, so no fallback is possible.
 ///
-/// A fallback candidate with an RFQ leg is skipped: encoding it waits on a network round trip for
+/// Fallback candidates exclude RFQ legs because encoding one waits on a network round trip for
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
@@ -436,8 +436,8 @@ fn record_encoding_failures(quotes: &[OrderQuote]) {
 ///
 /// Also credits each winning worker pool and algorithm. Attribution belongs here rather than at
 /// ranking: the price guard can pick a lower-ranked fallback, the exclusive overlay replaces the
-/// head of the list, and a failed encoding moves to the next candidate. These are the quotes the
-/// caller receives.
+/// head of the list, and a failed encoding moves to the next candidate without an RFQ leg. These
+/// are the quotes the caller receives.
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
