@@ -52,6 +52,7 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 use crate::{
     bps,
     encoding::encoder::Encoder,
+    fallback::FALLBACK_PREFIX,
     feed::{exclusivity::is_exclusive, protocol_registry::RFQ_PREFIX},
     price_guard::guard::PriceGuard,
     simulation::simulator::QuoteSimulator,
@@ -406,12 +407,17 @@ async fn encode_with_fallbacks(
     }
 }
 
+/// Whether `quote` has an RFQ leg, including one executed through an RFQ venue's fallback router
+/// (`fallback:rfq:bebop`): both fetch the maker's signed quote when encoded.
 fn has_rfq_leg(quote: &OrderQuote) -> bool {
     quote.route().is_some_and(|route| {
-        route
-            .swaps()
-            .iter()
-            .any(|swap| swap.protocol().starts_with(RFQ_PREFIX))
+        route.swaps().iter().any(|swap| {
+            let protocol = swap.protocol();
+            protocol
+                .strip_prefix(FALLBACK_PREFIX)
+                .unwrap_or(protocol)
+                .starts_with(RFQ_PREFIX)
+        })
     })
 }
 
@@ -2252,6 +2258,8 @@ mod tests {
     #[test]
     fn test_has_rfq_leg() {
         assert!(has_rfq_leg(make_single_quote_on("rfq:bebop", 900).order()));
+        assert!(has_rfq_leg(make_single_quote_on("fallback:rfq:bebop", 900).order()));
+        assert!(!has_rfq_leg(make_single_quote_on("fallback:fermiswap", 900).order()));
         assert!(!has_rfq_leg(make_single_quote(900).order()));
     }
 
