@@ -2099,10 +2099,16 @@ mod conversions {
     impl From<fynd_core::SimulationResult> for SimulationResult {
         fn from(core: fynd_core::SimulationResult) -> Self {
             match core {
-                fynd_core::SimulationResult::Success { amount_out, gas_used } => {
+                fynd_core::SimulationResult::Success { amount_out, gas_used, .. } => {
                     Self::Success { amount_out, gas_used }
                 }
-                fynd_core::SimulationResult::Failure { reason } => Self::Failure { reason },
+                fynd_core::SimulationResult::Reverted { reason } |
+                fynd_core::SimulationResult::Failure { reason } |
+                fynd_core::SimulationResult::BlockUnavailable { reason } => {
+                    Self::Failure { reason }
+                }
+                // Fallback for future variants added to fynd_core::SimulationResult.
+                _ => Self::Failure { reason: "unrecognised simulation outcome".to_string() },
             }
         }
     }
@@ -2319,6 +2325,33 @@ mod conversions {
             assert!(
                 matches!(decoded, SimulationResult::Failure { reason } if reason == "execution reverted")
             );
+        }
+
+        #[test]
+        fn test_core_revert_and_missing_block_reach_the_wire_as_a_failure() {
+            let cores = [
+                fynd_core::SimulationResult::Reverted { reason: "K".to_string() },
+                fynd_core::SimulationResult::BlockUnavailable { reason: "K".to_string() },
+            ];
+            for core in cores {
+                let wire = SimulationResult::from(core);
+                assert!(matches!(wire, SimulationResult::Failure { reason } if reason == "K"));
+            }
+        }
+
+        #[test]
+        fn test_core_success_drops_its_logs_on_the_wire() {
+            let core = fynd_core::SimulationResult::Success {
+                amount_out: BigUint::from(990_u64),
+                gas_used: 1,
+                logs: vec![fynd_core::EventLog {
+                    address: tycho_simulation::tycho_common::Bytes::from([0xCC_u8; 20]),
+                    topics: vec![tycho_simulation::tycho_common::Bytes::from([0xAA_u8; 32])],
+                    data: tycho_simulation::tycho_common::Bytes::from([0xBB_u8; 32]),
+                }],
+            };
+            let json = serde_json::to_string(&SimulationResult::from(core)).unwrap();
+            assert_eq!(json, r#"{"status":"success","amount_out":"990","gas_used":1}"#);
         }
 
         #[test]

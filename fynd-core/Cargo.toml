@@ -72,3 +72,4 @@ toml.workspace = true
 fynd-test-fixtures = { path = "../test-fixtures" }
 tracing-subscriber.workspace = true
 metrics-util.workspace = true
+wiremock.workspace = true

@@ -22,7 +22,6 @@ pub mod config;
 pub mod guard;
 /// Hyperliquid price provider implementation.
 pub mod hyperliquid;
-/// [`PriceProvider`](crate::price_guard::provider::PriceProvider) trait and supporting error types.
 pub mod provider;
 /// Registry that manages and queries multiple
 /// [`PriceProvider`](crate::price_guard::provider::PriceProvider)s concurrently.

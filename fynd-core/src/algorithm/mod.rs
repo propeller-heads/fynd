@@ -19,7 +19,7 @@
 //! 3. Register it in `worker_pool/registry.rs`
 //!
 //! **From outside this crate:** implement the trait and bring it in with
-//! [`AlgorithmRegistry`](crate::algorithm::registry::AlgorithmRegistry); no change here is needed.
+//! [`AlgorithmRegistry`]; no change here is needed.
 
 pub mod bellman_ford;
 pub mod most_liquid;

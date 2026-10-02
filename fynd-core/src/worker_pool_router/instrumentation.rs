@@ -329,7 +329,9 @@ fn record_shortfall_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps
 fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
     match quote.simulation_result() {
         None => ("", None),
+        Some(SimulationResult::Reverted { .. }) => ("reverted", None),
         Some(SimulationResult::Failure { .. }) => ("failed", None),
+        Some(SimulationResult::BlockUnavailable { .. }) => ("block_unavailable", None),
         Some(SimulationResult::Success { amount_out, .. }) => {
             ("success", deviation_bps(quote, amount_out))
         }

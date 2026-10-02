@@ -3584,6 +3584,7 @@ dependencies = [
  "tycho-simulation",
  "typetag",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

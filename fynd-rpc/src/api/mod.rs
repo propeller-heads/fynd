@@ -35,6 +35,11 @@ use std::{
 use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
 pub use error::{ApiError, RequestValidationError};
+#[cfg(feature = "experimental")]
+use fynd_core::feed::{
+    events::{MarketEvent, MarketEvents},
+    market_data::MarketReader,
+};
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData, types::BlockInfo,
     worker_pool_router::WorkerPoolRouter,
@@ -252,6 +257,8 @@ pub struct AppState {
     #[cfg(feature = "experimental")]
     pub(crate) market_data: MarketData,
     #[cfg(feature = "experimental")]
+    market_events: MarketEvents,
+    #[cfg(feature = "experimental")]
     pub(crate) tokens_cache: Arc<tokio::sync::RwLock<Option<tokens::TokensCache>>>,
 }
 
@@ -268,6 +275,7 @@ impl AppState {
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
         #[cfg(feature = "experimental")] market_data: MarketData,
+        #[cfg(feature = "experimental")] market_events: MarketEvents,
     ) -> Self {
         Self {
             worker_router: Arc::new(worker_router),
@@ -283,6 +291,8 @@ impl AppState {
             #[cfg(feature = "experimental")]
             market_data,
             #[cfg(feature = "experimental")]
+            market_events,
+            #[cfg(feature = "experimental")]
             tokens_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
@@ -291,6 +301,22 @@ impl AppState {
     #[must_use]
     pub fn worker_router(&self) -> &Arc<WorkerPoolRouter> {
         &self.worker_router
+    }
+
+    /// Returns a read-only handle on the market data this instance solves against.
+    #[cfg(feature = "experimental")]
+    #[must_use]
+    pub fn market_reader(&self) -> MarketReader {
+        self.market_data.reader()
+    }
+
+    /// Returns a new receiver of the market events the feed sends on each update.
+    ///
+    /// The receiver gets only events sent after this call.
+    #[cfg(feature = "experimental")]
+    #[must_use]
+    pub fn subscribe_market_events(&self) -> tokio::sync::broadcast::Receiver<MarketEvent> {
+        self.market_events.subscribe()
     }
 
     /// Returns the health tracker backing `GET /v1/health`.
@@ -496,7 +522,14 @@ mod configure_app_tests {
     use super::*;
 
     fn test_state() -> AppState {
-        let market_data: MarketData = MarketData::new_shared();
+        test_state_on(MarketData::new_shared(), tokio::sync::broadcast::channel(16).0)
+    }
+
+    fn test_state_on(
+        market_data: MarketData,
+        #[cfg_attr(not(feature = "experimental"), allow(unused_variables))]
+        market_events: tokio::sync::broadcast::Sender<fynd_core::feed::events::MarketEvent>,
+    ) -> AppState {
         let derived_data: SharedDerivedDataRef =
             Arc::new(tokio::sync::RwLock::new(Default::default()));
         let registry = SwapEncoderRegistry::new(Chain::Ethereum)
@@ -518,7 +551,47 @@ mod configure_app_tests {
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
             #[cfg(feature = "experimental")]
             market_data,
+            #[cfg(feature = "experimental")]
+            fynd_core::feed::events::MarketEvents::new(market_events),
         )
+    }
+
+    #[cfg(feature = "experimental")]
+    #[tokio::test]
+    async fn test_app_state_exposes_the_market_it_serves() {
+        let market = MarketData::new_shared();
+        let state = test_state_on(market.clone(), tokio::sync::broadcast::channel(16).0);
+
+        market
+            .write()
+            .await
+            .upsert_tokens([fynd_core::algorithm::test_utils::token(0x01, "TKN")]);
+
+        let reader = state.market_reader();
+        let view = reader.read().await;
+        assert_eq!(view.base_market_state().token_count(), 1, "reads what the feed wrote");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[tokio::test]
+    async fn test_app_state_hands_out_the_feed_events() {
+        let (feed, _) = tokio::sync::broadcast::channel(16);
+        let state = test_state_on(MarketData::new_shared(), feed.clone());
+        let mut events = state.subscribe_market_events();
+        let update = fynd_core::feed::events::MarketEvent::MarketUpdated {
+            added_components: Default::default(),
+            removed_components: vec!["pool".to_string()],
+            updated_components: Vec::new(),
+        };
+
+        feed.send(update)
+            .expect("a receiver is subscribed");
+
+        let fynd_core::feed::events::MarketEvent::MarketUpdated { removed_components, .. } = events
+            .recv()
+            .await
+            .expect("the event arrives");
+        assert_eq!(removed_components, ["pool"]);
     }
 
     async fn override_info(_state: web::Data<AppState>) -> HttpResponse {
