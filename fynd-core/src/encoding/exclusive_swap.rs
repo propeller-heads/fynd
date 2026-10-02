@@ -200,7 +200,7 @@ impl ExclusiveSwapSigner {
     fn next_nonce(&self) -> Result<u64, SolveError> {
         let counter = self
             .nonce_counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| counter.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |counter| counter.checked_add(1))
             .map_err(|_| {
                 SolveError::FailedEncoding(
                     "exclusive swap nonce counter is exhausted; restart to draw a new prefix"

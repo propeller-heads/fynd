@@ -17,9 +17,8 @@
 //!    transfer costs and router overhead. The `amount_out_net_gas` values are rescaled
 //!    proportionally so the final ranking reflects realistic execution cost.
 //! 5. **Selection**: Choose best quote (max refined `amount_out_net_gas`)
-//! 6. **Encoding**: If [`EncodingOptions`](crate::EncodingOptions) are provided in the request,
-//!    encode winning solutions into executable on-chain transactions via the
-//!    [`encoding::encoder::Encoder`](crate::encoding::encoder::Encoder)
+//! 6. **Encoding**: If [`EncodingOptions`] are provided in the request, encode winning solutions
+//!    into executable on-chain transactions via the [`Encoder`]
 
 mod allocation;
 pub mod config;
