@@ -1,4 +1,11 @@
 
+## [0.110.7](https://github.com/propeller-heads/fynd/compare/0.110.6...0.110.7) (2026-09-30)
+
+### Features
+
+* support Pons hooks and Gigadex V3 on Robinhood ([c4be598](https://github.com/propeller-heads/fynd/commit/c4be598a46d19ef7f4938cb6ab3db88426ac4345))
+
+
 ## [0.110.6](https://github.com/propeller-heads/fynd/compare/0.110.5...0.110.6) (2026-09-30)
 
 ### Features

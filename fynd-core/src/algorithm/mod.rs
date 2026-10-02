@@ -8,8 +8,8 @@
 //!
 //! # Adding a New Algorithm
 //!
-//! **External:** Implement the `Algorithm` trait in your own crate and plug it
-//! into a [`WorkerPoolBuilder`](crate::worker_pool::pool::WorkerPoolBuilder) via
+//! **External:** Implement the `Algorithm` trait in your own crate and plug it into a
+//! [`WorkerPoolBuilder`] via
 //! [`with_algorithm`](crate::worker_pool::pool::WorkerPoolBuilder::with_algorithm). No changes
 //! to fynd-core required. See the `custom_algorithm` example.
 //!
@@ -18,8 +18,8 @@
 //! 2. Implement the `Algorithm` trait
 //! 3. Register it in `worker_pool/registry.rs`
 //!
-//! **From outside this crate:** implement the trait and bring it in with
-//! [`AlgorithmRegistry`](crate::algorithm::registry::AlgorithmRegistry); no change here is needed.
+//! **From outside this crate:** implement the trait and bring it in with [`AlgorithmRegistry`]; no
+//! change here is needed.
 
 pub mod bellman_ford;
 pub mod most_liquid;

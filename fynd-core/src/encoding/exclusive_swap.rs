@@ -198,6 +198,9 @@ impl ExclusiveSwapSigner {
     /// Errors from the 2³²-th payload on. Wrapping the counter would resign a spent nonce, so the
     /// signer stops instead and a restart draws a fresh prefix.
     fn next_nonce(&self) -> Result<u64, SolveError> {
+        // Rust 1.98 renames `fetch_update` to `try_update`, but the Docker image builds on 1.92,
+        // which has no `try_update`. Rename it once the image moves to 1.98.
+        #[allow(deprecated)]
         let counter = self
             .nonce_counter
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| counter.checked_add(1))
