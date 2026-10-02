@@ -35,7 +35,10 @@ use crate::{
         sim_guard::GuardedProtocolSim,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
-    derived::{computation::ComputationRequirements, types::TokenGasPrices},
+    derived::{
+        computation::ComputationRequirements,
+        types::{gas_cost_in_token, TokenGasPrices},
+    },
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
         GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
@@ -255,7 +258,8 @@ fn swap_on_route(
         gas += swap.gas_estimate();
     }
 
-    amount_out - BigInt::from(gas * gas_price * &price.numerator / &price.denominator)
+    let gas_cost = gas_cost_in_token(&(gas * gas_price), price).unwrap_or_default();
+    amount_out - BigInt::from(gas_cost)
 }
 
 /// Algorithm that selects routes based on expected output after gas.
@@ -668,7 +672,8 @@ impl MostLiquidAlgorithm {
                 )?;
                 let net = match token_out_gas_price {
                     Some(price) => {
-                        let cost = &paid.gas * gas_price * &price.numerator / &price.denominator;
+                        let cost =
+                            gas_cost_in_token(&(&paid.gas * gas_price), price).unwrap_or_default();
                         BigInt::from(paid.amount_out.clone()) - BigInt::from(cost)
                     }
                     None => BigInt::from(paid.amount_out.clone()),
@@ -684,7 +689,8 @@ impl MostLiquidAlgorithm {
         // charged in.
         let net_amount_out = match legs.last().and_then(|leg| leg.data.2) {
             Some(price) => {
-                let cost = scored.gas * ctx.gas_price * &price.numerator / &price.denominator;
+                let cost =
+                    gas_cost_in_token(&(scored.gas * ctx.gas_price), price).unwrap_or_default();
                 BigInt::from(scored.amount_out) - BigInt::from(cost)
             }
             None => BigInt::from(scored.amount_out),
@@ -1592,7 +1598,8 @@ mod tests {
         )]);
 
         let algorithm = MostLiquidAlgorithm::new();
-        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
+        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei
+                                                                         // liquidity
 
         let result = algorithm
             .find_best_route(SolveRequest::new(manager.graph(), market, &order))
