@@ -219,6 +219,16 @@ beats the committed amount and records the difference as `SurplusInfo`
 (`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
 `#[serde(skip)]` — internal, not on the wire.
 
+The one exclusive leg can sit at any hop of the route (`has_valid_exclusive_route`). When pools
+follow it, `pin_commitment` converts the surplus into the leg's token at the average price of those
+pools (`leg_route_output`): the route output the leg's output produces, divided by the leg's
+output. The conversion runs no simulation. On split and merging routes the leg gets the share of
+its token's route output that its own output makes up. The user gets at least the committed amount
+when the pools after the leg give less per unit as their input grows, which holds for AMM pools.
+After a hook pool, a market-maker quote with a minimum order size, or a fixed-rate pool (rounding),
+the user can get slightly less; the router's `min_amount_out` bounds that loss by the request's
+slippage.
+
 Two gauges report what the overlay is worth, in whole gas tokens: `exclusive_fee_amount` (LP fee
 capture) and `exclusive_user_savings_amount` (user improvement over the public reference).
 `to_gas_token_amount` converts without a price lookup — the quote states its gas cost both in wei
