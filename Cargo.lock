@@ -3442,7 +3442,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3482,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-bench-harness"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "chrono",
  "clap",
@@ -3504,7 +3504,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "alloy",
  "bytes",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3614,7 +3614,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3666,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3701,7 +3701,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "alloy",
  "anyhow",
@@ -5915,7 +5915,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.110.5"
+version = "0.110.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -7953,9 +7953,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.428.0"
+version = "0.431.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34a5e6d5a074612023226469d193cc25d290694e27ff37df5cc5cf53cff37624"
+checksum = "3e658f461dfe0ace0c07f486c121a5dd630e77cfc16ff253790d5312eb74c606"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7983,9 +7983,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.428.0"
+version = "0.431.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca9f2885e3ab268ce22110665e19d61a8daa28ebbf51229e11d9261d4219eb76"
+checksum = "99781d3394c5244674e48b7164c6d82e328a2e2258dc65951f9e5996129eb662"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8012,9 +8012,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.428.0"
+version = "0.431.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9408b9ff74741473f93bc42e6325cdc1fcea732d1b7e42c299b3fd43ab35ac"
+checksum = "0569e7fe8d52b3be7cdae2fd990fc187c432a1d1df64bcfd0e86f7397c696314"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8034,9 +8034,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.428.0"
+version = "0.431.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1866b093620f21a43ab37d6ba90e482ec438eee3cf6dae4330910b14a88ead7f"
+checksum = "351e54d9924be9787f59209dca1065ac2b27bb6a33f3032391b179695a6a5c8d"
 dependencies = [
  "alloy",
  "chrono",
@@ -8058,9 +8058,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.428.0"
+version = "0.431.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62ad2135127428fdda149978a4b3e5ea787f285010fa899614dc15a2aaab0261"
+checksum = "90175d3323526cf01946c93e824a8e1a35d1b769269a5372a8ea051753430ce5"
 dependencies = [
  "alloy",
  "alloy-chains",
