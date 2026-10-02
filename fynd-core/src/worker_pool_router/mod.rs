@@ -383,6 +383,7 @@ async fn encode_with_fallbacks(
             }
         }
         if next_candidates.is_empty() {
+            record_encoding_failures(&quotes);
             return Ok(quotes);
         }
         let encoded = encoder
@@ -393,6 +394,20 @@ async fn encode_with_fallbacks(
                 debug!(order_id = %quote.order_id(), "encoded the next-best candidate");
                 quotes[order_index] = quote;
             }
+        }
+    }
+}
+
+/// Counts `encoding_failures_total` once per order that is returned without a transaction,
+/// after every candidate of that order failed to encode.
+fn record_encoding_failures(quotes: &[OrderQuote]) {
+    for quote in quotes {
+        if quote.status() == QuoteStatus::EncodingFailed {
+            warn!(
+                order_id = %quote.order_id(),
+                "no candidate of this order encoded; it is returned without a transaction"
+            );
+            counter!("encoding_failures_total").increment(1);
         }
     }
 }
@@ -2194,6 +2209,52 @@ mod tests {
             assert_eq!(quote.status(), QuoteStatus::Success);
             assert!(quote.transaction().is_some());
         }
+    }
+
+    /// Four candidates fail to encode, but only one order comes back without a transaction.
+    #[test]
+    fn test_encode_quotes_counts_failures_per_order() {
+        let ranked = RankedQuotes::new(vec![
+            vec![
+                make_single_quote_on("no_such_protocol", 950)
+                    .order()
+                    .clone(),
+                make_single_quote_on("no_such_protocol", 800)
+                    .order()
+                    .clone(),
+                make_single_quote_on("no_such_protocol", 700)
+                    .order()
+                    .clone(),
+            ],
+            vec![
+                make_single_quote_on("no_such_protocol", 950)
+                    .order()
+                    .clone(),
+                make_single_quote(800).order().clone(),
+            ],
+        ])
+        .expect("both orders have candidates");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime builds");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // A current-thread runtime polls the router on this thread, where the local recorder is
+        // installed.
+        let quotes = metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01)))
+        })
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert_eq!(quotes[1].status(), QuoteStatus::Success);
+        let failures: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "encoding_failures_total")
+            .map(|(_, _, value)| value)
+            .collect();
+        assert_eq!(failures, vec![metrics_util::debugging::DebugValue::Counter(1)]);
     }
 
     #[test]
