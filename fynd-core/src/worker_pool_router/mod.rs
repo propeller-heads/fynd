@@ -49,11 +49,14 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    bps, encoding::encoder::Encoder, feed::exclusivity::is_exclusive,
-    price_guard::guard::PriceGuard, simulation::simulator::QuoteSimulator,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
-    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo, Swap,
+    bps,
+    encoding::encoder::Encoder,
+    feed::{exclusivity::is_exclusive, protocol_registry::RFQ_PREFIX},
+    price_guard::guard::PriceGuard,
+    simulation::simulator::QuoteSimulator,
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -338,6 +341,9 @@ impl RankedQuotes {
 /// candidate with [`QuoteStatus::EncodingFailed`]. With the price guard enabled, every order has
 /// one candidate, so no fallback is possible.
 ///
+/// A fallback candidate with an RFQ leg is skipped: encoding it waits on a network round trip for
+/// the maker's signed quote, which the request would pay on top of the failed attempt.
+///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
 /// it on the quote.
@@ -376,7 +382,9 @@ async fn encode_with_fallbacks(
             if quote.status() != QuoteStatus::EncodingFailed {
                 continue;
             }
-            if let Some(candidate) = fallbacks[order_index].next() {
+            if let Some(candidate) =
+                fallbacks[order_index].find(|candidate| !has_rfq_leg(candidate))
+            {
                 order_indices.push(order_index);
                 next_candidates.push(candidate);
             }
@@ -395,6 +403,15 @@ async fn encode_with_fallbacks(
             }
         }
     }
+}
+
+fn has_rfq_leg(quote: &OrderQuote) -> bool {
+    quote.route().is_some_and(|route| {
+        route
+            .swaps()
+            .iter()
+            .any(|swap| swap.protocol().starts_with(RFQ_PREFIX))
+    })
 }
 
 /// Counts `encoding_failures_total` once per order that is returned without a transaction,
@@ -2202,6 +2219,33 @@ mod tests {
             assert_eq!(quote.status(), QuoteStatus::Success);
             assert!(quote.transaction().is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_skips_rfq_fallback_candidate() {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on("no_such_protocol", 950)
+                .order()
+                .clone(),
+            make_single_quote_on("rfq:bebop", 900)
+                .order()
+                .clone(),
+            make_single_quote(800).order().clone(),
+        ]])
+        .expect("the order has candidates");
+
+        let quotes = encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01))
+            .await
+            .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::Success);
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(800u64));
+    }
+
+    #[test]
+    fn test_has_rfq_leg() {
+        assert!(has_rfq_leg(make_single_quote_on("rfq:bebop", 900).order()));
+        assert!(!has_rfq_leg(make_single_quote(900).order()));
     }
 
     /// Four candidates fail to encode, but only one order comes back without a transaction.
