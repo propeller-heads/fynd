@@ -16,7 +16,7 @@ use tycho_simulation::{
 use super::{most_liquid::DepthAndPrice, NoPathReason};
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
-    derived::types::TokenGasPrices,
+    derived::types::{gas_cost_in_token, TokenGasPrices},
     feed::market_data::{MarketData, MarketDataView, MarketState},
     graph::{GraphError, Path, RouteSearch, TokenPath, TopologyGraph},
     types::{ComponentId, Route, RouteResult, Swap},
@@ -206,11 +206,11 @@ pub fn simulate_pool_path<D>(
 
         // Convert gas cost to output token terms using token prices. Without a price the output
         // amount stands as-is, which is what happens before derived data has been computed.
-        match token_prices.and_then(|prices| prices.get(last_swap.token_out())) {
-            Some(price) => {
-                BigInt::from(output_amount) -
-                    BigInt::from(gas_cost_wei * &price.numerator / &price.denominator)
-            }
+        match token_prices
+            .and_then(|prices| prices.get(last_swap.token_out()))
+            .and_then(|price| gas_cost_in_token(&gas_cost_wei, price))
+        {
+            Some(gas_cost) => BigInt::from(output_amount) - BigInt::from(gas_cost),
             None => BigInt::from(output_amount),
         }
     } else {

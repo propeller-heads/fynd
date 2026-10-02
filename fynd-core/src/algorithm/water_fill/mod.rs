@@ -71,7 +71,10 @@ use crate::{
             SHARED_MAX_CANDIDATES,
         },
     },
-    derived::{computation::ComputationRequirements, types::TokenGasPrices},
+    derived::{
+        computation::ComputationRequirements,
+        types::{gas_cost_in_token, TokenGasPrices},
+    },
     feed::market_data::{MarketDataView, MarketState},
     graph::{EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph, TopologyGraphManager},
     types::{ComponentId, Order, RouteResult},
@@ -159,10 +162,7 @@ impl WaterFillAlgorithm {
         token_out: &Address,
     ) -> Option<BigUint> {
         let price = token_prices?.get(token_out)?;
-        if price.denominator.is_zero() {
-            return None;
-        }
-        Some(total_gas * gas_price_wei * &price.numerator / &price.denominator)
+        gas_cost_in_token(&(total_gas * gas_price_wei), price)
     }
 
     /// A path's gas converted to output-token terms as a signed amount, or zero when no gas price
