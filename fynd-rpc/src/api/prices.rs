@@ -3,8 +3,11 @@
 use std::fmt;
 
 use fynd_core::types::ComponentId;
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
+};
 use utoipa::{IntoParams, ToSchema};
 
 /// Maximum number of significant digits in the decimal-string representation of
@@ -14,6 +17,31 @@ use utoipa::{IntoParams, ToSchema};
 /// encoding or rendering quirks. Values that need more precision should consume the raw
 /// `numerator`/`denominator` from the server's derived-data layer directly.
 const PRICE_DECIMAL_PRECISION: usize = 17;
+
+/// Converts an internal native-gas-denominated price back to routable gas-token units.
+///
+/// Internal quote accounting uses token raw units per native gas raw unit. The API preserves its
+/// token raw units per routable gas-token raw unit contract by dividing by the exact
+/// routable-per-native conversion at this boundary.
+pub(crate) fn price_in_routable_units(
+    price: &Price,
+    native_to_routable_unit: &Price,
+) -> Option<Price> {
+    if price.numerator == BigUint::from(0u8) ||
+        price.denominator == BigUint::from(0u8) ||
+        native_to_routable_unit.numerator == BigUint::from(0u8) ||
+        native_to_routable_unit.denominator == BigUint::from(0u8)
+    {
+        return None;
+    }
+    if native_to_routable_unit.numerator == native_to_routable_unit.denominator {
+        return Some(price.clone());
+    }
+    Some(Price {
+        numerator: &price.numerator * &native_to_routable_unit.denominator,
+        denominator: &price.denominator * &native_to_routable_unit.numerator,
+    })
+}
 
 /// Query parameters for GET /v1/prices.
 #[derive(Debug, Default, Deserialize, IntoParams)]
@@ -320,8 +348,36 @@ mod tests {
     use std::str::FromStr;
 
     use num_bigint::BigUint;
+    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use super::*;
+
+    #[test]
+    fn native_price_converts_back_to_routable_gas_token_units() {
+        let native_to_routable = Price {
+            numerator: BigUint::from(1_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+        let gas_token_native_price = native_to_routable.clone();
+        let token_native_price = Price {
+            numerator: BigUint::from(2_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+
+        let gas_token = price_in_routable_units(&gas_token_native_price, &native_to_routable)
+            .expect("Arc gas-token price should be representable");
+        let token = price_in_routable_units(&token_native_price, &native_to_routable)
+            .expect("Arc token price should be representable");
+
+        assert_eq!(
+            price_to_decimal_string(&gas_token.numerator, &gas_token.denominator),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            price_to_decimal_string(&token.numerator, &token.denominator),
+            Some("2".to_string())
+        );
+    }
 
     #[test]
     fn test_data_status_serialization() {
