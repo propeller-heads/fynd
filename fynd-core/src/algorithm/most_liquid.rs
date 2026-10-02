@@ -1627,7 +1627,8 @@ mod tests {
         )]);
 
         let algorithm = MostLiquidAlgorithm::new();
-        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
+        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei
+                                                                         // liquidity
 
         let result = algorithm
             .find_best_route(SolveRequest::new(manager.graph(), market, &order))
