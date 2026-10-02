@@ -198,15 +198,26 @@ impl ExclusiveSwapSigner {
     /// Errors from the 2³²-th payload on. Wrapping the counter would resign a spent nonce, so the
     /// signer stops instead and a restart draws a fresh prefix.
     fn next_nonce(&self) -> Result<u64, SolveError> {
-        let counter = self
+        // A compare-exchange loop rather than `fetch_update` (deprecated from Rust 1.99) or its
+        // replacement `try_update` (absent from the Rust 1.92 the Docker builds use).
+        let mut counter = self
             .nonce_counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| counter.checked_add(1))
-            .map_err(|_| {
+            .load(Ordering::Relaxed);
+        loop {
+            let next = counter.checked_add(1).ok_or_else(|| {
                 SolveError::FailedEncoding(
                     "exclusive swap nonce counter is exhausted; restart to draw a new prefix"
                         .to_string(),
                 )
             })?;
+            match self
+                .nonce_counter
+                .compare_exchange_weak(counter, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(current) => counter = current,
+            }
+        }
         Ok((u64::from(self.nonce_prefix) << 32) | u64::from(counter))
     }
 
