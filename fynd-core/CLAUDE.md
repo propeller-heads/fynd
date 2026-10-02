@@ -118,7 +118,9 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
    market and hands the result to `Algorithm::find_best_route` → `RouteResult`. An algorithm takes
    the request apart with the consuming `SolveRequest::into_parts` method; a route search reads its own
    `GraphQueryFilter` bounds and the request's `RouteExclusions` through one `RouteSearch`
-3. Selects best by `amount_out_net_gas` → optional `Encoder` → optional simulation → `Quote`
+3. Selects best by `amount_out_net_gas` → optional `Encoder` → optional simulation → `Quote`.
+   When an order's best candidate fails to encode, the next successful candidate without an RFQ
+   leg is encoded instead, until one encodes or none remain
 
 Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
 candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes`,
