@@ -337,10 +337,10 @@ impl RankedQuotes {
 /// Encodes the best candidate of every order into router calldata and records
 /// `encoding_duration_seconds`.
 ///
-/// When an order's best candidate fails to encode, the next candidate in its ranking without an
-/// RFQ leg is encoded instead, until one encodes or none remain. An order whose candidates all
-/// fail keeps its best candidate with [`QuoteStatus::EncodingFailed`]. With the price guard
-/// enabled, every order has one candidate, so no fallback is possible.
+/// When an order's best candidate fails to encode, the next successful candidate in its ranking
+/// without an RFQ leg is encoded instead, until one encodes or none remain. An order whose
+/// candidates all fail keeps its best candidate with [`QuoteStatus::EncodingFailed`]. With the
+/// price guard enabled, every order has one candidate, so no fallback is possible.
 ///
 /// Fallback candidates exclude RFQ legs because encoding one waits on a network round trip for
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
@@ -370,7 +370,9 @@ async fn encode_with_fallbacks(
         let mut candidates = candidates.into_iter();
         // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
         best.extend(candidates.next());
-        fallbacks.push(candidates.filter(|candidate| !has_rfq_leg(candidate)));
+        fallbacks.push(candidates.filter(|candidate| {
+            candidate.status() == QuoteStatus::Success && !has_rfq_leg(candidate)
+        }));
     }
     let mut quotes = encoder
         .encode(best, encoding_options.clone())
