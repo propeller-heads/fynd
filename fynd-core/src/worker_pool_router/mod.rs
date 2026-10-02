@@ -259,8 +259,8 @@ pub struct WorkerPoolRouter {
 ///
 /// One inner list per request order, in request order, best candidate first. An order with no
 /// route yields a single `NoRouteFound`/`Timeout` placeholder, so every list is non-empty. When
-/// the request enables the price guard, `PriceGuard::validate` has already picked the winner, so
-/// every list holds exactly that one candidate.
+/// the request enables the price guard, `PriceGuard::validate` has already dropped the candidates
+/// that fail it; an order where none pass holds only its best candidate, as `PriceCheckFailed`.
 #[must_use]
 #[derive(Debug)]
 pub struct RankedQuotes {
@@ -528,19 +528,13 @@ impl WorkerPoolRouter {
             .map(|e| e.price_guard())
             .filter(|c| c.enabled());
 
-        // `PriceGuard::validate` keeps only the winning candidate per order, since it has
-        // already chosen among the ranked candidates. Wrap each in a one-element `Vec` so both
-        // match arms share the `Vec<Vec<OrderQuote>>` shape `RankedQuotes` expects.
         let ranked_per_order: Vec<Vec<OrderQuote>> = match (&self.price_guard, price_guard_config) {
             (Some(guard), Some(config)) => guard
                 .validate(ranked_quotes, config)
                 .map_err(|e| {
                     warn!(error = %e, "price guard validation error");
                     SolveError::Internal(e.to_string())
-                })?
-                .into_iter()
-                .map(|order_quote| vec![order_quote])
-                .collect(),
+                })?,
             (None, Some(_)) => {
                 return Err(SolveError::Internal(
                     "price guard config provided but price guard is not enabled on this server"
