@@ -345,6 +345,11 @@ impl RankedQuotes {
 /// Fallback candidates exclude RFQ legs because encoding one waits on a network round trip for
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
 ///
+/// No fallback round starts more than 5ms after the best candidates were encoded. A round takes
+/// tens of microseconds, but some encoders reach the network: an Angstrom swap fetches its
+/// attestation over HTTP, with a 3s timeout, whenever its background cache is stale. Without the
+/// budget, an outage of the Angstrom API would cost 3s per fallback round instead of one round.
+///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
 /// it on the quote.
@@ -354,7 +359,8 @@ pub async fn encode_quotes(
     encoding_options: &EncodingOptions,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let encode_start = Instant::now();
-    let encoded = encode_with_fallbacks(encoder, ranked, encoding_options).await;
+    let encoded =
+        encode_with_fallbacks(encoder, ranked, encoding_options, Duration::from_millis(5)).await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
     encoded
 }
@@ -363,6 +369,7 @@ async fn encode_with_fallbacks(
     encoder: &Encoder,
     ranked: RankedQuotes,
     encoding_options: &EncodingOptions,
+    fallback_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let mut best = Vec::new();
     let mut fallbacks = Vec::new();
@@ -377,6 +384,7 @@ async fn encode_with_fallbacks(
     let mut quotes = encoder
         .encode(best, encoding_options.clone())
         .await?;
+    let fallback_deadline = Instant::now() + fallback_budget;
 
     loop {
         let mut order_indices = Vec::new();
@@ -391,6 +399,15 @@ async fn encode_with_fallbacks(
             }
         }
         if next_candidates.is_empty() {
+            record_encoding_failures(&quotes);
+            return Ok(quotes);
+        }
+        if Instant::now() >= fallback_deadline {
+            warn!(
+                orders = order_indices.len(),
+                budget_ms = fallback_budget.as_millis(),
+                "encoding fallback budget spent; the remaining candidates are not tried"
+            );
             record_encoding_failures(&quotes);
             return Ok(quotes);
         }
@@ -2246,6 +2263,29 @@ mod tests {
 
         assert_eq!(quotes[0].status(), QuoteStatus::Success);
         assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(800u64));
+    }
+
+    #[tokio::test]
+    async fn test_encode_with_fallbacks_spent_budget() {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on("no_such_protocol", 950)
+                .order()
+                .clone(),
+            make_single_quote(800).order().clone(),
+        ]])
+        .expect("the order has candidates");
+
+        let quotes = encode_with_fallbacks(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            Duration::ZERO,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(950u64));
     }
 
     #[test]
