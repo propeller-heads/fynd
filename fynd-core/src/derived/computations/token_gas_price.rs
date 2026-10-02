@@ -10,10 +10,12 @@
 //! slippage. Gas-aware scoring is off because it reads the prices this computation produces.
 //!
 //! The price is the arithmetic mean of the buy and sell rates, kept as an exact fraction.
-//! Both rates are in token units per gas token unit: the bought amount divided by `probe_amount`
-//! or by the gas amount returned, respectively. This mean values a token lower as its round-trip
-//! loss grows. An exact fraction cannot always represent the geometric mean. The next section
-//! gives the one exception.
+//! Both route rates start in token raw units per routable gas-token raw unit: the bought amount
+//! divided by `probe_amount` or by the gas-token amount returned, respectively. They are then
+//! scaled into token raw units per native gas raw unit. This matters on shared-balance chains such
+//! as Arc, where native gas uses 18 decimals while routable USDC uses 6. The mean values a token
+//! lower as its round-trip loss grows. An exact fraction cannot always represent the geometric
+//! mean. The next section gives the one exception.
 //!
 //! # Flagged pools and sell solves
 //!
@@ -110,7 +112,7 @@
 //! Seeding selects every market token except the gas token without a token count cap because
 //! `derived_data_ready` does not wait for every token to have a price. The sell solve cap and
 //! deadline still apply. Unattempted tokens keep their previous price and dependencies.
-//! The gas token gets a price of one and no dependencies.
+//! The gas token gets the native-to-routable raw-unit conversion and no dependencies.
 
 use std::{
     ops::RangeInclusive,
@@ -147,7 +149,7 @@ use crate::{
     },
     feed::market_data::MarketData,
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, OrderSide, RouteExclusions},
+    types::{constants::GasTokenConfig, ComponentId, Order, OrderSide, RouteExclusions},
 };
 
 /// The range of `spot(a→b) * spot(b→a)` for a pool whose two spot prices agree. A pool with no
@@ -258,10 +260,21 @@ fn collect_route_components(buy_leg: &ReachedToken) -> FxHashSet<ComponentId> {
 
 /// Prices a token at the sell rate alone: the amount sold divided by the gas token amount
 /// returned. Stores the buy route's components as its dependencies.
-fn build_sell_rate_entry(buy_leg: &ReachedToken, sell_out: BigUint) -> TokenPriceEntry {
+fn scale_price(price: Price, scale: &Price) -> Price {
+    Price {
+        numerator: price.numerator * &scale.numerator,
+        denominator: price.denominator * &scale.denominator,
+    }
+}
+
+fn build_sell_rate_entry(
+    buy_leg: &ReachedToken,
+    sell_out: BigUint,
+    native_to_routable_unit: &Price,
+) -> TokenPriceEntry {
     let path_components = collect_route_components(buy_leg);
     let sell_rate = Price { numerator: buy_leg.amount_out.clone(), denominator: sell_out };
-    TokenPriceEntry { price: sell_rate, path_components }
+    TokenPriceEntry { price: scale_price(sell_rate, native_to_routable_unit), path_components }
 }
 
 /// Returns why the pool's two spot prices between `token_in` and `token_out` fail the check, or
@@ -611,7 +624,10 @@ impl<'a> PricingPassState<'a> {
             numerator: &buy_leg.amount_out * (&self.computation.probe_amount + &sell_out),
             denominator: BigUint::from(2u8) * &self.computation.probe_amount * sell_out,
         };
-        TokenPriceEntry { price: mid_price, path_components }
+        TokenPriceEntry {
+            price: scale_price(mid_price, &self.computation.native_to_routable_unit),
+            path_components,
+        }
     }
 
     /// Prices a token with a sell solve of its bought amount back to the gas token. The stored
@@ -631,7 +647,9 @@ impl<'a> PricingPassState<'a> {
         };
         let mut entry = match buy_leg {
             SellSolveBuyLeg::Trusted(route) => self.build_price_entry(token, route, sell_out),
-            SellSolveBuyLeg::ThroughFlaggedPool(route) => build_sell_rate_entry(route, sell_out),
+            SellSolveBuyLeg::ThroughFlaggedPool(route) => {
+                build_sell_rate_entry(route, sell_out, &self.computation.native_to_routable_unit)
+            }
         };
         entry
             .path_components
@@ -756,6 +774,8 @@ pub struct TokenGasPriceComputation {
     max_hops: usize,
     /// Amount of gas token each probe buys with (affects slippage).
     probe_amount: BigUint,
+    /// Routable gas-token raw units with the same economic value as one native gas raw unit.
+    native_to_routable_unit: Price,
     /// Wall-clock budget for the steps of a pricing pass after its first buy pass. The snapshot
     /// and the first buy pass run outside it, bounded only by the algorithm's timeout. Tokens not
     /// attempted before it expires keep their previous price; the module's "Cost and time
@@ -977,6 +997,10 @@ impl Default for TokenGasPriceComputation {
             gas_token: Address::zero(20), // ETH address
             max_hops: crate::solver::defaults::PRICING_MAX_HOPS,
             probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
+            native_to_routable_unit: Price {
+                numerator: BigUint::from(1u8),
+                denominator: BigUint::from(1u8),
+            },
             pass_budget: DEFAULT_PASS_BUDGET,
             max_tokens_per_pass: DEFAULT_MAX_TOKENS_PER_PASS,
             max_sell_solves_per_pass: DEFAULT_MAX_SELL_SOLVES_PER_PASS,
@@ -1016,6 +1040,16 @@ impl TokenGasPriceComputation {
     /// Sets how many sell solves one pass may run.
     pub fn with_max_sell_solves_per_pass(self, max_sell_solves_per_pass: usize) -> Self {
         Self { max_sell_solves_per_pass, ..self }
+    }
+
+    /// Sets the conversion from one native gas raw unit to routable gas-token raw units.
+    pub(crate) fn with_native_to_routable_unit(self, native_to_routable_unit: Price) -> Self {
+        Self { native_to_routable_unit, ..self }
+    }
+
+    /// Sets the routable gas-token amount used to probe token prices.
+    pub(crate) fn with_probe_amount(self, probe_amount: BigUint) -> Self {
+        Self { probe_amount, ..self }
     }
 
     /// Sets how long after a pass starts the next one may start. `Duration::ZERO` lets a pass
@@ -1145,9 +1179,17 @@ impl TokenGasPriceComputation {
         Self { max_hops, ..self }
     }
 
-    /// Sets the gas token address.
+    /// Sets only the gas-token address, retaining the current probe amount and unit conversion.
+    /// Prefer [`Self::with_gas_token_config`] for shared-balance native assets.
     pub fn with_gas_token(self, gas_token: Address) -> Self {
         Self { gas_token, ..self }
+    }
+
+    /// Sets the routable gas token, probe amount, and native/routable raw-unit conversion.
+    pub fn with_gas_token_config(self, gas_token: GasTokenConfig) -> Self {
+        self.with_gas_token(gas_token.address)
+            .with_probe_amount(gas_token.probe_amount)
+            .with_native_to_routable_unit(gas_token.native_to_routable_unit)
     }
 
     /// Solves one capped pass, ranking every token in the market and attempting the best
@@ -1486,9 +1528,9 @@ impl TokenGasPriceComputation {
             }
         }
 
-        // The gas token is 1:1 with itself and needs no route.
-        let gas_token_price =
-            Price { numerator: self.probe_amount.clone(), denominator: self.probe_amount.clone() };
+        // The routable gas token needs no route. Its price converts native gas raw units into the
+        // routable representation's raw units; this is 1:1 on ordinary wrapper chains.
+        let gas_token_price = self.native_to_routable_unit.clone();
         token_prices_with_deps.insert(
             self.gas_token.clone(),
             TokenPriceEntry {
@@ -1595,6 +1637,29 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn complete_gas_token_config_applies_arc_units() {
+        let config = crate::types::constants::gas_token_config(
+            &tycho_simulation::tycho_common::models::Chain::Arc,
+        )
+        .unwrap();
+        let computation = TokenGasPriceComputation::default().with_gas_token_config(config);
+
+        assert_eq!(computation.probe_amount, BigUint::from(1_000_000u64));
+        assert_eq!(
+            computation
+                .native_to_routable_unit
+                .numerator,
+            BigUint::from(1_000_000u64)
+        );
+        assert_eq!(
+            computation
+                .native_to_routable_unit
+                .denominator,
+            BigUint::from(10u8).pow(18)
+        );
+    }
     use crate::{
         algorithm::test_utils::{
             component, setup_market_weighted, setup_market_weighted_boxed, token, MockProtocolSim,
@@ -1647,6 +1712,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scales_prices_from_routable_to_native_gas_units() {
+        let gas_token = token(0, "USDC");
+        let output = token(1, "OUT");
+        let (market, _) = setup_market_weighted(vec![(
+            "usdc_out",
+            &gas_token,
+            &output,
+            MockProtocolSim::new(2.0),
+        )]);
+        let store = DerivedData::new_shared();
+        let unit_scale = Price {
+            numerator: BigUint::from(1_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+
+        let prices = TokenGasPriceComputation::new(
+            gas_token.address.clone(),
+            3,
+            BigUint::from(1_000_000u64),
+        )
+        .with_native_to_routable_unit(unit_scale.clone())
+        .compute(&market, &store, &ChangedComponents::default())
+        .await
+        .expect("pricing must not fail")
+        .data;
+
+        assert_eq!(prices[&gas_token.address], unit_scale);
+        assert!((ratio(&prices[&output.address]) - 2e-12).abs() < 1e-24);
+    }
+
+    #[tokio::test]
     async fn test_gas_token_price() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
@@ -1654,13 +1750,12 @@ mod tests {
         let prices =
             prices_for(&eth, vec![("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0))]).await;
 
-        // The gas token needs no route: its entry is the probe amount over itself, not merely
-        // any equal pair.
+        // The gas token needs no route: the default native/routable raw-unit conversion is 1:1.
         let eth_price = prices
             .get(&eth.address)
             .expect("gas token should be priced");
-        assert_eq!(eth_price.numerator, BigUint::from(PROBE_AMOUNT));
-        assert_eq!(eth_price.denominator, BigUint::from(PROBE_AMOUNT));
+        assert_eq!(eth_price.numerator, BigUint::from(1u8));
+        assert_eq!(eth_price.denominator, BigUint::from(1u8));
     }
 
     #[tokio::test]

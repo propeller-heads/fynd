@@ -4,6 +4,8 @@
 use std::{sync::Arc, time::Instant};
 
 use actix_web::{web, HttpRequest, HttpResponse};
+#[cfg(feature = "experimental")]
+use fynd_core::derived::TokenGasPrices;
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -11,9 +13,9 @@ use tracing::{debug, info, warn};
 use super::{dto, ApiError, AppState, RouteConfigurator};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_to_decimal_string, ComponentDepthEntry, ComputationDataStatus, ComputationDataStatuses,
-    DataStatus, IncludeField, PricesQuery, PricesResponse, SpotPriceEntry, TokenPriceEntry,
-    TychoDataStatus,
+    price_in_routable_units, price_to_decimal_string, ComponentDepthEntry, ComputationDataStatus,
+    ComputationDataStatuses, DataStatus, IncludeField, PricesQuery, PricesResponse, SpotPriceEntry,
+    TokenPriceEntry, TychoDataStatus,
 };
 #[cfg(feature = "experimental")]
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
@@ -361,7 +363,11 @@ pub async fn get_prices(
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
     for (address, price) in snapshot.token_prices.iter() {
-        match price_to_decimal_string(&price.numerator, &price.denominator) {
+        let routable_price = price_in_routable_units(price, &state.native_to_routable_unit);
+        match routable_price
+            .as_ref()
+            .and_then(|price| price_to_decimal_string(&price.numerator, &price.denominator))
+        {
             Some(price) => prices.push(TokenPriceEntry { token: address.clone(), price }),
             None => {
                 debug!(
@@ -540,11 +546,18 @@ pub async fn get_tokens(
         let market = state.market_data.read().await;
         (market.component_topology(), market.token_registry_ref().clone())
     };
+    let routable_token_prices: TokenGasPrices = token_prices
+        .iter()
+        .filter_map(|(address, price)| {
+            price_in_routable_units(price, &state.native_to_routable_unit)
+                .map(|price| (address.clone(), price))
+        })
+        .collect();
     let entries = build_token_entries(
         &topology,
         &token_registry,
         depths.as_ref(),
-        Some(token_prices.as_ref()),
+        Some(&routable_token_prices),
     );
 
     let cache = TokensCache { key, entries: std::sync::Arc::new(entries) };
@@ -800,6 +813,11 @@ mod tests {
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
             #[cfg(feature = "experimental")]
+            tycho_simulation::tycho_core::simulation::protocol_sim::Price::new(
+                1u8.into(),
+                1u8.into(),
+            ),
+            #[cfg(feature = "experimental")]
             market_data,
         )
     }
@@ -987,6 +1005,50 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         let body = body_json(resp).await;
         assert_eq!(body["prices"].as_array().map(Vec::len), Some(1), "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_preserve_routable_units_for_shared_balance_gas_token() {
+        use num_bigint::BigUint;
+        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+
+        let mut state = make_test_state();
+        let native_to_routable = Price {
+            numerator: BigUint::from(1_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+        state.native_to_routable_unit = native_to_routable.clone();
+        seed_tycho_head(&state).await;
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(
+                [(test_addr(0x00), native_to_routable)]
+                    .into_iter()
+                    .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["prices"][0]["price"], "1", "body was: {body}");
     }
 
     #[cfg(feature = "experimental")]

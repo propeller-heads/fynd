@@ -48,7 +48,7 @@ use crate::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
     },
     simulation::simulator::QuoteSimulator,
-    types::constants::native_token,
+    types::constants::gas_token_config,
     worker_pool::{
         pool::{WorkerPool, WorkerPoolBuilder},
         registry::UnknownAlgorithmError,
@@ -912,9 +912,9 @@ impl FyndBuilder {
         let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
         let market_event_tx = tycho_feed.event_sender();
 
-        let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
+        let gas_token = gas_token_config(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
         let mut computation_config = ComputationManagerConfig::new()
-            .with_gas_token(gas_token)
+            .with_gas_token_config(gas_token)
             .with_max_hop(self.pricing_max_hops);
         if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
             computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
@@ -1469,9 +1469,9 @@ impl Solver {
             });
         }
 
-        let gas_token = native_token(&chain).map_err(|_| SolverBuildError::GasToken)?;
+        let gas_token = gas_token_config(&chain).map_err(|_| SolverBuildError::GasToken)?;
         let computation_config = ComputationManagerConfig::new()
-            .with_gas_token(gas_token)
+            .with_gas_token_config(gas_token)
             .with_max_hop(defaults::PRICING_MAX_HOPS)
             // Replay tests assert exact priced-token counts against a deterministic recording, so
             // no bound on a pricing pass may apply: an effectively unbounded budget keeps a

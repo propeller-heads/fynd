@@ -172,8 +172,9 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.431.0"
-tycho-simulation = ">=0.431.0"
+# 0.433.0 is the first release containing Arc router/executor metadata.
+tycho-execution = ">=0.433.0"
+tycho-simulation = ">=0.433.0"
 typetag = "0.2"
 
 # Compression
