@@ -228,3 +228,13 @@ debug = true
 # for derived data. The workspace's own code keeps the debug settings.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Tycho from propeller-heads/tycho#1524, which speeds up Uniswap v3, v4 and v3 fork quotes. Every
+# tycho crate comes from the same commit, so the workspace holds one copy of each. Remove this
+# section when a tycho release includes that PR.
+[patch.crates-io]
+tycho-client = { git = "https://github.com/propeller-heads/tycho", rev = "a9f8f189955ff7d95ec0d60ce32dd7eae2e0b9de" }
+tycho-common = { git = "https://github.com/propeller-heads/tycho", rev = "a9f8f189955ff7d95ec0d60ce32dd7eae2e0b9de" }
+tycho-ethereum = { git = "https://github.com/propeller-heads/tycho", rev = "a9f8f189955ff7d95ec0d60ce32dd7eae2e0b9de" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "a9f8f189955ff7d95ec0d60ce32dd7eae2e0b9de" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "a9f8f189955ff7d95ec0d60ce32dd7eae2e0b9de" }
