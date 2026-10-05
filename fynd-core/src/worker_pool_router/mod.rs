@@ -18,7 +18,7 @@
 //!    proportionally so the final ranking reflects realistic execution cost.
 //! 5. **Selection**: Choose best quote (max refined `amount_out_net_gas`)
 //! 6. **Encoding**: If [`EncodingOptions`] are provided in the request, encode winning solutions
-//!    into executable on-chain transactions via the [`Encoder`]
+//!    into executable on-chain transactions via the [`encoding::encoder::Encoder`]
 
 mod allocation;
 pub mod config;

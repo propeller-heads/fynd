@@ -56,6 +56,10 @@
 //! is not a dependency, so an improved rival route changes the price only after another change or
 //! after the price is stale.
 //!
+//! `PassHistory` keeps each stored price's pools in swap order, the bought amount, and the gas
+//! token amount the sell returned. A pass that moves a stored price by `PRICE_JUMP_WARN_RATIO` or
+//! more logs a warning with the old and new routes and amounts.
+//!
 //! An attempted token that cannot be priced loses its old price and dependencies. Tokens with
 //! no buy route count as unreachable; tokens with no sell route produce failed items.
 //! Unattempted tokens keep their price, dependencies, and stamp. If no snapshot subgraph exists
@@ -120,7 +124,7 @@ use std::{
 
 use async_trait::async_trait;
 use num_bigint::BigUint;
-use num_traits::Zero;
+use num_traits::{ToPrimitive, Zero};
 use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn, Span};
@@ -196,8 +200,8 @@ struct PricingPassState<'a> {
 
 /// The pricing result for one token in a pricing pass.
 enum TokenPricingOutcome {
-    /// The token's price and the components used to compute it.
-    Priced(TokenPriceEntry),
+    /// The token's price, the components used to compute it, and the route behind it.
+    Priced(PricedToken),
     /// The error from a sell solve that produces no price.
     Failed(FailedItemError),
     /// Pricing is incomplete; the token keeps its previous price, dependencies, and stamp.
@@ -247,21 +251,99 @@ enum PoolFlagReason {
     ZeroOutput,
 }
 
-/// Returns the components of every hop of `buy_leg`.
-fn collect_route_components(buy_leg: &ReachedToken) -> FxHashSet<ComponentId> {
-    buy_leg
+/// A token's price with the route behind it.
+struct PricedToken {
+    /// The stored price and its dependencies.
+    entry: TokenPriceEntry,
+    /// The pools and amounts that produced the price.
+    route: PriceRoute,
+}
+
+/// The pools and amounts behind a token's price, kept for the price jump warning.
+#[derive(Debug, Clone)]
+struct PriceRoute {
+    /// The components of the routes that priced the token, in swap order: the buy route, then
+    /// the sell route of a sell solve.
+    components: Vec<ComponentId>,
+    /// The amount of the token that the buy route bought with the probe amount of gas token.
+    buy_amount_out: BigUint,
+    /// The gas token amount that selling `buy_amount_out` back returned.
+    sell_amount_out: BigUint,
+}
+
+/// Builds the price of a token priced from `buy_leg` and the gas token amount `sell_out` that
+/// selling its bought amount back returned. The buy route's components are its dependencies.
+fn build_priced_token(price: Price, buy_leg: &ReachedToken, sell_out: BigUint) -> PricedToken {
+    let components: Vec<ComponentId> = buy_leg
         .hops
         .iter()
         .map(|(_, _, component_id)| component_id.clone())
-        .collect()
+        .collect();
+    let entry = TokenPriceEntry { price, path_components: components.iter().cloned().collect() };
+    let route = PriceRoute {
+        components,
+        buy_amount_out: buy_leg.amount_out.clone(),
+        sell_amount_out: sell_out,
+    };
+    PricedToken { entry, route }
 }
 
 /// Prices a token at the sell rate alone: the amount sold divided by the gas token amount
 /// returned. Stores the buy route's components as its dependencies.
-fn build_sell_rate_entry(buy_leg: &ReachedToken, sell_out: BigUint) -> TokenPriceEntry {
-    let path_components = collect_route_components(buy_leg);
-    let sell_rate = Price { numerator: buy_leg.amount_out.clone(), denominator: sell_out };
-    TokenPriceEntry { price: sell_rate, path_components }
+fn build_sell_rate_entry(buy_leg: &ReachedToken, sell_out: BigUint) -> PricedToken {
+    let sell_rate = Price { numerator: buy_leg.amount_out.clone(), denominator: sell_out.clone() };
+    build_priced_token(sell_rate, buy_leg, sell_out)
+}
+
+/// How far a token's price may move in one pricing pass before the pass logs a warning, as the
+/// ratio of the larger price to the smaller.
+const PRICE_JUMP_WARN_RATIO: f64 = 1.1;
+
+/// Returns `new / stored` when the price moved by `PRICE_JUMP_WARN_RATIO` or more in either
+/// direction, else `None`. A zero price never counts as a jump.
+fn price_jump_ratio(stored: &Price, new: &Price) -> Option<f64> {
+    let ratio = price_to_f64(new)? / price_to_f64(stored)?;
+    (ratio >= PRICE_JUMP_WARN_RATIO || ratio.recip() >= PRICE_JUMP_WARN_RATIO).then_some(ratio)
+}
+
+/// Logs a warning with both routes and their amounts for each price in `solved` that moved by
+/// `PRICE_JUMP_WARN_RATIO` or more from its price in `stored`. A token with no stored price or
+/// no stored route is skipped.
+fn warn_on_price_jumps(
+    stored: &TokenPricesWithDeps,
+    stored_routes: &FxHashMap<Address, PriceRoute>,
+    solved: &PricingPassOutcome,
+) {
+    for (token, new) in &solved.prices {
+        let (Some(stored), Some(stored_route), Some(new_route)) =
+            (stored.get(token), stored_routes.get(token), solved.routes.get(token))
+        else {
+            continue;
+        };
+        let Some(ratio) = price_jump_ratio(&stored.price, &new.price) else {
+            continue;
+        };
+        warn!(
+            %token,
+            block = solved.block,
+            ratio,
+            stored_price = price_to_f64(&stored.price),
+            new_price = price_to_f64(&new.price),
+            stored_route = ?stored_route.components,
+            new_route = ?new_route.components,
+            stored_buy_amount_out = %stored_route.buy_amount_out,
+            new_buy_amount_out = %new_route.buy_amount_out,
+            stored_sell_amount_out = %stored_route.sell_amount_out,
+            new_sell_amount_out = %new_route.sell_amount_out,
+            "token price jumped"
+        );
+    }
+}
+
+/// Returns `price` as a float, or `None` when it is zero or does not fit.
+fn price_to_f64(price: &Price) -> Option<f64> {
+    let value = price.numerator.to_f64()? / price.denominator.to_f64()?;
+    (value.is_finite() && value > 0.0).then_some(value)
 }
 
 /// Returns why the pool's two spot prices between `token_in` and `token_out` fail the check, or
@@ -553,13 +635,15 @@ impl<'a> PricingPassState<'a> {
         block: u64,
     ) -> PricingPassOutcome {
         let mut prices = FxHashMap::default();
+        let mut routes = FxHashMap::default();
         let mut failed_items = Vec::new();
         let mut unattempted = FxHashSet::default();
         let mut unreachable_tokens = 0usize;
         for (token, outcome) in outcomes {
             match outcome {
-                TokenPricingOutcome::Priced(entry) => {
-                    prices.insert(token, entry);
+                TokenPricingOutcome::Priced(PricedToken { entry, route }) => {
+                    prices.insert(token.clone(), entry);
+                    routes.insert(token, route);
                 }
                 TokenPricingOutcome::Failed(error) => {
                     failed_items.push(FailedItem { key: token.to_string(), error });
@@ -591,7 +675,14 @@ impl<'a> PricingPassState<'a> {
             );
         }
         let new_flagged_components = std::mem::take(&mut self.new_flagged_components);
-        PricingPassOutcome { prices, block, failed_items, unattempted, new_flagged_components }
+        PricingPassOutcome {
+            prices,
+            routes,
+            block,
+            failed_items,
+            unattempted,
+            new_flagged_components,
+        }
     }
 
     /// Prices one token as the arithmetic mean of its buy price and its sell price, kept as an
@@ -602,16 +693,13 @@ impl<'a> PricingPassState<'a> {
         token: &Address,
         buy_leg: &ReachedToken,
         sell_out: BigUint,
-    ) -> TokenPriceEntry {
-        // The legs are discarded after the mean; this is the only place their divergence —
-        // sell_out under the probe amount is the round-trip loss — can be observed.
+    ) -> PricedToken {
         trace!(%token, buy_out = %buy_leg.amount_out, sell_out = %sell_out, "token priced");
-        let path_components = collect_route_components(buy_leg);
         let mid_price = Price {
             numerator: &buy_leg.amount_out * (&self.computation.probe_amount + &sell_out),
-            denominator: BigUint::from(2u8) * &self.computation.probe_amount * sell_out,
+            denominator: BigUint::from(2u8) * &self.computation.probe_amount * &sell_out,
         };
-        TokenPriceEntry { price: mid_price, path_components }
+        build_priced_token(mid_price, buy_leg, sell_out)
     }
 
     /// Prices a token with a sell solve of its bought amount back to the gas token. The stored
@@ -624,19 +712,23 @@ impl<'a> PricingPassState<'a> {
     ) -> TokenPricingOutcome {
         let (SellSolveBuyLeg::Trusted(route) | SellSolveBuyLeg::ThroughFlaggedPool(route)) =
             buy_leg;
-        let (sell_out, sell_components) = match self.solve_sell_leg(token, route.amount_out.clone())
-        {
+        let (sell_out, sell_route) = match self.solve_sell_leg(token, route.amount_out.clone()) {
             Ok(sell_leg) => sell_leg,
             Err(error) => return TokenPricingOutcome::Failed(error),
         };
-        let mut entry = match buy_leg {
+        let mut priced = match buy_leg {
             SellSolveBuyLeg::Trusted(route) => self.build_price_entry(token, route, sell_out),
             SellSolveBuyLeg::ThroughFlaggedPool(route) => build_sell_rate_entry(route, sell_out),
         };
-        entry
+        priced
+            .entry
             .path_components
-            .extend(sell_components);
-        TokenPricingOutcome::Priced(entry)
+            .extend(sell_route.iter().cloned());
+        priced
+            .route
+            .components
+            .extend(sell_route);
+        TokenPricingOutcome::Priced(priced)
     }
 
     /// Sells the bought amount back along the buy route, hop by hop in reverse. Returns
@@ -672,13 +764,14 @@ impl<'a> PricingPassState<'a> {
     }
 
     /// Re-roots the pass's shared snapshot at `token`, solves the route selling `amount` of
-    /// `token` back to the gas token, and returns what it delivers with its components. Returns
-    /// `MissingSellRoute` with the reason to help explain failures on the same block.
+    /// `token` back to the gas token, and returns what it delivers with its components in swap
+    /// order. Returns `MissingSellRoute` with the reason to help explain failures on the same
+    /// block.
     fn solve_sell_leg(
         &mut self,
         token: &Address,
         amount: BigUint,
-    ) -> Result<(BigUint, FxHashSet<ComponentId>), FailedItemError> {
+    ) -> Result<(BigUint, Vec<ComponentId>), FailedItemError> {
         let token_node = *self
             .token_nodes
             .get(token)
@@ -726,6 +819,8 @@ impl<'a> PricingPassState<'a> {
 struct PricingPassOutcome {
     /// Priced tokens with the components that must re-price them when they change.
     prices: FxHashMap<Address, TokenPriceEntry>,
+    /// The route behind each priced token's price.
+    routes: FxHashMap<Address, PriceRoute>,
     /// The block the market snapshot was taken at.
     block: u64,
     /// Tokens that were attempted and could not be priced: bought, but no sell route back.
@@ -800,6 +895,25 @@ struct PassHistory {
     /// The flagged components, each with the number of the pricing pass that flagged it. The first
     /// buy pass of the next `FLAGGED_POOL_PASSES` pricing passes leaves the component out.
     flagged_components: FxHashMap<ComponentId, u64>,
+    /// The route behind each stored price, for the price jump warning.
+    routes: FxHashMap<Address, PriceRoute>,
+}
+
+impl PassHistory {
+    /// Stores the routes of the prices a pass produced, and forgets the routes of the tokens
+    /// that have no price in `stored`.
+    fn record_routes(
+        &mut self,
+        routes: &FxHashMap<Address, PriceRoute>,
+        stored: &TokenPricesWithDeps,
+    ) {
+        for (token, route) in routes {
+            self.routes
+                .insert(token.clone(), route.clone());
+        }
+        self.routes
+            .retain(|token, _| stored.contains_key(token));
+    }
 }
 
 /// How much of a pass the interval allows right now.
@@ -1186,6 +1300,7 @@ impl TokenGasPriceComputation {
         if ordered.is_empty() {
             return Ok(PricingPassOutcome {
                 prices: FxHashMap::default(),
+                routes: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
                 unattempted: universe,
@@ -1241,6 +1356,7 @@ impl TokenGasPriceComputation {
             warn!(unattempted = universe.len(), "no subgraph around the gas token");
             return Ok(PricingPassOutcome {
                 prices: FxHashMap::default(),
+                routes: FxHashMap::default(),
                 block,
                 failed_items: Vec::new(),
                 unattempted: universe,
@@ -1398,6 +1514,8 @@ impl TokenGasPriceComputation {
                 // Everything the pass priced, not only what the change pointed at: the pass
                 // ranks over the whole market, so it reaches tokens this block's change never
                 // named — which is the only way a token that has no price gets one.
+                let mut history = self.lock_pass_history();
+                warn_on_price_jumps(deps, &history.routes, &solved);
                 for (token, entry) in &solved.prices {
                     result.insert(token.clone(), entry.price.clone());
                     deps.insert(token.clone(), entry.clone());
@@ -1419,6 +1537,7 @@ impl TokenGasPriceComputation {
                     result.remove(&token);
                     deps.remove(&token);
                 }
+                history.record_routes(&solved.routes, deps);
             });
         if !edited {
             warn!("token price dependencies vanished between the read and the write");
@@ -1498,6 +1617,8 @@ impl TokenGasPriceComputation {
         );
         token_prices.insert(self.gas_token.clone(), gas_token_price);
 
+        self.lock_pass_history()
+            .record_routes(&solved.routes, &token_prices_with_deps);
         store
             .write()
             .await
@@ -2858,6 +2979,13 @@ mod tests {
                 .contains_key(&oneway.address),
             "a dropped token must leave the dependency map too"
         );
+        assert!(
+            !computation
+                .lock_pass_history()
+                .routes
+                .contains_key(&oneway.address),
+            "a dropped token must leave the stored routes too"
+        );
     }
 
     #[tokio::test]
@@ -2885,6 +3013,66 @@ mod tests {
             .expect("deps are stored")[&usdc.address]
             .path_components;
         assert_eq!(deps, &FxHashSet::from_iter(["direct".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_route_and_amounts() {
+        // USDC is reachable only through ETH->MID->USDC. Fee-free pools buy 1500 USDC with one
+        // ETH probe and sell it back for the whole probe. A mock pool quotes its rate in address
+        // order, so MID takes the lower address.
+        let eth = token(0, "ETH");
+        let mid = token(1, "MID");
+        let usdc = token(2, "USDC");
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_mid", &eth, &mid, MockProtocolSim::new(1.0)),
+            ("mid_usdc", &mid, &usdc, MockProtocolSim::new(1500.0)),
+        ]);
+        let store = DerivedData::new_shared();
+        let computation = computation_for(&eth.address);
+        computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+
+        let history = computation.lock_pass_history();
+        let route = &history.routes[&usdc.address];
+        assert_eq!(route.components, vec!["eth_mid".to_string(), "mid_usdc".to_string()]);
+        let buy_amount_out = route
+            .buy_amount_out
+            .to_f64()
+            .expect("amount fits in f64");
+        let sell_amount_out = route
+            .sell_amount_out
+            .to_f64()
+            .expect("amount fits in f64");
+        assert!((buy_amount_out / PROBE_AMOUNT as f64 - 1500.0).abs() < 1e-6);
+        assert!((sell_amount_out / PROBE_AMOUNT as f64 - 1.0).abs() < 1e-6);
+    }
+
+    #[rstest::rstest]
+    #[case::up_ten_percent(100, 110, Some(1.1))]
+    #[case::down_ten_percent(110, 100, Some(100.0 / 110.0))]
+    #[case::up_five_percent(100, 105, None)]
+    #[case::unchanged(100, 100, None)]
+    #[case::stored_zero(0, 100, None)]
+    #[case::new_zero(100, 0, None)]
+    fn test_price_jump_ratio(
+        #[case] stored_numerator: u64,
+        #[case] new_numerator: u64,
+        #[case] expected: Option<f64>,
+    ) {
+        let price = |numerator: u64| Price {
+            numerator: BigUint::from(numerator),
+            denominator: BigUint::from(100u64),
+        };
+
+        let jump = price_jump_ratio(&price(stored_numerator), &price(new_numerator));
+
+        match (jump, expected) {
+            (Some(jump), Some(expected)) => assert!((jump - expected).abs() < 1e-9),
+            (None, None) => {}
+            (jump, expected) => panic!("expected {expected:?}, got {jump:?}"),
+        }
     }
 
     /// A pool that fails the reverse sell check: one whose output cap stops the reverse sell, or
@@ -3020,6 +3208,11 @@ mod tests {
             .expect("deps are stored")[&y.address]
             .path_components;
         assert_eq!(deps, &FxHashSet::from_iter(["skewed".to_string()]));
+        let history = computation.lock_pass_history();
+        assert_eq!(
+            history.routes[&y.address].components,
+            vec!["skewed".to_string(), "skewed".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -3055,6 +3248,7 @@ mod tests {
         let record_pass = |new_flagged_components: FxHashSet<ComponentId>| {
             let outcome = PricingPassOutcome {
                 prices: FxHashMap::default(),
+                routes: FxHashMap::default(),
                 block: 0,
                 failed_items: Vec::new(),
                 unattempted: FxHashSet::default(),

@@ -20,6 +20,9 @@
 //! instance, or the [custom algorithm guide](https://docs.fynd.xyz/guides/custom-algorithm)
 //! to implement your own routing strategy.
 
+/// Route-finding algorithms. Includes [`MostLiquidAlgorithm`],
+/// [`algorithm::BellmanFordAlgorithm`], [`PathFrankWolfeAlgorithm`],
+/// [`algorithm::WaterFillAlgorithm`], and the pluggable [`Algorithm`] trait.
 pub mod algorithm;
 /// Basis-point arithmetic shared by the modules that scale an amount by a rate.
 mod bps;
@@ -35,6 +38,7 @@ pub mod feed;
 /// Graph management for algorithms. Provides [`GraphManager`](graph::GraphManager)
 /// trait and the reusable [`PetgraphStableDiGraphManager`](graph::PetgraphStableDiGraphManager).
 pub mod graph;
+/// External price validation for quotes.
 pub mod price_guard;
 /// Re-execute an already-built route against a (possibly newer) market state.
 pub mod replay;
@@ -44,9 +48,11 @@ mod rpc;
 pub mod simulation;
 /// [`FyndBuilder`] assembles the full pipeline and returns a [`Solver`].
 pub mod solver;
+/// Core domain types: [`Order`], [`Route`], [`Quote`], etc.
 pub mod types;
 /// Multi-threaded solver pool management with pluggable algorithm registry.
 pub mod worker_pool;
+/// Request orchestration: fans out orders to all solver pools and selects the best result.
 pub mod worker_pool_router;
 
 #[cfg(test)]
@@ -72,7 +78,7 @@ pub use rustc_hash;
 pub use simulation::simulator::SimulationPurpose;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
-/// [`FyndBuilder::build_with_pending`].
+/// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
 pub use tycho_simulation::evm::pending::PendingBlockProcessor;
 /// Error type produced by [`PendingBlockProcessor`] when simulating a pending bundle.
 pub use tycho_simulation::evm::pending::PendingError;
@@ -84,7 +90,7 @@ pub use tycho_simulation::evm::pending::PendingUpdate;
 #[cfg(feature = "experimental")]
 pub use tycho_simulation::evm::stream::BlockStepController;
 /// Implement this trait and register it via
-/// [`FyndBuilder::with_pending_indexer`]
+/// [`FyndBuilder::with_pending_indexer`](solver::FyndBuilder::with_pending_indexer)
 /// to receive raw transaction deltas during pending-block simulation.
 pub use tycho_simulation::tycho_common::traits::TxDeltaIndexer;
 pub use types::{

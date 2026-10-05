@@ -1,4 +1,15 @@
 
+## [0.110.8](https://github.com/propeller-heads/fynd/compare/0.110.7...0.110.8) (2026-10-05)
+
+### Features
+
+* **token-prices:** warn when a token price jumps 10% or more ([ea902a5](https://github.com/propeller-heads/fynd/commit/ea902a552d789804fc062621671ab9f6ec992f3a))
+
+### Bug Fixes
+
+* **core:** allow the deprecated fetch_update on Rust 1.98 ([3d9608f](https://github.com/propeller-heads/fynd/commit/3d9608f8e00d5f5ea77f830955f1a484e040f931))
+
+
 ## [0.110.7](https://github.com/propeller-heads/fynd/compare/0.110.6...0.110.7) (2026-09-30)
 
 ### Features
