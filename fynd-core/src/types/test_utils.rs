@@ -5,6 +5,8 @@
 //! `algorithm` and `no_route_cause` among them — which is what a test asserting on those
 //! fields needs to set.
 
+use std::time::{Duration, Instant};
+
 use num_bigint::BigUint;
 
 use crate::types::{
@@ -112,4 +114,10 @@ impl OrderQuoteBuilder {
         }
         quote
     }
+}
+
+/// A deadline long enough that a test never reaches it, so the test measures the queue or the
+/// worker rather than the router giving up.
+pub fn long_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(60)
 }

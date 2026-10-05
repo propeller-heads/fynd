@@ -130,7 +130,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus, SingleOrderQuote, SolveParams,
+        types::test_utils::long_deadline, BlockInfo, Order, OrderQuote, OrderSide, QuoteStatus,
+        SingleOrderQuote, SolveParams,
     };
 
     // -------------------------------------------------------------------------
@@ -139,12 +140,6 @@ mod tests {
 
     fn make_address(byte: u8) -> Address {
         Address::from([byte; 20])
-    }
-
-    /// A deadline long enough that these tests never reach it, so they measure the queue
-    /// rather than the router giving up.
-    fn long_deadline() -> Instant {
-        Instant::now() + std::time::Duration::from_secs(60)
     }
 
     fn make_order() -> Order {
