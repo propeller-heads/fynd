@@ -633,6 +633,17 @@ impl EncodingOptions {
         self
     }
 
+    /// Returns these options with `slippage` as the slippage tolerance. The other options do not
+    /// change.
+    ///
+    /// # Arguments
+    ///
+    /// * `slippage` - The slippage tolerance, as a fraction: `0.005` is 0.5%.
+    pub fn with_slippage(mut self, slippage: f64) -> Self {
+        self.slippage = slippage;
+        self
+    }
+
     /// Returns the slippage tolerance.
     pub fn slippage(&self) -> f64 {
         self.slippage
@@ -1269,10 +1280,65 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
-    /// Overrides the output amount (used by `combine_with_surplus` to pin to the committed
-    /// reference).
-    pub(crate) fn set_amount_out(&mut self, value: BigUint) {
+    /// Sets the input amount.
+    ///
+    /// Clears the transaction, the fee breakdown and the simulation result, because they were built
+    /// for the previous amount. Encode the quote again after this call.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The new input amount, in the smallest unit of the input token.
+    pub fn set_amount_in(&mut self, value: BigUint) {
+        self.amount_in = value;
+        self.transaction = None;
+        self.fee_breakdown = None;
+        self.simulation_result = None;
+    }
+
+    /// Sets the output amount, and changes `amount_out_net_gas` by the same difference.
+    ///
+    /// When `amount_out_net_gas` is zero, it stays zero. The transaction and the fee breakdown do
+    /// not change, so the caller must keep them consistent with the new amount.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The new output amount, in the smallest unit of the output token.
+    pub fn set_amount_out(&mut self, value: BigUint) {
+        if value >= self.amount_out {
+            if self.amount_out_net_gas > BigUint::ZERO {
+                self.amount_out_net_gas += &value - &self.amount_out;
+            }
+        } else {
+            let lost = &self.amount_out - &value;
+            self.amount_out_net_gas = if self.amount_out_net_gas > lost {
+                &self.amount_out_net_gas - lost
+            } else {
+                BigUint::ZERO
+            };
+        }
         self.amount_out = value;
+    }
+
+    /// Changes a solved quote into a quote without a route.
+    ///
+    /// Sets the status to `status`. Clears the route, the transaction, the fee breakdown, the
+    /// simulation result and the surplus, and sets the output amounts and the gas to zero. The
+    /// input amount does not change.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The status to report, for example [`QuoteStatus::NoRouteFound`].
+    pub fn retract(&mut self, status: QuoteStatus) {
+        self.status = status;
+        self.route = None;
+        self.transaction = None;
+        self.fee_breakdown = None;
+        self.simulation_result = None;
+        self.surplus = None;
+        self.price_impact_bps = None;
+        self.amount_out = BigUint::ZERO;
+        self.amount_out_net_gas = BigUint::ZERO;
+        self.gas_estimate = BigUint::ZERO;
     }
 
     /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).
@@ -1420,10 +1486,22 @@ impl OrderQuote {
     }
 }
 
-/// Outcome of simulating an encoded quote on the latest block.
+/// One event log a simulated call emitted, undecoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventLog {
+    /// The contract that emitted the event.
+    pub address: Bytes,
+    /// The indexed topics, the event signature first.
+    pub topics: Vec<Bytes>,
+    /// The ABI-encoded non-indexed fields.
+    pub data: Bytes,
+}
+
+/// Outcome of simulating an encoded quote on the block it was priced on.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SimulationResult {
     /// The simulated router call returned an amount and consumed gas.
     Success {
@@ -1432,10 +1510,23 @@ pub enum SimulationResult {
         amount_out: BigUint,
         /// Gas consumed by the simulated call.
         gas_used: u64,
+        /// Every event the call emitted, in emission order. Not serialized.
+        #[serde(skip)]
+        logs: Vec<EventLog>,
     },
-    /// The simulated router call could not complete.
+    /// The simulated router call ran and reverted.
+    Reverted {
+        /// Readable reason the simulated call reverted.
+        reason: String,
+    },
+    /// The simulated router call could not be run: setup, transport or timeout.
     Failure {
-        /// Readable reason the simulated call failed.
+        /// Readable reason the simulation did not run.
+        reason: String,
+    },
+    /// The node did not have the block the quote was priced on, even after the retries.
+    BlockUnavailable {
+        /// Readable reason the node gave.
         reason: String,
     },
 }
@@ -2495,6 +2586,80 @@ mod tests {
 
         assert_eq!(quote.surplus_amount(), Some(&surplus));
         assert_eq!(quote.committed_amount_out(), Some(&committed));
+    }
+
+    fn make_executable_quote() -> OrderQuote {
+        let mut quote = make_quote(990)
+            .with_route(make_route(vec![(0x01, 0x02)]))
+            .with_price_impact_bps(5)
+            .with_surplus(SurplusInfo::new(BigUint::from(15u64), BigUint::from(975u64)));
+        quote.set_transaction(Transaction::new(Bytes::default(), BigUint::ZERO, vec![1, 2, 3]));
+        quote.set_simulation_result(SimulationResult::Failure { reason: "test".to_string() });
+        quote
+    }
+
+    #[test]
+    fn test_retract_leaves_only_the_status_and_the_input() {
+        let mut quote = make_executable_quote();
+        let amount_in = quote.amount_in().clone();
+
+        quote.retract(QuoteStatus::NoRouteFound);
+
+        assert_eq!(quote.status(), QuoteStatus::NoRouteFound);
+        assert!(quote.route().is_none());
+        assert!(quote.transaction().is_none());
+        assert!(quote.fee_breakdown().is_none());
+        assert!(quote.simulation_result().is_none());
+        assert!(quote.surplus_amount().is_none());
+        assert!(quote.price_impact_bps().is_none());
+        assert_eq!(*quote.amount_out(), BigUint::ZERO);
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::ZERO);
+        assert_eq!(*quote.gas_estimate(), BigUint::ZERO);
+        assert_eq!(*quote.amount_in(), amount_in);
+    }
+
+    #[test]
+    fn test_set_amount_in_drops_what_was_encoded_for_the_old_amount() {
+        let mut quote = make_executable_quote();
+
+        quote.set_amount_in(BigUint::from(1_053u64));
+
+        assert_eq!(*quote.amount_in(), BigUint::from(1_053u64));
+        assert!(quote.transaction().is_none(), "the calldata pulled the old amount");
+        assert!(quote.simulation_result().is_none());
+        assert!(quote.route().is_some(), "the route still holds");
+    }
+
+    #[test]
+    fn test_set_amount_out_moves_the_net_output_with_it() {
+        // 990 out, 40 of it spent on gas.
+        let mut quote = make_executable_quote();
+        quote.set_amount_out_net_gas(BigUint::from(950u64));
+
+        quote.set_amount_out(BigUint::from(970u64));
+        assert_eq!(*quote.amount_out(), BigUint::from(970u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::from(930u64));
+        assert!(quote.transaction().is_some(), "the calldata is the caller's to keep");
+
+        quote.set_amount_out(BigUint::from(990u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::from(950u64));
+
+        quote.set_amount_out(BigUint::from(10u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::ZERO, "gas exceeds the output");
+        quote.set_amount_out(BigUint::from(20u64));
+        assert_eq!(*quote.amount_out_net_gas(), BigUint::ZERO, "by an amount no longer known");
+    }
+
+    #[test]
+    fn test_with_slippage_keeps_the_other_options() {
+        let options = EncodingOptions::new(0.005)
+            .with_simulation()
+            .with_calldata_watermark(b"fee".to_vec())
+            .with_slippage(0.02);
+
+        assert_eq!(options.slippage(), 0.02);
+        assert!(options.simulate());
+        assert_eq!(options.calldata_watermark(), Some(&b"fee"[..]));
     }
 
     #[test]

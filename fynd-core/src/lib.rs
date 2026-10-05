@@ -75,6 +75,7 @@ pub use replay::{replay_route, ReplayError, RouteReplay};
 // Re-exported so an external implementor names the same types without matching our
 // `rustc-hash` version itself.
 pub use rustc_hash;
+pub use simulation::simulator::SimulationPurpose;
 pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
@@ -93,9 +94,9 @@ pub use tycho_simulation::evm::stream::BlockStepController;
 /// to receive raw transaction deltas during pending-block simulation.
 pub use tycho_simulation::tycho_common::traits::TxDeltaIndexer;
 pub use types::{
-    BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, EncodingOptionsError, FeeBreakdown,
-    Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote,
-    QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
+    BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, EncodingOptionsError, EventLog,
+    FeeBreakdown, Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails, PermitSingle,
+    Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
     RouteValidationError, SimulationResult, SingleOrderQuote, SolveError, SolveParams, SolveResult,
     SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
 };

@@ -62,6 +62,19 @@ pub enum ReadLabeledError {
     NotFound(StateLabel),
 }
 
+/// A read-only handle on [`MarketData`].
+///
+/// Cloning is cheap. Every clone reads the same data as the [`MarketData`] it came from.
+#[derive(Clone)]
+pub struct MarketReader(MarketData);
+
+impl MarketReader {
+    /// Acquires a base view of the market data with no overlay applied.
+    pub async fn read(&self) -> MarketDataView<'_> {
+        self.0.read().await
+    }
+}
+
 /// The main entry point for accessing market data.
 ///
 /// Cloning is cheap — all clones share the same underlying data and overlay registry.
@@ -88,6 +101,11 @@ impl MarketData {
     /// Acquires a base view of the market data with no overlay applied.
     pub async fn read(&self) -> MarketDataView<'_> {
         MarketDataView { guard: self.data.read().await, overlay: None }
+    }
+
+    /// Returns a read-only handle on the same data.
+    pub fn reader(&self) -> MarketReader {
+        MarketReader(self.clone())
     }
 
     /// Acquires an overlay-aware view scoped to `label`.

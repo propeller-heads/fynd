@@ -801,6 +801,8 @@ mod tests {
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
             #[cfg(feature = "experimental")]
             market_data,
+            #[cfg(feature = "experimental")]
+            fynd_core::feed::events::MarketEvents::new(tokio::sync::broadcast::channel(16).0),
         )
     }
 

@@ -49,11 +49,14 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    bps, encoding::encoder::Encoder, feed::exclusivity::is_exclusive,
-    price_guard::guard::PriceGuard, simulation::simulator::QuoteSimulator,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
-    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo, Swap,
+    bps,
+    encoding::encoder::Encoder,
+    feed::exclusivity::is_exclusive,
+    price_guard::guard::PriceGuard,
+    simulation::simulator::{QuoteSimulator, SimulationPurpose},
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -607,8 +610,31 @@ impl WorkerPoolRouter {
     /// started without `--enable-simulation`.
     pub async fn simulate_quotes(
         &self,
+        order_quotes: Vec<OrderQuote>,
+        encoding_options: &EncodingOptions,
+    ) -> Result<Vec<OrderQuote>, SolveError> {
+        self.simulate_quotes_for(order_quotes, encoding_options, SimulationPurpose::Quote)
+            .await
+    }
+
+    /// Simulates quotes like [`Self::simulate_quotes`], and records the metrics under `purpose`.
+    ///
+    /// # Arguments
+    ///
+    /// * `order_quotes` - The encoded quotes to simulate.
+    /// * `encoding_options` - The encoding options of the request. Simulation runs only when they
+    ///   ask for it.
+    /// * `purpose` - Why the quotes are simulated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolveError::Internal`] when the options ask for simulation and the server was
+    /// started without `--enable-simulation`.
+    pub async fn simulate_quotes_for(
+        &self,
         mut order_quotes: Vec<OrderQuote>,
         encoding_options: &EncodingOptions,
+        purpose: SimulationPurpose,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         if !encoding_options.simulate() {
             return Ok(order_quotes);
@@ -622,7 +648,7 @@ impl WorkerPoolRouter {
                 .map(|quote| async move {
                     if quote.status() == QuoteStatus::Success {
                         let result = simulator
-                            .simulate_attempt(quote)
+                            .simulate_attempt(quote, purpose)
                             .await
                             .into_result();
                         quote.set_simulation_result(result);
@@ -1811,7 +1837,7 @@ mod tests {
         let simulated = quote.orders()[0]
             .simulation_result()
             .expect("a successful quote carries a simulation result");
-        assert!(matches!(simulated, SimulationResult::Success { amount_out, gas_used }
+        assert!(matches!(simulated, SimulationResult::Success { amount_out, gas_used, .. }
                 if amount_out == &BigUint::from(4_242u64) && *gas_used == 123_456));
     }
 
@@ -1860,7 +1886,7 @@ mod tests {
         let simulated = quote.orders()[0]
             .simulation_result()
             .expect("a reverted call still produces a simulation result");
-        assert!(matches!(simulated, SimulationResult::Failure { .. }));
+        assert!(matches!(simulated, SimulationResult::Reverted { .. }));
         assert!(asserter.read_q().is_empty(), "the revert is reported from the single call");
     }
 
@@ -3731,6 +3757,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
             gas_used: 120_000,
+            logs: Vec::new(),
         });
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -3797,6 +3824,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(1001u64),
             gas_used: 120_000,
+            logs: Vec::new(),
         });
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -3834,6 +3862,7 @@ mod tests {
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
             gas_used: 120_000,
+            logs: Vec::new(),
         });
 
         let payloads = capture_winning_protocols(&quote);

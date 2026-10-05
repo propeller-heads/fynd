@@ -24,7 +24,10 @@ use metrics::{counter, histogram};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rustc_hash::FxHashMap;
-use tokio::{sync::OnceCell, time::timeout};
+use tokio::{
+    sync::OnceCell,
+    time::{sleep, timeout, Instant},
+};
 use tracing::debug;
 use tycho_simulation::tycho_common::models::Chain;
 
@@ -36,7 +39,7 @@ use crate::{
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
     solver::defaults::SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
-    OrderQuote, SimulationResult,
+    EventLog, OrderQuote, SimulationResult,
 };
 
 /// Balance and allowance every simulated account is given.
@@ -86,16 +89,42 @@ const SIMULATION_TRACE_TIMEOUT: Duration = Duration::from_millis(500);
 /// One token's layout, or the reason this build cannot resolve one, resolved once per token.
 type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
 
-/// The call a simulation runs.
-///
-/// The four travel together and always come from the same quote, so they are passed as one rather
-/// than as four parameters a caller could pair up wrongly.
+/// The call that a simulation runs. All fields come from one quote.
 #[derive(Clone, Copy)]
 pub(crate) struct SimulatedCall<'a> {
+    /// The account that sends the call.
     pub(crate) sender: Address,
+    /// The router contract that the call goes to.
     pub(crate) router: Address,
+    /// The amount of native token that the call sends.
     pub(crate) value: U256,
+    /// The encoded router call.
     pub(crate) data: &'a [u8],
+    /// The block whose state the call runs on: the block that the quote was priced on.
+    pub(crate) block: BlockNumberOrTag,
+}
+
+/// Why a quote is simulated.
+///
+/// The simulation metrics carry it as the `purpose` label, so that dashboards can show client
+/// quotes apart from other simulations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SimulationPurpose {
+    /// A client asked to simulate the quote.
+    Quote,
+    /// The service simulates the quote to measure the transfer fee of a token.
+    FeeTokenSample,
+}
+
+impl SimulationPurpose {
+    /// Returns the value of the `purpose` label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Quote => "quote",
+            Self::FeeTokenSample => "fee_token_sample",
+        }
+    }
 }
 
 /// Simulates encoded quote transactions with temporary sender funding.
@@ -108,7 +137,18 @@ pub struct QuoteSimulator {
     layout_cache: Mutex<FxHashMap<Address, LayoutCell>>,
     native_token: Address,
     request_timeout: std::time::Duration,
+    /// Time between two blocks of the chain. It sets the longest wait for a block that the node
+    /// does not have yet.
+    block_time: Duration,
 }
+
+/// Wait before the first retry when the node does not have the quote's block. Each later wait is
+/// twice as long.
+const BLOCK_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
+/// Longest total wait for a block that the node does not have, in block times.
+const BLOCK_RETRY_BLOCKS: u32 = 2;
+/// Block time of a simulator that is built without a chain.
+const DEFAULT_BLOCK_TIME: Duration = Duration::from_secs(12);
 
 /// The transaction envelope a simulated call runs under.
 ///
@@ -144,19 +184,29 @@ impl SimulationEnvelope {
 
 pub(crate) enum SimulationAttempt {
     /// The simulated call completed.
-    Success { amount_out: BigUint, gas_used: u64 },
+    Success { amount_out: BigUint, gas_used: u64, logs: Vec<EventLog> },
     /// The simulated call reverted.
     Reverted { reason: String },
     /// Simulation could not be completed.
     Failure { reason: String },
+    /// The node did not have the quote's block, also after the retries.
+    BlockUnavailable { reason: String },
 }
 
 impl QuoteSimulator {
-    /// Creates a simulator that sends requests to `rpc_url` for `chain`.
+    /// Creates a simulator that sends its requests to `rpc_url`.
+    ///
+    /// # Arguments
+    ///
+    /// * `rpc_url` - The URL of a node that supports `eth_simulateV1` and `debug_traceCall`.
+    /// * `chain` - The chain of the node. It sets the native token and the block time.
+    /// * `request_timeout` - The time limit for the `eth_simulateV1` calls of one simulation,
+    ///   retries included.
     ///
     /// # Errors
     ///
-    /// Returns an error when `rpc_url` is not a valid URL or the chain has no native token.
+    /// Returns an error when `rpc_url` is not a valid URL, or when the chain has no native token or
+    /// no block time.
     pub fn new(
         rpc_url: &str,
         chain: Chain,
@@ -168,20 +218,33 @@ impl QuoteSimulator {
         let native_token = chain
             .try_native_token()
             .map_err(|error| format!("native token for {chain:?}: {error}"))?;
+        let block_time = chain
+            .try_block_time_secs()
+            .map_err(|error| format!("block time for {chain:?}: {error}"))?;
         Ok(Self::with_provider(
             ProviderBuilder::default().connect_http(url),
             Address::from_slice(native_token.address.as_ref()),
             request_timeout,
-        ))
+        )
+        .with_block_time(Duration::from_secs(block_time)))
     }
 
-    /// Simulates an encoded quote and reports its returned amount and gas used or a failure.
+    /// Simulates an encoded quote, and records the metrics of the result.
     ///
-    /// Records the outcome and, on success, how far the simulated amount sits from what the quote
-    /// promised. Instrumenting here rather than at the call site keeps every caller measured.
-    pub(crate) async fn simulate_attempt(&self, quote: &OrderQuote) -> SimulationAttempt {
+    /// The metrics carry `purpose` as a label. For a successful simulation, they also record how
+    /// far the simulated output is from the quoted output, and the gas that the call used.
+    ///
+    /// # Arguments
+    ///
+    /// * `quote` - The encoded quote to simulate.
+    /// * `purpose` - Why the quote is simulated.
+    pub(crate) async fn simulate_attempt(
+        &self,
+        quote: &OrderQuote,
+        purpose: SimulationPurpose,
+    ) -> SimulationAttempt {
         let attempt = self.attempt(quote).await;
-        record_outcome(quote, &attempt);
+        record_outcome(quote, &attempt, purpose);
         attempt
     }
 
@@ -224,37 +287,86 @@ impl QuoteSimulator {
                 .as_slice(),
         );
         self.simulate_within_timeout(
-            SimulatedCall { sender, router, value, data: transaction.data() },
+            SimulatedCall {
+                sender,
+                router,
+                value,
+                data: transaction.data(),
+                block: BlockNumberOrTag::Number(quote.block().number()),
+            },
             overrides,
             SimulationEnvelope::for_quote(quote),
         )
         .await
     }
 
-    /// Runs one simulated call, reporting a timeout as a failure rather than waiting forever.
+    /// Runs one simulated call on `call.block`, within the request timeout.
+    ///
+    /// When the node does not have that block yet, waits and tries again. The first wait is 500 ms,
+    /// and each later wait is twice as long. The retries stop when the waits add up to two block
+    /// times, or when the request timeout leaves no time for one more try.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The call to simulate.
+    /// * `overrides` - The state overrides that fund the sender.
+    /// * `envelope` - The gas limit and the gas price of the call.
+    ///
+    /// # Returns
+    ///
+    /// The result of the call, or [`SimulationAttempt::BlockUnavailable`] when the node still does
+    /// not have the block after the retries.
     pub(crate) async fn simulate_within_timeout(
         &self,
         call: SimulatedCall<'_>,
         overrides: StateOverride,
         envelope: SimulationEnvelope,
     ) -> SimulationAttempt {
-        match simulate_with_overrides(
-            &self.provider,
-            call,
-            overrides,
-            envelope,
-            self.request_timeout,
-        )
-        .await
-        {
-            CallOutcome::Success { amount_out, gas_used } => {
-                SimulationAttempt::Success { amount_out, gas_used }
+        let deadline = Instant::now() + self.request_timeout;
+        let budget = self.block_time * BLOCK_RETRY_BLOCKS;
+        let mut waited = Duration::ZERO;
+        let mut delay = BLOCK_RETRY_FIRST_DELAY;
+        loop {
+            let outcome = simulate_with_overrides(
+                &self.provider,
+                call,
+                overrides.clone(),
+                envelope,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await;
+            let CallOutcome::BlockUnavailable(reason) = outcome else {
+                return outcome.into_attempt();
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let pause = delay
+                .min(budget.saturating_sub(waited))
+                .min(remaining);
+            // A pause that leaves no time to ask again ends the wait.
+            if pause.is_zero() || pause >= remaining {
+                return SimulationAttempt::BlockUnavailable {
+                    reason: format!("{reason} (waited {waited:?})"),
+                };
             }
-            CallOutcome::Reverted { reason } => {
-                SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
-            }
-            CallOutcome::Failure(reason) => SimulationAttempt::Failure { reason },
+            debug!(
+                target: SIMULATION_OUTCOME_TARGET,
+                block = ?call.block,
+                ?waited,
+                ?pause,
+                "node does not have the block yet; asking again"
+            );
+            sleep(pause).await;
+            waited += pause;
+            delay *= 2;
         }
+    }
+
+    /// Returns this simulator with `block_time` as the time between two blocks.
+    ///
+    /// The block time sets the longest wait for a block that the node does not have yet.
+    pub(crate) fn with_block_time(mut self, block_time: Duration) -> Self {
+        self.block_time = block_time;
+        self
     }
 
     pub(crate) fn with_provider(
@@ -267,6 +379,7 @@ impl QuoteSimulator {
             layout_cache: Mutex::new(FxHashMap::default()),
             native_token,
             request_timeout,
+            block_time: DEFAULT_BLOCK_TIME,
         }
     }
 
@@ -344,12 +457,12 @@ impl QuoteSimulator {
 impl SimulationAttempt {
     pub(crate) fn into_result(self) -> SimulationResult {
         match self {
-            Self::Success { amount_out, gas_used } => {
-                SimulationResult::Success { amount_out, gas_used }
+            Self::Success { amount_out, gas_used, logs } => {
+                SimulationResult::Success { amount_out, gas_used, logs }
             }
-            Self::Reverted { reason } | Self::Failure { reason } => {
-                SimulationResult::Failure { reason }
-            }
+            Self::Reverted { reason } => SimulationResult::Reverted { reason },
+            Self::Failure { reason } => SimulationResult::Failure { reason },
+            Self::BlockUnavailable { reason } => SimulationResult::BlockUnavailable { reason },
         }
     }
 }
@@ -380,31 +493,38 @@ fn log_outcome(quote: &OrderQuote, outcome: &'static str, reason: &str) -> &'sta
 /// A revert and a failure are counted apart because they call for different work: a revert means
 /// the route the solver priced does not execute, while a failure means the simulation itself did
 /// not run, so it says nothing about the route. Both carry the winning pool and algorithm, so a
-/// rise in either can be traced to the solver that produced the route.
-fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
+/// rise in either can be traced to the solver that produced the route. Every metric also carries
+/// the `purpose` label.
+fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt, purpose: SimulationPurpose) {
     let pool = quote.worker_pool().to_string();
     let algorithm = quote.algorithm().to_string();
+    let purpose = purpose.label();
     let outcome = match attempt {
-        SimulationAttempt::Success { amount_out, gas_used } => {
+        SimulationAttempt::Success { amount_out, gas_used, .. } => {
             if let Some(deviation) = deviation_bps(quote, amount_out) {
                 histogram!(
                     "quote_simulation_deviation_bps",
                     "pool" => pool.clone(),
-                    "algorithm" => algorithm.clone()
+                    "algorithm" => algorithm.clone(),
+                    "purpose" => purpose
                 )
                 .record(deviation);
             }
-            record_gas(quote, *gas_used, &pool, &algorithm);
+            record_gas(quote, *gas_used, &pool, &algorithm, purpose);
             "success"
         }
         SimulationAttempt::Reverted { reason } => log_outcome(quote, "reverted", reason),
         SimulationAttempt::Failure { reason } => log_outcome(quote, "failed", reason),
+        SimulationAttempt::BlockUnavailable { reason } => {
+            log_outcome(quote, "block_unavailable", reason)
+        }
     };
     counter!(
         "quote_simulations_total",
         "outcome" => outcome,
         "pool" => pool,
-        "algorithm" => algorithm
+        "algorithm" => algorithm,
+        "purpose" => purpose
     )
     .increment(1);
 }
@@ -413,19 +533,27 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
 ///
 /// Both are recorded for the same successful simulations only, so the two series compare like
 /// for like. A reverted or failed call has no gas figure to set against the estimate.
-fn record_gas(quote: &OrderQuote, gas_used: u64, pool: &str, algorithm: &str) {
+fn record_gas(
+    quote: &OrderQuote,
+    gas_used: u64,
+    pool: &str,
+    algorithm: &str,
+    purpose: &'static str,
+) {
     if let Some(gas_estimate) = quote.gas_estimate().to_f64() {
         histogram!(
             "quote_simulation_gas_estimate",
             "pool" => pool.to_string(),
-            "algorithm" => algorithm.to_string()
+            "algorithm" => algorithm.to_string(),
+            "purpose" => purpose
         )
         .record(gas_estimate);
     }
     histogram!(
         "quote_simulation_gas_used",
         "pool" => pool.to_string(),
-        "algorithm" => algorithm.to_string()
+        "algorithm" => algorithm.to_string(),
+        "purpose" => purpose
     )
     .record(gas_used as f64);
 }
@@ -437,11 +565,11 @@ fn failure_with(reason: String) -> SimulationAttempt {
     SimulationAttempt::Failure { reason }
 }
 
-/// Block environment for a simulated call.
+/// Returns the block fields that the simulation sets itself.
 ///
-/// `eth_simulateV1` builds on the real head, so the block number, timestamp, base fee, chain id and
-/// the ancestor hashes `blockhash` reads are already the ones the next block will carry. What it
-/// leaves at zero is what a pool can read to recognise a simulation, so those are set here.
+/// `eth_simulateV1` takes the other block fields from the block that it runs on. It leaves the
+/// coinbase and `prevrandao` at zero, and a pool can read these to detect a simulation. This sets
+/// them, and the block gas limit, to realistic values.
 fn block_overrides() -> BlockOverrides {
     BlockOverrides {
         coinbase: Some(SIMULATION_COINBASE),
@@ -451,12 +579,11 @@ fn block_overrides() -> BlockOverrides {
     }
 }
 
-/// The same environment, reporting the height and clock a simulated block actually carried.
+/// Returns `environment` with the block number and the timestamp that the simulated block used.
 ///
-/// `eth_simulateV1` numbers its own block on top of the head, so the number cannot be set in
-/// advance: a block landing between the solve and the simulation makes any prediction collide
-/// with the head, which the node refuses outright. It reports what it used, so the trace is
-/// pinned to that rather than to a guess.
+/// The trace of a revert must run in the same block environment as the simulation.
+/// `eth_simulateV1` picks the number of its block itself, so the caller takes `number` and
+/// `timestamp` from its response.
 fn executed_in(environment: BlockOverrides, number: u64, timestamp: u64) -> BlockOverrides {
     BlockOverrides { number: Some(U256::from(number)), time: Some(timestamp), ..environment }
 }
@@ -492,13 +619,21 @@ async fn simulate_with_overrides(
             .with_block_overrides(environment.clone())
             .call(call.clone()),
     );
-    let response = match timeout(request_timeout, provider.simulate(&payload)).await {
+    let response = match timeout(
+        request_timeout,
+        provider
+            .simulate(&payload)
+            .block_id(simulated.block.into()),
+    )
+    .await
+    {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
-            return CallOutcome::Failure(format!(
-                "simulation eth_simulateV1 failed: {}",
-                rpc_error_reason(&error)
-            ))
+            let reason = format!("simulation eth_simulateV1 failed: {}", rpc_error_reason(&error));
+            if is_block_unavailable(&error) {
+                return CallOutcome::BlockUnavailable(reason);
+            }
+            return CallOutcome::Failure(reason);
         }
         Err(_) => {
             return CallOutcome::Failure(format!(
@@ -531,6 +666,7 @@ async fn simulate_with_overrides(
             traced_revert_reason(
                 provider,
                 call,
+                simulated.block,
                 overrides,
                 executed_in(environment, block.inner.header.number, block.inner.header.timestamp),
             ),
@@ -550,7 +686,26 @@ async fn simulate_with_overrides(
     CallOutcome::Success {
         amount_out: BigUint::from_bytes_be(&amount.to_be_bytes::<32>()),
         gas_used: result.gas_used,
+        logs: event_logs(&result.logs),
     }
+}
+
+/// Converts the logs that the node returned to `EventLog`s, in the order that the call emitted
+/// them.
+fn event_logs(logs: &[alloy::rpc::types::Log]) -> Vec<EventLog> {
+    let mut events = Vec::with_capacity(logs.len());
+    for log in logs {
+        let mut topics = Vec::with_capacity(log.topics().len());
+        for topic in log.topics() {
+            topics.push(topic.to_vec().into());
+        }
+        events.push(EventLog {
+            address: log.address().to_vec().into(),
+            topics,
+            data: log.data().data.to_vec().into(),
+        });
+    }
+    events
 }
 
 /// What one simulated call came back with.
@@ -558,6 +713,7 @@ enum CallOutcome {
     Success {
         amount_out: BigUint,
         gas_used: u64,
+        logs: Vec<EventLog>,
     },
     /// The call reverted, with the best reason available: the payload's own error, or the one the
     /// trace recovered, or the node's message.
@@ -565,6 +721,39 @@ enum CallOutcome {
         reason: String,
     },
     Failure(String),
+    /// The node does not have the block the call is to run on.
+    BlockUnavailable(String),
+}
+
+impl CallOutcome {
+    /// Converts this outcome to the [`SimulationAttempt`] that a caller gets.
+    fn into_attempt(self) -> SimulationAttempt {
+        match self {
+            Self::Success { amount_out, gas_used, logs } => {
+                SimulationAttempt::Success { amount_out, gas_used, logs }
+            }
+            Self::Reverted { reason } => {
+                SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
+            }
+            Self::Failure(reason) => SimulationAttempt::Failure { reason },
+            Self::BlockUnavailable(reason) => SimulationAttempt::BlockUnavailable { reason },
+        }
+    }
+}
+
+/// Returns whether `error` says that the node does not have the requested block.
+///
+/// Matches the messages "header not found", "block not found" and "unknown block".
+fn is_block_unavailable(
+    error: &alloy::transports::RpcError<alloy::transports::TransportErrorKind>,
+) -> bool {
+    let Some(response) = error.as_error_resp() else {
+        return false;
+    };
+    let message = response.message.to_ascii_lowercase();
+    ["header not found", "block not found", "unknown block"]
+        .iter()
+        .any(|phrase| message.contains(phrase))
 }
 
 fn rpc_error_reason(
@@ -605,9 +794,10 @@ fn token_overrides(
     layout: TokenLayout,
 ) -> StateOverride {
     let funding = B256::from(SIMULATION_FUNDING_VALUE);
+    let balance = B256::from(layout.balance_word(SIMULATION_FUNDING_VALUE));
     let mut state_diff = B256HashMap::default();
     for holder in [sender, router] {
-        state_diff.insert(layout.balance_slot(holder), funding);
+        state_diff.insert(layout.balance_slot(holder), balance);
     }
     for spender in [router, permit2] {
         state_diff.insert(layout.allowance_slot(sender, spender), funding);
@@ -629,6 +819,7 @@ fn token_overrides(
 async fn traced_revert_reason(
     provider: &RootProvider<Ethereum>,
     call: TransactionRequest,
+    block: BlockNumberOrTag,
     overrides: StateOverride,
     environment: BlockOverrides,
 ) -> Option<String> {
@@ -644,7 +835,7 @@ async fn traced_revert_reason(
         .with_block_overrides(environment);
 
     match provider
-        .debug_trace_call_callframe(call, BlockNumberOrTag::Latest.into(), options)
+        .debug_trace_call_callframe(call, block.into(), options)
         .await
     {
         Ok(frame) => revert::reason_from_frame(&frame),
