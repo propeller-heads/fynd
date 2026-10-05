@@ -81,22 +81,22 @@ impl PriceGuard {
     /// Returns the candidates that pass price validation, or only the best one,
     /// marked as `PriceCheckFailed`.
     ///
-    /// A non-`Success` candidate ends the scan. When nothing passed before it, it is
-    /// returned unchanged: its status already says why the order has no quote.
+    /// A non-`Success` first candidate is the order's placeholder and is returned unchanged:
+    /// its status already says why the order has no quote.
     fn retain_valid(
         &self,
         candidates: Vec<OrderQuote>,
         config: &PriceGuardConfig,
     ) -> Result<Vec<OrderQuote>, PriceGuardError> {
+        if candidates
+            .first()
+            .is_some_and(|candidate| candidate.status() != QuoteStatus::Success)
+        {
+            return Ok(candidates);
+        }
         let mut passing = Vec::new();
         let mut best_rejected = None;
         for candidate in candidates {
-            if candidate.status() != QuoteStatus::Success {
-                if passing.is_empty() {
-                    return Ok(vec![candidate]);
-                }
-                break;
-            }
             let passes = self
                 .validated_token_pair(&candidate)
                 .is_some_and(|(token_in, token_out)| {
