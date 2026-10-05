@@ -1299,24 +1299,24 @@ mod tests {
 
     #[test]
     fn test_register_rfq_fallback_router_without_executor() {
-        let Err(err) = register_rfq_entries(Chain::Ethereum, &["fallback:rfq:metric"]) else {
-            panic!("expected fallback:rfq:metric to be rejected on ethereum");
+        let Err(err) = register_rfq_entries(Chain::Arbitrum, &["fallback:rfq:metric"]) else {
+            panic!("expected fallback:rfq:metric to be rejected on arbitrum");
         };
         assert!(
             err.to_string()
-                .contains("fallback:rfq:metric has no executor on ethereum"),
+                .contains("fallback:rfq:metric has no executor on arbitrum"),
             "got {err}"
         );
     }
 
     #[test]
     fn test_register_rfq_hashflow_via_fallback_router() {
-        let Err(err) = register_rfq_entries(Chain::Ethereum, &["fallback:rfq:hashflow"]) else {
-            panic!("expected fallback:rfq:hashflow to be rejected");
+        let Err(err) = register_rfq_entries(Chain::Base, &["fallback:rfq:hashflow"]) else {
+            panic!("expected fallback:rfq:hashflow to be rejected on base");
         };
         assert!(
             err.to_string()
-                .contains("fallback:rfq:hashflow has no executor on ethereum"),
+                .contains("fallback:rfq:hashflow has no executor on base"),
             "got {err}"
         );
     }
@@ -1347,11 +1347,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_register_rfq_metric_requires_api_key() {
+    #[rstest::rstest]
+    #[case::base(Chain::Base, "rfq:metric")]
+    #[case::robinhood_via_fallback_router(Chain::Robinhood, "fallback:rfq:metric")]
+    fn test_register_rfq_metric_requires_api_key(#[case] chain: Chain, #[case] entry: &str) {
         env::remove_var("METRIC_API_KEY");
-        let Err(err) = register_rfq_entries(Chain::Base, &["rfq:metric"]) else {
-            panic!("expected rfq:metric to require METRIC_API_KEY");
+        let Err(err) = register_rfq_entries(chain, &[entry]) else {
+            panic!("expected {entry} on {chain} to require METRIC_API_KEY");
         };
         assert!(
             err.to_string()
