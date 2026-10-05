@@ -8,6 +8,8 @@
     "url": "https://github.com/propeller-heads/fynd"
   },
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -21,7 +23,7 @@
     "LICENSE.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/schema.d.ts dist/schema.d.ts",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src/",
     "test": "vitest run"
