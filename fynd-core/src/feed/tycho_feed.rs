@@ -14,10 +14,11 @@ use tokio::{
 };
 use tokio_stream::{Stream, StreamExt};
 use tracing::{debug, info, instrument, span, trace, Instrument, Level};
-#[cfg(feature = "experimental")]
-use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::{
-    evm::{pending::PendingBlockProcessor, stream::ProtocolStreamBuilder},
+    evm::{
+        pending::PendingBlockProcessor,
+        stream::{BlockStepController, ProtocolStreamBuilder},
+    },
     protocol::models::Update,
     rfq::stream::RFQStreamBuilder,
     tycho_client::feed::{component_tracker::ComponentFilter, SynchronizerState},
@@ -80,6 +81,62 @@ where
     stream.next().await.ok_or_else(|| {
         DataFeedError::StreamError("price level stream ended unexpectedly".to_string())
     })
+}
+
+/// The handles a caller of [`TychoFeed::run_with_pending`] waits on while the feed sets up.
+///
+/// Every setup failure is fanned out to every handle, so the caller learns the root cause from
+/// whichever one it awaits first.
+pub(crate) struct PendingFeedSetup {
+    pending_tx: oneshot::Sender<Result<PendingBlockProcessor, String>>,
+    step_tx: Option<oneshot::Sender<Result<BlockStepController, String>>>,
+}
+
+impl PendingFeedSetup {
+    /// A setup that delivers the pending processor alone; blocks flow freely.
+    pub(crate) fn new(pending_tx: oneshot::Sender<Result<PendingBlockProcessor, String>>) -> Self {
+        Self { pending_tx, step_tx: None }
+    }
+
+    /// A setup that also delivers a [`BlockStepController`], which holds each block until
+    /// the caller releases it.
+    #[cfg(feature = "experimental")]
+    pub(crate) fn new_with_step_controller(
+        pending_tx: oneshot::Sender<Result<PendingBlockProcessor, String>>,
+        step_tx: oneshot::Sender<Result<BlockStepController, String>>,
+    ) -> Self {
+        Self { pending_tx, step_tx: Some(step_tx) }
+    }
+
+    fn needs_step_controller(&self) -> bool {
+        self.step_tx.is_some()
+    }
+
+    fn fail(self, message: &str) {
+        let Self { pending_tx, step_tx } = self;
+        let _ = pending_tx.send(Err(message.to_string()));
+        if let Some(step_tx) = step_tx {
+            let _ = step_tx.send(Err(message.to_string()));
+        }
+    }
+
+    fn deliver(self, pending: PendingBlockProcessor, controller: Option<BlockStepController>) {
+        let Self { pending_tx, step_tx } = self;
+        if pending_tx.send(Ok(pending)).is_err() {
+            tracing::warn!(
+                "PendingBlockProcessor receiver dropped before send; continuing without pending \
+                 updates"
+            );
+        }
+        if let (Some(step_tx), Some(controller)) = (step_tx, controller) {
+            if step_tx.send(Ok(controller)).is_err() {
+                tracing::warn!(
+                    "BlockStepController receiver dropped before send; the dropped controller \
+                     lets blocks flow freely"
+                );
+            }
+        }
+    }
 }
 
 impl TychoFeed {
@@ -298,229 +355,38 @@ impl TychoFeed {
     }
 
     /// Like [`run`](Self::run) but calls [`ProtocolStreamBuilder::build_with_pending`]
-    /// and delivers the [`PendingBlockProcessor`] (or a setup error) via `pending_tx`
-    /// before entering the stream loop.
+    /// and delivers the [`PendingBlockProcessor`] via `setup` before entering the stream
+    /// loop.
     ///
-    /// If setup fails before the processor can be created, the error message is sent
-    /// through the channel so the caller can surface the root cause instead of seeing
-    /// only "channel closed". If the receiver has already been dropped the processor is
-    /// discarded and the feed continues normally.
+    /// When `setup` carries a step channel, every block is held by the
+    /// [`BlockStepController`] delivered on it: the caller must call
+    /// [`BlockStepController::trigger_next_block`] for each block to be processed, and
+    /// dropping the controller lets blocks flow freely. The controller needs at least one
+    /// Tycho-streamed protocol; a configuration without one fails with
+    /// [`DataFeedError::Config`].
+    ///
+    /// If setup fails before the handles can be created, the error message is sent through
+    /// every channel so the caller can surface the root cause instead of seeing only
+    /// "channel closed". Handles whose receiver has already been dropped are discarded and
+    /// the feed continues normally.
     ///
     /// RFQ protocols are handled alongside the EVM stream, identical to [`run`](Self::run).
     /// The `PendingBlockProcessor` only covers EVM on-chain state.
     pub(crate) async fn run_with_pending(
         self,
-        pending_tx: oneshot::Sender<Result<PendingBlockProcessor, String>>,
+        setup: PendingFeedSetup,
         pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
     ) -> Result<(), DataFeedError> {
         info!(
             tycho_url = %self.config.tycho_url,
             protocols = ?self.config.protocols,
+            step_controlled = setup.needs_step_controller(),
             "Starting Data Feed (with pending)..."
         );
 
-        let tycho_api_key = self
-            .config
-            .tycho_api_key
-            .clone()
-            .or_else(|| std::env::var("TYCHO_API_KEY").ok());
-
-        let all_tokens = match load_all_tokens(
-            self.config.tycho_url.as_str(),
-            !self.config.use_tls,
-            tycho_api_key.as_deref(),
-            true,
-            self.config.chain,
-            Some(self.config.min_token_quality),
-            self.config.traded_n_days_ago,
-        )
-        .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                let e = DataFeedError::StreamError(e.to_string());
-                let _ = pending_tx.send(Err(e.to_string()));
-                return Err(e);
-            }
-        };
-
-        debug!("Loaded {} tokens from Tycho", all_tokens.len());
-
-        // Opened before `pending_tx` is answered: a bad venue or chain has to reach the caller as
-        // an error, not as a processor for a feed that dies on the next line.
-        let mut price_level_stream =
-            match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
-                Ok(stream) => stream.map(Box::pin),
-                Err(e) => {
-                    let _ = pending_tx.send(Err(e.to_string()));
-                    return Err(e);
-                }
-            };
-
-        let mut stream_builder = match register_exchanges(
-            self.protocol_stream_builder()
-                .skip_state_decode_failures(true),
-            ComponentFilter::with_tvl_range(
-                self.config.min_tvl / self.config.tvl_buffer_ratio,
-                self.config.min_tvl,
-            )
-            .blocklist(
-                self.config
-                    .blocklisted_components
-                    .clone(),
-            ),
-            &self.config.protocols,
-        ) {
-            Ok(sb) => sb,
-            Err(e) => {
-                let _ = pending_tx.send(Err(e.to_string()));
-                return Err(e);
-            }
-        }
-        .auth_key(self.config.tycho_api_key.clone())
-        .skip_state_decode_failures(true)
-        .min_token_quality(self.config.min_token_quality as u32)
-        .add_client_metadata(fynd_client_metadata())
-        .set_tokens(all_tokens.clone())
-        .await;
-
-        for (extractor, indexer) in pending_indexers {
-            stream_builder = match stream_builder.with_pending_indexer(&extractor, indexer) {
-                Ok(sb) => sb,
-                Err(e) => {
-                    let e = DataFeedError::StreamError(e.to_string());
-                    let _ = pending_tx.send(Err(e.to_string()));
-                    return Err(e);
-                }
-            };
-        }
-
-        let (protocol_stream, pending) = match stream_builder
-            .build_with_pending()
-            .await
-        {
-            Ok(pair) => pair,
-            Err(e) => {
-                let e = DataFeedError::StreamError(e.to_string());
-                let _ = pending_tx.send(Err(e.to_string()));
-                return Err(e);
-            }
-        };
-        let mut protocol_stream = Box::pin(protocol_stream);
-
-        if pending_tx.send(Ok(pending)).is_err() {
-            tracing::warn!(
-                "PendingBlockProcessor receiver dropped before send; continuing without pending \
-                 updates"
-            );
-        }
-
-        // Spawn RFQ stream (same as run()) — runs alongside the EVM pending stream.
-        let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
-            let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
-            let rfq_stream_builder = register_rfq(
-                RFQStreamBuilder::new()
-                    .set_tokens(all_tokens)
-                    .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
-                rfq_tokens,
-            )?;
-            let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
-            let rfq_handle: JoinHandle<Result<(), DataFeedError>> = tokio::spawn(async move {
-                rfq_stream_builder
-                    .build(rfq_tx)
-                    .await
-                    .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                Ok(())
-            });
-            (Some(rfq_rx), Some(rfq_handle))
-        } else {
-            (None, None)
-        };
-
-        loop {
-            tokio::select! {
-                msg = protocol_stream.next() => {
-                    match msg {
-                        Some(msg) => {
-                            trace!("Received message from protocol stream: {:?}", msg);
-                            let msg = msg.map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                            self.handle_tycho_message(msg).await?;
-                        }
-                        None => {
-                            info!("Protocol stream ended");
-                            break;
-                        }
-                    }
-                }
-                msg = async {
-                    if let Some(rx) = &mut rfq_rx { rx.recv().await }
-                    else { std::future::pending().await }
-                } => {
-                    match msg {
-                        Some(msg) => {
-                            trace!("Received message from RFQ stream: {:?}", msg);
-                            self.handle_tycho_message(msg).await?;
-                        }
-                        None => {
-                            info!("RFQ stream ended");
-                            break;
-                        }
-                    }
-                }
-                msg = next_price_level_update(&mut price_level_stream) => {
-                    let msg = msg?;
-                    trace!("Received message from price level stream: {:?}", msg);
-                    self.handle_tycho_message(msg).await?;
-                }
-                rfq_result = async {
-                    if let Some(handle) = &mut rfq_handle { handle.await }
-                    else { std::future::pending().await }
-                } => {
-                    match rfq_result {
-                        Ok(Ok(())) => {
-                            return Err(DataFeedError::StreamError(
-                                "RFQ stream task ended unexpectedly".to_string(),
-                            ));
-                        }
-                        Ok(Err(e)) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ stream error: {e}")));
-                        }
-                        Err(e) => {
-                            return Err(DataFeedError::StreamError(format!("RFQ task panicked: {e}")));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Like [`run`](Self::run) but gates each block behind a [`BlockStepController`].
-    ///
-    /// Delivers the controller (or an error string) via `controller_tx` once the stream is
-    /// built and before the first block is processed. The caller must call
-    /// [`BlockStepController::trigger_next_block`] for each block to be processed.
-    ///
-    /// Only valid when at least one Tycho-streamed protocol is configured. Returns
-    /// [`DataFeedError::Config`] if every entry names an RFQ client or the price level stream.
-    #[cfg(feature = "experimental")]
-    pub(crate) async fn run_with_step_controller(
-        self,
-        controller_tx: oneshot::Sender<Result<BlockStepController, String>>,
-    ) -> Result<(), DataFeedError> {
-        info!(
-            tycho_url = %self.config.tycho_url,
-            protocols = ?self.config.protocols,
-            "Starting Data Feed (with step controller)..."
-        );
-
-        if !has_tycho_protocols(&self.config.protocols) {
+        if setup.needs_step_controller() && !has_tycho_protocols(&self.config.protocols) {
             let msg = "step controller requires at least one Tycho-streamed protocol".to_string();
-            let _ = controller_tx.send(Err(msg.clone()));
+            setup.fail(&msg);
             return Err(DataFeedError::Config(msg));
         }
 
@@ -544,43 +410,41 @@ impl TychoFeed {
             Ok(t) => t,
             Err(e) => {
                 let e = DataFeedError::StreamError(e.to_string());
-                let _ = controller_tx.send(Err(e.to_string()));
+                setup.fail(&e.to_string());
                 return Err(e);
             }
         };
 
         debug!("Loaded {} tokens from Tycho", all_tokens.len());
 
-        // Opened before `controller_tx` is answered: a bad venue or chain has to reach the caller
-        // as an error, not as a controller for a feed that dies on the next line.
+        // Opened before `setup` is answered: a bad venue or chain has to reach the caller as an
+        // error, not as a processor for a feed that dies on the next line.
         let mut price_level_stream =
             match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
                 Ok(stream) => stream.map(Box::pin),
                 Err(e) => {
-                    let _ = controller_tx.send(Err(e.to_string()));
+                    setup.fail(&e.to_string());
                     return Err(e);
                 }
             };
 
-        let tvl_filter = ComponentFilter::with_tvl_range(
-            self.config.min_tvl / self.config.tvl_buffer_ratio,
-            self.config.min_tvl,
-        )
-        .blocklist(
-            self.config
-                .blocklisted_components
-                .clone(),
-        );
-
         let mut stream_builder = match register_exchanges(
             self.protocol_stream_builder()
                 .skip_state_decode_failures(true),
-            tvl_filter,
+            ComponentFilter::with_tvl_range(
+                self.config.min_tvl / self.config.tvl_buffer_ratio,
+                self.config.min_tvl,
+            )
+            .blocklist(
+                self.config
+                    .blocklisted_components
+                    .clone(),
+            ),
             &self.config.protocols,
         ) {
             Ok(sb) => sb,
             Err(e) => {
-                let _ = controller_tx.send(Err(e.to_string()));
+                setup.fail(&e.to_string());
                 return Err(e);
             }
         }
@@ -593,24 +457,46 @@ impl TychoFeed {
             stream_builder = stream_builder.enable_partial_blocks();
         }
 
-        let stream_builder = stream_builder
+        let mut stream_builder = stream_builder
             .set_tokens(all_tokens.clone())
             .await;
-        let (stream_builder, controller) = stream_builder.with_step_controller();
 
-        let mut protocol_stream = match stream_builder.build().await {
-            Ok(stream) => {
-                let _ = controller_tx.send(Ok(controller));
-                Box::pin(stream)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let _ = controller_tx.send(Err(msg.clone()));
-                return Err(DataFeedError::StreamError(msg));
-            }
+        for (extractor, indexer) in pending_indexers {
+            stream_builder = match stream_builder.with_pending_indexer(&extractor, indexer) {
+                Ok(sb) => sb,
+                Err(e) => {
+                    let e = DataFeedError::StreamError(e.to_string());
+                    setup.fail(&e.to_string());
+                    return Err(e);
+                }
+            };
+        }
+
+        // `build_with_pending` hands blocks to the step controller once `with_step_controller`
+        // has been called, so one build serves both the stepped and the free-running feed.
+        let (stream_builder, controller) = if setup.needs_step_controller() {
+            let (stream_builder, controller) = stream_builder.with_step_controller();
+            (stream_builder, Some(controller))
+        } else {
+            (stream_builder, None)
         };
 
-        // Spawn rfq stream (same as run()).
+        let (protocol_stream, pending) = match stream_builder
+            .build_with_pending()
+            .await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                let e = DataFeedError::StreamError(e.to_string());
+                setup.fail(&e.to_string());
+                return Err(e);
+            }
+        };
+        let mut protocol_stream = Box::pin(protocol_stream);
+
+        setup.deliver(pending, controller);
+
+        // Spawn RFQ stream (same as run()) — runs alongside the EVM pending stream.
         let (mut rfq_rx, mut rfq_handle) = if has_rfq_protocols(&self.config.protocols) {
             let rfq_tokens: HashSet<Bytes> = all_tokens.keys().cloned().collect();
             let rfq_stream_builder = register_rfq(
@@ -853,6 +739,42 @@ mod tests {
 
     use super::*;
     use crate::feed::{market_data::MarketData, TychoFeedConfig};
+
+    #[tokio::test]
+    async fn test_pending_feed_setup_fail_reaches_every_handle() {
+        let (pending_tx, pending_rx) = oneshot::channel();
+        let (step_tx, step_rx) = oneshot::channel();
+        let setup = PendingFeedSetup { pending_tx, step_tx: Some(step_tx) };
+
+        setup.fail("tokens did not load");
+
+        assert_eq!(
+            pending_rx
+                .await
+                .unwrap()
+                .err()
+                .as_deref(),
+            Some("tokens did not load")
+        );
+        assert_eq!(step_rx.await.unwrap().err().as_deref(), Some("tokens did not load"));
+    }
+
+    #[tokio::test]
+    async fn test_pending_feed_setup_fail_without_step_channel() {
+        let (pending_tx, pending_rx) = oneshot::channel();
+        let setup = PendingFeedSetup::new(pending_tx);
+
+        setup.fail("tokens did not load");
+
+        assert_eq!(
+            pending_rx
+                .await
+                .unwrap()
+                .err()
+                .as_deref(),
+            Some("tokens did not load")
+        );
+    }
 
     /// Creates a new shared market data instance.
     fn new_shared_market_data() -> MarketData {

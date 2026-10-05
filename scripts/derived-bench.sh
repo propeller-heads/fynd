@@ -15,11 +15,14 @@
 #   --repeats N           Replay the whole recording N times in one process (default: 1),
 #                         so samply collects more samples
 #   --no-record           Run without samply, for timings only
+#   --write-snapshot PATH Save the token prices and pool depths to a JSON snapshot file
+#   --check-snapshot PATH Compare the token prices and pool depths with a saved snapshot file
 #
 # Examples:
 #   ./scripts/derived-bench.sh
 #   ./scripts/derived-bench.sh --no-record
 #   ./scripts/derived-bench.sh --repeats 20
+#   ./scripts/derived-bench.sh --no-record --check-snapshot /tmp/derived-snapshot.json
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,8 +30,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RECORDING="$REPO_ROOT/fynd-core/tests/fixtures/market_recording.json.zst"
 RECORD=1
 REPEATS=1
+SNAPSHOT_ARGS=()
 
-usage() { sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 require_value() {
   if [[ $# -lt 2 ]]; then
@@ -54,6 +58,13 @@ while [[ $# -gt 0 ]]; do
     --no-record)
       RECORD=0
       shift
+      ;;
+    --write-snapshot | --check-snapshot)
+      require_value "$@"
+      SNAPSHOT_PATH="$2"
+      [[ "$SNAPSHOT_PATH" == /* ]] || SNAPSHOT_PATH="$PWD/$SNAPSHOT_PATH"
+      SNAPSHOT_ARGS+=("$1" "$SNAPSHOT_PATH")
+      shift 2
       ;;
     -h | --help)
       usage
@@ -98,7 +109,7 @@ if [[ -z "$BIN" ]]; then
 fi
 echo "Built $BIN"
 
-BENCH_ARGS=(--recording "$RECORDING" --repeats "$REPEATS")
+BENCH_ARGS=(--recording "$RECORDING" --repeats "$REPEATS" ${SNAPSHOT_ARGS[@]+"${SNAPSHOT_ARGS[@]}"})
 if [[ $RECORD -eq 0 ]]; then
   exec "$BIN" "${BENCH_ARGS[@]}"
 fi

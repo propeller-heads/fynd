@@ -331,7 +331,22 @@ a slow order, then `--order <id>` to profile just that one.
 
 Replays a recording from `tools/record-market` and prints the time and output size of the spot
 price, token price and pool depth computations: a full recompute on the snapshot, then one
-incremental run for each later block. It runs under samply unless you pass `--no-record`.
+incremental run for each later block. It runs under samply unless you pass `--no-record`. At the
+end it prints a summary: the time of each computation on the first block, and the count, mean and
+total of its times on the later blocks.
+
+To check that a change to a computation keeps its values, save a snapshot before the change and
+compare with it after:
+
+```bash
+./scripts/derived-bench.sh --no-record --write-snapshot /tmp/derived-snapshot.json
+# change the computation
+./scripts/derived-bench.sh --no-record --check-snapshot /tmp/derived-snapshot.json
+```
+
+The snapshot holds the token prices and pool depths after the first and the last block. The check
+fails when a token price differs by more than 0.1%, a pool depth by more than 1%, or more than 0.5%
+of the keys are in only one of the snapshot and the run.
 
 ## Changing what is measured
 

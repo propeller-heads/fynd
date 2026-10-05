@@ -60,6 +60,14 @@ pub struct MockProtocolSim {
     /// When empty, get_limits assumes equal decimals (backward-compatible).
     #[serde(default)]
     pub token_decimals: FxHashMap<Bytes, u32>,
+    /// The factor on the spot price from the larger-address token to the smaller one, so
+    /// `spot(a→b) * spot(b→a)` is this factor. It is 1 for a pool whose two directions agree.
+    #[serde(default = "default_reverse_spot_factor")]
+    pub reverse_spot_factor: f64,
+}
+
+fn default_reverse_spot_factor() -> f64 {
+    1.0
 }
 
 impl MockProtocolSim {
@@ -92,6 +100,12 @@ impl MockProtocolSim {
         self
     }
 
+    /// Override the factor on the spot price from the larger-address token to the smaller one.
+    pub fn with_reverse_spot_factor(mut self, reverse_spot_factor: f64) -> Self {
+        self.reverse_spot_factor = reverse_spot_factor;
+        self
+    }
+
     /// Register token decimals for the given tokens.
     pub fn with_tokens(mut self, tokens: &[Token]) -> Self {
         for token in tokens {
@@ -110,6 +124,7 @@ impl Default for MockProtocolSim {
             liquidity: u128::MAX,
             fee: 0.0,
             token_decimals: FxHashMap::default(),
+            reverse_spot_factor: default_reverse_spot_factor(),
         }
     }
 }
@@ -126,7 +141,7 @@ impl ProtocolSim for MockProtocolSim {
         if base.address < quote.address {
             Ok(post_fee_spot_price)
         } else {
-            Ok(1.0 / post_fee_spot_price)
+            Ok(self.reverse_spot_factor / post_fee_spot_price)
         }
     }
 
@@ -169,6 +184,7 @@ impl ProtocolSim for MockProtocolSim {
             liquidity: self.liquidity,
             fee: self.fee,
             token_decimals: self.token_decimals.clone(),
+            reverse_spot_factor: self.reverse_spot_factor,
         });
         Ok(GetAmountOutResult::new(amount_out, BigUint::from(self.gas), new_state))
     }
@@ -213,16 +229,14 @@ impl ProtocolSim for MockProtocolSim {
         let token_out = params.token_out();
 
         match params.swap_constraint() {
-            SwapConstraint::TradeLimitPrice { .. } => {
+            // The mock's price does not change with the amount, so both constraints swap the whole
+            // sell limit.
+            SwapConstraint::TradeLimitPrice { .. } | SwapConstraint::PoolTargetPrice { .. } => {
                 let (sell_limit, _) =
                     self.get_limits(token_in.address.clone(), token_out.address.clone())?;
                 let result = self.get_amount_out(sell_limit.clone(), token_in, token_out)?;
                 Ok(PoolSwap::new(sell_limit, result.amount, result.new_state, None))
             }
-            _ => Err(SimulationError::InvalidInput(
-                "MockProtocolSim only supports TradeLimitPrice".to_string(),
-                None,
-            )),
         }
     }
 
@@ -415,8 +429,10 @@ impl ProtocolSim for ConstantProductSim {
         Ok((reserve_in / BigUint::from(2u64), reserve_out / BigUint::from(2u64)))
     }
 
+    /// Returns the error of tycho's default `query_pool_swap`, so `ComponentDepthComputation` falls
+    /// back to tycho's generic swap query.
     fn query_pool_swap(&self, _params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
-        unimplemented!("query_pool_swap not implemented in ConstantProductSim")
+        Err(SimulationError::FatalError("query_pool_swap not implemented".into()))
     }
 
     fn delta_transition(

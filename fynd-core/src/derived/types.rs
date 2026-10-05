@@ -31,9 +31,8 @@ pub type SpotPrices = FxHashMap<SpotPriceKey, f64>;
 /// Uniquely identifies a directional liquidity depth within a specific component.
 pub type ComponentDepthKey = (ComponentId, Address, Address);
 
-/// Component depths map: key -> maximum input amount at the configured slippage threshold.
-///
-/// Represents how much can be traded before the specified price impact.
+/// Component depths map: key -> the input after which the pool's net marginal price has fallen by
+/// the configured marginal price drop.
 pub type ComponentDepths = FxHashMap<ComponentDepthKey, BigUint>;
 
 // =============================================================================
@@ -52,12 +51,9 @@ pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 pub struct TokenPriceEntry {
     /// The computed mid-price relative to gas token.
     pub price: Price,
-    /// Every component on any route the router could pick between the token and the gas token
-    /// within the hop budget, plus the two chosen routes' own.
+    /// The components of the routes that priced the token.
     ///
-    /// Used for invalidation: a state change on any of them re-prices the token, so a rival
-    /// pool becoming the better route is noticed even though the chosen routes never touched
-    /// it.
+    /// A state change on any of them makes the token eligible for a new price.
     pub path_components: FxHashSet<ComponentId>,
 }
 

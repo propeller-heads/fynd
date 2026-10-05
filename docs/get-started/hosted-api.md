@@ -279,7 +279,7 @@ The response now includes a populated `transaction` and a `fee_breakdown`:
 * `transaction.to` is the chain's `router_address` (already set — submit as-is).
 * `transaction.data` is the calldata for the swap.
 * `transaction.gas` may or may not be populated — if absent, estimate gas separately with `eth_estimateGas` before submitting.
-* `fee_breakdown.router_fee` — the fee Fynd charges on the swap, in `token_out` units. The default Fynd fee is **0.1 bps (0.001%)** of swap output; quotes are free. See [Fynd Fees](../guides/router-fees.md) for volume discounts and the full fee arithmetic.
+* `fee_breakdown.router_fee` — the fee Fynd charges on the swap, in `token_out` units. The default Fynd fee is **0 bps**; quotes are free. See [Fynd Fees](../guides/router-fees.md) for the full fee arithmetic.
 * `fee_breakdown.client_fee` — integrator fee (0 unless you set `client_fee_params` in `encoding_options`; see [Charge Fees on your Swaps](../guides/client-fees.md)).
 * `fee_breakdown.max_slippage` — the slippage allowance in `token_out` units, applied to the post-fee amount. `min_amount_received` = `amount_out − router_fee − client_fee − max_slippage`. Verify the settled output is ≥ `min_amount_received` after the transaction confirms.
 

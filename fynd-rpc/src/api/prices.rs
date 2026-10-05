@@ -186,7 +186,8 @@ pub struct ComponentDepthEntry {
     /// Output token address.
     #[schema(value_type = String, example = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")]
     pub token_out: Address,
-    /// Maximum input amount before hitting the slippage threshold (decimal string).
+    /// Input amount after which the pool's marginal price, net of its fee, has fallen by the
+    /// configured drop (1.5% by default) (decimal string).
     pub depth: String,
 }
 

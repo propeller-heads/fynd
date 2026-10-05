@@ -1,4 +1,77 @@
 
+## [0.110.8](https://github.com/propeller-heads/fynd/compare/0.110.7...0.110.8) (2026-10-05)
+
+### Features
+
+* **token-prices:** warn when a token price jumps 10% or more ([ea902a5](https://github.com/propeller-heads/fynd/commit/ea902a552d789804fc062621671ab9f6ec992f3a))
+
+### Bug Fixes
+
+* **core:** allow the deprecated fetch_update on Rust 1.98 ([3d9608f](https://github.com/propeller-heads/fynd/commit/3d9608f8e00d5f5ea77f830955f1a484e040f931))
+
+
+## [0.110.7](https://github.com/propeller-heads/fynd/compare/0.110.6...0.110.7) (2026-09-30)
+
+### Features
+
+* support Pons hooks and Gigadex V3 on Robinhood ([c4be598](https://github.com/propeller-heads/fynd/commit/c4be598a46d19ef7f4938cb6ab3db88426ac4345))
+
+
+## [0.110.6](https://github.com/propeller-heads/fynd/compare/0.110.5...0.110.6) (2026-09-30)
+
+### Features
+
+* register Ethereum protocol decoders ([2b81db7](https://github.com/propeller-heads/fynd/commit/2b81db7934f36dfd5f0d852a5a60169898ab92f2))
+
+### Bug Fixes
+
+* use Balancer V3 public state export ([7c9a4b7](https://github.com/propeller-heads/fynd/commit/7c9a4b7836b3b04a8d67b82218fe744fbad8f37c))
+
+
+## [0.110.5](https://github.com/propeller-heads/fynd/compare/0.110.4...0.110.5) (2026-09-30)
+
+### Features
+
+* **core:** build a solver with pending state and a step controller ([2a49a82](https://github.com/propeller-heads/fynd/commit/2a49a82ec1c12a17574ba34c81f77b5046f3f7bf))
+
+### Bug Fixes
+
+* **token-prices:** run at most one pricing pass per block ([15763f9](https://github.com/propeller-heads/fynd/commit/15763f98fff5ccf2d6a7abe75ab83dfde4f2632f))
+
+
+## [0.110.4](https://github.com/propeller-heads/fynd/compare/0.110.3...0.110.4) (2026-09-30)
+
+### Features
+
+* **bench:** time later blocks apart and check derived values ([0a0bd7c](https://github.com/propeller-heads/fynd/commit/0a0bd7cef90d6e32ea90a8d109a8961a14c14092))
+
+### Bug Fixes
+
+* **token-prices:** refresh prices that no pass attempted for 100 passes ([8aa50dd](https://github.com/propeller-heads/fynd/commit/8aa50dd8e65cb2fe3c35c26986df989c25b98e49))
+* **token-prices:** drop the failures of attempted and removed tokens ([7e111b5](https://github.com/propeller-heads/fynd/commit/7e111b5cc6727a8193601dfe4d8e594c227adc8d))
+* **token-prices:** price a flagged buy route at the sell rate alone ([fedc488](https://github.com/propeller-heads/fynd/commit/fedc4887e7ba66c0988a665013b4ec1555809762))
+* **derived:** drop the failures of removed components ([7169d69](https://github.com/propeller-heads/fynd/commit/7169d697594637c5fac3d7e1347c161449529411))
+
+### Performance Improvements
+
+* **pool-depths:** measure depth as a 1.5% fall of the net price ([497259d](https://github.com/propeller-heads/fynd/commit/497259d999de03fb511935f6afcc0eb6b214aae0))
+* **token-prices:** cap sell solves at 200 per pass ([088ddfa](https://github.com/propeller-heads/fynd/commit/088ddfaa557f33ddfd8ca14e2cfd38bd6182e489))
+* **token-prices:** price 500 tokens per pass every second ([b3a469d](https://github.com/propeller-heads/fynd/commit/b3a469d47485e6faf9f0cd48d82f4dd7f3b8945e))
+* **token-prices:** sell each token back along its buy route ([2181dc5](https://github.com/propeller-heads/fynd/commit/2181dc51228402cc9ae49c81b6b8ce80216b5019))
+
+
+## [0.110.3](https://github.com/propeller-heads/fynd/compare/0.110.2...0.110.3) (2026-09-28)
+
+### Features
+
+* **rpc:** reject invalid slippage and client fee with per-rule codes ([6cfd995](https://github.com/propeller-heads/fynd/commit/6cfd995871312870850057d9d04a12e3cba82f44))
+* **rpc:** let an embedding service push its own quote records ([6020372](https://github.com/propeller-heads/fynd/commit/6020372c05eb1621cfa168cdabb0dfecf2fbe772))
+
+### Bug Fixes
+
+* **rpc:** reject a slippage of exactly 1 ([3975355](https://github.com/propeller-heads/fynd/commit/3975355784f6723a341043e149b660429507578e))
+
+
 ## [0.110.2](https://github.com/propeller-heads/fynd/compare/0.110.1...0.110.2) (2026-09-25)
 
 ### Bug Fixes

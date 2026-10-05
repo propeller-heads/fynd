@@ -100,7 +100,10 @@ fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
 
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation},
-    computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
+    computations::{
+        component_depth::DEFAULT_MARGINAL_PRICE_DROP, ComponentDepthComputation,
+        SpotPriceComputation, TokenGasPriceComputation,
+    },
     error::ComputationError,
     events::DerivedDataEvent,
     registry::ErasedComputation,
@@ -121,15 +124,18 @@ pub struct ComputationManagerConfig {
     gas_token: Address,
     /// Max hop count for token gas price computation.
     max_hop: usize,
-    /// Slippage threshold for component depth computation (0.0 < threshold < 1.0).
-    depth_slippage_threshold: f64,
-    /// Overrides the token pricing pass's sell-loop budget; `None` keeps the computation's
+    /// The share by which a pool's net marginal price falls at its depth (0.0 < drop < 1.0).
+    depth_marginal_price_drop: f64,
+    /// Overrides the token pricing pass budget; `None` keeps the computation's
     /// default. The replay harness sets an effectively unbounded budget so integration tests
     /// can assert exact priced-token counts.
     pricing_pass_budget: Option<Duration>,
     /// Overrides how many tokens one token-pricing pass may attempt; `None` keeps the
     /// computation's default.
     pricing_max_tokens_per_pass: Option<usize>,
+    /// Overrides how many sell solves one token-pricing pass may run; `None` keeps the
+    /// computation's default.
+    pricing_max_sell_solves_per_pass: Option<usize>,
     /// Overrides how long after a token-pricing pass starts the next one may start; `None`
     /// keeps the computation's default.
     pricing_min_pass_interval: Option<Duration>,
@@ -141,9 +147,9 @@ impl ComputationManagerConfig {
         Self::default()
     }
 
-    /// Sets the slippage threshold for component depth computation.
-    pub fn with_depth_slippage_threshold(mut self, threshold: f64) -> Self {
-        self.depth_slippage_threshold = threshold;
+    /// Sets the share by which a pool's net marginal price falls at its depth.
+    pub fn with_depth_marginal_price_drop(mut self, price_drop: f64) -> Self {
+        self.depth_marginal_price_drop = price_drop;
         self
     }
 
@@ -153,7 +159,7 @@ impl ComputationManagerConfig {
         self
     }
 
-    /// Overrides the wall-clock budget for the token pricing pass's sell loop.
+    /// Overrides the wall-clock budget for a token pricing pass after its first buy pass.
     pub fn with_pricing_pass_budget(mut self, pass_budget: Duration) -> Self {
         self.pricing_pass_budget = Some(pass_budget);
         self
@@ -162,6 +168,12 @@ impl ComputationManagerConfig {
     /// Overrides how many tokens one token-pricing pass may attempt.
     pub fn with_pricing_max_tokens_per_pass(mut self, max_tokens: usize) -> Self {
         self.pricing_max_tokens_per_pass = Some(max_tokens);
+        self
+    }
+
+    /// Overrides how many sell solves one token-pricing pass may run.
+    pub fn with_pricing_max_sell_solves_per_pass(mut self, max_sell_solves: usize) -> Self {
+        self.pricing_max_sell_solves_per_pass = Some(max_sell_solves);
         self
     }
 
@@ -187,9 +199,9 @@ impl ComputationManagerConfig {
         self.max_hop
     }
 
-    /// Returns the depth slippage threshold.
-    pub fn depth_slippage_threshold(&self) -> f64 {
-        self.depth_slippage_threshold
+    /// Returns the share by which a pool's net marginal price falls at its depth.
+    pub fn depth_marginal_price_drop(&self) -> f64 {
+        self.depth_marginal_price_drop
     }
 
     /// Builds the token price computation this configuration describes.
@@ -203,6 +215,9 @@ impl ComputationManagerConfig {
         if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
             token_prices = token_prices.with_max_tokens_per_pass(max_tokens);
         }
+        if let Some(max_sell_solves) = self.pricing_max_sell_solves_per_pass {
+            token_prices = token_prices.with_max_sell_solves_per_pass(max_sell_solves);
+        }
         if let Some(interval) = self.pricing_min_pass_interval {
             token_prices = token_prices.with_min_pass_interval(interval);
         }
@@ -215,9 +230,10 @@ impl Default for ComputationManagerConfig {
         Self {
             gas_token: Address::zero(20),
             max_hop: crate::solver::defaults::PRICING_MAX_HOPS,
-            depth_slippage_threshold: 0.01,
+            depth_marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP,
             pricing_pass_budget: None,
             pricing_max_tokens_per_pass: None,
+            pricing_max_sell_solves_per_pass: None,
             pricing_min_pass_interval: None,
         }
     }
@@ -257,7 +273,7 @@ impl ComputationManager {
         let (mut manager, event_rx) = Self::empty(market_data);
         manager.register(SpotPriceComputation::new())?;
         manager.register(config.build_token_price_computation())?;
-        manager.register(ComponentDepthComputation::new(config.depth_slippage_threshold())?)?;
+        manager.register(ComponentDepthComputation::new(config.depth_marginal_price_drop())?)?;
         Ok((manager, event_rx))
     }
 
@@ -387,6 +403,13 @@ impl ComputationManager {
         let _ = self
             .event_tx
             .send(DerivedDataEvent::NewBlock { block });
+
+        if !changed.removed.is_empty() {
+            self.store
+                .write()
+                .await
+                .drop_failures_of_removed(&changed.removed);
+        }
 
         let nodes: Vec<(ComputationId, ComputationRequirements)> = self
             .computations
@@ -895,9 +918,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_slippage_threshold_returns_error() {
+    fn invalid_depth_marginal_price_drop_returns_error() {
         let (market, _) = setup_market_weighted(vec![]);
-        let config = ComputationManagerConfig::new().with_depth_slippage_threshold(1.5);
+        let config = ComputationManagerConfig::new().with_depth_marginal_price_drop(1.5);
 
         let result = ComputationManager::new(config, market);
         assert!(matches!(result, Err(ComputationError::InvalidConfiguration(_))));

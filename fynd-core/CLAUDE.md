@@ -66,7 +66,8 @@ Simulation is deployment-gated with `simulation_enabled(bool)` and attached to t
 
 Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
-pending-block support). `Solver::subscribe_market_events()` returns a broadcast receiver for
+pending-block support), `build_with_pending_and_step_controller()` (the same, plus a
+`BlockStepController` that holds each block until the caller releases it; feature `experimental`). `Solver::subscribe_market_events()` returns a broadcast receiver for
 `MarketEvent`s.
 
 ## Adding a Custom Algorithm
@@ -143,11 +144,11 @@ its own registration function in `feed/protocol_registry.rs`:
 `register_exchanges` skips both prefixes, and `has_tycho_protocols` / `has_rfq_protocols` tell
 `TychoFeed` which sources to open. `is_tycho_system` is the per-entry form of the first, used by
 `register_exchanges` to skip these entries and exported so `fynd_rpc::protocols` can leave them out
-of its Tycho availability check. All three feed loops (`run`, `run_with_pending`,
-`run_with_step_controller`) select over whichever sources are configured and hand every `Update`
-to the same `handle_tycho_message`. Both non-Tycho streams are opened before the loop answers its
-`pending_tx` / `controller_tx` handshake, so a configuration error reaches the caller as an error
-rather than as a handle to a feed that dies.
+of its Tycho availability check. Both feed loops (`run` and `run_with_pending`, the latter
+gated or not) select over whichever sources are configured and hand every `Update` to the same
+`handle_tycho_message`. Both non-Tycho streams are opened before `run_with_pending` answers its
+`PendingFeedSetup` handshake, so a configuration error reaches the caller as an error rather than
+as a handle to a feed that dies.
 
 Each RFQ client reads its own credentials through `get_env`, so a missing one is a
 `DataFeedError::Config` at registration rather than a client that streams nothing: `BEBOP_KEY` for

@@ -10,12 +10,15 @@
 //!     .algorithm("most_liquid")
 //!     .build()?;
 //! ```
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{future::Future, str::FromStr, sync::Arc, time::Duration};
 
 use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::broadcast, task::JoinHandle};
+use tokio::{
+    sync::{broadcast, oneshot},
+    task::JoinHandle,
+};
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
 #[cfg(feature = "experimental")]
 use tycho_simulation::evm::stream::BlockStepController;
@@ -37,8 +40,8 @@ use crate::{
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
-        tycho_feed::TychoFeed,
-        TychoFeedConfig,
+        tycho_feed::{PendingFeedSetup, TychoFeed},
+        DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
     price_guard::{
@@ -108,7 +111,6 @@ pub mod defaults {
 
 // Internal-only defaults not shared with downstream crates.
 const DEFAULT_TYCHO_USE_TLS: bool = true;
-const DEFAULT_DEPTH_SLIPPAGE_THRESHOLD: f64 = 0.01;
 /// Generous router timeout for standalone (non-server) use. HTTP services should
 /// override this to a tighter value appropriate for their SLA.
 const DEFAULT_ROUTER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -913,8 +915,7 @@ impl FyndBuilder {
         let gas_token = native_token(&self.chain).map_err(|_| SolverBuildError::GasToken)?;
         let mut computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
-            .with_max_hop(self.pricing_max_hops)
-            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD);
+            .with_max_hop(self.pricing_max_hops);
         if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
             computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
         }
@@ -1116,46 +1117,8 @@ impl FyndBuilder {
     ///
     /// Returns [`SolverBuildError`] if any component fails to initialize.
     pub fn build(self) -> Result<Solver, SolverBuildError> {
-        let mut c = self.assemble_components()?;
-
-        let feed_handle = tokio::spawn(async move {
-            if let Err(e) = c.tycho_feed.run().await {
-                metrics::counter!("tycho_feed_failures_total").increment(1);
-                tracing::error!(error = %e, "tycho feed error");
-            }
-        });
-        let gas_price_handle = tokio::spawn(async move {
-            c.gas_price_fetcher.run().await;
-        });
-        let metrics_sampler =
-            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
-        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
-        let router_fee_handle = match c.router_fee_fetcher {
-            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
-            None => tokio::spawn(async {}),
-        };
-        let computation_handle = tokio::spawn(async move {
-            c.computation_manager
-                .run(c.computation_event_rx, c.computation_shutdown_rx)
-                .await;
-        });
-
-        Ok(Solver {
-            router: c.router,
-            worker_pools: c.worker_pools,
-            market_data: c.market_data,
-            derived_data: c.derived_data,
-            router_fees: c.router_fees,
-            feed_handle,
-            gas_price_handle,
-            metrics_sampler_handle,
-            router_fee_handle,
-            computation_handle,
-            computation_shutdown_tx: c.computation_shutdown_tx,
-            chain: c.chain,
-            router_address: c.router_address,
-            market_event_tx: c.market_event_tx,
-        })
+        let components = self.assemble_components()?;
+        Ok(Self::spawn_tasks(components, |tycho_feed, _pending_indexers| tycho_feed.run()))
     }
 
     /// Assembles and starts all solver components, also returning a [`PendingBlockProcessor`]
@@ -1172,136 +1135,143 @@ impl FyndBuilder {
     pub async fn build_with_pending(
         self,
     ) -> Result<(Solver, PendingBlockProcessor), SolverBuildError> {
-        let mut c = self.assemble_components()?;
+        let (pending_tx, pending_rx) = oneshot::channel::<Result<PendingBlockProcessor, String>>();
+        let solver = self.build_with_feed_setup(PendingFeedSetup::new(pending_tx))?;
+        let pending = pending_rx
+            .await
+            .map_err(|_| SolverBuildError::PendingChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+        Ok((solver, pending))
+    }
 
-        let (pending_tx, pending_rx) =
-            tokio::sync::oneshot::channel::<Result<PendingBlockProcessor, String>>();
+    /// Assembles and starts all solver components, returning the [`PendingBlockProcessor`] of
+    /// [`build_with_pending`](Self::build_with_pending) together with a [`BlockStepController`]
+    /// that decides when each buffered block is released for processing.
+    ///
+    /// Intended for deterministic testing against pending state: hold the feed one block behind
+    /// the chain with [`BlockStepController::peek_next_block`], overlay the block that really
+    /// came next through the processor, then call [`BlockStepController::trigger_next_block`]
+    /// to advance. Dropping the controller lets blocks flow freely until the stream ends.
+    ///
+    /// Only valid when at least one Tycho-streamed protocol is configured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError`] if any component fails to initialize, no protocol is
+    /// Tycho-streamed, or either handshake channel closes before its handle is delivered.
+    #[cfg(feature = "experimental")]
+    pub async fn build_with_pending_and_step_controller(
+        self,
+    ) -> Result<(Solver, PendingBlockProcessor, BlockStepController), SolverBuildError> {
+        let (pending_tx, pending_rx) = oneshot::channel::<Result<PendingBlockProcessor, String>>();
+        let (controller_tx, controller_rx) =
+            oneshot::channel::<Result<BlockStepController, String>>();
+        let solver = self.build_with_feed_setup(PendingFeedSetup::new_with_step_controller(
+            pending_tx,
+            controller_tx,
+        ))?;
+        let pending = pending_rx
+            .await
+            .map_err(|_| SolverBuildError::PendingChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+        let controller = controller_rx
+            .await
+            .map_err(|_| SolverBuildError::StepControllerChannelClosed)?
+            .map_err(SolverBuildError::FeedSetup)?;
+        Ok((solver, pending, controller))
+    }
 
-        let pending_indexers = c.pending_indexers;
+    /// [`build_with_pending_and_step_controller`](Self::build_with_pending_and_step_controller)
+    /// for a caller that steps blocks but never overlays pending state; the processor is
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// As [`build_with_pending_and_step_controller`](Self::build_with_pending_and_step_controller).
+    #[cfg(feature = "experimental")]
+    pub async fn build_with_step_controller(
+        self,
+    ) -> Result<(Solver, BlockStepController), SolverBuildError> {
+        let (solver, _pending, controller) = self
+            .build_with_pending_and_step_controller()
+            .await?;
+        Ok((solver, controller))
+    }
+
+    fn build_with_feed_setup(self, setup: PendingFeedSetup) -> Result<Solver, SolverBuildError> {
+        let components = self.assemble_components()?;
+        Ok(Self::spawn_tasks(components, move |tycho_feed, pending_indexers| {
+            tycho_feed.run_with_pending(setup, pending_indexers)
+        }))
+    }
+
+    /// Spawns every background task and hands back the running [`Solver`].
+    ///
+    /// `run_feed` chooses how the Tycho feed runs; everything else is the same for every build
+    /// path.
+    fn spawn_tasks<F, Fut>(components: BuiltComponents, run_feed: F) -> Solver
+    where
+        F: FnOnce(TychoFeed, Vec<(String, Box<dyn TxDeltaIndexer>)>) -> Fut,
+        Fut: Future<Output = Result<(), DataFeedError>> + Send + 'static,
+    {
+        let BuiltComponents {
+            tycho_feed,
+            mut gas_price_fetcher,
+            router_fee_fetcher,
+            computation_manager,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            router,
+            worker_pools,
+            market_data,
+            derived_data,
+            router_fees,
+            chain,
+            router_address,
+            pending_indexers,
+            market_event_tx,
+        } = components;
+
+        let feed = run_feed(tycho_feed, pending_indexers);
         let feed_handle = tokio::spawn(async move {
-            if let Err(e) = c
-                .tycho_feed
-                .run_with_pending(pending_tx, pending_indexers)
-                .await
-            {
+            if let Err(e) = feed.await {
                 metrics::counter!("tycho_feed_failures_total").increment(1);
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
         let gas_price_handle = tokio::spawn(async move {
-            c.gas_price_fetcher.run().await;
+            gas_price_fetcher.run().await;
         });
         let metrics_sampler =
-            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+            MetricsSampler::new(market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
         let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
-        let router_fee_handle = match c.router_fee_fetcher {
+        let router_fee_handle = match router_fee_fetcher {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
         let computation_handle = tokio::spawn(async move {
-            c.computation_manager
-                .run(c.computation_event_rx, c.computation_shutdown_rx)
+            computation_manager
+                .run(computation_event_rx, computation_shutdown_rx)
                 .await;
         });
 
-        let pending = pending_rx
-            .await
-            .map_err(|_| SolverBuildError::PendingChannelClosed)?
-            .map_err(SolverBuildError::FeedSetup)?;
-
-        Ok((
-            Solver {
-                router: c.router,
-                worker_pools: c.worker_pools,
-                market_data: c.market_data,
-                derived_data: c.derived_data,
-                router_fees: c.router_fees,
-                feed_handle,
-                gas_price_handle,
-                metrics_sampler_handle,
-                router_fee_handle,
-                computation_handle,
-                computation_shutdown_tx: c.computation_shutdown_tx,
-                chain: c.chain,
-                router_address: c.router_address,
-                market_event_tx: c.market_event_tx,
-            },
-            pending,
-        ))
-    }
-
-    /// Assembles and starts all solver components, also returning a [`BlockStepController`]
-    /// that lets the caller control when each buffered block is released for processing.
-    ///
-    /// Intended for deterministic testing: call [`BlockStepController::trigger_next_block`] to
-    /// step through blocks one at a time, and [`BlockStepController::peek_next_block`] to inspect
-    /// a block before it is decoded. Dropping the controller ungates the stream so it runs to its
-    /// natural end.
-    ///
-    /// Only valid when at least one non-RFQ protocol is configured.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SolverBuildError`] if any component fails to initialize, all protocols are RFQ,
-    /// or the step-controller channel closes before the controller is delivered.
-    #[cfg(feature = "experimental")]
-    pub async fn build_with_step_controller(
-        self,
-    ) -> Result<(Solver, BlockStepController), SolverBuildError> {
-        let mut c = self.assemble_components()?;
-
-        let (controller_tx, controller_rx) =
-            tokio::sync::oneshot::channel::<Result<BlockStepController, String>>();
-
-        let feed_handle = tokio::spawn(async move {
-            if let Err(e) = c
-                .tycho_feed
-                .run_with_step_controller(controller_tx)
-                .await
-            {
-                tracing::error!(error = %e, "tycho feed error");
-            }
-        });
-        let gas_price_handle = tokio::spawn(async move {
-            c.gas_price_fetcher.run().await;
-        });
-        let metrics_sampler =
-            MetricsSampler::new(c.market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
-        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
-        let router_fee_handle = match c.router_fee_fetcher {
-            Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
-            None => tokio::spawn(async {}),
-        };
-        let computation_handle = tokio::spawn(async move {
-            c.computation_manager
-                .run(c.computation_event_rx, c.computation_shutdown_rx)
-                .await;
-        });
-
-        let controller = controller_rx
-            .await
-            .map_err(|_| SolverBuildError::StepControllerChannelClosed)?
-            .map_err(SolverBuildError::FeedSetup)?;
-
-        Ok((
-            Solver {
-                router: c.router,
-                worker_pools: c.worker_pools,
-                market_data: c.market_data,
-                derived_data: c.derived_data,
-                router_fees: c.router_fees,
-                feed_handle,
-                gas_price_handle,
-                metrics_sampler_handle,
-                router_fee_handle,
-                computation_handle,
-                computation_shutdown_tx: c.computation_shutdown_tx,
-                chain: c.chain,
-                router_address: c.router_address,
-                market_event_tx: c.market_event_tx,
-            },
-            controller,
-        ))
+        Solver {
+            router,
+            worker_pools,
+            market_data,
+            derived_data,
+            router_fees,
+            feed_handle,
+            gas_price_handle,
+            metrics_sampler_handle,
+            router_fee_handle,
+            computation_handle,
+            computation_shutdown_tx,
+            chain,
+            router_address,
+            market_event_tx,
+        }
     }
 } // impl FyndBuilder
 
@@ -1503,13 +1473,13 @@ impl Solver {
         let computation_config = ComputationManagerConfig::new()
             .with_gas_token(gas_token)
             .with_max_hop(defaults::PRICING_MAX_HOPS)
-            .with_depth_slippage_threshold(DEFAULT_DEPTH_SLIPPAGE_THRESHOLD)
             // Replay tests assert exact priced-token counts against a deterministic recording, so
-            // neither bound on a pricing pass may apply: an effectively unbounded budget keeps a
-            // starved CI machine from cutting a pass short, and an unbounded cap keeps a pass
-            // from deferring tokens to a later one that the replay never runs.
+            // no bound on a pricing pass may apply: an effectively unbounded budget keeps a
+            // starved CI machine from cutting a pass short, and unbounded token and sell-solve
+            // caps keep a pass from deferring tokens to a later one that the replay never runs.
             .with_pricing_pass_budget(Duration::from_secs(24 * 60 * 60))
             .with_pricing_max_tokens_per_pass(usize::MAX)
+            .with_pricing_max_sell_solves_per_pass(usize::MAX)
             .with_pricing_min_pass_interval(Duration::ZERO);
         let (computation_manager, _) =
             ComputationManager::new(computation_config, market_data.clone())

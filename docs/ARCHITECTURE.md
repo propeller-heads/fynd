@@ -255,7 +255,8 @@ Background task that connects to Tycho's WebSocket API, processes component/stat
 Pre-computes analytics from raw market data:
 
 * `SpotPriceComputation`: Spot prices for all component pairs
-* `ComponentDepthComputation`: Liquidity depth at configured slippage
+* `ComponentDepthComputation`: Liquidity depth: the input after which a pool's net marginal price
+  has fallen by the configured marginal price drop
 * `TokenGasPriceComputation`: Token prices relative to gas token
 
 Computations run in dependency order. Workers use `ReadinessTracker` to wait for required data before solving.

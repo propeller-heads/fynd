@@ -363,7 +363,7 @@
           },
           "depth": {
             "type": "string",
-            "description": "Maximum input amount before hitting the slippage threshold (decimal string)."
+            "description": "Input amount after which the pool's marginal price, net of its fee, has fallen by the\nconfigured drop (1.5% by default) (decimal string)."
           },
           "token_in": {
             "type": "string",

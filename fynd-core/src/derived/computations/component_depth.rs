@@ -1,9 +1,9 @@
 //! Component depth computation.
 //!
-//! Computes liquidity depths for all components using `query_pool_swap`, falling back to
-//! the generic Brent solver from tycho-simulation when the component doesn't implement it natively.
-//! Depth represents the maximum input amount before reaching the configured slippage
-//! threshold from the spot price.
+//! Computes the depth of every component with `query_pool_swap` and a `PoolTargetPrice`
+//! constraint. A component that does not answer that query uses tycho's generic search. The depth
+//! is the input after which the pool's marginal price, net of its fee, has fallen by the configured
+//! marginal price drop.
 //!
 //! # Dependencies
 //!
@@ -14,13 +14,18 @@
 use async_trait::async_trait;
 use itertools::Itertools;
 use num_bigint::BigUint;
-use num_traits::Zero;
+use num_traits::{Float, One};
 use rustc_hash::FxHashSet;
 use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     evm::query_pool_swap::query_pool_swap,
-    tycho_common::simulation::errors::SimulationError,
-    tycho_core::simulation::protocol_sim::{Price, QueryPoolSwapParams, SwapConstraint},
+    tycho_common::{
+        models::{token::Token, Address},
+        simulation::errors::SimulationError,
+    },
+    tycho_core::simulation::protocol_sim::{
+        Price, ProtocolSim, QueryPoolSwapParams, SwapConstraint,
+    },
 };
 
 use crate::{
@@ -34,43 +39,68 @@ use crate::{
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
-        types::ComponentDepths,
+        types::{ComponentDepthKey, ComponentDepths, SpotPrices},
     },
     feed::market_data::{MarketData, MarketState},
     types::ComponentId,
 };
 
+/// Converts `price`, in whole tokens of `token_out` per whole token of `token_in`, to the exact
+/// fraction of smallest units that `query_pool_swap` reads.
+fn to_raw_price(price: f64, decimals_in: u32, decimals_out: u32) -> Price {
+    let (mantissa, exponent, _) = price.integer_decode();
+    let mut numerator = BigUint::from(mantissa);
+    let mut denominator = BigUint::one();
+    let shift = usize::from(exponent.unsigned_abs());
+    if exponent >= 0 {
+        numerator <<= shift;
+    } else {
+        denominator <<= shift;
+    }
+    if decimals_out >= decimals_in {
+        numerator *= BigUint::from(10u32).pow(decimals_out - decimals_in);
+    } else {
+        denominator *= BigUint::from(10u32).pow(decimals_in - decimals_out);
+    }
+    Price::new(numerator, denominator)
+}
+
+/// The default share by which a pool's net marginal price falls at its depth.
+pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
+
 /// Computes component depths for all components in all directions.
 ///
-/// For each component and token pair, uses `query_pool_swap` (with Brent solver fallback)
-/// to find the maximum input amount that results in at most the configured slippage
-/// from spot price.
+/// For each component and token pair, finds the input after which the pool's marginal price,
+/// net of its fee, has fallen by `marginal_price_drop`: with `query_pool_swap` and a
+/// `PoolTargetPrice` constraint, or with tycho's generic search for a pool that has no such query.
 #[derive(Debug)]
 pub struct ComponentDepthComputation {
-    slippage_threshold: f64,
+    /// The share by which the pool's net marginal price falls at the depth.
+    marginal_price_drop: f64,
 }
 
 impl Default for ComponentDepthComputation {
     fn default() -> Self {
-        Self { slippage_threshold: 0.01 }
+        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP }
     }
 }
 
 impl ComponentDepthComputation {
-    /// Creates a new ComponentDepthComputation with the given slippage threshold.
+    /// Creates a new ComponentDepthComputation with the given marginal price drop.
     ///
     /// # Arguments
-    /// * `slippage_threshold` - Value between 0 and 1 exclusive (e.g., 0.01 for 1%)
+    /// * `marginal_price_drop` - The share by which the pool's net marginal price falls at the
+    ///   depth, between 0 and 1 exclusive (e.g., 0.015 for 1.5%)
     ///
     /// # Errors
-    /// Returns `InvalidConfiguration` if slippage_threshold is not in (0, 1).
-    pub fn new(slippage_threshold: f64) -> Result<Self, ComputationError> {
-        if !(slippage_threshold > 0.0 && slippage_threshold < 1.0) {
+    /// Returns `InvalidConfiguration` if marginal_price_drop is not in (0, 1).
+    pub fn new(marginal_price_drop: f64) -> Result<Self, ComputationError> {
+        if !(marginal_price_drop > 0.0 && marginal_price_drop < 1.0) {
             return Err(ComputationError::InvalidConfiguration(format!(
-                "slippage_threshold must be between 0 and 1 exclusive, got {slippage_threshold}"
+                "marginal_price_drop must be between 0 and 1 exclusive, got {marginal_price_drop}"
             )));
         }
-        Ok(Self { slippage_threshold })
+        Ok(Self { marginal_price_drop })
     }
 }
 
@@ -102,239 +132,42 @@ impl DerivedComputation for ComponentDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        // Read derived data from store
-        let (spot_prices, mut component_depths) = {
-            let store_guard = store.read().await;
-            // Get precomputed spot prices (required dependency).
-            let spot_prices = store_guard
-                .spot_prices()
-                .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
-                .clone();
-            // Start with existing depths (or empty for full recompute).
-            let component_depths = if changed.is_full_recompute {
-                ComponentDepths::default()
-            } else {
-                store_guard
-                    .component_depths()
-                    .cloned()
-                    .unwrap_or_default()
-            };
-            (spot_prices, component_depths)
-        };
-
-        // Remove component depths for removed components.
+        let (spot_prices, mut component_depths) = read_stored_data(store, changed).await?;
         for component_id in &changed.removed {
             component_depths.retain(|key, _| &key.0 != component_id);
         }
-
-        // Snapshot market data under brief lock.
-        let (snapshot, components_to_compute) = {
-            let market_guard = market.read().await;
-            let topology = market_guard.component_topology();
-
-            // Determine which components need (re)computation.
-            let components_to_compute: Vec<ComponentId> = if changed.is_full_recompute {
-                topology.keys().cloned().collect()
-            } else {
-                changed
-                    .added
-                    .keys()
-                    .chain(changed.updated.iter())
-                    .cloned()
-                    .collect()
-            };
-
-            let component_ids: FxHashSet<&ComponentId> = components_to_compute.iter().collect();
-            let snapshot: MarketState = market_guard.extract_subset(&component_ids);
-
-            (snapshot, components_to_compute)
-        };
-
+        let (snapshot, components_to_compute) = snapshot_changed_components(market, changed).await;
         let topology = snapshot.component_topology();
-        let tokens = snapshot.token_registry_ref();
 
         let mut succeeded = 0usize;
         let mut failed_items: Vec<FailedItem> = Vec::new();
-
         for component_id in &components_to_compute {
             // Get token addresses: changed.added for new components, topology for existing
-            let token_addresses = changed
+            let Some(token_addresses) = changed
                 .added
                 .get(component_id)
-                .or_else(|| topology.get(component_id));
-
-            let Some(token_addresses) = token_addresses else {
+                .or_else(|| topology.get(component_id))
+            else {
                 continue; // Component might have been removed in the meantime
             };
-
-            let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
-                warn!(component_id, "missing simulation state, skipping component");
-                component_depths.retain(|key, _| &key.0 != component_id);
-                for perm in token_addresses.iter().permutations(2) {
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: FailedItemError::MissingSimulationState,
-                    });
-                }
-                continue;
-            };
-
-            let component_tokens: Result<Vec<_>, _> = token_addresses
-                .iter()
-                .map(|addr| tokens.get(addr).ok_or(addr))
-                .collect();
-            let Ok(component_tokens) = component_tokens else {
-                warn!(component_id, "missing token metadata, skipping component");
-                component_depths.retain(|key, _| &key.0 != component_id);
-                for perm in token_addresses.iter().permutations(2) {
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
-                        error: FailedItemError::MissingTokenMetadata,
-                    });
-                }
-                continue;
-            };
-
-            for perm in component_tokens.iter().permutations(2) {
-                let (token_in, token_out) = (*perm[0], *perm[1]);
-                let key =
-                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
-
-                // Look up precomputed spot price
-                let Some(spot_price) = spot_prices.get(&key) else {
-                    warn!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        "missing spot price, skipping pair"
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::MissingSpotPrice,
-                    });
-                    continue;
-                };
-
-                let min_price = spot_price * (1.0 - self.slippage_threshold);
-
-                // Price is a raw fraction (numerator/denominator) that query_pool_swap
-                // converts back to f64 by multiplying by 10^(dec_in - dec_out). We keep
-                // the f64→u128 multiply at a fixed precision scale and absorb the decimal
-                // adjustment into the BigUint denominator.
-                const SCALE_EXP: i32 = 18;
-                let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-                let denominator_exp = SCALE_EXP + decimal_diff;
-                if denominator_exp < 0 {
-                    warn!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        "extreme decimal mismatch ({}→{}), skipping pair",
-                        token_in.decimals, token_out.decimals
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::ExtremeDecimalMismatch {
-                            from: token_in.decimals,
-                            to: token_out.decimals,
-                        },
-                    });
-                    continue;
-                }
-
-                let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-                let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-
-                if numerator.is_zero() {
-                    debug!(
-                        component_id,
-                        token_in = %token_in.address,
-                        token_out = %token_out.address,
-                        spot_price,
-                        "spot price too small to compute depth, skipping pair"
-                    );
-                    component_depths.remove(&key);
-                    failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, token_in.address, token_out.address),
-                        error: FailedItemError::SpotPriceTooSmall(*spot_price),
-                    });
-                    continue;
-                }
-
-                let limit_price = Price::new(numerator, denominator);
-
-                let params = QueryPoolSwapParams::new(
-                    (**token_in).clone(),
-                    (**token_out).clone(),
-                    SwapConstraint::TradeLimitPrice {
-                        limit: limit_price,
-                        tolerance: 0.0,
-                        min_amount_in: None,
-                        max_amount_in: None,
-                    },
-                );
-
-                let depth_result = match sim_state.query_pool_swap(&params) {
-                    Ok(swap) => Ok(swap),
-                    Err(SimulationError::FatalError(msg))
-                        if msg == "query_pool_swap not implemented" =>
-                    {
-                        query_pool_swap(sim_state, &params)
-                    }
-                    Err(SimulationError::InvalidInput(msg, _))
-                        if msg.contains("does not support TradeLimitPrice") =>
-                    {
-                        query_pool_swap(sim_state, &params)
-                    }
-                    Err(e) => Err(e),
-                }
-                .map(|swap| swap.amount_in().clone())
-                .map_err(|e| {
-                    ComputationError::SimulationFailed(format!(
-                        "query_pool_swap failed for {}/{}: {e}",
-                        token_in.address, token_out.address
-                    ))
-                });
-
-                match depth_result {
+            let pair_depths = self.compute_component_depths(
+                component_id,
+                token_addresses,
+                &snapshot,
+                &spot_prices,
+            );
+            for (key, depth) in pair_depths {
+                match depth {
                     Ok(depth) => {
                         component_depths.insert(key, depth);
                         succeeded += 1;
                     }
-                    Err(e) => {
-                        // Diagnostic: probe with 1 unit to understand why depth search failed.
-                        // Guarded so a panicking component degrades to a diagnostic string instead
-                        // of killing the computation worker.
-                        let probe_info = sim_state
-                            .get_amount_out_guarded(BigUint::from(1u32), token_in, token_out)
-                            .map(|r| format!("amount_out={}", r.amount))
-                            .unwrap_or_else(|e| format!("sim_error={e}"));
-                        let limits_info = sim_state
-                            .get_limits(token_in.address.clone(), token_out.address.clone())
-                            .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
-                            .unwrap_or_else(|e| format!("limits_error={e}"));
-                        debug!(
-                            component_id,
-                            token_in = %token_in.address,
-                            token_out = %token_out.address,
-                            spot_price,
-                            min_price,
-                            probe_info,
-                            limits_info,
-                            error = %e,
-                            "component depth failed, skipping pair"
-                        );
+                    Err(error) => {
                         component_depths.remove(&key);
+                        let (component_id, token_in, token_out) = key;
                         failed_items.push(FailedItem {
-                            key: format!(
-                                "{}/{}/{}",
-                                component_id, token_in.address, token_out.address
-                            ),
-                            error: FailedItemError::SimulationFailed(format!(
-                                "{e}: {probe_info}, {limits_info}"
-                            )),
+                            key: format!("{component_id}/{token_in}/{token_out}"),
+                            error,
                         });
                     }
                 }
@@ -353,18 +186,235 @@ impl DerivedComputation for ComponentDepthComputation {
     }
 }
 
+/// The depth of one directed pair of a component, or why it has none.
+type PairDepth = (ComponentDepthKey, Result<BigUint, FailedItemError>);
+
+/// Reads the stored spot prices, and the stored depths to start from. A full recompute starts
+/// from no depths.
+async fn read_stored_data(
+    store: &SharedDerivedDataRef,
+    changed: &ChangedComponents,
+) -> Result<(SpotPrices, ComponentDepths), ComputationError> {
+    let store_guard = store.read().await;
+    let spot_prices = store_guard
+        .spot_prices()
+        .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
+        .clone();
+    let component_depths = if changed.is_full_recompute {
+        ComponentDepths::default()
+    } else {
+        store_guard
+            .component_depths()
+            .cloned()
+            .unwrap_or_default()
+    };
+    Ok((spot_prices, component_depths))
+}
+
+/// Returns the components whose depths need computing, and a market snapshot of them taken under
+/// a brief lock. A full recompute computes every component; otherwise the added and updated ones.
+async fn snapshot_changed_components(
+    market: &MarketData,
+    changed: &ChangedComponents,
+) -> (MarketState, Vec<ComponentId>) {
+    let market_guard = market.read().await;
+    let components_to_compute: Vec<ComponentId> = if changed.is_full_recompute {
+        market_guard
+            .component_topology()
+            .into_keys()
+            .collect()
+    } else {
+        changed
+            .added
+            .keys()
+            .chain(changed.updated.iter())
+            .cloned()
+            .collect()
+    };
+    let component_ids: FxHashSet<&ComponentId> = components_to_compute.iter().collect();
+    (market_guard.extract_subset(&component_ids), components_to_compute)
+}
+
+/// Returns the pool's marginal price from `token_in` to `token_out`, net of its fee, or `None`
+/// without a spot price for the pair.
+///
+/// tycho's `PoolTargetPrice` compares its target with the price net of the pool's fee.
+/// `spot_price` adds the fee for some pools (Uniswap V2 and V3) and is net of it for others (many
+/// Uniswap V4 pools), so the net price is the lower of `spot(in→out)` and `1 / spot(out→in)`.
+/// Without a reverse spot price, the forward one is the marginal price.
+fn net_marginal_price(spot_prices: &SpotPrices, key: &ComponentDepthKey) -> Option<f64> {
+    let spot_price = spot_prices.get(key)?;
+    let (component_id, token_in, token_out) = key;
+    let reverse_key = (component_id.clone(), token_out.clone(), token_in.clone());
+    let marginal_price = spot_prices
+        .get(&reverse_key)
+        .map_or(*spot_price, |reverse_spot_price| spot_price.min(1.0 / reverse_spot_price));
+    Some(marginal_price)
+}
+
+/// Queries the input that moves the pool's net marginal price to `target_price`. A pool with no
+/// query of its own uses tycho's generic search.
+fn query_depth(
+    sim_state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+    target_price: f64,
+) -> Result<BigUint, SimulationError> {
+    let params = QueryPoolSwapParams::new(
+        token_in.clone(),
+        token_out.clone(),
+        SwapConstraint::PoolTargetPrice {
+            target: to_raw_price(target_price, token_in.decimals, token_out.decimals),
+            tolerance: 0.0,
+            min_amount_in: None,
+            max_amount_in: None,
+        },
+    );
+    let pool_swap = match sim_state.query_pool_swap(&params) {
+        Err(SimulationError::FatalError(msg)) if msg == "query_pool_swap not implemented" => {
+            query_pool_swap(sim_state, &params)
+        }
+        result => result,
+    }?;
+    Ok(pool_swap.amount_in().clone())
+}
+
+/// Describes a pool whose depth query failed: what a swap of one unit returns, and the pool's
+/// swap limits.
+///
+/// The swap is guarded, so a panicking component degrades to a diagnostic string instead of
+/// killing the computation worker.
+fn describe_failed_query(
+    sim_state: &dyn ProtocolSim,
+    token_in: &Token,
+    token_out: &Token,
+) -> (String, String) {
+    let probe_info = sim_state
+        .get_amount_out_guarded(BigUint::from(1u32), token_in, token_out)
+        .map(|r| format!("amount_out={}", r.amount))
+        .unwrap_or_else(|e| format!("sim_error={e}"));
+    let limits_info = sim_state
+        .get_limits(token_in.address.clone(), token_out.address.clone())
+        .map(|(max_in, max_out)| format!("max_in={max_in}, max_out={max_out}"))
+        .unwrap_or_else(|e| format!("limits_error={e}"));
+    (probe_info, limits_info)
+}
+
+impl ComponentDepthComputation {
+    /// Computes the depth of every directed pair of `component_id`'s tokens. Every pair fails
+    /// when the component misses its simulation state or the metadata of a token.
+    fn compute_component_depths(
+        &self,
+        component_id: &ComponentId,
+        token_addresses: &[Address],
+        snapshot: &MarketState,
+        spot_prices: &SpotPrices,
+    ) -> Vec<PairDepth> {
+        let fail_every_pair = |error: FailedItemError| -> Vec<PairDepth> {
+            token_addresses
+                .iter()
+                .permutations(2)
+                .map(|pair| {
+                    let key = (component_id.clone(), pair[0].clone(), pair[1].clone());
+                    (key, Err(error.clone()))
+                })
+                .collect()
+        };
+        let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
+            warn!(component_id, "missing simulation state, skipping component");
+            return fail_every_pair(FailedItemError::MissingSimulationState);
+        };
+        let tokens = snapshot.token_registry_ref();
+        let component_tokens: Option<Vec<&Token>> = token_addresses
+            .iter()
+            .map(|address| {
+                tokens
+                    .get(address)
+                    .map(|token| &**token)
+            })
+            .collect();
+        let Some(component_tokens) = component_tokens else {
+            warn!(component_id, "missing token metadata, skipping component");
+            return fail_every_pair(FailedItemError::MissingTokenMetadata);
+        };
+
+        component_tokens
+            .iter()
+            .permutations(2)
+            .map(|pair| {
+                let (token_in, token_out) = (*pair[0], *pair[1]);
+                let key =
+                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+                let depth =
+                    self.compute_pair_depth(sim_state, &key, token_in, token_out, spot_prices);
+                (key, depth)
+            })
+            .collect()
+    }
+
+    /// Computes the input after which the pool's net marginal price from `token_in` to
+    /// `token_out` has fallen by `marginal_price_drop`.
+    fn compute_pair_depth(
+        &self,
+        sim_state: &dyn ProtocolSim,
+        key: &ComponentDepthKey,
+        token_in: &Token,
+        token_out: &Token,
+        spot_prices: &SpotPrices,
+    ) -> Result<BigUint, FailedItemError> {
+        let component_id = &key.0;
+        let Some(marginal_price) = net_marginal_price(spot_prices, key) else {
+            warn!(
+                component_id,
+                token_in = %token_in.address,
+                token_out = %token_out.address,
+                "missing spot price, skipping pair"
+            );
+            return Err(FailedItemError::MissingSpotPrice);
+        };
+        let target_price = marginal_price * (1.0 - self.marginal_price_drop);
+        if !(target_price.is_finite() && target_price > 0.0) {
+            debug!(
+                component_id,
+                token_in = %token_in.address,
+                token_out = %token_out.address,
+                marginal_price,
+                "target price is not a positive finite number, skipping pair"
+            );
+            return Err(FailedItemError::InvalidTargetPrice(target_price));
+        }
+        query_depth(sim_state, token_in, token_out, target_price).map_err(|error| {
+            let (probe_info, limits_info) = describe_failed_query(sim_state, token_in, token_out);
+            debug!(
+                component_id,
+                token_in = %token_in.address,
+                token_out = %token_out.address,
+                marginal_price,
+                target_price,
+                probe_info,
+                limits_info,
+                %error,
+                "component depth failed, skipping pair"
+            );
+            FailedItemError::SimulationFailed(format!(
+                "depth query failed: {error}: {probe_info}, {limits_info}"
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use num_traits::{ToPrimitive, Zero};
     use rstest::rstest;
     use rustc_hash::FxHashMap;
-    use tycho_simulation::{
-        tycho_common::simulation::protocol_sim::ProtocolSim, tycho_core::models::token::Token,
-    };
+    use tycho_simulation::tycho_core::models::token::Token;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{
-            setup_market_weighted, token, token_with_decimals, MockProtocolSim,
+            setup_market_weighted, setup_market_weighted_boxed, token, token_with_decimals,
+            ConstantProductSim, MockProtocolSim,
         },
         derived::{
             computation::FailedItemError,
@@ -380,9 +430,9 @@ mod tests {
     }
 
     #[test]
-    fn default_slippage_is_one_percent() {
+    fn test_default_marginal_price_drop() {
         let comp = ComponentDepthComputation::default();
-        assert!((comp.slippage_threshold - 0.01).abs() < f64::EPSILON);
+        assert!((comp.marginal_price_drop - 0.015).abs() < f64::EPSILON);
     }
 
     #[rstest]
@@ -390,9 +440,9 @@ mod tests {
     #[case(0.01)]
     #[case(0.5)]
     #[case(0.99)]
-    fn new_with_valid_slippage(#[case] threshold: f64) {
+    fn new_with_valid_marginal_price_drop(#[case] threshold: f64) {
         let comp = ComponentDepthComputation::new(threshold).unwrap();
-        assert!((comp.slippage_threshold - threshold).abs() < f64::EPSILON);
+        assert!((comp.marginal_price_drop - threshold).abs() < f64::EPSILON);
     }
 
     #[rstest]
@@ -402,7 +452,7 @@ mod tests {
     #[case(1.5, "greater than one")]
     #[case(f64::NAN, "NaN")]
     #[case(f64::INFINITY, "infinity")]
-    fn new_with_invalid_slippage(#[case] threshold: f64, #[case] _desc: &str) {
+    fn new_with_invalid_marginal_price_drop(#[case] threshold: f64, #[case] _desc: &str) {
         let result = ComponentDepthComputation::new(threshold);
         assert!(
             matches!(result, Err(ComputationError::InvalidConfiguration(_))),
@@ -535,253 +585,140 @@ mod tests {
         );
     }
 
-    /// Verify that Price construction in compute() correctly handles decimal scaling
-    /// across mixed-decimal token pairs (e.g. WETH(18)/USDC(6)).
-    ///
-    /// Uses the shared `query_pool_swap` function directly because UniV2's trait
-    /// method rejects TradeLimitPrice, but the shared function works with any
-    /// ProtocolSim via get_amount_out/spot_price.
-    #[rstest]
-    #[case::same_decimals(18, 18, 1000, 2000)]
-    #[case::high_to_low(18, 6, 1000, 2_000_000)]
-    #[case::low_to_high(6, 18, 2_000_000, 1000)]
-    #[case::small_difference(8, 18, 100, 2000)]
-    #[test]
-    fn test_decimal_scaling_with_real_univ2(
-        #[case] decimals_in: u32,
-        #[case] decimals_out: u32,
-        #[case] tokens_in_reserve: u64,
-        #[case] tokens_out_reserve: u64,
-    ) {
+    #[tokio::test]
+    async fn test_compute_native_pool_target_price() {
+        // UniswapV2 answers `PoolTargetPrice` itself, for both directions.
         use alloy::primitives::U256;
-        use tycho_simulation::evm::{
-            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
+        use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+
+        let weth = token_with_decimals(0x01, "WETH", 18);
+        let usdc = token_with_decimals(0x02, "USDC", 6);
+        let univ2 = UniswapV2State::new(
+            U256::from(5_000u64) * U256::from(10u64).pow(U256::from(18u64)),
+            U256::from(10_000_000u64) * U256::from(10u64).pow(U256::from(6u64)),
+        );
+        let (market, _) =
+            setup_market_weighted_boxed(vec![("component", &weth, &usdc, Box::new(univ2))]);
+        let derived = DerivedData::new_shared();
+        let changed = ChangedComponents {
+            added: FxHashMap::from_iter([(
+                "component".to_string(),
+                vec![weth.address.clone(), usdc.address.clone()],
+            )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
         };
+        let spot_output = SpotPriceComputation::new()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("spot price computation should succeed");
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_output.data, vec![], 0, true);
 
-        let token_in = token_with_decimals(0x01, "IN", decimals_in);
-        let token_out = token_with_decimals(0x02, "OUT", decimals_out);
+        let output = ComponentDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("computation should succeed");
 
-        let reserve_in =
-            U256::from(tokens_in_reserve) * U256::from(10u64).pow(U256::from(decimals_in));
-        let reserve_out =
-            U256::from(tokens_out_reserve) * U256::from(10u64).pow(U256::from(decimals_out));
-        let univ2 = UniswapV2State::new(reserve_in, reserve_out);
-
-        let spot_price = univ2
-            .spot_price(&token_in, &token_out)
-            .expect("spot_price should succeed");
-
-        let slippage = 0.01;
-        let min_price = spot_price * (1.0 - slippage);
-
-        let decimal_diff = token_in.decimals as i32 - token_out.decimals as i32;
-        let numerator = BigUint::from((min_price * 10_f64.powi(18)) as u128);
-        let denominator = BigUint::from(10u64).pow((18 + decimal_diff) as u32);
-
-        let limit_price = Price::new(numerator, denominator);
-
-        let params = QueryPoolSwapParams::new(
-            token_in.clone(),
-            token_out.clone(),
-            SwapConstraint::TradeLimitPrice {
-                limit: limit_price,
-                tolerance: 0.0,
-                min_amount_in: None,
-                max_amount_in: None,
-            },
-        );
-
-        let result = query_pool_swap(&univ2, &params);
-        assert!(
-            result.is_ok(),
-            "query_pool_swap should succeed for {decimals_in}/{decimals_out} decimals, \
-             got error: {:?}",
-            result.err()
-        );
-
-        let swap = result.unwrap();
-        assert!(
-            !swap.amount_in().is_zero(),
-            "amount_in should be non-zero for {decimals_in}/{decimals_out} decimals"
-        );
-
-        let post_swap_spot = swap
-            .new_state()
-            .spot_price(&token_in, &token_out)
-            .expect("post-swap spot_price should succeed");
-        let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
-        assert!(
-            price_impact <= slippage + 0.005,
-            "post-swap price impact {price_impact:.4} should be near slippage {slippage} \
-             for {decimals_in}/{decimals_out} decimals"
-        );
-    }
-
-    /// Exercises the Brent solver fallback path with realistic UniV2 component states to verify
-    /// it produces sensible depth values. This validates that the Price construction
-    /// approach in compute() is correct across a range of real-world token pairs.
-    ///
-    /// Three components covering the key decimal configurations encountered in production:
-    ///   - WETH/USDC: 18/6 decimals, ~$2000 price, ~$10M liquidity
-    ///   - WETH/WBTC: 18/8 decimals, ~15 price, ~$5M liquidity
-    ///   - USDC/USDT: 6/6 decimals, ~1 price, ~$50M liquidity
-    #[test]
-    fn test_brent_solver_with_realistic_components() {
-        use alloy::primitives::U256;
-        use tycho_simulation::evm::{
-            protocol::uniswap_v2::state::UniswapV2State, query_pool_swap::query_pool_swap,
-        };
-
-        struct ComponentCase {
-            name: &'static str,
-            token_in: tycho_simulation::tycho_core::models::token::Token,
-            token_out: tycho_simulation::tycho_core::models::token::Token,
-            reserve_in_human: u64,
-            reserve_out_human: u64,
-        }
-
-        // WETH reserve ~5000 ETH, USDC reserve ~10M USDC  → ~$2000/ETH, ~$10M TVL
-        // WETH reserve ~333 ETH, WBTC reserve ~5000 WBTC  → ~15 WBTC/WETH, ~$5M TVL
-        // USDC reserve ~25M, USDT reserve ~25M            → ~1:1, ~$50M TVL
-        let cases = vec![
-            ComponentCase {
-                name: "WETH(18)/USDC(6)",
-                token_in: token_with_decimals(0x01, "WETH", 18),
-                token_out: token_with_decimals(0x02, "USDC", 6),
-                reserve_in_human: 5_000,
-                reserve_out_human: 10_000_000,
-            },
-            ComponentCase {
-                name: "WETH(18)/WBTC(8)",
-                token_in: token_with_decimals(0x01, "WETH", 18),
-                token_out: token_with_decimals(0x02, "WBTC", 8),
-                reserve_in_human: 5_000,
-                reserve_out_human: 333,
-            },
-            ComponentCase {
-                name: "USDC(6)/USDT(6)",
-                token_in: token_with_decimals(0x01, "USDC", 6),
-                token_out: token_with_decimals(0x02, "USDT", 6),
-                reserve_in_human: 25_000_000,
-                reserve_out_human: 25_000_000,
-            },
-        ];
-
-        let slippage = 0.01_f64;
-        const SCALE_EXP: i32 = 18;
-
-        for case in &cases {
-            let decimals_in = case.token_in.decimals;
-            let decimals_out = case.token_out.decimals;
-
-            let reserve_in =
-                U256::from(case.reserve_in_human) * U256::from(10u64).pow(U256::from(decimals_in));
-            let reserve_out = U256::from(case.reserve_out_human) *
-                U256::from(10u64).pow(U256::from(decimals_out));
-            let univ2 = UniswapV2State::new(reserve_in, reserve_out);
-
-            let spot_price = univ2
-                .spot_price(&case.token_in, &case.token_out)
-                .unwrap_or_else(|e| panic!("[{}] spot_price failed: {e}", case.name));
-
-            let min_price = spot_price * (1.0 - slippage);
-
-            let decimal_diff = decimals_in as i32 - decimals_out as i32;
-            let denominator_exp = SCALE_EXP + decimal_diff;
-            assert!(
-                denominator_exp >= 0,
-                "[{}] denominator_exp would be negative: {denominator_exp}",
-                case.name
-            );
-
-            let numerator = BigUint::from((min_price * 10_f64.powi(SCALE_EXP)) as u128);
-            let denominator = BigUint::from(10u64).pow(denominator_exp as u32);
-            let limit_price = Price::new(numerator, denominator);
-
-            let limit_price_f64 = min_price;
-
-            let params = QueryPoolSwapParams::new(
-                case.token_in.clone(),
-                case.token_out.clone(),
-                SwapConstraint::TradeLimitPrice {
-                    limit: limit_price,
-                    tolerance: 0.0,
-                    min_amount_in: None,
-                    max_amount_in: None,
-                },
-            );
-
-            let result = query_pool_swap(&univ2, &params)
-                .unwrap_or_else(|e| panic!("[{}] query_pool_swap failed: {e}", case.name));
-
-            let amount_in = result.amount_in();
-            assert!(!amount_in.is_zero(), "[{}] amount_in (depth) should be non-zero", case.name);
-
-            let post_swap_spot = result
-                .new_state()
-                .spot_price(&case.token_in, &case.token_out)
-                .unwrap_or_else(|e| panic!("[{}] post-swap spot_price failed: {e}", case.name));
-            let price_impact = ((post_swap_spot - spot_price) / spot_price).abs();
-
-            let amount_in_human = {
-                let raw: f64 = amount_in
-                    .to_string()
-                    .parse()
-                    .unwrap_or(0.0);
-                raw / 10_f64.powi(decimals_in as i32)
-            };
-
-            println!(
-                "[{}] spot_price={:.6}, limit_price={:.6}, amount_in={} ({:.4} human), \
-                 post_swap_spot={:.6}, price_impact={:.4}%",
-                case.name,
-                spot_price,
-                limit_price_f64,
-                amount_in,
-                amount_in_human,
-                post_swap_spot,
-                price_impact * 100.0
-            );
-
-            assert!(
-                price_impact <= slippage + 0.005,
-                "[{}] price impact {:.4}% exceeds slippage {:.4}% + tolerance",
-                case.name,
-                price_impact * 100.0,
-                slippage * 100.0
-            );
+        assert!(!output.has_failures(), "failed items: {:?}", output.failed_items);
+        for (token_in, token_out) in [(&weth, &usdc), (&usdc, &weth)] {
+            let key: ComponentDepthKey =
+                ("component".into(), token_in.address.clone(), token_out.address.clone());
+            let depth = output
+                .data
+                .get(&key)
+                .expect("the depth is stored");
+            assert!(!depth.is_zero(), "{} depth is zero", token_in.symbol);
         }
     }
 
     #[tokio::test]
-    async fn test_compute_partial_failure_missing_spot_price() {
+    async fn test_compute_generic_search_fallback() {
+        // `ConstantProductSim` has no `query_pool_swap` of its own, so `compute` falls back to
+        // tycho's generic search. With no fee, its price after a swap of `x` is
+        // `spot * (reserve_in / (reserve_in + x))²`, so a 1.5% fall takes
+        // `x = reserve_in * (1 / sqrt(0.985) - 1)`.
         let eth = token(0x01, "ETH");
         let usdc = token(0x02, "USDC");
-
-        let (market, _) = setup_market_weighted(vec![(
-            "component",
-            &eth,
-            &usdc,
-            MockProtocolSim::new(2000.0)
-                .with_liquidity(1_000_000)
-                .with_tokens(&[eth.clone(), usdc.clone()]),
-        )]);
+        let pool = ConstantProductSim {
+            reserve_0: BigUint::from(1_000u32) * BigUint::from(10u32).pow(18),
+            reserve_1: BigUint::from(2_000_000u32) * BigUint::from(10u32).pow(18),
+            gas: 100_000,
+        };
+        // The ETH reserve is 1e21 wei.
+        let expected_depth = 1e21 * (1.0 / 0.985f64.sqrt() - 1.0);
+        let (market, _) =
+            setup_market_weighted_boxed(vec![("component", &eth, &usdc, Box::new(pool))]);
         let derived = DerivedData::new_shared();
-
-        // Provide spot price for only one direction so the other becomes a FailedItem
-        let mut partial_spot = SpotPrices::default();
-        let key_eth_usdc = ("component".to_string(), eth.address.clone(), usdc.address.clone());
-        partial_spot.insert(key_eth_usdc, 2000.0);
-        derived
-            .try_write()
-            .unwrap()
-            .set_spot_prices(partial_spot, vec![], 0, true);
-
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
                 vec![eth.address.clone(), usdc.address.clone()],
             )]),
+            removed: vec![],
+            updated: vec![],
+            is_full_recompute: true,
+        };
+        let spot_output = SpotPriceComputation::new()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("spot price computation should succeed");
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(spot_output.data, vec![], 0, true);
+
+        let output = ComponentDepthComputation::default()
+            .compute(&market, &derived, &changed)
+            .await
+            .expect("computation should succeed");
+
+        let key: ComponentDepthKey =
+            ("component".into(), eth.address.clone(), usdc.address.clone());
+        let depth = output
+            .data
+            .get(&key)
+            .and_then(ToPrimitive::to_f64)
+            .expect("the depth is stored");
+        assert!((depth - expected_depth).abs() / expected_depth < 1e-4, "depth {depth}");
+    }
+
+    #[tokio::test]
+    async fn test_compute_partial_failure_missing_spot_price() {
+        // The eth_usdc pool has a spot price only from ETH to USDC, so only that direction gets a
+        // depth. The eth_dai pool has both and gets both depths.
+        let eth = token(0x01, "ETH");
+        let usdc = token(0x02, "USDC");
+        let dai = token(0x03, "DAI");
+        let pool = |quote: &Token| {
+            MockProtocolSim::new(2000.0)
+                .with_liquidity(1_000_000)
+                .with_tokens(&[eth.clone(), quote.clone()])
+        };
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_usdc", &eth, &usdc, pool(&usdc)),
+            ("eth_dai", &eth, &dai, pool(&dai)),
+        ]);
+        let derived = DerivedData::new_shared();
+        let key = |component: &str, token_in: &Token, token_out: &Token| {
+            (component.to_string(), token_in.address.clone(), token_out.address.clone())
+        };
+        let mut partial_spot = SpotPrices::default();
+        partial_spot.insert(key("eth_usdc", &eth, &usdc), 2000.0);
+        partial_spot.insert(key("eth_dai", &eth, &dai), 2000.0);
+        partial_spot.insert(key("eth_dai", &dai, &eth), 1.0 / 2000.0);
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(partial_spot, vec![], 0, true);
+        let changed = ChangedComponents {
+            added: FxHashMap::from_iter([
+                ("eth_usdc".to_string(), vec![eth.address.clone(), usdc.address.clone()]),
+                ("eth_dai".to_string(), vec![eth.address.clone(), dai.address.clone()]),
+            ]),
             removed: vec![],
             updated: vec![],
             is_full_recompute: true,
@@ -792,22 +729,23 @@ mod tests {
             .await
             .expect("should succeed with partial results");
 
-        assert!(output.has_failures(), "missing USDC→ETH spot price should produce a failed item");
-
-        // ETH→USDC direction should succeed
-        let key_eth_usdc: ComponentDepthKey =
-            ("component".into(), eth.address.clone(), usdc.address.clone());
-        assert!(output.data.contains_key(&key_eth_usdc), "ETH→USDC depth should be present");
-
-        // USDC→ETH direction should be in failed_items
-        let usdc_eth_key = format!("component/{}/{}", usdc.address, eth.address);
+        assert!(output
+            .data
+            .contains_key(&key("eth_dai", &eth, &dai)));
+        assert!(output
+            .data
+            .contains_key(&key("eth_dai", &dai, &eth)));
+        assert!(output
+            .data
+            .contains_key(&key("eth_usdc", &eth, &usdc)));
+        let failed_key = format!("eth_usdc/{}/{}", usdc.address, eth.address);
         assert!(
             output
                 .failed_items
                 .iter()
-                .any(|item| item.key == usdc_eth_key &&
+                .any(|item| item.key == failed_key &&
                     matches!(item.error, FailedItemError::MissingSpotPrice)),
-            "USDC→ETH should appear in failed_items with missing spot price error"
+            "{failed_key} should fail with a missing spot price"
         );
     }
 

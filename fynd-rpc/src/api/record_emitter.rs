@@ -5,7 +5,7 @@
 //! dropped and counted. Dropping the incoming record rather than evicting an older one leaves the
 //! store a clean prefix of the traffic while the collector is out, instead of a sample with gaps.
 //!
-//! [`spawn_record_sender`] builds the other end: a task that drains the queue and POSTs each batch
+//! `spawn_record_sender` builds the other end: a task that drains the queue and POSTs each batch
 //! to `<collector_url>/v1/records`, zstd-compressed, within a second of the batch's first record.
 //! A batch that fails is dropped and counted, never retried: the collector mints the record ids on
 //! receipt, so a retry stores every record in that batch a second time.
@@ -26,7 +26,7 @@ use crate::{api::record::QuoteRecord, config::defaults};
 
 /// The quote handler's end of the record queue.
 #[derive(Clone, Debug)]
-pub(crate) struct RecordEmitter {
+pub struct RecordEmitter {
     sender: mpsc::Sender<QuoteRecord>,
 }
 
@@ -44,7 +44,7 @@ impl RecordEmitter {
 
     /// Queues `record`, or drops it and counts the drop. Runs on the response path, so it never
     /// waits on the sending task.
-    pub(crate) fn emit(&self, record: QuoteRecord) {
+    pub fn emit(&self, record: QuoteRecord) {
         match self.sender.try_send(record) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => record_dropped("queue_full", 1),

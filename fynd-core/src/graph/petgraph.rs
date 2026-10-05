@@ -318,7 +318,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager
     ///
     /// Uses pre-computed derived data (spot prices, component depths, etc.) to update
     /// edge weights. This is more accurate than computing from scratch as it uses
-    /// data computed with slippage thresholds via `query_pool_swap` or binary search.
+    /// data computed with `query_pool_swap`.
     ///
     /// # Arguments
     ///

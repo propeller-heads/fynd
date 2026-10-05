@@ -8,19 +8,24 @@ use tycho_simulation::{
         protocol::{
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
+            balancer_v3::BalancerV3State,
             curve::CurveState,
             ekubo::state::EkuboState,
             ekubo_v3::state::EkuboV3State,
             erc4626::state::ERC4626State,
+            etherfi::state::EtherfiState,
             filters::{
-                balancer_v2_pool_filter, curve_filter, ekubo_v3_extension_filter,
-                ekubo_v3_extension_filter_with_signed_exclusive_swap, erc4626_filter,
-                fluid_v1_paused_pools_filter,
+                balancer_v2_pool_filter, balancer_v3_pool_filter, curve_filter,
+                ekubo_v3_extension_filter, ekubo_v3_extension_filter_with_signed_exclusive_swap,
+                erc4626_filter, fluid_v1_paused_pools_filter, liquidityparty_killed_pools_filter,
             },
             fluid::FluidV1,
+            lido_v4::state::LidoV4State,
             lunarbase::state::LunarBaseState,
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
+            ring_swap_v2::state::RingSwapV2State,
+            sky::state::SkyState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
             uniswap_v4::state::UniswapV4State,
@@ -344,6 +349,7 @@ fn register_exchange(
         "robinswap_v3" => {
             builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
         }
+        "gigadex_v3" => builder.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None),
         "ramses_v3" => builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None),
         "pancakeswap_v3" => {
             builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
@@ -353,13 +359,17 @@ fn register_exchange(
             tvl_filter.clone(),
             Some(balancer_v2_pool_filter),
         ),
+        "vm:balancer_v3" => builder.exchange::<BalancerV3State>(
+            "vm:balancer_v3",
+            tvl_filter.clone(),
+            Some(balancer_v3_pool_filter),
+        ),
         "uniswap_v4" => builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None),
         "ekubo_v2" => builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None),
         "vm:curve" => {
-            // The hybrid CurveState with tycho-simulation's own curve_filter, which drops
-            // the components CurveState cannot quote correctly (oracle/rate-bearing/rebasing
-            // coins) — the source of the overestimation that forced the temporary
-            // full-EVM fallback (see #318); fixed upstream in tycho-simulation 0.338.0.
+            // Tycho's curve_filter keeps standard coins and, since 0.428.0, oracle coins
+            // with trusted rate providers (including weETH getRate()). Untrusted oracle,
+            // rebasing and ERC4626 coins remain excluded from the hybrid CurveState.
             builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
         }
         "uniswap_v4_hooks" => builder.exchange::<UniswapV4State>(
@@ -371,6 +381,11 @@ fn register_exchange(
             "vm:maverick_v2",
             tvl_filter.clone(),
             None,
+        ),
+        "vm:liquidityparty" => builder.exchange::<EVMPoolState<PreCachedDB>>(
+            "vm:liquidityparty",
+            tvl_filter.clone(),
+            Some(liquidityparty_killed_pools_filter),
         ),
         "vm:bopamm" => {
             builder.exchange::<EVMPoolState<PreCachedDB>>("vm:bopamm", tvl_filter.clone(), None)
@@ -418,6 +433,12 @@ fn register_exchange(
         "quickswap_v2" => {
             builder.exchange::<UniswapV2State>("quickswap_v2", tvl_filter.clone(), None)
         }
+        "ring_swap_v2" => {
+            builder.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None)
+        }
+        "sky" => builder.exchange::<SkyState>("sky", tvl_filter.clone(), None),
+        "lido_v4" => builder.exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None),
+        "etherfi" => builder.exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None),
         "lunarbase" => builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None),
         _ => return Registration::NoDecoder(builder),
     };
@@ -818,6 +839,49 @@ mod tests {
         assert_eq!(uniswap_v4_hook_filter(&uniswap_v4_component(hook)), kept);
     }
 
+    // Guard the upstream filter behavior Fynd relies on when updating Tycho dependencies.
+    #[rstest::rstest]
+    #[case::trusted_weeth("0x01", "0xCd5fE23C85820F7B72D0926FC9b05b43E359b7ee", "0x679aefce", true)]
+    #[case::untrusted_oracle(
+        "0x01",
+        "0x1111111111111111111111111111111111111111",
+        "0x679aefce",
+        false
+    )]
+    #[case::wrong_method("0x01", "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x12345678", false)]
+    #[case::rebasing("0x02", "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x679aefce", false)]
+    #[case::erc4626("0x03", "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee", "0x679aefce", false)]
+    fn test_curve_filter_trusted_rate_provider(
+        #[case] asset_type: &str,
+        #[case] oracle: &str,
+        #[case] method_id: &str,
+        #[case] kept: bool,
+    ) {
+        use tycho_simulation::tycho_common::models::protocol::{
+            ProtocolComponent, ProtocolComponentState,
+        };
+
+        let static_attributes = [
+            ("asset_types", vec!["0x00", asset_type]),
+            ("oracles", vec!["0x0000000000000000000000000000000000000000", oracle]),
+            ("method_ids", vec!["0x00000000", method_id]),
+        ]
+        .into_iter()
+        .map(|(key, values)| (key.to_string(), Bytes::from(serde_json::to_vec(&values).unwrap())))
+        .collect();
+        let component = ComponentWithState {
+            component: ProtocolComponent {
+                protocol_system: "vm:curve".to_string(),
+                static_attributes,
+                ..Default::default()
+            },
+            state: ProtocolComponentState::new("curve_pool", HashMap::new(), HashMap::new()),
+            component_tvl: None,
+            entrypoints: vec![],
+        };
+        assert_eq!(curve_filter(&component), kept);
+    }
+
     fn register(entries: &[&str]) -> Result<ProtocolStreamBuilder, DataFeedError> {
         register_exchanges(
             ProtocolStreamBuilder::new("localhost:0", Chain::Ethereum),
@@ -976,6 +1040,8 @@ mod tests {
             "uniswap_v2",
             "ekubo_v3",
             "up_v3",
+            "uniswap_v4_hooks",
+            "gigadex_v3",
         ];
         let skipped = skipped_unknown_protocols(&robinhood_protocols);
         assert!(
@@ -983,6 +1049,18 @@ mod tests {
             "expected every Robinhood protocol to register, but got unknown-protocol warnings \
              for: {skipped:?}"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::liquidityparty("vm:liquidityparty")]
+    #[case::ring_swap_v2("ring_swap_v2")]
+    #[case::balancer_v3("vm:balancer_v3")]
+    #[case::sky("sky")]
+    #[case::lido_v4("lido_v4")]
+    #[case::etherfi("etherfi")]
+    fn test_register_exchange_supports_protocol(#[case] protocol: &str) {
+        let skipped = skipped_unknown_protocols(&[protocol]);
+        assert!(skipped.is_empty(), "expected {protocol} to register, but got {skipped:?}");
     }
 
     #[test]

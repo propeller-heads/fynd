@@ -1,13 +1,13 @@
 {
   "metadata": {
     "block_number": 26045981,
-    "num_components": 2785,
-    "num_tokens": 1985,
+    "num_components": 2946,
+    "num_tokens": 2003,
     "fynd_version": "0.110.0",
     "derived_data": {
-      "components_with_spot_prices": 2785,
-      "components_with_depths": 2577,
-      "token_prices": 1812
+      "components_with_spot_prices": 2946,
+      "components_with_depths": 2652,
+      "token_prices": 1813
     }
   },
   "scenarios": [

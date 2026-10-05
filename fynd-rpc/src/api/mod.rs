@@ -20,7 +20,7 @@ pub mod prices;
 /// The quote record every answered `/v1/quote` produces for the collector.
 pub mod record;
 /// The bounded queue carrying those records to the task that sends them.
-pub(crate) mod record_emitter;
+pub mod record_emitter;
 /// Builds re-issuable, signature-free representation of a quote request for replay logging.
 pub mod request_capture;
 #[cfg(feature = "experimental")]
@@ -141,9 +141,12 @@ fn block_age_ms_at_time(timestamp_secs: u64, now: SystemTime) -> u64 {
         })
 }
 
-pub(crate) struct TychoHeadStatus {
-    pub(crate) head: BlockInfo,
-    pub(crate) last_update_ms: u64,
+/// The Tycho head one market-data snapshot reported, and how long ago it arrived.
+pub struct TychoHeadStatus {
+    /// The block the feed last delivered.
+    pub head: BlockInfo,
+    /// Milliseconds since that block arrived.
+    pub last_update_ms: u64,
 }
 
 /// Simple tracker for service health metrics.
@@ -176,7 +179,7 @@ impl HealthTracker {
     }
 
     /// Returns the current Tycho head and its age from one market-data snapshot.
-    pub(crate) async fn tycho_head_status(&self) -> Option<TychoHeadStatus> {
+    pub async fn tycho_head_status(&self) -> Option<TychoHeadStatus> {
         let head = self
             .market_data
             .read()
@@ -322,7 +325,7 @@ impl AppState {
 
     /// Returns the record queue the quote handler feeds, when this instance emits records.
     #[must_use]
-    pub(crate) fn record_emitter(&self) -> Option<&RecordEmitter> {
+    pub fn record_emitter(&self) -> Option<&RecordEmitter> {
         self.record_emitter.as_ref()
     }
 }

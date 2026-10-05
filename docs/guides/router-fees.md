@@ -6,9 +6,9 @@ icon: coins
 
 This page describes the on-chain fee calculation. The [Fynd License 1.0](../reference/license.md) governs settlement and also sets out revenue-share and reporting obligations, including for revenue collected off-chain.
 
-Fynd charges a fee when you execute a swap. Quotes are free.
+Fynd may charge a fee when you execute a swap. Quotes are free.
 
-The default Fynd fee is 0.1 bps (0.001%) of swap output. Contact us for volume discounts.
+The default Fynd fee is 0 bps.
 
 Negotiated rates are keyed to your address. When your users submit swaps from their own wallets,
 [identify yourself with zero-fee client fee params](client-fees.md#identify-as-a-client-without-charging-a-fee)
@@ -46,7 +46,7 @@ Invariant without client fees: `amount_out = router_fee + max_slippage + min_amo
 
 ### Example
 
-Example: 1,000,000 USDC output, 0.1 bps Fynd fee, 1% slippage:
+Example with a non-zero rate: 1,000,000 USDC output, 0.1 bps Fynd fee, 1% slippage:
 
 ```
 router_fee           = 1,000,000 * 0.1 / 10,000         = 10

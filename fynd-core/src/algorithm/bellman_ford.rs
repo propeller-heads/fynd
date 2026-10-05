@@ -95,27 +95,29 @@ impl BellmanFordContext {
     /// The subgraph walk and the endpoint switch belong together: re-pointing alone would leave
     /// the solve running against the previous root's subgraph. Token metadata and the market
     /// snapshot are reused as-is, so the new endpoints must lie inside the subgraph the context
-    /// was built from. Returns the walk's candidate component ids — every component on any
-    /// `token_in`-to-`token_out` path within `max_hops` — or `None` when no such path exists.
-    pub(crate) fn reroot_toward<'a>(
+    /// was built from. Returns `false`, and leaves the context unchanged, when no
+    /// `token_in`-to-`token_out` path exists within `max_hops`.
+    pub(crate) fn reroot_toward(
         &mut self,
-        graph: &'a StableDiGraph<()>,
+        graph: &StableDiGraph<()>,
         token_in_node: NodeIndex,
         token_out_node: NodeIndex,
         hops_to_token_out: &FxHashMap<NodeIndex, usize>,
         max_hops: usize,
-    ) -> Option<FxHashSet<&'a ComponentId>> {
-        let subgraph = BellmanFordAlgorithm::get_subgraph_with_hop_map(
+    ) -> bool {
+        let Some(subgraph) = BellmanFordAlgorithm::get_subgraph_with_hop_map(
             graph,
             (token_in_node, Some(token_out_node)),
             Some(hops_to_token_out),
             max_hops,
             &RouteExclusions::default(),
-        )?;
+        ) else {
+            return false;
+        };
         self.adj = subgraph.adjacency;
         self.token_in_node = token_in_node;
         self.token_out_node = Some(token_out_node);
-        Some(subgraph.component_ids)
+        true
     }
 }
 
@@ -130,13 +132,14 @@ pub(crate) struct ReachOutcome {
 }
 
 /// What one relaxation delivers at a destination the source token reaches: the output amount
-/// and the components along the best path to it.
+/// and the hops of the best path to it.
 pub(crate) struct ReachedToken {
     /// What the path delivers at the destination. Never zero: a destination the relaxation
     /// leaves at zero counts as unreached and is absent from the map.
     pub(crate) amount_out: BigUint,
-    /// The components the path runs through, in hop order.
-    pub(crate) components: Vec<ComponentId>,
+    /// The path's hops in route order: the node of the token each hop sells, the node of the
+    /// token it buys, and the component it swaps through.
+    pub(crate) hops: Vec<(NodeIndex, NodeIndex, ComponentId)>,
 }
 
 /// Controls how `find_single_route` ranks candidate routes after simulation.
@@ -414,7 +417,7 @@ impl BellmanFordAlgorithm {
     }
 
     /// Every token the source token reaches, with what the best path to it delivers and the
-    /// components that path runs through, from one relaxation.
+    /// hops of that path, from one relaxation.
     ///
     /// The relaxation fills the best amount at every node, so reading all of them costs one pass
     /// rather than one per destination. Deliberately not a [`Route`] per destination:
@@ -455,12 +458,10 @@ impl BellmanFordAlgorithm {
                     continue;
                 }
             };
-            let components = path_edges
-                .into_iter()
-                .map(|(_, _, component_id)| component_id)
-                .collect();
-            reached
-                .insert(address.clone(), ReachedToken { amount_out: amount.clone(), components });
+            reached.insert(
+                address.clone(),
+                ReachedToken { amount_out: amount.clone(), hops: path_edges },
+            );
         }
 
         debug!(
@@ -1774,6 +1775,24 @@ mod tests {
             .map(|t| t.address.clone())
             .collect();
         assert_eq!(reached, expected);
+        let hops_to_c: Vec<(&Address, &Address, &str)> = routes.reached[&token_c.address]
+            .hops
+            .iter()
+            .map(|(sold_node, bought_node, component_id)| {
+                (
+                    &ctx.node_address[sold_node],
+                    &ctx.node_address[bought_node],
+                    component_id.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            hops_to_c,
+            vec![
+                (&token_g.address, &token_b.address, "component_gb"),
+                (&token_b.address, &token_c.address, "component_bc"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1901,8 +1920,10 @@ mod tests {
             3,
             &RouteExclusions::default(),
         );
-        ctx.reroot_toward(graph, node_of(&token_c.address), gas_node, &hops_to_gas, 3)
-            .expect("a C-to-G path exists");
+        assert!(
+            ctx.reroot_toward(graph, node_of(&token_c.address), gas_node, &hops_to_gas, 3),
+            "a C-to-G path exists"
+        );
         let ord = order(&token_c, &token_g, 100, OrderSide::Sell);
         let result = algo
             .find_single_route(&ctx, &ord, FindRouteOptions::default())
