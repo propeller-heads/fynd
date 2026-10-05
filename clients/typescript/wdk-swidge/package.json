@@ -1,0 +1,36 @@
+{
+  "name": "wdk-protocol-swidge-fynd",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "description": "WDK Swidge adapter for the hosted Fynd API",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./types/index.d.ts",
+  "exports": { ".": { "types": "./types/index.d.ts", "bare": "./bare.js", "default": "./index.js" } },
+  "files": ["index.js", "bare.js", "src", "types", "docs", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", ".env.example"],
+  "repository": { "type": "git", "url": "https://github.com/propeller-heads/fynd.git", "directory": "clients/typescript/wdk-swidge" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tests/tsconfig.json",
+    "lint": "oxlint src index.js tests",
+    "test": "vitest run",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@tetherto/wdk": "1.0.0-beta.18",
+    "@tetherto/wdk-wallet": "1.0.0-beta.19",
+    "@tetherto/wdk-wallet-evm": "1.0.0-beta.19",
+    "bare-node-runtime": "1.5.1",
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "bare": "1.33.5",
+    "oxlint": "1.51.0",
+    "require-asset": "1.2.4",
+    "typescript": "5.8.2",
+    "vitest": "4.0.18"
+  }
+}
