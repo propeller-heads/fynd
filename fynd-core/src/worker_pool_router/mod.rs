@@ -403,7 +403,7 @@ async fn encode_with_retries(
             }
         }
         if retry_batch.is_empty() {
-            record_encoding_failures(&quote_per_order);
+            record_encoding_failures(&quote_per_order, &[]);
             return Ok(quote_per_order);
         }
         if Instant::now() >= retry_deadline {
@@ -412,7 +412,7 @@ async fn encode_with_retries(
                 budget_ms = retry_budget.as_millis(),
                 "encoding retry budget spent; the remaining candidates are not tried"
             );
-            record_encoding_failures(&quote_per_order);
+            record_encoding_failures(&quote_per_order, &retried_orders);
             return Ok(quote_per_order);
         }
         let retried_quotes = encoder
@@ -445,16 +445,24 @@ fn has_rfq_leg(quote: &OrderQuote) -> bool {
     })
 }
 
-/// Counts `encoding_failures_total` once per order that is returned without a transaction,
-/// after every candidate of that order failed to encode.
-fn record_encoding_failures(quotes: &[OrderQuote]) {
-    for quote in quotes {
+/// Counts `encoding_failures_total` once per order that is returned without a transaction.
+///
+/// `retry_budget_spent` is `true` for the orders in `cut_off_orders`, which still had untried
+/// candidates when the retry budget ran out, and `false` for orders whose every candidate failed.
+fn record_encoding_failures(quotes: &[OrderQuote], cut_off_orders: &[usize]) {
+    for (order_index, quote) in quotes.iter().enumerate() {
         if quote.status() == QuoteStatus::EncodingFailed {
+            let retry_budget_spent = cut_off_orders.contains(&order_index);
             warn!(
                 order_id = %quote.order_id(),
-                "no candidate of this order encoded; it is returned without a transaction"
+                retry_budget_spent,
+                "this order is returned without a transaction"
             );
-            counter!("encoding_failures_total").increment(1);
+            counter!(
+                "encoding_failures_total",
+                "retry_budget_spent" => retry_budget_spent.to_string()
+            )
+            .increment(1);
         }
     }
 }
@@ -2300,8 +2308,8 @@ mod tests {
         assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(800u64));
     }
 
-    #[tokio::test]
-    async fn test_encode_quotes_zero_retry_budget() {
+    #[test]
+    fn test_encode_quotes_zero_retry_budget() {
         let ranked = RankedQuotes::new(vec![vec![
             make_single_quote_on("no_such_protocol", 950)
                 .order()
@@ -2309,14 +2317,30 @@ mod tests {
             make_single_quote(800).order().clone(),
         ]])
         .expect("the order has candidates");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime builds");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
 
-        let quotes =
-            encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01), Duration::ZERO)
-                .await
-                .expect("a failing candidate is reported on the order, not on the call");
+        let quotes = metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(encode_quotes(
+                &default_encoder(),
+                ranked,
+                &EncodingOptions::new(0.01),
+                Duration::ZERO,
+            ))
+        })
+        .expect("a failing candidate is reported on the order, not on the call");
 
         assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
         assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(950u64));
+        let failures: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "encoding_failures_total")
+            .map(|(_, labels, _)| labels)
+            .collect();
+        assert_eq!(failures, vec![vec!["retry_budget_spent=true".to_string()]]);
     }
 
     #[test]
@@ -2373,9 +2397,15 @@ mod tests {
         let failures: Vec<_> = recorded_metrics(&snapshotter)
             .into_iter()
             .filter(|(metric, _, _)| metric == "encoding_failures_total")
-            .map(|(_, _, value)| value)
+            .map(|(_, labels, value)| (labels, value))
             .collect();
-        assert_eq!(failures, vec![metrics_util::debugging::DebugValue::Counter(1)]);
+        assert_eq!(
+            failures,
+            vec![(
+                vec!["retry_budget_spent=false".to_string()],
+                metrics_util::debugging::DebugValue::Counter(1)
+            )]
+        );
     }
 
     #[test]
