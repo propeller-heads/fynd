@@ -177,6 +177,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets how long one route may take to encode before it is given up as `EncodingFailed`
+    /// (default: 1s).
+    pub fn encoding_route_timeout(mut self, route_timeout: Duration) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .encoding_route_timeout(route_timeout);
+        self
+    }
+
     /// Sets the Tycho API key.
     pub fn tycho_api_key(mut self, key: String) -> Self {
         self.fynd_builder = self.fynd_builder.tycho_api_key(key);

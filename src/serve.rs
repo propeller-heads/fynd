@@ -341,6 +341,7 @@ async fn setup_solver(
             .worker_router_timeout(Duration::from_millis(args.worker_router_timeout_ms))
             .worker_router_min_responses(args.worker_router_min_responses)
             .encoding_retry_budget(Duration::from_millis(args.encoding_retry_budget_ms))
+            .encoding_route_timeout(Duration::from_millis(args.encoding_route_timeout_ms))
             .gas_price_stale_threshold(
                 args.gas_price_stale_threshold_secs
                     .map(Duration::from_secs),

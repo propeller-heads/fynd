@@ -143,6 +143,11 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::ENCODING_RETRY_BUDGET.as_millis() as u64)]
     pub encoding_retry_budget_ms: u64,
 
+    /// Milliseconds one route may take to encode before it is given up and the next candidate
+    /// is tried
+    #[arg(long, default_value_t = defaults::ENCODING_ROUTE_TIMEOUT.as_millis() as u64)]
+    pub encoding_route_timeout_ms: u64,
+
     /// Path to worker pools TOML config file
     #[arg(short, long, env, default_value = "worker_pools.toml")]
     pub worker_pools_config: PathBuf,
@@ -298,6 +303,7 @@ mod cli_tests {
         assert_eq!(args.worker_router_timeout_ms, 100);
         assert_eq!(args.worker_router_min_responses, 0);
         assert_eq!(args.encoding_retry_budget_ms, 5);
+        assert_eq!(args.encoding_route_timeout_ms, 1000);
         assert_eq!(args.blocklist_config, None);
         assert_eq!(args.hosted_swagger_url, None);
         assert_eq!(args.collector_url, None);

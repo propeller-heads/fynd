@@ -346,10 +346,11 @@ impl RankedQuotes {
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
 ///
 /// No retry round starts more than `retry_budget` after the best candidates were encoded, and
-/// `Duration::ZERO` turns retrying off. A round takes tens of microseconds, but some encoders
-/// reach the network: an Angstrom swap fetches its attestation over HTTP, with a 3s timeout,
-/// whenever its background cache is stale. Without the budget, an outage of the Angstrom API
-/// would cost 3s per retry round instead of one round.
+/// `Duration::ZERO` turns retrying off. A round takes tens of microseconds unless an encoder
+/// reaches the network, as an Angstrom swap does when its attestation cache is cold. The
+/// encoder's route timeout ([`Encoder::with_route_timeout`]) gives up on such a route instead of
+/// waiting for it, so an order moves on to its next candidate rather than waiting on the
+/// Angstrom API, and a request spends at most about two route timeouts encoding.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
@@ -2318,6 +2319,7 @@ mod tests {
         ]])
         .expect("the order has candidates");
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .expect("a current-thread runtime builds");
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
@@ -2375,6 +2377,7 @@ mod tests {
         ])
         .expect("both orders have candidates");
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .expect("a current-thread runtime builds");
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
