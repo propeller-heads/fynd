@@ -20,11 +20,8 @@ pub mod test_utils;
 /// A component's tokens and swap directions.
 pub mod topology;
 
-// Re-export native-gas configuration and chain parsing.
-pub use constants::{
-    gas_token_config, native_token, parse_chain, GasTokenConfig, ParseChainError,
-    UnsupportedChainError,
-};
+// Re-export native-gas lookup and chain parsing.
+pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};
 // Re-export error types (needed for API responses)
 pub use internal::{RouteRejection, SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;

@@ -67,9 +67,6 @@ pub(crate) fn mul_div_ceil(
         return None;
     }
     let scaled = value * multiplier;
-    if scaled == BigUint::from(0u8) {
-        return Some(scaled);
-    }
     Some((scaled + denominator - BigUint::from(1u8)) / denominator)
 }
 

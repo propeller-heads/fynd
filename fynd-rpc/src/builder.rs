@@ -480,11 +480,8 @@ impl FyndRPCBuilder {
                 .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
 
         #[cfg(feature = "experimental")]
-        let (gas_token, native_to_routable_unit) = {
-            use fynd_core::types::constants::gas_token_config;
-            let config = gas_token_config(&chain).context("gas token not configured for chain")?;
-            (config.address().clone(), config.native_to_routable_unit().clone())
-        };
+        let gas_token =
+            fynd_core::types::native_token(&chain).context("gas token not configured for chain")?;
 
         let (
             router,
@@ -520,8 +517,6 @@ impl FyndRPCBuilder {
             Arc::clone(&_derived_data),
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
-            native_to_routable_unit,
             #[cfg(feature = "experimental")]
             _market_data.clone(),
         );
