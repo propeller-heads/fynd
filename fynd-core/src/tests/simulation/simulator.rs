@@ -35,7 +35,9 @@ fn test_success_reports_amount_out_and_gas_used() {
 
 #[test]
 fn test_revert_reports_no_gas() {
-    let result = SimulationAttempt::Reverted { reason: "no liquidity".to_string() }.into_result();
+    let result =
+        SimulationAttempt::Reverted { reason: "no liquidity".to_string(), replay: empty_replay() }
+            .into_result();
     assert!(matches!(result, SimulationResult::Failure { reason } if reason == "no liquidity"));
 }
 
@@ -64,6 +66,10 @@ fn test_token_overrides_fund_both_holders_and_both_spenders() {
 }
 
 /// An envelope for the tests that drive the call directly, without a quote to derive one from.
+fn empty_replay() -> Box<Replay> {
+    Box::new(Replay { parent_block: 0, payload: SimulatePayload::default() })
+}
+
 fn test_envelope() -> SimulationEnvelope {
     SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1 }
 }
@@ -421,6 +427,52 @@ async fn test_simulate_keeps_the_node_message_when_the_trace_fails() {
     );
 }
 
+/// A reverted call is only reproducible against the block it ran in: a signed RFQ quote expires,
+/// and `prevrandao` is drawn per call. The replay has to carry that block, not the head's.
+#[tokio::test]
+async fn test_reverted_simulation_carries_a_replay_pinned_to_its_block() {
+    let asserter = Asserter::new();
+    let mut response = simulated_response(
+        crate::simulation::revert::RouterErrors::TychoRouter__EmptySwaps {}.abi_encode(),
+        false,
+        0,
+    );
+    response[0].inner.header.inner.number = 101;
+    response[0].inner.header.inner.timestamp = 1_700_000_000;
+    asserter.push_success(&response);
+    let sender = Address::repeat_byte(1);
+
+    let outcome = simulate_with_overrides(
+        &RootProvider::new(RpcClient::mocked(asserter)),
+        SimulatedCall { sender, router: Address::repeat_byte(2), value: U256::ZERO, data: &[0x12] },
+        native_balance_override(sender),
+        test_envelope(),
+        TEST_TIMEOUT,
+    )
+    .await;
+
+    let CallOutcome::Reverted { replay, .. } = outcome else {
+        panic!("the call reverted");
+    };
+    assert_eq!(replay.parent_block, 100);
+    let block = &replay.payload.block_state_calls[0];
+    let environment = block
+        .block_overrides
+        .as_ref()
+        .expect("block overrides");
+    assert_eq!(environment.number, Some(U256::from(101)));
+    assert_eq!(environment.time, Some(1_700_000_000));
+    assert!(environment.random.is_some(), "prevrandao is pinned");
+    assert!(block
+        .state_overrides
+        .as_ref()
+        .is_some_and(|overrides| overrides.contains_key(&sender)));
+    assert_eq!(block.calls[0].input.input(), Some(&Bytes::from_static(&[0x12])));
+    assert!(replay
+        .payload_json()
+        .contains("\"blockStateCalls\""));
+}
+
 /// A server that accepts the connection and never answers, so the request outlives the timeout.
 async fn unresponsive_rpc_url() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -534,7 +586,7 @@ fn test_record_outcome_reverted() {
     metrics::with_local_recorder(&recorder, || {
         record_outcome(
             &quote_with_fees(1_000_000),
-            &SimulationAttempt::Reverted { reason: "reverted".to_string() },
+            &SimulationAttempt::Reverted { reason: "reverted".to_string(), replay: empty_replay() },
         );
     });
 
@@ -611,7 +663,7 @@ async fn test_live_simulate_and_trace() {
         .await;
 
         let described = match &outcome {
-            CallOutcome::Reverted { reason } => format!("reverted: {reason}"),
+            CallOutcome::Reverted { reason, .. } => format!("reverted: {reason}"),
             CallOutcome::Success { amount_out, .. } => format!("success: {amount_out}"),
             CallOutcome::Failure(reason) => format!("failed: {reason}"),
         };

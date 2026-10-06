@@ -146,7 +146,7 @@ pub(crate) enum SimulationAttempt {
     /// The simulated call completed.
     Success { amount_out: BigUint, gas_used: u64 },
     /// The simulated call reverted.
-    Reverted { reason: String },
+    Reverted { reason: String, replay: Box<Replay> },
     /// Simulation could not be completed.
     Failure { reason: String },
 }
@@ -250,9 +250,10 @@ impl QuoteSimulator {
             CallOutcome::Success { amount_out, gas_used } => {
                 SimulationAttempt::Success { amount_out, gas_used }
             }
-            CallOutcome::Reverted { reason } => {
-                SimulationAttempt::Reverted { reason: format!("simulation reverted: {reason}") }
-            }
+            CallOutcome::Reverted { reason, replay } => SimulationAttempt::Reverted {
+                reason: format!("simulation reverted: {reason}"),
+                replay,
+            },
             CallOutcome::Failure(reason) => SimulationAttempt::Failure { reason },
         }
     }
@@ -347,7 +348,7 @@ impl SimulationAttempt {
             Self::Success { amount_out, gas_used } => {
                 SimulationResult::Success { amount_out, gas_used }
             }
-            Self::Reverted { reason } | Self::Failure { reason } => {
+            Self::Reverted { reason, .. } | Self::Failure { reason } => {
                 SimulationResult::Failure { reason }
             }
         }
@@ -357,6 +358,25 @@ impl SimulationAttempt {
 /// Target for the reason a simulated quote reverted or failed. Emitted at DEBUG, so a deployment
 /// that wants the reasons sets `RUST_LOG=...,fynd::simulation_outcome=debug`.
 const SIMULATION_OUTCOME_TARGET: &str = "fynd::simulation_outcome";
+
+/// Target for everything needed to rerun a reverted simulation. Emitted at DEBUG and kept apart
+/// from [`SIMULATION_OUTCOME_TARGET`] because the payload carries the full calldata, so a
+/// deployment opts in per chain with `RUST_LOG=...,fynd::simulation_replay=debug`.
+const SIMULATION_REPLAY_TARGET: &str = "fynd::simulation_replay";
+
+/// Logs what it takes to rerun one reverted simulation exactly.
+///
+/// The payload is serialised only when the target is enabled, so a deployment that leaves it off
+/// never renders the calldata.
+fn log_replay(quote: &OrderQuote, replay: &Replay) {
+    debug!(
+        target: SIMULATION_REPLAY_TARGET,
+        order_id = quote.order_id(),
+        parent_block = replay.parent_block,
+        payload = %replay.payload_json(),
+        "simulation reverted; rerun with eth_simulateV1(payload, parent_block)"
+    );
+}
 
 /// Logs why one simulated quote did not return an amount, and names the outcome for the counter.
 ///
@@ -397,7 +417,10 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt) {
             record_gas(quote, *gas_used, &pool, &algorithm);
             "success"
         }
-        SimulationAttempt::Reverted { reason } => log_outcome(quote, "reverted", reason),
+        SimulationAttempt::Reverted { reason, replay } => {
+            log_replay(quote, replay);
+            log_outcome(quote, "reverted", reason)
+        }
         SimulationAttempt::Failure { reason } => log_outcome(quote, "failed", reason),
     };
     counter!(
@@ -486,12 +509,7 @@ async fn simulate_with_overrides(
     // revert. `prevrandao` is drawn at random per call, so it is built once and reused rather
     // than regenerated.
     let environment = block_overrides();
-    let payload = SimulatePayload::default().extend(
-        SimBlock::default()
-            .with_state_overrides(overrides.clone())
-            .with_block_overrides(environment.clone())
-            .call(call.clone()),
-    );
+    let payload = simulate_payload(call.clone(), overrides.clone(), environment.clone());
     let response = match timeout(request_timeout, provider.simulate(&payload)).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
@@ -515,30 +533,31 @@ async fn simulate_with_overrides(
         );
     };
     if !result.status {
+        let number = block.inner.header.number;
+        let executed = executed_in(environment, number, block.inner.header.timestamp);
+        let replay = Box::new(Replay {
+            parent_block: number.saturating_sub(1),
+            payload: simulate_payload(call.clone(), overrides.clone(), executed.clone()),
+        });
+        if let Some(decoded) = revert::decode_error(&result.return_data) {
+            return CallOutcome::Reverted { reason: decoded, replay };
+        }
         let message = result
             .error
             .as_ref()
             .map_or("execution reverted", |error| error.message.as_str())
             .to_string();
-        if let Some(decoded) = revert::decode_error(&result.return_data) {
-            return CallOutcome::Reverted { reason: decoded };
-        }
         // `eth_simulateV1` drops the revert payload, so the same call is replayed under the
         // tracer -- same overrides, same environment -- to read the error off the frame that
         // produced it.
         let traced = timeout(
             SIMULATION_TRACE_TIMEOUT,
-            traced_revert_reason(
-                provider,
-                call,
-                overrides,
-                executed_in(environment, block.inner.header.number, block.inner.header.timestamp),
-            ),
+            traced_revert_reason(provider, call, overrides, executed),
         )
         .await
         .ok()
         .flatten();
-        return CallOutcome::Reverted { reason: traced.unwrap_or(message) };
+        return CallOutcome::Reverted { reason: traced.unwrap_or(message), replay };
     }
     if result.return_data.len() != 32 {
         return CallOutcome::Failure(format!(
@@ -553,6 +572,39 @@ async fn simulate_with_overrides(
     }
 }
 
+/// The `eth_simulateV1` request for one call: a single block holding the call alone.
+fn simulate_payload(
+    call: TransactionRequest,
+    overrides: StateOverride,
+    environment: BlockOverrides,
+) -> SimulatePayload {
+    SimulatePayload::default().extend(
+        SimBlock::default()
+            .with_state_overrides(overrides)
+            .with_block_overrides(environment)
+            .call(call),
+    )
+}
+
+/// What it takes to rerun a reverted simulation exactly.
+///
+/// The payload carries the call, the funding overrides and the block environment, with the number,
+/// timestamp and `prevrandao` the simulated block actually had. Sent to `eth_simulateV1` on top of
+/// `parent_block`, it executes the same call against the same state. A route can revert on any of
+/// those inputs, a signed RFQ quote on the timestamp alone, so none of them is left to a guess.
+#[derive(Debug)]
+pub(crate) struct Replay {
+    parent_block: u64,
+    payload: SimulatePayload,
+}
+
+impl Replay {
+    fn payload_json(&self) -> String {
+        serde_json::to_string(&self.payload)
+            .unwrap_or_else(|error| format!("payload did not serialize: {error}"))
+    }
+}
+
 /// What one simulated call came back with.
 enum CallOutcome {
     Success {
@@ -563,6 +615,7 @@ enum CallOutcome {
     /// trace recovered, or the node's message.
     Reverted {
         reason: String,
+        replay: Box<Replay>,
     },
     Failure(String),
 }
