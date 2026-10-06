@@ -262,25 +262,13 @@ impl PathFrankWolfeAlgorithm {
             .swaps()
             .last()
             .ok_or_else(|| AlgorithmError::Other("route has no swaps".to_string()))?;
-        Ok(Self::gas_units_to_output_tokens(&route.total_gas(), last_swap.token_out(), ctx))
-    }
-
-    /// Converts a raw gas amount into output-token cost as `f64`.
-    ///
-    /// Returns `0.0` when the gas price or the output token's price is
-    /// unavailable — gas is then simply not part of the objective.
-    fn gas_units_to_output_tokens(
-        gas: &BigUint,
-        output_token: &Address,
-        ctx: &BellmanFordContext,
-    ) -> f64 {
-        Self::gas_units_to_output_tokens_exact(gas, output_token, ctx)
+        Ok(Self::gas_units_to_output_tokens(&route.total_gas(), last_swap.token_out(), ctx)
             .and_then(|cost| cost.to_f64())
-            .unwrap_or(0.0)
+            .unwrap_or(0.0))
     }
 
     /// Converts a raw gas amount into an exact, ceiling-rounded output-token cost.
-    fn gas_units_to_output_tokens_exact(
+    fn gas_units_to_output_tokens(
         gas: &BigUint,
         output_token: &Address,
         ctx: &BellmanFordContext,
@@ -427,6 +415,8 @@ impl PathFrankWolfeAlgorithm {
                     let gross = total_output.to_f64().unwrap_or(0.0);
                     gross -
                         Self::gas_units_to_output_tokens(&BigUint::from(gas), &output_token, ctx)
+                            .and_then(|cost| cost.to_f64())
+                            .unwrap_or(0.0)
                 }
                 Err(_) => 0.0,
             }
@@ -632,7 +622,7 @@ impl PathFrankWolfeAlgorithm {
         let total_out = route.amount_out(output_token);
 
         let gas_cost_tokens =
-            Self::gas_units_to_output_tokens_exact(&route.total_gas(), output_token, ctx)
+            Self::gas_units_to_output_tokens(&route.total_gas(), output_token, ctx)
                 .unwrap_or_default();
         Ok(BigInt::from(total_out) - BigInt::from(gas_cost_tokens))
     }
@@ -823,7 +813,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            PathFrankWolfeAlgorithm::gas_units_to_output_tokens_exact(
+            PathFrankWolfeAlgorithm::gas_units_to_output_tokens(
                 &exact_cost,
                 &token_b.address,
                 &context,

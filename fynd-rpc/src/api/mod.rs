@@ -43,8 +43,6 @@ use handlers::configure_routes;
 #[cfg(feature = "experimental")]
 use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
-#[cfg(feature = "experimental")]
-use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 use utoipa::OpenApi;
 
 use crate::api::{error::ErrorResponse, record_emitter::RecordEmitter};
@@ -252,8 +250,6 @@ pub struct AppState {
     #[cfg(feature = "experimental")]
     pub(crate) gas_token: Address,
     #[cfg(feature = "experimental")]
-    pub(crate) native_to_routable_unit: Price,
-    #[cfg(feature = "experimental")]
     pub(crate) market_data: MarketData,
     #[cfg(feature = "experimental")]
     pub(crate) tokens_cache: Arc<tokio::sync::RwLock<Option<tokens::TokensCache>>>,
@@ -271,7 +267,6 @@ impl AppState {
         record_emitter: Option<RecordEmitter>,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
         #[cfg(feature = "experimental")] gas_token: Address,
-        #[cfg(feature = "experimental")] native_to_routable_unit: Price,
         #[cfg(feature = "experimental")] market_data: MarketData,
     ) -> Self {
         Self {
@@ -285,8 +280,6 @@ impl AppState {
             derived_data,
             #[cfg(feature = "experimental")]
             gas_token,
-            #[cfg(feature = "experimental")]
-            native_to_routable_unit,
             #[cfg(feature = "experimental")]
             market_data,
             #[cfg(feature = "experimental")]
@@ -523,11 +516,6 @@ mod configure_app_tests {
             derived_data,
             #[cfg(feature = "experimental")]
             tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
-            #[cfg(feature = "experimental")]
-            tycho_simulation::tycho_core::simulation::protocol_sim::Price::new(
-                1u8.into(),
-                1u8.into(),
-            ),
             #[cfg(feature = "experimental")]
             market_data,
         )

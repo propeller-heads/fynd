@@ -18,11 +18,8 @@ pub mod quote;
 /// Builders for assembling quote types in tests, here and in dependent crates.
 pub mod test_utils;
 
-// Re-export native-gas configuration and chain parsing.
-pub use constants::{
-    gas_token_config, native_token, parse_chain, GasTokenConfig, ParseChainError,
-    UnsupportedChainError,
-};
+// Re-export native-gas lookup and chain parsing.
+pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};
 // Re-export error types (needed for API responses)
 pub use internal::{RouteRejection, SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
