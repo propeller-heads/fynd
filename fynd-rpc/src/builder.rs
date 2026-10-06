@@ -168,6 +168,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets how long encoding retries may take, counted from when the best candidates were
+    /// encoded (default: 5ms). `Duration::ZERO` turns retrying off.
+    pub fn encoding_retry_budget(mut self, budget: Duration) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .encoding_retry_budget(budget);
+        self
+    }
+
     /// Sets the Tycho API key.
     pub fn tycho_api_key(mut self, key: String) -> Self {
         self.fynd_builder = self.fynd_builder.tycho_api_key(key);

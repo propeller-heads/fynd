@@ -49,11 +49,15 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
-    bps, encoding::encoder::Encoder, feed::exclusivity::is_exclusive,
-    price_guard::guard::PriceGuard, simulation::simulator::QuoteSimulator,
-    worker_pool::task_queue::TaskQueueHandle, BlockInfo, EncodingOptions, Order, OrderQuote,
-    OrderSide, Quote, QuoteOptions, QuoteRequest, QuoteStatus, SolveError, SolveParams,
-    SurplusInfo, Swap,
+    bps,
+    encoding::encoder::Encoder,
+    fallback::FALLBACK_PREFIX,
+    feed::{exclusivity::is_exclusive, protocol_registry::RFQ_PREFIX},
+    price_guard::guard::PriceGuard,
+    simulation::simulator::QuoteSimulator,
+    worker_pool::task_queue::TaskQueueHandle,
+    BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -330,30 +334,146 @@ impl RankedQuotes {
     }
 }
 
-/// Encodes successful order quotes into router calldata and records `encoding_duration_seconds`.
+/// Encodes the best candidate of every order into router calldata and records
+/// `encoding_duration_seconds`.
+///
+/// When an order's best candidate fails to encode, the next successful candidate in its ranking
+/// without an RFQ leg is encoded instead, until one encodes or none remain. An order whose
+/// candidates all fail keeps its best candidate with [`QuoteStatus::EncodingFailed`]. With the
+/// price guard enabled, every order has one candidate, so no retry is possible.
+///
+/// Retried candidates exclude RFQ legs because encoding one waits on a network round trip for
+/// the maker's signed quote, which the request would pay on top of the failed attempt.
+///
+/// Retrying stops `retry_budget` after the best candidates were encoded: no round starts later,
+/// and a candidate still encoding then is given up. `Duration::ZERO` turns retrying off. The best
+/// candidates have no such limit, so retrying adds at most `retry_budget` to a request. A round
+/// takes tens of microseconds unless an encoder reaches the network, as an Angstrom swap does when
+/// its attestation cache is cold: it fetches the attestation inline, for up to 3s, and the budget
+/// gives up on it instead.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
 /// it on the quote.
 pub async fn encode_quotes(
     encoder: &Encoder,
-    order_quotes: Vec<OrderQuote>,
+    ranked: RankedQuotes,
     encoding_options: &EncodingOptions,
+    retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let encode_start = Instant::now();
-    let encoded = encoder
-        .encode(order_quotes, encoding_options.clone())
-        .await;
+    let encoded = encode_with_retries(encoder, ranked, encoding_options, retry_budget).await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
     encoded
+}
+
+async fn encode_with_retries(
+    encoder: &Encoder,
+    ranked: RankedQuotes,
+    encoding_options: &EncodingOptions,
+    retry_budget: Duration,
+) -> Result<Vec<OrderQuote>, SolveError> {
+    let mut best_candidate_per_order = Vec::new();
+    let mut retry_candidates_per_order = Vec::new();
+    for candidates in ranked.into_per_order() {
+        let mut candidates = candidates.into_iter();
+        // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
+        best_candidate_per_order.extend(candidates.next());
+        retry_candidates_per_order.push(candidates.filter(|candidate| {
+            candidate.status() == QuoteStatus::Success && !has_rfq_leg(candidate)
+        }));
+    }
+    // One quote per order: encoded, or the best candidate marked `EncodingFailed` until a retry
+    // replaces it.
+    let mut quote_per_order = encoder
+        .encode(best_candidate_per_order, encoding_options.clone())
+        .await?;
+    let retry_deadline = Instant::now() + retry_budget;
+
+    loop {
+        // Every order still without calldata retries with its next candidate.
+        let mut retried_orders = Vec::new();
+        let mut retry_batch = Vec::new();
+        for (order_index, order_quote) in quote_per_order.iter().enumerate() {
+            if order_quote.status() != QuoteStatus::EncodingFailed {
+                continue;
+            }
+            if let Some(retry_candidate) = retry_candidates_per_order[order_index].next() {
+                retried_orders.push(order_index);
+                retry_batch.push(retry_candidate);
+            }
+        }
+        if retry_batch.is_empty() {
+            record_encoding_failures(&quote_per_order, &[]);
+            return Ok(quote_per_order);
+        }
+        if Instant::now() >= retry_deadline {
+            warn!(
+                orders = retried_orders.len(),
+                budget_ms = retry_budget.as_millis(),
+                "encoding retry budget spent; the remaining candidates are not tried"
+            );
+            record_encoding_failures(&quote_per_order, &retried_orders);
+            return Ok(quote_per_order);
+        }
+        let retried_quotes = encoder
+            .encode_until(retry_batch, encoding_options.clone(), Some(retry_deadline))
+            .await?;
+        // A failed retry leaves the order on its best candidate's failure for the next round.
+        for (order_index, retried_quote) in retried_orders
+            .into_iter()
+            .zip(retried_quotes)
+        {
+            if retried_quote.status() == QuoteStatus::Success {
+                debug!(order_id = %retried_quote.order_id(), "encoded the next-best candidate");
+                quote_per_order[order_index] = retried_quote;
+            }
+        }
+    }
+}
+
+/// Whether `quote` has an RFQ leg, including one executed through an RFQ venue's fallback router
+/// (`fallback:rfq:bebop`): both fetch the maker's signed quote when encoded.
+fn has_rfq_leg(quote: &OrderQuote) -> bool {
+    quote.route().is_some_and(|route| {
+        route.swaps().iter().any(|swap| {
+            let protocol = swap.protocol();
+            protocol
+                .strip_prefix(FALLBACK_PREFIX)
+                .unwrap_or(protocol)
+                .starts_with(RFQ_PREFIX)
+        })
+    })
+}
+
+/// Counts `encoding_failures_total` once per order that is returned without a transaction.
+///
+/// `retry_budget_spent` is `true` for the orders in `cut_off_orders`, which still had untried
+/// candidates when the retry budget ran out, and `false` for orders whose every candidate failed.
+fn record_encoding_failures(quotes: &[OrderQuote], cut_off_orders: &[usize]) {
+    for (order_index, quote) in quotes.iter().enumerate() {
+        if quote.status() == QuoteStatus::EncodingFailed {
+            let retry_budget_spent = cut_off_orders.contains(&order_index);
+            warn!(
+                order_id = %quote.order_id(),
+                retry_budget_spent,
+                "order failed to encode; it is returned without a transaction"
+            );
+            counter!(
+                "encoding_failures_total",
+                "retry_budget_spent" => if retry_budget_spent { "true" } else { "false" }
+            )
+            .increment(1);
+        }
+    }
 }
 
 /// Builds the final [`Quote`]: sums the per-order gas estimates and stamps the solve time.
 ///
 /// Also credits each winning worker pool and algorithm. Attribution belongs here rather than at
 /// ranking: the price guard can pick a lower-ranked fallback, the exclusive overlay replaces the
-/// head of the list, and a failed encoding returns no quote at all. These are the quotes the
-/// caller receives.
+/// head of the list, and a failed encoding moves to the next candidate without an RFQ leg. These
+/// are the quotes the caller receives.
 pub fn finalize_quote(order_quotes: Vec<OrderQuote>, solve_time_ms: u64) -> Quote {
     for quote in &order_quotes {
         record_win(quote);
@@ -568,13 +688,20 @@ impl WorkerPoolRouter {
     ) -> Result<Quote, SolveError> {
         let ranked = self.solve(&request, access).await?;
         let started = ranked.started();
-        let mut order_quotes = ranked.into_best();
-        if let Some(encoding_options) = request.options().encoding_options() {
-            order_quotes = encode_quotes(&self.encoder, order_quotes, encoding_options).await?;
-            order_quotes = self
-                .simulate_quotes(order_quotes, encoding_options)
+        let order_quotes = match request.options().encoding_options() {
+            Some(encoding_options) => {
+                let encoded = encode_quotes(
+                    &self.encoder,
+                    ranked,
+                    encoding_options,
+                    self.config.encoding_retry_budget(),
+                )
                 .await?;
-        }
+                self.simulate_quotes(encoded, encoding_options)
+                    .await?
+            }
+            None => ranked.into_best(),
+        };
         Ok(finalize_quote(order_quotes, started.elapsed().as_millis() as u64))
     }
 
@@ -1498,8 +1625,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component, MockProtocolSim},
+        algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
+        solver::defaults,
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
         EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
@@ -1599,6 +1727,10 @@ mod tests {
     }
 
     fn make_single_quote(amount_out_net_gas: u64) -> SingleOrderQuote {
+        make_single_quote_on("uniswap_v2", amount_out_net_gas)
+    }
+
+    fn make_single_quote_on(protocol: &str, amount_out_net_gas: u64) -> SingleOrderQuote {
         let make_token = |addr: Address| Token {
             address: addr,
             symbol: "T".to_string(),
@@ -1614,14 +1746,15 @@ mod tests {
         let tout_token = make_token(tout.clone());
         let swap = Swap::new(
             "pool-1".to_string(),
-            "uniswap_v2".to_string(),
+            protocol.to_string(),
             tin.clone(),
             tout.clone(),
             BigUint::from(1000u64),
             BigUint::from(990u64),
             BigUint::from(50_000u64),
-            component(
+            component_with_protocol(
                 "0x0000000000000000000000000000000000000001",
+                protocol,
                 &[tin_token.clone(), tout_token.clone()],
             ),
             Box::new(MockProtocolSim::default()),
@@ -2066,6 +2199,216 @@ mod tests {
         assert_eq!(staged.solve_time_ms(), 7);
         worker_a.abort();
         worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_best_candidate_fails_to_encode() {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on("no_such_protocol", 950)
+                .order()
+                .clone(),
+            make_single_quote(800).order().clone(),
+        ]])
+        .expect("the order has candidates");
+
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].status(), QuoteStatus::Success);
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(800u64));
+        assert!(quotes[0].transaction().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_every_candidate_fails_to_encode() {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on("no_such_protocol", 950)
+                .order()
+                .clone(),
+            make_single_quote_on("no_such_protocol", 800)
+                .order()
+                .clone(),
+        ]])
+        .expect("the order has candidates");
+
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(950u64));
+        assert!(quotes[0].transaction().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_one_of_two_orders_retries() {
+        let ranked = RankedQuotes::new(vec![
+            vec![make_single_quote(700).order().clone(), make_single_quote(600).order().clone()],
+            vec![
+                make_single_quote_on("no_such_protocol", 950)
+                    .order()
+                    .clone(),
+                make_single_quote(800).order().clone(),
+            ],
+        ])
+        .expect("both orders have candidates");
+
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(700u64));
+        assert_eq!(*quotes[1].amount_out_net_gas(), BigUint::from(800u64));
+        for quote in &quotes {
+            assert_eq!(quote.status(), QuoteStatus::Success);
+            assert!(quote.transaction().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_skips_rfq_retry_candidate() {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on("no_such_protocol", 950)
+                .order()
+                .clone(),
+            make_single_quote_on("rfq:bebop", 900)
+                .order()
+                .clone(),
+            make_single_quote(800).order().clone(),
+        ]])
+        .expect("the order has candidates");
+
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::Success);
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(800u64));
+    }
+
+    #[test]
+    fn test_encode_quotes_zero_retry_budget() {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on("no_such_protocol", 950)
+                .order()
+                .clone(),
+            make_single_quote(800).order().clone(),
+        ]])
+        .expect("the order has candidates");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a current-thread runtime builds");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let quotes = metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(encode_quotes(
+                &default_encoder(),
+                ranked,
+                &EncodingOptions::new(0.01),
+                Duration::ZERO,
+            ))
+        })
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(950u64));
+        let failures: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "encoding_failures_total")
+            .map(|(_, labels, _)| labels)
+            .collect();
+        assert_eq!(failures, vec![vec!["retry_budget_spent=true".to_string()]]);
+    }
+
+    #[test]
+    fn test_has_rfq_leg() {
+        assert!(has_rfq_leg(make_single_quote_on("rfq:bebop", 900).order()));
+        assert!(has_rfq_leg(make_single_quote_on("fallback:rfq:bebop", 900).order()));
+        assert!(!has_rfq_leg(make_single_quote_on("fallback:fermiswap", 900).order()));
+        assert!(!has_rfq_leg(make_single_quote(900).order()));
+    }
+
+    /// Four candidates fail to encode, but only one order comes back without a transaction.
+    #[test]
+    fn test_encode_quotes_counts_failures_per_order() {
+        let ranked = RankedQuotes::new(vec![
+            vec![
+                make_single_quote_on("no_such_protocol", 950)
+                    .order()
+                    .clone(),
+                make_single_quote_on("no_such_protocol", 800)
+                    .order()
+                    .clone(),
+                make_single_quote_on("no_such_protocol", 700)
+                    .order()
+                    .clone(),
+            ],
+            vec![
+                make_single_quote_on("no_such_protocol", 950)
+                    .order()
+                    .clone(),
+                make_single_quote(800).order().clone(),
+            ],
+        ])
+        .expect("both orders have candidates");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("a current-thread runtime builds");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // A current-thread runtime polls the router on this thread, where the local recorder is
+        // installed.
+        let quotes = metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(encode_quotes(
+                &default_encoder(),
+                ranked,
+                &EncodingOptions::new(0.01),
+                defaults::ENCODING_RETRY_BUDGET,
+            ))
+        })
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert_eq!(quotes[1].status(), QuoteStatus::Success);
+        let failures: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "encoding_failures_total")
+            .map(|(_, labels, value)| (labels, value))
+            .collect();
+        assert_eq!(
+            failures,
+            vec![(
+                vec!["retry_budget_spent=false".to_string()],
+                metrics_util::debugging::DebugValue::Counter(1)
+            )]
+        );
     }
 
     #[test]

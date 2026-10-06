@@ -1,11 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
     sol_types::SolValue,
 };
 use futures::{StreamExt, TryStreamExt};
-use metrics::counter;
 use num_bigint::BigUint;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -290,8 +289,23 @@ impl Encoder {
     /// belongs to one quote never fails the call.
     pub async fn encode(
         &self,
+        quotes: Vec<OrderQuote>,
+        encoding_options: EncodingOptions,
+    ) -> Result<Vec<OrderQuote>, SolveError> {
+        self.encode_until(quotes, encoding_options, None)
+            .await
+    }
+
+    /// Encodes like [`Self::encode`], except that a quote still encoding at `deadline` is given
+    /// up as [`QuoteStatus::EncodingFailed`].
+    ///
+    /// Blocking code cannot be cancelled, so the abandoned encode keeps its thread of the
+    /// blocking pool until its own network timeout; only its result is dropped.
+    pub(crate) async fn encode_until(
+        &self,
         mut quotes: Vec<OrderQuote>,
         encoding_options: EncodingOptions,
+        deadline: Option<Instant>,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         let Some(tycho_encoder) = self.tycho_encoder.as_ref() else {
             return Err(SolveError::EncodingUnavailable(format!(
@@ -323,7 +337,7 @@ impl Encoder {
         }
 
         let encoded_solutions = self
-            .encode_prepared_solutions(tycho_encoder, &to_encode)
+            .encode_prepared_solutions(tycho_encoder, &to_encode, deadline)
             .await?;
 
         for (encoded_solution, prepared) in encoded_solutions
@@ -345,9 +359,8 @@ impl Encoder {
             tracing::warn!(
                 order_id = %quotes[quote_index].order_id(),
                 %error,
-                "encoding failed for this quote; it is returned without a transaction"
+                "this candidate failed to encode"
             );
-            counter!("encoding_failures_total").increment(1);
             quotes[quote_index].set_status(QuoteStatus::EncodingFailed);
         }
 
@@ -439,6 +452,7 @@ impl Encoder {
         &self,
         tycho_encoder: &Arc<dyn TychoEncoder>,
         to_encode: &[PreparedSolution],
+        deadline: Option<Instant>,
     ) -> Result<Vec<Result<EncodedSolution, EncodingError>>, SolveError> {
         // Owned clones, so no task borrows from `to_encode`: a future that holds such a borrow
         // is not general enough over its lifetime for an async caller further up.
@@ -453,7 +467,7 @@ impl Encoder {
             .map(move |solution| {
                 let encoder = Arc::clone(&tycho_encoder);
                 async move {
-                    tokio::task::spawn_blocking(move || {
+                    let encode = tokio::task::spawn_blocking(move || {
                         encoder
                             .encode_solutions(vec![solution])?
                             .pop()
@@ -462,8 +476,16 @@ impl Encoder {
                                     "the encoder returned no encoded solution".to_string(),
                                 )
                             })
-                    })
-                    .await
+                    });
+                    let Some(deadline) = deadline else {
+                        return encode.await;
+                    };
+                    match tokio::time::timeout_at(deadline.into(), encode).await {
+                        Ok(joined) => joined,
+                        Err(_) => Ok(Err(EncodingError::RecoverableError(
+                            "the solution did not encode before the deadline".to_string(),
+                        ))),
+                    }
                 }
             });
 
@@ -1419,6 +1441,45 @@ mod tests {
         fn validate_solution(&self, _solution: &Solution) -> Result<(), EncodingError> {
             Ok(())
         }
+    }
+
+    /// Takes longer to encode than any deadline under test.
+    struct SlowEncoder;
+
+    impl TychoEncoder for SlowEncoder {
+        fn encode_solutions(
+            &self,
+            _solutions: Vec<Solution>,
+        ) -> Result<Vec<EncodedSolution>, EncodingError> {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            Err(EncodingError::FatalError("slow".to_string()))
+        }
+
+        fn validate_solution(&self, _solution: &Solution) -> Result<(), EncodingError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_until_deadline() {
+        let encoder = encoder_with(Chain::Ethereum, Arc::new(SlowEncoder));
+        let started = Instant::now();
+
+        let quotes = encoder
+            .encode_until(
+                vec![quote_on_protocol("slow", "uniswap_v2")],
+                EncodingOptions::new(0.01),
+                Some(started + std::time::Duration::from_millis(10)),
+            )
+            .await
+            .expect("a quote that misses the deadline is reported on its order");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "waited {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

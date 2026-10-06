@@ -86,6 +86,9 @@ pub mod defaults {
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
     /// all).
     pub const ROUTER_MIN_RESPONSES: usize = 0;
+    /// How long encoding retries may take, counted from when the best candidates were encoded
+    /// (`0` = no retries).
+    pub const ENCODING_RETRY_BUDGET: Duration = Duration::from_millis(5);
     /// Capacity of the task queue for each worker pool.
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
     /// Minimum number of hops allowed in a route.
@@ -505,6 +508,7 @@ pub struct FyndBuilder {
     pricing_min_pass_interval: Option<Duration>,
     router_timeout: Duration,
     router_min_responses: usize,
+    encoding_retry_budget: Duration,
     encoder: Option<Encoder>,
     calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
@@ -545,6 +549,7 @@ impl FyndBuilder {
             pricing_min_pass_interval: None,
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
+            encoding_retry_budget: defaults::ENCODING_RETRY_BUDGET,
             encoder: None,
             calldata_watermark: None,
             pools: Vec::new(),
@@ -672,6 +677,13 @@ impl FyndBuilder {
     /// Sets the minimum number of solver responses before early return (default: 0).
     pub fn worker_router_min_responses(mut self, min: usize) -> Self {
         self.router_min_responses = min;
+        self
+    }
+
+    /// Sets how long encoding retries may take, counted from when the best candidates were
+    /// encoded (default: 5ms). `Duration::ZERO` turns retrying off.
+    pub fn encoding_retry_budget(mut self, budget: Duration) -> Self {
+        self.encoding_retry_budget = budget;
         self
     }
 
@@ -1074,7 +1086,8 @@ impl FyndBuilder {
         // When disabled, per-request attempts to enable the guard return an error.
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
-            .with_min_responses(self.router_min_responses);
+            .with_min_responses(self.router_min_responses)
+            .with_encoding_retry_budget(self.encoding_retry_budget);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
         if let Some(simulator) = quote_simulator {
             router = router.with_simulator(simulator);
