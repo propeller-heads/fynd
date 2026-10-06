@@ -19,8 +19,8 @@ pub struct WorkerPoolRouterConfig {
     ///
     /// The best solution among received responses is still selected.
     min_responses: usize,
-    /// How long after the best candidates were encoded a new round of encoding retries may
-    /// start. `Duration::ZERO` turns retrying off.
+    /// How long encoding retries may take, counted from when the best candidates were encoded.
+    /// `Duration::ZERO` turns retrying off.
     encoding_retry_budget: Duration,
 }
 
@@ -45,7 +45,7 @@ impl WorkerPoolRouterConfig {
         self.min_responses
     }
 
-    /// Returns how long after the best candidates were encoded a retry round may start.
+    /// Returns how long encoding retries may take.
     pub fn encoding_retry_budget(&self) -> Duration {
         self.encoding_retry_budget
     }
@@ -62,7 +62,7 @@ impl WorkerPoolRouterConfig {
         self
     }
 
-    /// Sets how long after the best candidates were encoded a retry round may start.
+    /// Sets how long encoding retries may take.
     pub fn with_encoding_retry_budget(mut self, budget: Duration) -> Self {
         self.encoding_retry_budget = budget;
         self

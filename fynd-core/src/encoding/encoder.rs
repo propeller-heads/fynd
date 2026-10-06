@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Instant};
 
 use alloy::{
     primitives::{aliases::U48, keccak256, Address, Keccak256, U160, U256},
@@ -30,7 +30,6 @@ use crate::{
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     fallback::user_data::fallback_user_data,
-    solver::defaults,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, SolveError, Transaction,
 };
 
@@ -78,9 +77,6 @@ pub struct Encoder {
     /// on-chain effect. `None` (the default) appends nothing. A request that carries its own
     /// watermark in [`EncodingOptions`] replaces this one.
     calldata_watermark: Option<Vec<u8>>,
-    /// How long one route may take to encode before it is given up as
-    /// [`QuoteStatus::EncodingFailed`].
-    route_timeout: Duration,
 }
 
 /// Maps a successful quote onto an encodable solution, leaving `min_amount_out` equal to the
@@ -224,7 +220,6 @@ impl Encoder {
             exclusive_swap_signer,
             disable_slippage_taking_signer,
             calldata_watermark: None,
-            route_timeout: defaults::ENCODING_ROUTE_TIMEOUT,
         })
     }
 
@@ -234,14 +229,6 @@ impl Encoder {
     #[must_use]
     pub fn with_calldata_watermark(mut self, watermark: impl Into<Vec<u8>>) -> Self {
         self.calldata_watermark = Some(watermark.into());
-        self
-    }
-
-    /// Sets how long one route may take to encode before it is given up as
-    /// [`QuoteStatus::EncodingFailed`] (default: 1s).
-    #[must_use]
-    pub fn with_route_timeout(mut self, route_timeout: Duration) -> Self {
-        self.route_timeout = route_timeout;
         self
     }
 
@@ -302,8 +289,23 @@ impl Encoder {
     /// belongs to one quote never fails the call.
     pub async fn encode(
         &self,
+        quotes: Vec<OrderQuote>,
+        encoding_options: EncodingOptions,
+    ) -> Result<Vec<OrderQuote>, SolveError> {
+        self.encode_until(quotes, encoding_options, None)
+            .await
+    }
+
+    /// Encodes like [`Self::encode`], except that a quote still encoding at `deadline` is given
+    /// up as [`QuoteStatus::EncodingFailed`].
+    ///
+    /// Blocking code cannot be cancelled, so the abandoned encode keeps its thread of the
+    /// blocking pool until its own network timeout; only its result is dropped.
+    pub(crate) async fn encode_until(
+        &self,
         mut quotes: Vec<OrderQuote>,
         encoding_options: EncodingOptions,
+        deadline: Option<Instant>,
     ) -> Result<Vec<OrderQuote>, SolveError> {
         let Some(tycho_encoder) = self.tycho_encoder.as_ref() else {
             return Err(SolveError::EncodingUnavailable(format!(
@@ -335,7 +337,7 @@ impl Encoder {
         }
 
         let encoded_solutions = self
-            .encode_prepared_solutions(tycho_encoder, &to_encode)
+            .encode_prepared_solutions(tycho_encoder, &to_encode, deadline)
             .await?;
 
         for (encoded_solution, prepared) in encoded_solutions
@@ -446,15 +448,11 @@ impl Encoder {
     /// every task sharing that worker -- the market feed included -- would wait with it. One task
     /// per solution also keeps a failing solution from discarding the calldata of the others, and
     /// the round trips still overlap.
-    ///
-    /// A solution still encoding after `route_timeout` is given up as an `EncodingError`, so a
-    /// slow RFQ maker or a cold Angstrom attestation cache costs the request at most the timeout.
-    /// Blocking code cannot be cancelled, so the abandoned encode keeps its thread of the blocking
-    /// pool until its own network timeout (3s for Angstrom); only its result is dropped.
     async fn encode_prepared_solutions(
         &self,
         tycho_encoder: &Arc<dyn TychoEncoder>,
         to_encode: &[PreparedSolution],
+        deadline: Option<Instant>,
     ) -> Result<Vec<Result<EncodedSolution, EncodingError>>, SolveError> {
         // Owned clones, so no task borrows from `to_encode`: a future that holds such a borrow
         // is not general enough over its lifetime for an async caller further up.
@@ -464,7 +462,6 @@ impl Encoder {
             .collect();
 
         let tycho_encoder = Arc::clone(tycho_encoder);
-        let route_timeout = self.route_timeout;
         let tasks = solutions
             .into_iter()
             .map(move |solution| {
@@ -480,12 +477,14 @@ impl Encoder {
                                 )
                             })
                     });
-                    match tokio::time::timeout(route_timeout, encode).await {
+                    let Some(deadline) = deadline else {
+                        return encode.await;
+                    };
+                    match tokio::time::timeout_at(deadline.into(), encode).await {
                         Ok(joined) => joined,
-                        Err(_) => Ok(Err(EncodingError::RecoverableError(format!(
-                            "the route did not encode within {}ms",
-                            route_timeout.as_millis()
-                        )))),
+                        Err(_) => Ok(Err(EncodingError::RecoverableError(
+                            "the solution did not encode before the deadline".to_string(),
+                        ))),
                     }
                 }
             });
@@ -1129,7 +1128,6 @@ mod tests {
             exclusive_swap_signer: None,
             disable_slippage_taking_signer: None,
             calldata_watermark: None,
-            route_timeout: defaults::ENCODING_ROUTE_TIMEOUT,
         }
     }
 
@@ -1445,7 +1443,7 @@ mod tests {
         }
     }
 
-    /// Takes longer to encode than any route timeout under test.
+    /// Takes longer to encode than any deadline under test.
     struct SlowEncoder;
 
     impl TychoEncoder for SlowEncoder {
@@ -1453,7 +1451,7 @@ mod tests {
             &self,
             _solutions: Vec<Solution>,
         ) -> Result<Vec<EncodedSolution>, EncodingError> {
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(500));
             Err(EncodingError::FatalError("slow".to_string()))
         }
 
@@ -1463,18 +1461,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_route_timeout() {
-        let encoder = encoder_with(Chain::Ethereum, Arc::new(SlowEncoder))
-            .with_route_timeout(Duration::from_millis(10));
-        let started = std::time::Instant::now();
+    async fn test_encode_until_deadline() {
+        let encoder = encoder_with(Chain::Ethereum, Arc::new(SlowEncoder));
+        let started = Instant::now();
 
         let quotes = encoder
-            .encode(vec![quote_on_protocol("slow", "uniswap_v2")], EncodingOptions::new(0.01))
+            .encode_until(
+                vec![quote_on_protocol("slow", "uniswap_v2")],
+                EncodingOptions::new(0.01),
+                Some(started + std::time::Duration::from_millis(10)),
+            )
             .await
-            .expect("a route that times out is reported on its order");
+            .expect("a quote that misses the deadline is reported on its order");
 
         assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
-        assert!(started.elapsed() < Duration::from_millis(500), "waited {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "waited {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

@@ -168,21 +168,12 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Sets how long after the best candidates were encoded a new round of encoding retries may
-    /// start (default: 5ms). `Duration::ZERO` turns retrying off.
+    /// Sets how long encoding retries may take, counted from when the best candidates were
+    /// encoded (default: 5ms). `Duration::ZERO` turns retrying off.
     pub fn encoding_retry_budget(mut self, budget: Duration) -> Self {
         self.fynd_builder = self
             .fynd_builder
             .encoding_retry_budget(budget);
-        self
-    }
-
-    /// Sets how long one route may take to encode before it is given up as `EncodingFailed`
-    /// (default: 1s).
-    pub fn encoding_route_timeout(mut self, route_timeout: Duration) -> Self {
-        self.fynd_builder = self
-            .fynd_builder
-            .encoding_route_timeout(route_timeout);
         self
     }
 

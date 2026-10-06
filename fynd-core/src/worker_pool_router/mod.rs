@@ -345,12 +345,12 @@ impl RankedQuotes {
 /// Retried candidates exclude RFQ legs because encoding one waits on a network round trip for
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
 ///
-/// No retry round starts more than `retry_budget` after the best candidates were encoded, and
-/// `Duration::ZERO` turns retrying off. A round takes tens of microseconds unless an encoder
-/// reaches the network, as an Angstrom swap does when its attestation cache is cold. The
-/// encoder's route timeout ([`Encoder::with_route_timeout`]) gives up on such a route instead of
-/// waiting for it, so an order moves on to its next candidate rather than waiting on the
-/// Angstrom API, and a request spends at most about two route timeouts encoding.
+/// Retrying stops `retry_budget` after the best candidates were encoded: no round starts later,
+/// and a candidate still encoding then is given up. `Duration::ZERO` turns retrying off. The best
+/// candidates have no such limit, so retrying adds at most `retry_budget` to a request. A round
+/// takes tens of microseconds unless an encoder reaches the network, as an Angstrom swap does when
+/// its attestation cache is cold: it fetches the attestation inline, for up to 3s, and the budget
+/// gives up on it instead.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
@@ -417,7 +417,7 @@ async fn encode_with_retries(
             return Ok(quote_per_order);
         }
         let retried_quotes = encoder
-            .encode(retry_batch, encoding_options.clone())
+            .encode_until(retry_batch, encoding_options.clone(), Some(retry_deadline))
             .await?;
         // A failed retry leaves the order on its best candidate's failure for the next round.
         for (order_index, retried_quote) in retried_orders

@@ -86,12 +86,9 @@ pub mod defaults {
     /// Minimum number of solver pool responses required before returning a quote (`0` = wait for
     /// all).
     pub const ROUTER_MIN_RESPONSES: usize = 0;
-    /// How long after the best candidates were encoded a new round of encoding retries may
-    /// start (`0` = no retries).
+    /// How long encoding retries may take, counted from when the best candidates were encoded
+    /// (`0` = no retries).
     pub const ENCODING_RETRY_BUDGET: Duration = Duration::from_millis(5);
-    /// How long one route may take to encode before it is given up. Above an RFQ maker's round
-    /// trip, below the 3s an Angstrom attestation fetch may take.
-    pub const ENCODING_ROUTE_TIMEOUT: Duration = Duration::from_millis(1000);
     /// Capacity of the task queue for each worker pool.
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
     /// Minimum number of hops allowed in a route.
@@ -512,7 +509,6 @@ pub struct FyndBuilder {
     router_timeout: Duration,
     router_min_responses: usize,
     encoding_retry_budget: Duration,
-    encoding_route_timeout: Duration,
     encoder: Option<Encoder>,
     calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
@@ -554,7 +550,6 @@ impl FyndBuilder {
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoding_retry_budget: defaults::ENCODING_RETRY_BUDGET,
-            encoding_route_timeout: defaults::ENCODING_ROUTE_TIMEOUT,
             encoder: None,
             calldata_watermark: None,
             pools: Vec::new(),
@@ -685,18 +680,10 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets how long after the best candidates were encoded a new round of encoding retries may
-    /// start (default: 5ms). `Duration::ZERO` turns retrying off.
+    /// Sets how long encoding retries may take, counted from when the best candidates were
+    /// encoded (default: 5ms). `Duration::ZERO` turns retrying off.
     pub fn encoding_retry_budget(mut self, budget: Duration) -> Self {
         self.encoding_retry_budget = budget;
-        self
-    }
-
-    /// Sets how long one route may take to encode before it is given up as
-    /// `EncodingFailed` (default: 1s). Applied to the encoder at build time, whether default or
-    /// overridden.
-    pub fn encoding_route_timeout(mut self, route_timeout: Duration) -> Self {
-        self.encoding_route_timeout = route_timeout;
         self
     }
 
@@ -1057,8 +1044,7 @@ impl FyndBuilder {
         let encoder = match self.calldata_watermark {
             Some(watermark) => encoder.with_calldata_watermark(watermark),
             None => encoder,
-        }
-        .with_route_timeout(self.encoding_route_timeout);
+        };
 
         let chain = self.chain;
         let router_address = encoder.router_address().cloned();
