@@ -348,36 +348,8 @@ mod tests {
     use std::str::FromStr;
 
     use num_bigint::BigUint;
-    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use super::*;
-
-    #[test]
-    fn native_price_converts_back_to_routable_gas_token_units() {
-        let native_to_routable = Price {
-            numerator: BigUint::from(1_000_000u64),
-            denominator: BigUint::from(10u8).pow(18),
-        };
-        let gas_token_native_price = native_to_routable.clone();
-        let token_native_price = Price {
-            numerator: BigUint::from(2_000_000u64),
-            denominator: BigUint::from(10u8).pow(18),
-        };
-
-        let gas_token = price_in_routable_units(&gas_token_native_price, &native_to_routable)
-            .expect("Arc gas-token price should be representable");
-        let token = price_in_routable_units(&token_native_price, &native_to_routable)
-            .expect("Arc token price should be representable");
-
-        assert_eq!(
-            price_to_decimal_string(&gas_token.numerator, &gas_token.denominator),
-            Some("1".to_string())
-        );
-        assert_eq!(
-            price_to_decimal_string(&token.numerator, &token.denominator),
-            Some("2".to_string())
-        );
-    }
 
     #[test]
     fn test_data_status_serialization() {

@@ -299,20 +299,16 @@ fn build_priced_token(price: Price, buy_leg: &ReachedToken, sell_out: BigUint) -
 
 /// Prices a token at the sell rate alone: the amount sold divided by the gas token amount
 /// returned. Stores the buy route's components as its dependencies.
-fn scale_price(price: Price, scale: &Price) -> Price {
-    Price {
-        numerator: price.numerator * &scale.numerator,
-        denominator: price.denominator * &scale.denominator,
-    }
-}
-
 fn build_sell_rate_entry(
     buy_leg: &ReachedToken,
     sell_out: BigUint,
     native_to_routable_unit: &Price,
 ) -> PricedToken {
-    let sell_rate = Price { numerator: buy_leg.amount_out.clone(), denominator: sell_out.clone() };
-    build_priced_token(scale_price(sell_rate, native_to_routable_unit), buy_leg, sell_out)
+    let sell_rate = Price {
+        numerator: &buy_leg.amount_out * &native_to_routable_unit.numerator,
+        denominator: &sell_out * &native_to_routable_unit.denominator,
+    };
+    build_priced_token(sell_rate, buy_leg, sell_out)
 }
 
 /// Environment variable that sets how far a token's price may move in one pricing pass before
@@ -611,8 +607,13 @@ impl<'a> PricingPassState<'a> {
         self.ctx.adj = adjacency;
         self.ctx.token_in_node = self.gas_node;
         self.ctx.token_out_node = None;
-        self.algorithm
-            .reach_from_source_token(&self.ctx, &self.computation.probe_amount)
+        self.algorithm.reach_from_source_token(
+            &self.ctx,
+            &self
+                .computation
+                .gas_token_config
+                .probe_amount,
+        )
     }
 
     /// Flags `component_id` for the rest of this pricing pass and for the pricing passes after it.
@@ -744,15 +745,19 @@ impl<'a> PricingPassState<'a> {
         sell_out: BigUint,
     ) -> PricedToken {
         trace!(%token, buy_out = %buy_leg.amount_out, sell_out = %sell_out, "token priced");
+        let config = &self.computation.gas_token_config;
         let mid_price = Price {
-            numerator: &buy_leg.amount_out * (&self.computation.probe_amount + &sell_out),
-            denominator: BigUint::from(2u8) * &self.computation.probe_amount * &sell_out,
+            numerator: &buy_leg.amount_out *
+                (&config.probe_amount + &sell_out) *
+                &config.native_to_routable_unit.numerator,
+            denominator: BigUint::from(2u8) *
+                &config.probe_amount *
+                &sell_out *
+                &config
+                    .native_to_routable_unit
+                    .denominator,
         };
-        build_priced_token(
-            scale_price(mid_price, &self.computation.native_to_routable_unit),
-            buy_leg,
-            sell_out,
-        )
+        build_priced_token(mid_price, buy_leg, sell_out)
     }
 
     /// Prices a token with a sell solve of its bought amount back to the gas token. The stored
@@ -771,9 +776,14 @@ impl<'a> PricingPassState<'a> {
         };
         let mut priced = match buy_leg {
             SellSolveBuyLeg::Trusted(route) => self.build_price_entry(token, route, sell_out),
-            SellSolveBuyLeg::ThroughFlaggedPool(route) => {
-                build_sell_rate_entry(route, sell_out, &self.computation.native_to_routable_unit)
-            }
+            SellSolveBuyLeg::ThroughFlaggedPool(route) => build_sell_rate_entry(
+                route,
+                sell_out,
+                &self
+                    .computation
+                    .gas_token_config
+                    .native_to_routable_unit,
+            ),
         };
         priced
             .entry
@@ -815,8 +825,12 @@ impl<'a> PricingPassState<'a> {
                 Err(_) => return flagged(PoolFlagReason::SwapFailed),
             }
         }
-        let min_sell_out =
-            &self.computation.probe_amount * self.computation.min_sell_out_bps / BPS_DENOMINATOR;
+        let min_sell_out = &self
+            .computation
+            .gas_token_config
+            .probe_amount *
+            self.computation.min_sell_out_bps /
+            BPS_DENOMINATOR;
         if amount < min_sell_out {
             return ReverseSellOutcome::LowSellOut;
         }
@@ -852,7 +866,10 @@ impl<'a> PricingPassState<'a> {
         }
         let order = Order::new(
             token.clone(),
-            self.computation.gas_token.clone(),
+            self.computation
+                .gas_token_config
+                .address
+                .clone(),
             amount,
             OrderSide::Sell,
             Address::zero(20),
@@ -862,7 +879,12 @@ impl<'a> PricingPassState<'a> {
             .find_single_route(&self.ctx, &order, FindRouteOptions::default())
             .map_err(|error| FailedItemError::MissingSellRoute(error.to_string()))?;
         let route = result.route();
-        let amount_out = route.amount_out(&self.computation.gas_token);
+        let amount_out = route.amount_out(
+            &self
+                .computation
+                .gas_token_config
+                .address,
+        );
         if amount_out.is_zero() {
             return Err(FailedItemError::MissingSellRoute("the sell route returns zero".into()));
         }
@@ -905,14 +927,10 @@ fn drop_stale_failures(store: &mut DerivedData, solved: &PricingPassOutcome) {
 /// Computes token prices relative to the gas token from the routes that trade it.
 #[derive(Debug, Clone)]
 pub struct TokenGasPriceComputation {
-    /// The gas token address (e.g., ETH).
-    gas_token: Address,
+    /// Routable gas token and its native/routable raw-unit conversion.
+    gas_token_config: GasTokenConfig,
     /// Longest route the algorithm may build.
     max_hops: usize,
-    /// Amount of gas token each probe buys with (affects slippage).
-    probe_amount: BigUint,
-    /// Routable gas-token raw units with the same economic value as one native gas raw unit.
-    native_to_routable_unit: Price,
     /// Wall-clock budget for the steps of a pricing pass after its first buy pass. The snapshot
     /// and the first buy pass run outside it, bounded only by the algorithm's timeout. Tokens not
     /// attempted before it expires keep their previous price; the module's "Cost and time
@@ -1159,13 +1177,8 @@ const DEFAULT_MIN_SELL_OUT_BPS: u32 = 5_000;
 impl Default for TokenGasPriceComputation {
     fn default() -> Self {
         Self {
-            gas_token: Address::zero(20), // ETH address
+            gas_token_config: GasTokenConfig::default(),
             max_hops: crate::solver::defaults::PRICING_MAX_HOPS,
-            probe_amount: BigUint::from(10u64).pow(18), // 1 ETH
-            native_to_routable_unit: Price {
-                numerator: BigUint::from(1u8),
-                denominator: BigUint::from(1u8),
-            },
             pass_budget: DEFAULT_PASS_BUDGET,
             max_tokens_per_pass: DEFAULT_MAX_TOKENS_PER_PASS,
             max_sell_solves_per_pass: DEFAULT_MAX_SELL_SOLVES_PER_PASS,
@@ -1185,9 +1198,12 @@ impl TokenGasPriceComputation {
     #[cfg(test)]
     pub fn new(gas_token: Address, max_hops: usize, probe_amount: BigUint) -> Self {
         Self {
-            gas_token,
+            gas_token_config: GasTokenConfig {
+                address: gas_token,
+                probe_amount,
+                ..GasTokenConfig::default()
+            },
             max_hops,
-            probe_amount,
             min_pass_interval: Duration::ZERO,
             ..Self::default()
         }
@@ -1206,16 +1222,6 @@ impl TokenGasPriceComputation {
     /// Sets how many sell solves one pass may run.
     pub fn with_max_sell_solves_per_pass(self, max_sell_solves_per_pass: usize) -> Self {
         Self { max_sell_solves_per_pass, ..self }
-    }
-
-    /// Sets the conversion from one native gas raw unit to routable gas-token raw units.
-    pub(crate) fn with_native_to_routable_unit(self, native_to_routable_unit: Price) -> Self {
-        Self { native_to_routable_unit, ..self }
-    }
-
-    /// Sets the routable gas-token amount used to probe token prices.
-    pub(crate) fn with_probe_amount(self, probe_amount: BigUint) -> Self {
-        Self { probe_amount, ..self }
     }
 
     /// Sets how long after a pass starts the next one may start. `Duration::ZERO` lets a pass
@@ -1345,17 +1351,9 @@ impl TokenGasPriceComputation {
         Self { max_hops, ..self }
     }
 
-    /// Sets only the gas-token address, retaining the current probe amount and unit conversion.
-    /// Prefer [`Self::with_gas_token_config`] for shared-balance native assets.
-    pub fn with_gas_token(self, gas_token: Address) -> Self {
-        Self { gas_token, ..self }
-    }
-
     /// Sets the routable gas token, probe amount, and native/routable raw-unit conversion.
-    pub fn with_gas_token_config(self, gas_token: GasTokenConfig) -> Self {
-        self.with_gas_token(gas_token.address)
-            .with_probe_amount(gas_token.probe_amount)
-            .with_native_to_routable_unit(gas_token.native_to_routable_unit)
+    pub(crate) fn with_gas_token_config(self, gas_token_config: GasTokenConfig) -> Self {
+        Self { gas_token_config, ..self }
     }
 
     /// Solves one capped pass, ranking every token in the market and attempting the best
@@ -1440,7 +1438,7 @@ impl TokenGasPriceComputation {
             .build_context_from_source_token(
                 graph,
                 market.clone(),
-                &self.gas_token,
+                &self.gas_token_config.address,
                 self.max_hops + 1,
                 Some(&selected),
             )
@@ -1501,7 +1499,7 @@ impl TokenGasPriceComputation {
         topology
             .values()
             .flatten()
-            .filter(|token| *token != &self.gas_token)
+            .filter(|token| *token != &self.gas_token_config.address)
             .cloned()
             .collect()
     }
@@ -1552,7 +1550,7 @@ impl TokenGasPriceComputation {
             let mut new_tokens = 0usize;
             for token in changed.added.values().flatten() {
                 // Every added pool carries the gas token, which no pass ever attempts.
-                if *token == self.gas_token || !arrived.insert(token.clone()) {
+                if *token == self.gas_token_config.address || !arrived.insert(token.clone()) {
                     continue;
                 }
                 if !existing_deps.contains_key(token) {
@@ -1623,7 +1621,7 @@ impl TokenGasPriceComputation {
                 let dropped: Vec<Address> = deps
                     .keys()
                     .filter(|token| {
-                        **token != self.gas_token &&
+                        **token != self.gas_token_config.address &&
                             !solved.prices.contains_key(*token) &&
                             !solved.unattempted.contains(*token)
                     })
@@ -1703,15 +1701,18 @@ impl TokenGasPriceComputation {
 
         // The routable gas token needs no route. Its price converts native gas raw units into the
         // routable representation's raw units; this is 1:1 on ordinary wrapper chains.
-        let gas_token_price = self.native_to_routable_unit.clone();
+        let gas_token_price = self
+            .gas_token_config
+            .native_to_routable_unit
+            .clone();
         token_prices_with_deps.insert(
-            self.gas_token.clone(),
+            self.gas_token_config.address.clone(),
             TokenPriceEntry {
                 price: gas_token_price.clone(),
                 path_components: FxHashSet::default(),
             },
         );
-        token_prices.insert(self.gas_token.clone(), gas_token_price);
+        token_prices.insert(self.gas_token_config.address.clone(), gas_token_price);
 
         self.lock_pass_history()
             .record_routes(&solved.routes, &token_prices_with_deps);
@@ -1812,29 +1813,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn complete_gas_token_config_applies_arc_units() {
-        let config = crate::types::constants::gas_token_config(
-            &tycho_simulation::tycho_common::models::Chain::Arc,
-        )
-        .unwrap();
-        let computation = TokenGasPriceComputation::default().with_gas_token_config(config);
-
-        assert_eq!(computation.probe_amount, BigUint::from(1_000_000u64));
-        assert_eq!(
-            computation
-                .native_to_routable_unit
-                .numerator,
-            BigUint::from(1_000_000u64)
-        );
-        assert_eq!(
-            computation
-                .native_to_routable_unit
-                .denominator,
-            BigUint::from(10u8).pow(18)
-        );
-    }
     use crate::{
         algorithm::test_utils::{
             component, component_with_protocol, setup_market_weighted, setup_market_weighted_boxed,
@@ -1904,16 +1882,18 @@ mod tests {
             denominator: BigUint::from(10u8).pow(18),
         };
 
-        let prices = TokenGasPriceComputation::new(
-            gas_token.address.clone(),
-            3,
-            BigUint::from(1_000_000u64),
-        )
-        .with_native_to_routable_unit(unit_scale.clone())
-        .compute(&market, &store, &ChangedComponents::default())
-        .await
-        .expect("pricing must not fail")
-        .data;
+        let prices = TokenGasPriceComputation::default()
+            .with_gas_token_config(GasTokenConfig {
+                address: gas_token.address.clone(),
+                probe_amount: BigUint::from(1_000_000u64),
+                native_to_routable_unit: unit_scale.clone(),
+            })
+            .with_max_hops(3)
+            .with_min_pass_interval(Duration::ZERO)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail")
+            .data;
 
         assert_eq!(prices[&gas_token.address], unit_scale);
         assert!((ratio(&prices[&output.address]) - 2e-12).abs() < 1e-24);

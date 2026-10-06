@@ -9,27 +9,23 @@ use tycho_simulation::{
 /// The routable representation used to price native gas and the conversion between its raw units
 /// and the chain's native gas units.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GasTokenConfig {
+pub(crate) struct GasTokenConfig {
     pub(crate) address: Address,
     pub(crate) probe_amount: BigUint,
     /// Routable-token raw units with the same economic value as one native gas raw unit.
     pub(crate) native_to_routable_unit: Price,
 }
 
-impl GasTokenConfig {
-    /// Returns the real routable token used to price native gas.
-    pub fn address(&self) -> &Address {
-        &self.address
-    }
-
-    /// Returns the routable-token raw amount used by token-price probes.
-    pub fn probe_amount(&self) -> &BigUint {
-        &self.probe_amount
-    }
-
-    /// Returns routable-token raw units with the value of one native gas raw unit.
-    pub fn native_to_routable_unit(&self) -> &Price {
-        &self.native_to_routable_unit
+impl Default for GasTokenConfig {
+    fn default() -> Self {
+        Self {
+            address: Address::zero(20),
+            probe_amount: BigUint::from(10u8).pow(18),
+            native_to_routable_unit: Price {
+                numerator: BigUint::from(1u8),
+                denominator: BigUint::from(1u8),
+            },
+        }
     }
 }
 
@@ -53,7 +49,7 @@ impl UnsupportedChainError {
 /// Returns `UnsupportedChainError` if the chain is not registered or has no routable native-asset
 /// representation. Wrapper chains use their wrapper token. Shared-balance chains such as Arc use
 /// their real routable representation without inventing a wrapper.
-pub fn gas_token_config(chain: &Chain) -> Result<GasTokenConfig, UnsupportedChainError> {
+pub(crate) fn gas_token_config(chain: &Chain) -> Result<GasTokenConfig, UnsupportedChainError> {
     let unsupported = || UnsupportedChainError { chain: *chain };
     let native_asset = chain
         .try_native_asset()
