@@ -456,11 +456,11 @@ fn record_encoding_failures(quotes: &[OrderQuote], cut_off_orders: &[usize]) {
             warn!(
                 order_id = %quote.order_id(),
                 retry_budget_spent,
-                "this order is returned without a transaction"
+                "order failed to encode; it is returned without a transaction"
             );
             counter!(
                 "encoding_failures_total",
-                "retry_budget_spent" => retry_budget_spent.to_string()
+                "retry_budget_spent" => if retry_budget_spent { "true" } else { "false" }
             )
             .increment(1);
         }
