@@ -168,6 +168,11 @@ twice.
 
 Price level venues must be one of tycho-simulation's `default_served_pamms` — an unrecognised name
 is a `DataFeedError::Config`, not a warning, because these entries are always hand-written. The
+one exception is `PRICE_LEVEL_STREAM_AUTO` (`pricelevelstream:auto`), which turns on the builder's
+`with_known_pamms` and `auto_detect`: every streamed venue is served, the known ones under their
+names and any other one under its address (`fallback:0x…`) with the auto-detected gas cost. The
+venues upstream denies stay off. `matches_streamed_system` maps every `fallback:` label back to
+that entry. The
 stream is Ethereum-only (`PRICE_LEVEL_STREAM_CHAIN` tracks upstream's venue set, which carries no
 chain of its own). Its components arrive labelled `fallback:{venue}`, tycho-execution's
 `FALLBACK_PREFIX` aliased by `fallback/`: every served venue executes through the

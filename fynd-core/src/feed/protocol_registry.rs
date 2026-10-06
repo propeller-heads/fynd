@@ -63,7 +63,17 @@ const EXCLUSIVE_CAPABLE_PROTOCOLS: &[&str] = &["ekubo_v3"];
 
 /// Marks a `--protocols` entry served from the Titan pAMM price level stream rather than from
 /// Tycho, e.g. `pricelevelstream:fermiswap`.
-const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
+pub const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
+
+/// The `--protocols` entry that serves every venue the price level stream carries.
+///
+/// The known venues (`default_served_pamms`) keep their names and measured gas costs. Any other
+/// venue is served under its address with the conservative auto-detected gas cost. The venues
+/// known to be unexecutable (`default_denied_pamms`) are not served.
+pub const PRICE_LEVEL_STREAM_AUTO: &str = "pricelevelstream:auto";
+
+/// The venue part of [`PRICE_LEVEL_STREAM_AUTO`].
+const AUTO_DETECT_VENUE: &str = "auto";
 
 /// Marks a protocol served from an RFQ client rather than from Tycho, e.g. `rfq:bebop`: both its
 /// `--protocols` entry and the protocol system of the components the client streams.
@@ -152,7 +162,8 @@ pub(crate) fn has_tycho_protocols(protocols: &[String]) -> bool {
 /// exclusive-liquidity stream variant, and the prefix is stripped before registration, so its
 /// components arrive under the bare system name. A `pricelevelstream:{pamm}` entry names the pAMM
 /// to stream, and its components arrive labelled `fallback:{pamm}`: the stream serves every venue
-/// through the `TychoFallbackRouter`, so both prefixes answer for the same entry.
+/// through the `TychoFallbackRouter`, so both prefixes answer for the same entry. The
+/// [`PRICE_LEVEL_STREAM_AUTO`] entry answers for every `fallback:` venue.
 pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     let entry = entry
         .strip_prefix(EXCLUSIVE_PREFIX)
@@ -160,13 +171,11 @@ pub fn matches_streamed_system(entry: &str, protocol_system: &str) -> bool {
     if entry == protocol_system {
         return true;
     }
-    match (
-        entry.strip_prefix(PRICE_LEVEL_STREAM_PREFIX),
-        protocol_system.strip_prefix(FALLBACK_PREFIX),
-    ) {
-        (Some(requested_venue), Some(streamed_venue)) => requested_venue == streamed_venue,
-        _ => false,
-    }
+    let Some(streamed_venue) = protocol_system.strip_prefix(FALLBACK_PREFIX) else {
+        return false;
+    };
+    entry == PRICE_LEVEL_STREAM_AUTO ||
+        entry.strip_prefix(PRICE_LEVEL_STREAM_PREFIX) == Some(streamed_venue)
 }
 
 /// Whether any requested protocol is served by an RFQ client.
@@ -514,7 +523,9 @@ pub(crate) fn register_rfq(
 /// Returns `None` when no entry names the stream. Every named venue must be one of the venues
 /// tycho-simulation knows how to execute against ([`default_served_pamms`]); a name outside that
 /// set is a configuration error rather than a warning, because these entries are always written
-/// by hand and a typo would otherwise silently stream nothing.
+/// by hand and a typo would otherwise silently stream nothing. The [`PRICE_LEVEL_STREAM_AUTO`]
+/// entry also serves the venues that are not named, including the ones tycho-simulation does not
+/// know yet.
 ///
 /// The stream reconnects on its own for as long as it is polled, so — unlike the RFQ clients —
 /// it needs no supervising task.
@@ -549,6 +560,15 @@ pub(crate) fn open_price_level_stream(
     let served = default_served_pamms();
     let mut builder = PriceLevelStreamBuilder::new().with_tokens(tokens.clone());
     for venue in venues {
+        if venue == AUTO_DETECT_VENUE {
+            info!(
+                "Adding every price level venue the stream carries ({PRICE_LEVEL_STREAM_AUTO})..."
+            );
+            builder = builder
+                .with_known_pamms()
+                .auto_detect(true);
+            continue;
+        }
         let Some(config) = served
             .iter()
             .find(|config| config.protocol == venue)
@@ -1087,6 +1107,20 @@ mod tests {
     }
 
     #[test]
+    fn test_price_level_stream_auto_entry() {
+        assert_eq!(
+            PRICE_LEVEL_STREAM_AUTO,
+            format!("{PRICE_LEVEL_STREAM_PREFIX}{AUTO_DETECT_VENUE}")
+        );
+        assert!(
+            default_served_pamms()
+                .iter()
+                .all(|config| config.protocol != AUTO_DETECT_VENUE),
+            "a served venue named '{AUTO_DETECT_VENUE}' would be shadowed by auto-detection"
+        );
+    }
+
+    #[test]
     fn test_matches_streamed_system() {
         assert!(matches_streamed_system("uniswap_v3", "uniswap_v3"));
         assert!(matches_streamed_system(
@@ -1097,6 +1131,12 @@ mod tests {
         assert!(matches_streamed_system("pricelevelstream:fermiswap", "fallback:fermiswap"));
         // The prefix is stripped before registration, so the components carry the bare system.
         assert!(matches_streamed_system("exclusive:ekubo_v3", "ekubo_v3"));
+        // Auto-detection serves every venue, named or not.
+        assert!(matches_streamed_system(PRICE_LEVEL_STREAM_AUTO, "fallback:fermiswap"));
+        assert!(matches_streamed_system(
+            PRICE_LEVEL_STREAM_AUTO,
+            "fallback:0xb09aaa8933626d7e4c48d65dad2d77021cfbca9a"
+        ));
     }
 
     #[test]
@@ -1106,6 +1146,8 @@ mod tests {
         assert!(!matches_streamed_system("uniswap_v3", "fallback:fermiswap"));
         assert!(!matches_streamed_system("vm:fermiswap", "fallback:fermiswap"));
         assert!(!matches_streamed_system("exclusive:ekubo_v3", "ekubo_v2"));
+        assert!(!matches_streamed_system(PRICE_LEVEL_STREAM_AUTO, "vm:fermiswap"));
+        assert!(!matches_streamed_system(PRICE_LEVEL_STREAM_AUTO, "uniswap_v3"));
     }
 
     #[test]
@@ -1147,6 +1189,30 @@ mod tests {
         ) else {
             panic!("expected both venues to be served");
         };
+    }
+
+    #[test]
+    fn test_open_price_level_stream_auto() {
+        for entries in [
+            vec![PRICE_LEVEL_STREAM_AUTO],
+            vec!["pricelevelstream:fermiswap", PRICE_LEVEL_STREAM_AUTO],
+        ] {
+            let Ok(Some(_)) = price_level_stream(Chain::Ethereum, &entries) else {
+                panic!("expected auto-detection to open the stream for {entries:?}");
+            };
+        }
+    }
+
+    #[test]
+    fn test_open_price_level_stream_auto_other_chain() {
+        let Err(err) = price_level_stream(Chain::Base, &[PRICE_LEVEL_STREAM_AUTO]) else {
+            panic!("expected auto-detection to be rejected off Ethereum");
+        };
+        assert!(
+            err.to_string()
+                .contains("serves ethereum only"),
+            "got {err}"
+        );
     }
 
     #[test]

@@ -81,6 +81,15 @@ fynd serve \
 
 The `exclude:` prefix drops a protocol from the list. It matters here: `vm:fermiswap` and `pricelevelstream:fermiswap` price the same maker inventory, so streaming both double-counts that liquidity. Drop the Tycho-streamed one whenever you serve the same venue from the price level stream. An `exclude:` entry that matches no streamed protocol logs a warning and is otherwise ignored, so a protocol Tycho has dropped does not stop the solver from starting.
 
+To serve every venue the stream carries, use `pricelevelstream:auto`:
+
+```bash
+fynd serve \
+  --protocols all_onchain,pricelevelstream:auto
+```
+
+The known venues keep their names and gas estimates. Fynd serves a venue it does not know under the venue's address, for example `fallback:0x…`, with a conservative gas estimate of 335,000 per swap. A venue that moves to a new contract thus stays served until Fynd learns its new address. You cannot exclude a single venue next to `pricelevelstream:auto`: Fynd does not start with `exclude:pricelevelstream:{venue}` in the same list. To select venues, name each one instead.
+
 **Limitations:**
 
 * Ethereum mainnet only — the venue addresses are mainnet deployments.
