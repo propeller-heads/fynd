@@ -373,52 +373,59 @@ async fn encode_with_retries(
     retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let mut best_candidate_per_order = Vec::new();
-    let mut retry_candidates = Vec::new();
+    let mut retry_candidates_per_order = Vec::new();
     for candidates in ranked.into_per_order() {
         let mut candidates = candidates.into_iter();
         // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
         best_candidate_per_order.extend(candidates.next());
-        retry_candidates.push(candidates.filter(|candidate| {
+        retry_candidates_per_order.push(candidates.filter(|candidate| {
             candidate.status() == QuoteStatus::Success && !has_rfq_leg(candidate)
         }));
     }
-    let mut quotes = encoder
+    // One quote per order: encoded, or the best candidate marked `EncodingFailed` until a retry
+    // replaces it.
+    let mut quote_per_order = encoder
         .encode(best_candidate_per_order, encoding_options.clone())
         .await?;
     let retry_deadline = Instant::now() + retry_budget;
 
     loop {
-        let mut order_indices = Vec::new();
-        let mut next_candidates = Vec::new();
-        for (order_index, quote) in quotes.iter().enumerate() {
-            if quote.status() != QuoteStatus::EncodingFailed {
+        // Every order still without calldata retries with its next candidate.
+        let mut retried_orders = Vec::new();
+        let mut retry_batch = Vec::new();
+        for (order_index, order_quote) in quote_per_order.iter().enumerate() {
+            if order_quote.status() != QuoteStatus::EncodingFailed {
                 continue;
             }
-            if let Some(candidate) = retry_candidates[order_index].next() {
-                order_indices.push(order_index);
-                next_candidates.push(candidate);
+            if let Some(retry_candidate) = retry_candidates_per_order[order_index].next() {
+                retried_orders.push(order_index);
+                retry_batch.push(retry_candidate);
             }
         }
-        if next_candidates.is_empty() {
-            record_encoding_failures(&quotes);
-            return Ok(quotes);
+        if retry_batch.is_empty() {
+            record_encoding_failures(&quote_per_order);
+            return Ok(quote_per_order);
         }
         if Instant::now() >= retry_deadline {
             warn!(
-                orders = order_indices.len(),
+                orders = retried_orders.len(),
                 budget_ms = retry_budget.as_millis(),
                 "encoding retry budget spent; the remaining candidates are not tried"
             );
-            record_encoding_failures(&quotes);
-            return Ok(quotes);
+            record_encoding_failures(&quote_per_order);
+            return Ok(quote_per_order);
         }
-        let encoded = encoder
-            .encode(next_candidates, encoding_options.clone())
+        let retried_quotes = encoder
+            .encode(retry_batch, encoding_options.clone())
             .await?;
-        for (order_index, quote) in order_indices.into_iter().zip(encoded) {
-            if quote.status() == QuoteStatus::Success {
-                debug!(order_id = %quote.order_id(), "encoded the next-best candidate");
-                quotes[order_index] = quote;
+        // A failed retry leaves the order on its best candidate's failure for the next round.
+        for (order_index, retried_quote) in retried_orders
+            .into_iter()
+            .zip(retried_quotes)
+        {
+            if retried_quote.status() == QuoteStatus::Success {
+                debug!(order_id = %retried_quote.order_id(), "encoded the next-best candidate");
+                quote_per_order[order_index] = retried_quote;
             }
         }
     }
