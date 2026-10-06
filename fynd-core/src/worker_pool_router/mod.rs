@@ -345,10 +345,11 @@ impl RankedQuotes {
 /// Retried candidates exclude RFQ legs because encoding one waits on a network round trip for
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
 ///
-/// No retry round starts more than 5ms after the best candidates were encoded. A round takes
-/// tens of microseconds, but some encoders reach the network: an Angstrom swap fetches its
-/// attestation over HTTP, with a 3s timeout, whenever its background cache is stale. Without the
-/// budget, an outage of the Angstrom API would cost 3s per retry round instead of one round.
+/// No retry round starts more than `retry_budget` after the best candidates were encoded, and
+/// `Duration::ZERO` turns retrying off. A round takes tens of microseconds, but some encoders
+/// reach the network: an Angstrom swap fetches its attestation over HTTP, with a 3s timeout,
+/// whenever its background cache is stale. Without the budget, an outage of the Angstrom API
+/// would cost 3s per retry round instead of one round.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
@@ -357,10 +358,10 @@ pub async fn encode_quotes(
     encoder: &Encoder,
     ranked: RankedQuotes,
     encoding_options: &EncodingOptions,
+    retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let encode_start = Instant::now();
-    let encoded =
-        encode_with_retries(encoder, ranked, encoding_options, Duration::from_millis(5)).await;
+    let encoded = encode_with_retries(encoder, ranked, encoding_options, retry_budget).await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
     encoded
 }
@@ -673,7 +674,13 @@ impl WorkerPoolRouter {
         let started = ranked.started();
         let order_quotes = match request.options().encoding_options() {
             Some(encoding_options) => {
-                let encoded = encode_quotes(&self.encoder, ranked, encoding_options).await?;
+                let encoded = encode_quotes(
+                    &self.encoder,
+                    ranked,
+                    encoding_options,
+                    self.config.encoding_retry_budget(),
+                )
+                .await?;
                 self.simulate_quotes(encoded, encoding_options)
                     .await?
             }
@@ -1604,6 +1611,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         feed::exclusivity::mark_exclusive,
+        solver::defaults,
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
         EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
@@ -2187,9 +2195,14 @@ mod tests {
         ]])
         .expect("the order has candidates");
 
-        let quotes = encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01))
-            .await
-            .expect("a failing candidate is reported on the order, not on the call");
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
 
         assert_eq!(quotes.len(), 1);
         assert_eq!(quotes[0].status(), QuoteStatus::Success);
@@ -2209,9 +2222,14 @@ mod tests {
         ]])
         .expect("the order has candidates");
 
-        let quotes = encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01))
-            .await
-            .expect("a failing candidate is reported on the order, not on the call");
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
 
         assert_eq!(quotes.len(), 1);
         assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
@@ -2232,9 +2250,14 @@ mod tests {
         ])
         .expect("both orders have candidates");
 
-        let quotes = encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01))
-            .await
-            .expect("a failing candidate is reported on the order, not on the call");
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
 
         assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(700u64));
         assert_eq!(*quotes[1].amount_out_net_gas(), BigUint::from(800u64));
@@ -2257,16 +2280,21 @@ mod tests {
         ]])
         .expect("the order has candidates");
 
-        let quotes = encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01))
-            .await
-            .expect("a failing candidate is reported on the order, not on the call");
+        let quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing candidate is reported on the order, not on the call");
 
         assert_eq!(quotes[0].status(), QuoteStatus::Success);
         assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(800u64));
     }
 
     #[tokio::test]
-    async fn test_encode_with_retries_spent_budget() {
+    async fn test_encode_quotes_zero_retry_budget() {
         let ranked = RankedQuotes::new(vec![vec![
             make_single_quote_on("no_such_protocol", 950)
                 .order()
@@ -2275,14 +2303,10 @@ mod tests {
         ]])
         .expect("the order has candidates");
 
-        let quotes = encode_with_retries(
-            &default_encoder(),
-            ranked,
-            &EncodingOptions::new(0.01),
-            Duration::ZERO,
-        )
-        .await
-        .expect("a failing candidate is reported on the order, not on the call");
+        let quotes =
+            encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01), Duration::ZERO)
+                .await
+                .expect("a failing candidate is reported on the order, not on the call");
 
         assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
         assert_eq!(*quotes[0].amount_out_net_gas(), BigUint::from(950u64));
@@ -2328,7 +2352,12 @@ mod tests {
         // A current-thread runtime polls the router on this thread, where the local recorder is
         // installed.
         let quotes = metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(encode_quotes(&default_encoder(), ranked, &EncodingOptions::new(0.01)))
+            runtime.block_on(encode_quotes(
+                &default_encoder(),
+                ranked,
+                &EncodingOptions::new(0.01),
+                defaults::ENCODING_RETRY_BUDGET,
+            ))
         })
         .expect("a failing candidate is reported on the order, not on the call");
 

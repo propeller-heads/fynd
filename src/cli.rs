@@ -138,6 +138,11 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::ROUTER_MIN_RESPONSES)]
     pub worker_router_min_responses: usize,
 
+    /// Milliseconds after the best candidates were encoded during which a failed encoding may
+    /// still be retried on the next candidate (0 = no retries)
+    #[arg(long, default_value_t = defaults::ENCODING_RETRY_BUDGET.as_millis() as u64)]
+    pub encoding_retry_budget_ms: u64,
+
     /// Path to worker pools TOML config file
     #[arg(short, long, env, default_value = "worker_pools.toml")]
     pub worker_pools_config: PathBuf,
@@ -292,6 +297,7 @@ mod cli_tests {
         assert_eq!(args.reconnect_delay_secs, 5);
         assert_eq!(args.worker_router_timeout_ms, 100);
         assert_eq!(args.worker_router_min_responses, 0);
+        assert_eq!(args.encoding_retry_budget_ms, 5);
         assert_eq!(args.blocklist_config, None);
         assert_eq!(args.hosted_swagger_url, None);
         assert_eq!(args.collector_url, None);

@@ -120,7 +120,8 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
    `GraphQueryFilter` bounds and the request's `RouteExclusions` through one `RouteSearch`
 3. Selects best by `amount_out_net_gas` → optional `Encoder` → optional simulation → `Quote`.
    When an order's best candidate fails to encode, the next successful candidate without an RFQ
-   leg is encoded instead, until one encodes, none remain, or 5ms have passed since the first
+   leg is encoded instead, until one encodes, none remain, or the encoding retry budget (5ms by
+   default, `WorkerPoolRouterConfig::with_encoding_retry_budget`) has passed since the first
    encode
 
 Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
