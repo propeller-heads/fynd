@@ -340,15 +340,15 @@ impl RankedQuotes {
 /// When an order's best candidate fails to encode, the next successful candidate in its ranking
 /// without an RFQ leg is encoded instead, until one encodes or none remain. An order whose
 /// candidates all fail keeps its best candidate with [`QuoteStatus::EncodingFailed`]. With the
-/// price guard enabled, every order has one candidate, so no fallback is possible.
+/// price guard enabled, every order has one candidate, so no retry is possible.
 ///
-/// Fallback candidates exclude RFQ legs because encoding one waits on a network round trip for
+/// Retried candidates exclude RFQ legs because encoding one waits on a network round trip for
 /// the maker's signed quote, which the request would pay on top of the failed attempt.
 ///
-/// No fallback round starts more than 5ms after the best candidates were encoded. A round takes
+/// No retry round starts more than 5ms after the best candidates were encoded. A round takes
 /// tens of microseconds, but some encoders reach the network: an Angstrom swap fetches its
 /// attestation over HTTP, with a 3s timeout, whenever its background cache is stale. Without the
-/// budget, an outage of the Angstrom API would cost 3s per fallback round instead of one round.
+/// budget, an outage of the Angstrom API would cost 3s per retry round instead of one round.
 ///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
@@ -360,31 +360,31 @@ pub async fn encode_quotes(
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let encode_start = Instant::now();
     let encoded =
-        encode_with_fallbacks(encoder, ranked, encoding_options, Duration::from_millis(5)).await;
+        encode_with_retries(encoder, ranked, encoding_options, Duration::from_millis(5)).await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
     encoded
 }
 
-async fn encode_with_fallbacks(
+async fn encode_with_retries(
     encoder: &Encoder,
     ranked: RankedQuotes,
     encoding_options: &EncodingOptions,
-    fallback_budget: Duration,
+    retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
-    let mut best = Vec::new();
-    let mut fallbacks = Vec::new();
+    let mut best_candidate_per_order = Vec::new();
+    let mut retry_candidates = Vec::new();
     for candidates in ranked.into_per_order() {
         let mut candidates = candidates.into_iter();
         // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
-        best.extend(candidates.next());
-        fallbacks.push(candidates.filter(|candidate| {
+        best_candidate_per_order.extend(candidates.next());
+        retry_candidates.push(candidates.filter(|candidate| {
             candidate.status() == QuoteStatus::Success && !has_rfq_leg(candidate)
         }));
     }
     let mut quotes = encoder
-        .encode(best, encoding_options.clone())
+        .encode(best_candidate_per_order, encoding_options.clone())
         .await?;
-    let fallback_deadline = Instant::now() + fallback_budget;
+    let retry_deadline = Instant::now() + retry_budget;
 
     loop {
         let mut order_indices = Vec::new();
@@ -393,7 +393,7 @@ async fn encode_with_fallbacks(
             if quote.status() != QuoteStatus::EncodingFailed {
                 continue;
             }
-            if let Some(candidate) = fallbacks[order_index].next() {
+            if let Some(candidate) = retry_candidates[order_index].next() {
                 order_indices.push(order_index);
                 next_candidates.push(candidate);
             }
@@ -402,11 +402,11 @@ async fn encode_with_fallbacks(
             record_encoding_failures(&quotes);
             return Ok(quotes);
         }
-        if Instant::now() >= fallback_deadline {
+        if Instant::now() >= retry_deadline {
             warn!(
                 orders = order_indices.len(),
-                budget_ms = fallback_budget.as_millis(),
-                "encoding fallback budget spent; the remaining candidates are not tried"
+                budget_ms = retry_budget.as_millis(),
+                "encoding retry budget spent; the remaining candidates are not tried"
             );
             record_encoding_failures(&quotes);
             return Ok(quotes);
@@ -2220,7 +2220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_quotes_one_order_falls_back_of_two() {
+    async fn test_encode_quotes_one_of_two_orders_retries() {
         let ranked = RankedQuotes::new(vec![
             vec![make_single_quote(700).order().clone(), make_single_quote(600).order().clone()],
             vec![
@@ -2245,7 +2245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_quotes_skips_rfq_fallback_candidate() {
+    async fn test_encode_quotes_skips_rfq_retry_candidate() {
         let ranked = RankedQuotes::new(vec![vec![
             make_single_quote_on("no_such_protocol", 950)
                 .order()
@@ -2266,7 +2266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encode_with_fallbacks_spent_budget() {
+    async fn test_encode_with_retries_spent_budget() {
         let ranked = RankedQuotes::new(vec![vec![
             make_single_quote_on("no_such_protocol", 950)
                 .order()
@@ -2275,7 +2275,7 @@ mod tests {
         ]])
         .expect("the order has candidates");
 
-        let quotes = encode_with_fallbacks(
+        let quotes = encode_with_retries(
             &default_encoder(),
             ranked,
             &EncodingOptions::new(0.01),
