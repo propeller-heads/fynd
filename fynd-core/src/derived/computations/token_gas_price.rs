@@ -8,6 +8,8 @@
 //! with `probe_amount` of the gas token to find each selected token's best buy route and bought
 //! amount. A reverse sell swaps that amount back along the buy route. Both include fees and
 //! slippage. Gas-aware scoring is off because it reads the prices this computation produces.
+//! Pricing leaves out pAMMs: a pAMM's quote ladder can pay almost nothing back at the probe size
+//! for a block, and its spot prices do not show it.
 //!
 //! The price is the arithmetic mean of the buy and sell rates, kept as an exact fraction.
 //! Both rates are in token units per gas token unit: the bought amount divided by `probe_amount`
@@ -34,8 +36,10 @@
 //! If the second buy pass finishes without reaching a token, or its reverse sell flags another
 //! pool, a sell solve uses the amount the first buy pass bought. Missing simulation state or
 //! token metadata also requires a sell solve, using the route that lacked it and its bought
-//! amount; it does not flag a pool. Any buy pass timeout, including the second buy pass without
-//! flagged pools, leaves tokens it did not reach unattempted.
+//! amount; it does not flag a pool. So does a reverse sell that returns less than
+//! `min_sell_out_bps` of `probe_amount`: a hop on the route pays far too little back, and the
+//! sell solve finds a route that does not use it. Any buy pass timeout, including the second buy
+//! pass without flagged pools, leaves tokens it did not reach unattempted.
 //!
 //! A sell solve searches for a route back to the gas token. It can use flagged pools because it
 //! ranks routes by simulated output. A token needs a nonzero sell result to get a price: a buy
@@ -57,8 +61,8 @@
 //! after the price is stale.
 //!
 //! `PassHistory` keeps each stored price's pools in swap order, the bought amount, and the gas
-//! token amount the sell returned. A pass that moves a stored price by `PRICE_JUMP_WARN_RATIO` or
-//! more logs a warning with the old and new routes and amounts.
+//! token amount the sell returned. A pass that moves a stored price by `TOKEN_PRICE_JUMP_WARN_BPS`
+//! (default 10%) or more logs a warning with the old and new routes and amounts.
 //!
 //! An attempted token that cannot be priced loses its old price and dependencies. Tokens with
 //! no buy route count as unreachable; tokens with no sell route produce failed items.
@@ -118,7 +122,7 @@
 
 use std::{
     ops::RangeInclusive,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -149,7 +153,8 @@ use crate::{
         store::DerivedData,
         types::{TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
-    feed::market_data::MarketData,
+    fallback::is_pamm,
+    feed::{component_filter::remove_components, market_data::MarketData},
     graph::{GraphManager, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, OrderSide, RouteExclusions},
 };
@@ -236,6 +241,8 @@ enum ReverseSellOutcome {
     FlaggedPool(ComponentId, PoolFlagReason),
     /// A hop lacks simulation state or token metadata; this does not flag the pool.
     MissingHopData,
+    /// The reverse sell returned less than `min_sell_out_bps` of the probe amount.
+    LowSellOut,
 }
 
 /// The reason a reverse sell flags a pool.
@@ -295,15 +302,44 @@ fn build_sell_rate_entry(buy_leg: &ReachedToken, sell_out: BigUint) -> PricedTok
     build_priced_token(sell_rate, buy_leg, sell_out)
 }
 
+/// Environment variable that sets how far a token's price may move in one pricing pass before
+/// the pass logs a warning, in basis points of the smaller price.
+const PRICE_JUMP_WARN_BPS_ENV: &str = "TOKEN_PRICE_JUMP_WARN_BPS";
+
+/// Default price move that logs a warning: 10%.
+const DEFAULT_PRICE_JUMP_WARN_BPS: u32 = 1_000;
+
 /// How far a token's price may move in one pricing pass before the pass logs a warning, as the
-/// ratio of the larger price to the smaller.
-const PRICE_JUMP_WARN_RATIO: f64 = 1.1;
+/// ratio of the larger price to the smaller. Read once from `PRICE_JUMP_WARN_BPS_ENV`.
+static PRICE_JUMP_WARN_RATIO: LazyLock<f64> =
+    LazyLock::new(|| 1.0 + f64::from(price_jump_warn_bps_from_env()) / f64::from(BPS_DENOMINATOR));
+
+/// Reads the warning threshold from `PRICE_JUMP_WARN_BPS_ENV`, falling back to
+/// `DEFAULT_PRICE_JUMP_WARN_BPS` when the variable is unset or not a whole number.
+fn price_jump_warn_bps_from_env() -> u32 {
+    let Ok(raw) = std::env::var(PRICE_JUMP_WARN_BPS_ENV) else {
+        return DEFAULT_PRICE_JUMP_WARN_BPS;
+    };
+    match raw.trim().parse::<u32>() {
+        Ok(bps) => bps,
+        Err(_) => {
+            warn!(
+                value = %raw,
+                default_bps = DEFAULT_PRICE_JUMP_WARN_BPS,
+                "{PRICE_JUMP_WARN_BPS_ENV} must be a whole number of basis points; using the \
+                 default"
+            );
+            DEFAULT_PRICE_JUMP_WARN_BPS
+        }
+    }
+}
 
 /// Returns `new / stored` when the price moved by `PRICE_JUMP_WARN_RATIO` or more in either
 /// direction, else `None`. A zero price never counts as a jump.
 fn price_jump_ratio(stored: &Price, new: &Price) -> Option<f64> {
     let ratio = price_to_f64(new)? / price_to_f64(stored)?;
-    (ratio >= PRICE_JUMP_WARN_RATIO || ratio.recip() >= PRICE_JUMP_WARN_RATIO).then_some(ratio)
+    let warn_ratio = *PRICE_JUMP_WARN_RATIO;
+    (ratio >= warn_ratio || ratio.recip() >= warn_ratio).then_some(ratio)
 }
 
 /// Logs a warning with both routes and their amounts for each price in `solved` that moved by
@@ -496,7 +532,7 @@ impl<'a> PricingPassState<'a> {
                     .insert(token.clone(), buy_leg);
                 None
             }
-            ReverseSellOutcome::MissingHopData => {
+            ReverseSellOutcome::MissingHopData | ReverseSellOutcome::LowSellOut => {
                 queued
                     .for_sell_solve
                     .insert(token.clone(), SellSolveBuyLeg::Trusted(buy_leg));
@@ -619,7 +655,7 @@ impl<'a> PricingPassState<'a> {
                     for_sell_solve
                         .insert(token, SellSolveBuyLeg::ThroughFlaggedPool(flagged_route));
                 }
-                ReverseSellOutcome::MissingHopData => {
+                ReverseSellOutcome::MissingHopData | ReverseSellOutcome::LowSellOut => {
                     for_sell_solve.insert(token, SellSolveBuyLeg::Trusted(buy_leg));
                 }
             }
@@ -760,6 +796,11 @@ impl<'a> PricingPassState<'a> {
                 Err(_) => return flagged(PoolFlagReason::SwapFailed),
             }
         }
+        let min_sell_out =
+            &self.computation.probe_amount * self.computation.min_sell_out_bps / BPS_DENOMINATOR;
+        if amount < min_sell_out {
+            return ReverseSellOutcome::LowSellOut;
+        }
         ReverseSellOutcome::Sold(amount)
     }
 
@@ -866,6 +907,9 @@ pub struct TokenGasPriceComputation {
     /// market gives it something to price. The cap bounds what one pass costs; this bounds how
     /// often one runs. See the module's "Spacing pricing passes" section.
     min_pass_interval: Duration,
+    /// The least gas token a reverse sell must return, in basis points of `probe_amount`. A
+    /// reverse sell that returns less goes to a sell solve.
+    min_sell_out_bps: u32,
     /// What earlier pricing passes left behind: when to run the next one, which tokens have
     /// waited longest, and which components are flagged.
     ///
@@ -1085,6 +1129,12 @@ const DEFAULT_MAX_TOKENS_PER_PASS: usize = 500;
 /// 2.4 s.
 const DEFAULT_MAX_SELL_SOLVES_PER_PASS: usize = 200;
 
+/// Basis points in a whole.
+const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Default `min_sell_out_bps`: a reverse sell must return half the probe amount.
+const DEFAULT_MIN_SELL_OUT_BPS: u32 = 5_000;
+
 impl Default for TokenGasPriceComputation {
     fn default() -> Self {
         Self {
@@ -1095,6 +1145,7 @@ impl Default for TokenGasPriceComputation {
             max_tokens_per_pass: DEFAULT_MAX_TOKENS_PER_PASS,
             max_sell_solves_per_pass: DEFAULT_MAX_SELL_SOLVES_PER_PASS,
             min_pass_interval: DEFAULT_MIN_PASS_INTERVAL,
+            min_sell_out_bps: DEFAULT_MIN_SELL_OUT_BPS,
             pass_history: Arc::new(Mutex::new(PassHistory::default())),
         }
     }
@@ -1288,7 +1339,9 @@ impl TokenGasPriceComputation {
                 .last_updated()
                 .map(|b| b.number())
                 .unwrap_or(0);
-            (guard.component_topology(), block)
+            let topology =
+                remove_components(guard.base_market_state(), guard.component_topology(), &is_pamm);
+            (topology, block)
         };
 
         let universe = self.tokens_to_price(&topology);
@@ -1718,9 +1771,11 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{
-            component, setup_market_weighted, setup_market_weighted_boxed, token, MockProtocolSim,
+            component, component_with_protocol, setup_market_weighted, setup_market_weighted_boxed,
+            token, MockProtocolSim,
         },
         derived::store::DerivedData,
+        fallback::FALLBACK_PREFIX,
     };
 
     const PROBE_AMOUNT: u128 = 1_000_000_000_000_000_000;
@@ -2986,6 +3041,66 @@ mod tests {
                 .contains_key(&oneway.address),
             "a dropped token must leave the stored routes too"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::floor_on(DEFAULT_MIN_SELL_OUT_BPS, (2.0 + 2.0 / (2.0 / 1.9)) / 2.0)]
+    #[case::floor_off(0, (2.0 + 2.0 / 0.25) / 2.0)]
+    #[tokio::test]
+    async fn test_low_sell_out(#[case] min_sell_out_bps: u32, #[case] expected: f64) {
+        // "lossy" buys the most X, 2 per ETH, but its 50% fee sells those 2 X back for 0.25 ETH.
+        // Below the floor, a sell solve sells them through "fair" for 2 / 1.9 ETH instead.
+        let eth = token(0, "ETH");
+        let x = token(1, "X");
+        let (market, _) = setup_market_weighted(vec![
+            ("lossy", &eth, &x, MockProtocolSim::new(4.0).with_fee(0.5)),
+            ("fair", &eth, &x, MockProtocolSim::new(1.9)),
+        ]);
+        let store = DerivedData::new_shared();
+        let computation =
+            TokenGasPriceComputation { min_sell_out_bps, ..computation_for(&eth.address) };
+
+        let prices = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail")
+            .data;
+
+        assert!((ratio(&prices[&x.address]) - expected).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_pamm_left_out() {
+        // The pAMM quotes 3 X per ETH, the plain pool 2. Pricing leaves the pAMM out.
+        let eth = token(0, "ETH");
+        let x = token(1, "X");
+        let (market, _) = setup_market_weighted(vec![
+            ("pamm", &eth, &x, MockProtocolSim::new(3.0)),
+            ("plain", &eth, &x, MockProtocolSim::new(2.0)),
+        ]);
+        market
+            .write()
+            .await
+            .upsert_components([component_with_protocol(
+                "pamm",
+                &format!("{FALLBACK_PREFIX}fermiswap"),
+                &[eth.clone(), x.clone()],
+            )]);
+        let store = DerivedData::new_shared();
+
+        let prices = computation_for(&eth.address)
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail")
+            .data;
+
+        assert!((ratio(&prices[&x.address]) - 2.0).abs() < 1e-6);
+        let guard = store.read().await;
+        let deps = &guard
+            .token_prices_deps()
+            .expect("deps are stored")[&x.address]
+            .path_components;
+        assert_eq!(deps, &FxHashSet::from_iter(["plain".to_string()]));
     }
 
     #[tokio::test]
