@@ -87,7 +87,7 @@ struct SolveContext<'a> {
 }
 
 /// A token sequence with every hop solved, before any swap is built.
-struct SolvedRoute {
+struct SolvedTokenPath {
     hops: SmallVec<[HopResult; INLINE_EDGES]>,
     /// The route's output less the gas it costs, in the output token's own units. Falls back to
     /// the gross amount when that token has no price, which is what happens before derived data
@@ -421,7 +421,7 @@ impl MostLiquidAlgorithm {
     fn build_route(
         ctx: &SolveContext<'_>,
         token_path: &[NodeIndex],
-        solved: &SolvedRoute,
+        solved: &SolvedTokenPath,
     ) -> Result<Route, AlgorithmError> {
         let SolveContext { graph, market, amount_in, .. } = *ctx;
         let mut current_amount = amount_in.clone();
@@ -522,7 +522,7 @@ impl MostLiquidAlgorithm {
         report: &mut SolveReport,
         ctx: &SolveContext,
     ) -> Result<RouteResult, AlgorithmError> {
-        let mut best_route: Option<(&TokenPath, SolvedRoute)> = None;
+        let mut best_route: Option<(&TokenPath, SolvedTokenPath)> = None;
         let mut winners = PairWinners::new(self.cache_pair_swaps);
         let mut swaps = SwapCache::new();
         let timeout_ms = self.timeout.as_millis() as u64;
@@ -546,7 +546,7 @@ impl MostLiquidAlgorithm {
             // Check if this is the best result so far
             if best_route
                 .as_ref()
-                .is_none_or(|(_, previous): &(&TokenPath, SolvedRoute)| {
+                .is_none_or(|(_, previous): &(&TokenPath, SolvedTokenPath)| {
                     solved.net_amount_out > previous.net_amount_out
                 })
             {
@@ -622,7 +622,7 @@ impl MostLiquidAlgorithm {
         token_path: &[NodeIndex],
         winners: &mut PairWinners,
         swaps: &mut SwapCache<'g>,
-    ) -> Result<SolvedRoute, MostLiquidError> {
+    ) -> Result<SolvedTokenPath, MostLiquidError> {
         let (graph, market, gas_price) = (ctx.graph, ctx.market, ctx.gas_price);
 
         // Resolved before any pool is asked anything. It is a registry lookup that cannot depend on
@@ -690,7 +690,7 @@ impl MostLiquidAlgorithm {
             None => BigInt::from(scored.amount_out),
         };
 
-        Ok(SolvedRoute { hops: scored.hops, net_amount_out })
+        Ok(SolvedTokenPath { hops: scored.hops, net_amount_out })
     }
 
     fn get_pair_data<'a>(
