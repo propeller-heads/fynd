@@ -11,6 +11,12 @@
 # above); release.yaml publishes the list it names on the release event. fynd-test-fixtures,
 # fynd-tools-common and fynd-bench-harness are on that list, because fynd-labs depends on them
 # and a git dependency there would put a second copy of fynd-core in its build.
+#
+# A published crate must not be release=false. release-plz rewrites the `version` of the
+# workspace dependency entries only for the packages it releases; an entry it skips keeps its
+# old requirement, which the next minor bump leaves behind, and `cargo update` then rejects the
+# workspace (0.82 -> 0.83 in July 2026, 0.110 -> 0.111 in October 2026). Changelog and tag stay
+# off for these crates through the workspace defaults and `fynd`'s changelog_include.
 [workspace]
 changelog_update = false
 # All crates share the workspace version, so they all resolve to the same bare tag name.
@@ -37,9 +43,6 @@ changelog_include = ["fynd-core", "fynd-rpc", "fynd-rpc-types", "fynd-client"]
 name = "fynd-benchmark"
 release = false
 [[package]]
-name = "fynd-tools-common"
-release = false
-[[package]]
 name = "fynd-swap-cli"
 release = false
 [[package]]
@@ -47,9 +50,6 @@ name = "fynd-gas-audit"
 release = false
 [[package]]
 name = "record-market"
-release = false
-[[package]]
-name = "fynd-test-fixtures"
 release = false
 
 [changelog]
