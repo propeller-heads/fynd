@@ -1231,6 +1231,7 @@ mod tests {
                 component, component_with_protocol, order, setup_market_weighted, token,
                 MockProtocolSim,
             },
+            SolvedRoutes,
         },
         derived::{
             computation::DerivedComputation,
@@ -1241,6 +1242,7 @@ mod tests {
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
         types::{
             ComponentId, OrderSide, Route, RouteExclusionFilter, RouteRejection, RouteResult, Swap,
+            Variation,
         },
         AlgorithmError,
     };
@@ -1500,6 +1502,42 @@ mod tests {
         }
     }
 
+    /// Always fails, with an error message listing the pools each variation's exclusions hold.
+    struct ReportVariationExclusionsAlgorithm;
+
+    impl Algorithm for ReportVariationExclusionsAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "report_variation_exclusions_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let mut reports = Vec::new();
+            for (_, exclusions) in request.variations() {
+                let mut excluded: Vec<&str> = ["p1", "p2", "p3"]
+                    .into_iter()
+                    .filter(|id| exclusions.excludes_pool(id))
+                    .collect();
+                excluded.sort_unstable();
+                reports.push(excluded.join(","));
+            }
+            Err(AlgorithmError::Other(format!("excluded: {}", reports.join(" | "))))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
     /// Mock algorithm that returns a two-branch A→B route. This models the split-route shape
     /// that `water_fill` returns. The worker calculates the quote's price impact.
     struct SplitRouteAlgorithm {
@@ -1594,6 +1632,49 @@ mod tests {
         match result {
             Err(SolveError::AlgorithmError(msg)) => {
                 assert!(msg.contains("excluded: p1,p2"), "unexpected message: {msg}");
+            }
+            other => panic!("expected the algorithm's report, got {other:?}"),
+        }
+    }
+
+    /// Each variation's exclusions hold the request's pool and the pools of the variation's own
+    /// protocols.
+    #[tokio::test]
+    async fn test_quote_resolves_variation_exclusions() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let mut market = crate::feed::market_data::MarketState::new();
+        market.update_last_updated(BlockInfo::new(1, "0x00".into(), 0));
+        let tokens = [token_a.clone(), token_b.clone()];
+        market.upsert_components([
+            component_with_protocol("p1", "uniswap_v2", &tokens),
+            component_with_protocol("p2", "uniswap_v3", &tokens),
+            component_with_protocol("p3", "vm:curve", &tokens),
+        ]);
+        market.upsert_tokens(tokens);
+        let mut worker = SolverWorker::new(
+            MarketData::new(Arc::new(tokio::sync::RwLock::new(market))),
+            DerivedData::new_shared(),
+            ReportVariationExclusionsAlgorithm,
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let params = SolveParams::default()
+            .with_route_filter(
+                RouteExclusionFilter::default().with_excluded_pools(["p1".to_string()]),
+            )
+            .with_variations(vec![
+                Variation::ExcludeProtocols(vec!["uniswap_v3".to_string()]),
+                Variation::ExcludeProtocols(vec!["vm:".to_string()]),
+                build_alternatives(1),
+            ]);
+
+        let result = worker.quote(&ord, params).await;
+
+        match result {
+            Err(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("excluded: p1,p2 | p1,p3 | p1"), "unexpected message: {msg}");
             }
             other => panic!("expected the algorithm's report, got {other:?}"),
         }
@@ -1860,6 +1941,245 @@ mod tests {
             ),
             "expected the unpriceable fallback to drop the route, got {result:?}"
         );
+    }
+
+    /// A one-swap A→B route through `pool` of `protocol`, paying `amount_out` for 100 A.
+    fn build_single_swap_route(pool: &str, protocol: &str, amount_out: u64) -> RouteResult {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let swap = Swap::new(
+            pool.to_string(),
+            protocol.to_string(),
+            token_a.address.clone(),
+            token_b.address.clone(),
+            BigUint::from(100u64),
+            BigUint::from(amount_out),
+            BigUint::from(1u64),
+            component_with_protocol(pool, protocol, &[token_a.clone(), token_b.clone()]),
+            Box::new(MockProtocolSim::new(2.0)),
+        );
+        let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
+        RouteResult::new(route, num_bigint::BigInt::from(amount_out), BigUint::from(1u64))
+    }
+
+    /// What the mock algorithm returns for one variation: routes as `(pool, protocol,
+    /// amount_out)`, or an error.
+    type MockVariationRoutes = Result<Vec<(&'static str, &'static str, u64)>, AlgorithmError>;
+
+    /// Returns a main route through `main` on `uniswap_v3`, and one entry of `variation_routes`
+    /// per variation outcome, whatever the request asks for.
+    struct VariationRoutesAlgorithm {
+        variation_routes: Vec<MockVariationRoutes>,
+    }
+
+    impl Algorithm for VariationRoutesAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "variation_routes_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            _request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            Ok(build_single_swap_route("main", "uniswap_v3", 200))
+        }
+
+        async fn find_routes(
+            &self,
+            _request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<SolvedRoutes, AlgorithmError> {
+            let mut variations = Vec::new();
+            for variation_result in &self.variation_routes {
+                let outcome = variation_result.clone().map(|routes| {
+                    routes
+                        .into_iter()
+                        .map(|(pool, protocol, amount_out)| {
+                            build_single_swap_route(pool, protocol, amount_out)
+                        })
+                        .collect()
+                });
+                variations.push(outcome);
+            }
+            Ok(SolvedRoutes::with_variation_routes(
+                build_single_swap_route("main", "uniswap_v3", 200),
+                variations,
+            ))
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    fn build_alternatives(count: usize) -> Variation {
+        Variation::Alternatives(std::num::NonZeroUsize::new(count).unwrap())
+    }
+
+    /// The amount out of every quote in a solved variation outcome.
+    fn collect_solved_amounts_out(outcome: &VariationOutcome) -> Vec<BigUint> {
+        let VariationOutcome::Solved(quotes) = outcome else {
+            panic!("expected a solved variation, got {outcome:?}");
+        };
+        quotes
+            .iter()
+            .map(|quote| quote.amount_out().clone())
+            .collect()
+    }
+
+    /// Quotes one A→B sell order with `params` on a worker running `algorithm`.
+    async fn quote_with_algorithm<A>(
+        algorithm: A,
+        params: SolveParams,
+    ) -> (OrderQuote, Vec<VariationOutcome>)
+    where
+        A: Algorithm<
+            GraphType = StableDiGraph<DepthAndPrice>,
+            GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>,
+        >,
+    {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) =
+            setup_market_weighted(vec![("p1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            algorithm,
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let (order_quote, _, variations) = worker
+            .quote(&ord, params)
+            .await
+            .expect("the main route should produce a quote")
+            .into_parts();
+        (order_quote, variations)
+    }
+
+    #[tokio::test]
+    async fn test_quote_variation_routes() {
+        let algorithm = VariationRoutesAlgorithm {
+            variation_routes: vec![
+                Ok(vec![("p1", "uniswap_v2", 190)]),
+                Ok(vec![("p1", "uniswap_v2", 190), ("p2", "sushiswap", 180)]),
+            ],
+        };
+        let params = SolveParams::default().with_variations(vec![
+            Variation::ExcludeProtocols(vec!["uniswap_v3".to_string()]),
+            build_alternatives(2),
+        ]);
+
+        let (order_quote, variations) = quote_with_algorithm(algorithm, params).await;
+
+        assert_eq!(order_quote.amount_out(), &BigUint::from(200u64));
+        assert_eq!(variations.len(), 2);
+        assert_eq!(collect_solved_amounts_out(&variations[0]), vec![BigUint::from(190u64)]);
+        assert_eq!(
+            collect_solved_amounts_out(&variations[1]),
+            vec![BigUint::from(190u64), BigUint::from(180u64)]
+        );
+    }
+
+    /// The worker checks each variation route against the request's filter and the variation's
+    /// excluded protocols. The worker drops only the failing route and keeps the main quote.
+    #[tokio::test]
+    async fn test_quote_variation_route_filter() {
+        let algorithm = VariationRoutesAlgorithm {
+            variation_routes: vec![
+                Ok(vec![("p1", "uniswap_v2", 190)]),
+                Ok(vec![("p1", "sushiswap", 190), ("p2", "uniswap_v2", 180)]),
+            ],
+        };
+        let params = SolveParams::default()
+            .with_route_filter(
+                RouteExclusionFilter::default().with_excluded_protocols(["sushiswap".to_string()]),
+            )
+            .with_variations(vec![
+                Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+                build_alternatives(2),
+            ]);
+
+        let (order_quote, variations) = quote_with_algorithm(algorithm, params).await;
+
+        assert_eq!(order_quote.status(), QuoteStatus::Success);
+        match &variations[0] {
+            VariationOutcome::Failed(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("excluded protocol uniswap_v2"), "unexpected message: {msg}");
+            }
+            other => panic!("expected the variation's own exclusion to reject, got {other:?}"),
+        }
+        assert_eq!(collect_solved_amounts_out(&variations[1]), vec![BigUint::from(180u64)]);
+    }
+
+    #[tokio::test]
+    async fn test_quote_variation_algorithm_error() {
+        let algorithm =
+            VariationRoutesAlgorithm { variation_routes: vec![Err(AlgorithmError::timeout(5))] };
+        let params = SolveParams::default().with_variations(vec![Variation::NoRfq]);
+
+        let (order_quote, variations) = quote_with_algorithm(algorithm, params).await;
+
+        assert_eq!(order_quote.status(), QuoteStatus::Success);
+        assert!(
+            matches!(variations[..], [VariationOutcome::Failed(SolveError::Timeout { .. })]),
+            "expected the variation to time out, got {variations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quote_variations_outcome_count_mismatch() {
+        let algorithm = VariationRoutesAlgorithm {
+            variation_routes: vec![Ok(vec![("p1", "uniswap_v2", 190)])],
+        };
+        let params =
+            SolveParams::default().with_variations(vec![Variation::NoRfq, Variation::NoPamm]);
+
+        let (order_quote, variations) = quote_with_algorithm(algorithm, params).await;
+
+        assert_eq!(order_quote.status(), QuoteStatus::Success);
+        assert_eq!(variations.len(), 2);
+        for outcome in &variations {
+            assert!(
+                matches!(outcome, VariationOutcome::Failed(SolveError::AlgorithmError(msg))
+                    if msg.contains("1 variation outcomes for 2 variations")),
+                "expected the count mismatch to fail the variation, got {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_variations_unsupported() {
+        let params =
+            SolveParams::default().with_variations(vec![Variation::NoRfq, build_alternatives(1)]);
+
+        let (order_quote, variations) = quote_with_algorithm(UnpricedRouteAlgorithm, params).await;
+
+        assert_eq!(order_quote.status(), QuoteStatus::Success);
+        assert_eq!(order_quote.amount_out(), &BigUint::from(190u64));
+        assert_eq!(order_quote.amount_out_net_gas(), &BigUint::from(190u64));
+        assert_eq!(variations.len(), 2);
+        for outcome in &variations {
+            assert!(
+                matches!(outcome, VariationOutcome::Unsupported),
+                "expected unsupported, got {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_without_variations() {
+        let (_, variations) =
+            quote_with_algorithm(UnpricedRouteAlgorithm, SolveParams::default()).await;
+
+        assert!(variations.is_empty());
     }
 
     // ==================== wait_until_ready Tests ====================
