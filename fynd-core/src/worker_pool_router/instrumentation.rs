@@ -380,7 +380,12 @@ mod tests {
         quote: OrderQuote,
         solve_time_ms: u64,
     ) -> WorkerPoolQuote {
-        WorkerPoolQuote { worker_pool: worker_pool.to_string(), quote, solve_time_ms }
+        WorkerPoolQuote {
+            worker_pool: worker_pool.to_string(),
+            quote,
+            solve_time_ms,
+            variations: Vec::new(),
+        }
     }
 
     fn make_address(byte: u8) -> Address {

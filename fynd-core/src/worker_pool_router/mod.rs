@@ -2088,7 +2088,7 @@ mod tests {
         feed::exclusivity::mark_exclusive,
         solver::defaults,
         tests::metrics::recorded_metrics,
-        types::internal::SolveTask,
+        types::{internal::SolveTask, Variation},
         EncodingOptions, FeeBreakdown, OrderSide, PermitDetails, PermitSingle, Route,
         SimulationResult, SingleOrderQuote, Swap, UserTransferType,
     };
@@ -2125,7 +2125,12 @@ mod tests {
         // Stamped the same way `solve_order` stamps a quote as it arrives, so the ranking and
         // overlay tests see the attribution production sees.
         quote.set_worker_pool(worker_pool.to_string());
-        WorkerPoolQuote { worker_pool: worker_pool.to_string(), quote, solve_time_ms }
+        WorkerPoolQuote {
+            worker_pool: worker_pool.to_string(),
+            quote,
+            solve_time_ms,
+            variations: Vec::new(),
+        }
     }
 
     /// A minimal successful quote for tests that only care about the net-of-gas amount.
@@ -2190,6 +2195,15 @@ mod tests {
     }
 
     fn make_single_quote_on(protocol: &str, amount_out_net_gas: u64) -> SingleOrderQuote {
+        make_single_quote_through(protocol, "pool-1", amount_out_net_gas)
+    }
+
+    /// A one-swap quote on `protocol` through the pool `component_id`.
+    fn make_single_quote_through(
+        protocol: &str,
+        component_id: &str,
+        amount_out_net_gas: u64,
+    ) -> SingleOrderQuote {
         let make_token = |addr: Address| Token {
             address: addr,
             symbol: "T".to_string(),
@@ -2204,7 +2218,7 @@ mod tests {
         let tin_token = make_token(tin.clone());
         let tout_token = make_token(tout.clone());
         let swap = Swap::new(
-            "pool-1".to_string(),
+            component_id.to_string(),
             protocol.to_string(),
             tin.clone(),
             tout.clone(),
@@ -2534,6 +2548,607 @@ mod tests {
         (SolverPoolHandle::new(name, handle), worker, received)
     }
 
+    /// A variation outcome holding one quote per net-of-gas amount, in the order given.
+    fn build_solved_outcome(amounts_out_net_gas: &[u64]) -> VariationOutcome {
+        VariationOutcome::Solved(
+            amounts_out_net_gas
+                .iter()
+                .map(|net| make_single_quote(*net).order().clone())
+                .collect(),
+        )
+    }
+
+    /// A variation outcome holding one quote per `(pool, net-of-gas amount)`, in the order given.
+    fn build_solved_outcome_through(routes: &[(&str, u64)]) -> VariationOutcome {
+        VariationOutcome::Solved(
+            routes
+                .iter()
+                .map(|(pool, net)| {
+                    make_single_quote_through("uniswap_v2", pool, *net)
+                        .order()
+                        .clone()
+                })
+                .collect(),
+        )
+    }
+
+    fn build_alternatives(count: usize) -> Variation {
+        Variation::Alternatives(std::num::NonZeroUsize::new(count).unwrap())
+    }
+
+    /// Solves one order with `options` against one mock worker pool per response, waiting for
+    /// every pool.
+    async fn solve_with_options(
+        responses: Vec<(&str, SingleOrderQuote)>,
+        options: QuoteOptions,
+    ) -> RankedQuotes {
+        let mut pools = Vec::new();
+        let mut workers = Vec::new();
+        for (name, response) in responses {
+            let (pool, worker) = create_mock_worker_pool(name, Ok(response), 0);
+            pools.push(pool);
+            workers.push(worker);
+        }
+        let config = WorkerPoolRouterConfig::default().with_min_responses(pools.len());
+        let router = WorkerPoolRouter::new(pools, config, default_encoder());
+        let ranked = router
+            .solve(&QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Denied)
+            .await
+            .expect("solve");
+        for worker in workers {
+            worker.abort();
+        }
+        ranked
+    }
+
+    async fn solve_with_variations(
+        responses: Vec<(&str, SingleOrderQuote)>,
+        variations: Vec<Variation>,
+    ) -> RankedQuotes {
+        solve_with_options(responses, QuoteOptions::default().with_variations(variations)).await
+    }
+
+    /// The net-of-gas amount and worker pool of each quote in a variation.
+    fn collect_variation_net_amounts_and_pools(
+        ranked: &RankedQuotes,
+        variation_index: usize,
+    ) -> Vec<(u64, String)> {
+        ranked.per_order()[0].variations()[variation_index]
+            .quotes()
+            .iter()
+            .map(|quote| {
+                let net = quote
+                    .amount_out_net_gas()
+                    .to_u64()
+                    .expect("test amount fits in u64");
+                (net, quote.worker_pool().to_string())
+            })
+            .collect()
+    }
+
+    /// The only variation of the only order.
+    fn single_variation(ranked: &RankedQuotes) -> &VariationQuote {
+        let variations = ranked.per_order()[0].variations();
+        assert_eq!(variations.len(), 1, "the request asks for one variation");
+        &variations[0]
+    }
+
+    #[tokio::test]
+    async fn test_solve_validates_variations() {
+        let router =
+            WorkerPoolRouter::new(vec![], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default().with_variations(vec![Variation::NoRfq; 5]);
+
+        let result = router
+            .solve(&QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Denied)
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(SolveError::InvalidVariations(
+                    crate::types::VariationsValidationError::TooManyVariations { count: 5 }
+                ))
+            ),
+            "expected the variation limit to reject the request, got {result:?}"
+        );
+    }
+
+    /// pool_b's variation quote pays more, but pool_a won the main quote, so the response uses
+    /// pool_a's variation quote.
+    #[tokio::test]
+    async fn test_solve_variations_from_winning_pool() {
+        let ranked = solve_with_variations(
+            vec![
+                (
+                    "pool_a",
+                    make_single_quote(900).with_variations(vec![build_solved_outcome(&[700])]),
+                ),
+                (
+                    "pool_b",
+                    make_single_quote(800).with_variations(vec![build_solved_outcome(&[750])]),
+                ),
+            ],
+            vec![Variation::NoRfq],
+        )
+        .await;
+
+        assert_eq!(
+            collect_variation_net_amounts_and_pools(&ranked, 0),
+            vec![(700, "pool_a".to_string())]
+        );
+        assert_eq!(single_variation(&ranked).variation(), &Variation::NoRfq);
+        assert_eq!(single_variation(&ranked).status(), VariationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn test_solve_alternatives_from_winning_pool() {
+        let ranked = solve_with_variations(
+            vec![
+                (
+                    "pool_a",
+                    make_single_quote(900).with_variations(vec![build_solved_outcome_through(&[
+                        ("pool-2", 600),
+                        ("pool-3", 500),
+                    ])]),
+                ),
+                (
+                    "pool_b",
+                    make_single_quote(800)
+                        .with_variations(vec![build_solved_outcome_through(&[("pool-4", 700)])]),
+                ),
+            ],
+            vec![build_alternatives(2)],
+        )
+        .await;
+
+        assert_eq!(
+            collect_variation_net_amounts_and_pools(&ranked, 0),
+            vec![(600, "pool_a".to_string()), (500, "pool_a".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_solve_winning_pool_without_variation_support() {
+        let ranked = solve_with_variations(
+            vec![
+                (
+                    "pool_a",
+                    make_single_quote(900).with_variations(vec![VariationOutcome::Unsupported]),
+                ),
+                (
+                    "pool_b",
+                    make_single_quote(800).with_variations(vec![build_solved_outcome(&[650])]),
+                ),
+            ],
+            vec![Variation::NoPamm],
+        )
+        .await;
+
+        let variation = single_variation(&ranked);
+        assert_eq!(variation.status(), VariationStatus::Unsupported);
+        assert!(variation.quotes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_solve_variation_timeout_in_winning_pool() {
+        let ranked = solve_with_variations(
+            vec![
+                (
+                    "pool_a",
+                    make_single_quote(900)
+                        .with_variations(vec![VariationOutcome::Failed(SolveError::timeout(5))]),
+                ),
+                (
+                    "pool_b",
+                    make_single_quote(800).with_variations(vec![build_solved_outcome(&[650])]),
+                ),
+            ],
+            vec![Variation::NoRfq],
+        )
+        .await;
+
+        let variation = single_variation(&ranked);
+        assert_eq!(variation.status(), VariationStatus::Timeout);
+        assert!(variation.quotes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_solve_variations_without_successful_main_quote() {
+        let mut failed_main = make_single_quote(900).order().clone();
+        failed_main.set_status(QuoteStatus::NoRouteFound);
+        let ranked = solve_with_variations(
+            vec![(
+                "pool_a",
+                SingleOrderQuote::new(failed_main, 5)
+                    .with_variations(vec![build_solved_outcome(&[700])]),
+            )],
+            vec![Variation::NoRfq],
+        )
+        .await;
+
+        let variation = single_variation(&ranked);
+        assert_eq!(variation.status(), VariationStatus::NoRouteFound);
+        assert!(variation.quotes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_solve_variation_over_max_gas() {
+        let options = QuoteOptions::default()
+            .with_max_gas(BigUint::from(150_000u64))
+            .with_variations(vec![Variation::NoRfq]);
+        let mut heavy_variation_quote = make_single_quote(700).order().clone();
+        heavy_variation_quote.set_gas_estimate(BigUint::from(200_000u64));
+        let ranked = solve_with_options(
+            vec![(
+                "pool_a",
+                make_single_quote(900)
+                    .with_variations(vec![VariationOutcome::Solved(vec![heavy_variation_quote])]),
+            )],
+            options,
+        )
+        .await;
+
+        let variation = single_variation(&ranked);
+        assert_eq!(variation.status(), VariationStatus::NoRouteFound);
+        assert!(variation.quotes().is_empty());
+    }
+
+    /// The winning pool's variation quote falls back to 500, below the user's `min_amount_out`.
+    #[tokio::test]
+    async fn test_solve_variation_pamm_fallback_below_min_amount_out() {
+        let pamm_outcome = VariationOutcome::Solved(vec![pamm_quote(980, 500)]);
+        let options = QuoteOptions::default()
+            .with_encoding_options(EncodingOptions::new(0.01))
+            .with_variations(vec![Variation::NoRfq]);
+        let ranked = solve_with_options(
+            vec![
+                ("pool_a", make_single_quote(900).with_variations(vec![pamm_outcome])),
+                (
+                    "pool_b",
+                    make_single_quote(800).with_variations(vec![build_solved_outcome(&[700])]),
+                ),
+            ],
+            options,
+        )
+        .await;
+
+        let variation = single_variation(&ranked);
+        assert_eq!(variation.status(), VariationStatus::NoRouteFound);
+        assert!(variation.quotes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_solve_variation_with_exclusive_pool() {
+        let (public_pool, public_worker) = create_mock_worker_pool(
+            "public_pool",
+            Ok(make_single_quote(800).with_variations(vec![build_solved_outcome(&[700])])),
+            0,
+        );
+        let (exclusive_pool, exclusive_worker) = create_mock_worker_pool(
+            "exclusive_pool",
+            Ok(make_exclusive_quote(1100).with_variations(vec![build_solved_outcome(&[1000])])),
+            0,
+        );
+        let exclusive_pool = exclusive_pool.with_liquidity_scope(LiquidityScope::IncludeExclusive);
+        let router = WorkerPoolRouter::new(
+            vec![public_pool, exclusive_pool],
+            WorkerPoolRouterConfig::default().with_min_responses(2),
+            default_encoder(),
+        );
+        let options = QuoteOptions::default().with_variations(vec![Variation::NoRfq]);
+
+        let ranked = router
+            .solve(&QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Granted)
+            .await
+            .expect("solve");
+        public_worker.abort();
+        exclusive_worker.abort();
+
+        assert_eq!(ranked.per_order()[0].candidates()[0].worker_pool(), "exclusive_pool");
+        assert_eq!(
+            collect_variation_net_amounts_and_pools(&ranked, 0),
+            vec![(1000, "exclusive_pool".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_solve_main_ranking_with_variations() {
+        let ranked = solve_with_variations(
+            vec![
+                (
+                    "pool_a",
+                    make_single_quote(900).with_variations(vec![build_solved_outcome(&[2_000])]),
+                ),
+                (
+                    "pool_b",
+                    make_single_quote(800).with_variations(vec![build_solved_outcome(&[1_500])]),
+                ),
+            ],
+            vec![Variation::NoRfq],
+        )
+        .await;
+
+        let candidates = ranked.per_order()[0].candidates();
+        let main: Vec<&BigUint> = candidates
+            .iter()
+            .map(OrderQuote::amount_out_net_gas)
+            .collect();
+        assert_eq!(main, vec![&BigUint::from(900u64), &BigUint::from(800u64)]);
+        assert!(candidates
+            .iter()
+            .all(|quote| quote.variations().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_quote_attaches_variations_without_encoding() {
+        let response = make_single_quote(900).with_variations(vec![build_solved_outcome(&[850])]);
+        let (pool, worker) = create_mock_worker_pool("pool", Ok(response), 0);
+        let router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default().with_variations(vec![Variation::NoRfq]);
+
+        let quote = router
+            .quote(QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Denied)
+            .await
+            .expect("quote");
+        worker.abort();
+
+        let variations = quote.orders()[0].variations();
+        assert_eq!(variations.len(), 1);
+        assert_eq!(variations[0].quotes()[0].amount_out_net_gas(), &BigUint::from(850u64));
+        assert!(variations[0].quotes()[0]
+            .transaction()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_quote_encodes_variations() {
+        let response =
+            make_single_quote(900).with_variations(vec![build_solved_outcome(&[850, 840])]);
+        let (pool, worker) = create_mock_worker_pool("pool", Ok(response), 0);
+        let router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+        let options = QuoteOptions::default()
+            .with_encoding_options(EncodingOptions::new(0.01))
+            .with_variations(vec![build_alternatives(2)]);
+
+        let quote = router
+            .quote(QuoteRequest::new(vec![make_order()], options), ExclusiveAccess::Denied)
+            .await
+            .expect("quote");
+        worker.abort();
+
+        let variation_quotes = quote.orders()[0].variations()[0].quotes();
+        assert_eq!(variation_quotes.len(), 2);
+        for variation_quote in variation_quotes {
+            assert_eq!(variation_quote.status(), QuoteStatus::Success);
+            assert!(!variation_quote
+                .transaction()
+                .expect("encoded variation quote")
+                .data()
+                .is_empty());
+        }
+    }
+
+    /// The given candidates of one order, each stamped with its worker pool.
+    fn build_candidates(candidates: Vec<(&str, OrderQuote)>) -> Vec<OrderQuote> {
+        candidates
+            .into_iter()
+            .map(|(worker_pool, mut candidate)| {
+                candidate.set_worker_pool(worker_pool.to_string());
+                candidate
+            })
+            .collect()
+    }
+
+    /// One order's variations, keyed by the worker pool that built them.
+    fn build_order_variations(by_worker_pool: Vec<(&str, Vec<VariationQuote>)>) -> OrderVariations {
+        OrderVariations {
+            by_worker_pool: by_worker_pool
+                .into_iter()
+                .map(|(worker_pool, variations)| (worker_pool.to_string(), variations))
+                .collect(),
+            without_main_quote: Vec::new(),
+        }
+    }
+
+    /// Ranked quotes for one order: a main candidate from "pool" that encodes, and the
+    /// `variations` of that pool.
+    fn rank_with_variations(
+        variations: Vec<VariationQuote>,
+        deadline: Option<Instant>,
+    ) -> RankedQuotes {
+        let ranked_order = RankedOrder {
+            candidates: build_candidates(vec![("pool", make_single_quote(900).order().clone())]),
+            variations: build_order_variations(vec![("pool", variations)]),
+        };
+        RankedQuotes::started_at(vec![ranked_order], Instant::now(), deadline)
+            .expect("the order has candidates")
+    }
+
+    async fn encode_ranked(ranked: RankedQuotes) -> OrderQuote {
+        let mut quotes = encode_quotes(
+            &default_encoder(),
+            ranked,
+            &EncodingOptions::new(0.01),
+            defaults::ENCODING_RETRY_BUDGET,
+        )
+        .await
+        .expect("a failing variation is reported on its quote, not on the call");
+        quotes.remove(0)
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_mixed_variation_outcomes() {
+        let solved =
+            vec![make_single_quote(850).order().clone(), make_single_quote(840).order().clone()];
+        let ranked = rank_with_variations(
+            vec![
+                VariationQuote::new(Variation::NoRfq, VariationStatus::NoRouteFound, Vec::new()),
+                VariationQuote::new(build_alternatives(2), VariationStatus::Success, solved),
+            ],
+            None,
+        );
+
+        let order = encode_ranked(ranked).await;
+
+        let variations = order.variations();
+        assert_eq!(variations[0].status(), VariationStatus::NoRouteFound);
+        assert!(variations[0].quotes().is_empty());
+        assert_eq!(variations[1].status(), VariationStatus::Success);
+        assert_eq!(variations[1].quotes().len(), 2);
+        for variation_quote in variations[1].quotes() {
+            assert!(variation_quote.transaction().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_variation_unknown_protocol() {
+        let failing = make_single_quote_on("no_such_protocol", 850)
+            .order()
+            .clone();
+        let ranked = rank_with_variations(
+            vec![VariationQuote::new(Variation::NoRfq, VariationStatus::Success, vec![failing])],
+            None,
+        );
+
+        let order = encode_ranked(ranked).await;
+
+        assert!(order.transaction().is_some());
+        let variation_quote = &order.variations()[0].quotes()[0];
+        assert_eq!(variation_quote.status(), QuoteStatus::EncodingFailed);
+        assert!(variation_quote.transaction().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_encode_quotes_variations_after_the_request_deadline() {
+        let variation_quote = make_single_quote(850).order().clone();
+        let deadline = Instant::now() - Duration::from_millis(1);
+        let ranked = rank_with_variations(
+            vec![VariationQuote::new(
+                Variation::NoRfq,
+                VariationStatus::Success,
+                vec![variation_quote],
+            )],
+            Some(deadline),
+        );
+
+        let order = encode_ranked(ranked).await;
+
+        assert!(order.transaction().is_some());
+        let variation_quote = &order.variations()[0].quotes()[0];
+        assert_eq!(variation_quote.status(), QuoteStatus::EncodingFailed);
+        assert!(variation_quote.transaction().is_none());
+    }
+
+    /// pool_a's best candidate fails to encode, so the retry makes pool_b's candidate the main
+    /// quote, and the response uses pool_b's variation quote.
+    #[tokio::test]
+    async fn test_encode_quotes_variations_of_retried_candidate() {
+        let ranked_order = RankedOrder {
+            candidates: build_candidates(vec![
+                (
+                    "pool_a",
+                    make_single_quote_on("no_such_protocol", 950)
+                        .order()
+                        .clone(),
+                ),
+                ("pool_b", make_single_quote(800).order().clone()),
+            ]),
+            variations: build_order_variations(vec![
+                (
+                    "pool_a",
+                    vec![VariationQuote::new(
+                        Variation::NoRfq,
+                        VariationStatus::Success,
+                        build_candidates(vec![("pool_a", make_single_quote(700).order().clone())]),
+                    )],
+                ),
+                (
+                    "pool_b",
+                    vec![VariationQuote::new(
+                        Variation::NoRfq,
+                        VariationStatus::Success,
+                        build_candidates(vec![("pool_b", make_single_quote(650).order().clone())]),
+                    )],
+                ),
+            ]),
+        };
+        let ranked = RankedQuotes::started_at(vec![ranked_order], Instant::now(), None)
+            .expect("the order has candidates");
+
+        let order = encode_ranked(ranked).await;
+
+        assert_eq!(order.worker_pool(), "pool_b");
+        let variation_quotes = order.variations()[0].quotes();
+        assert_eq!(variation_quotes.len(), 1);
+        assert_eq!(variation_quotes[0].worker_pool(), "pool_b");
+        assert_eq!(variation_quotes[0].amount_out_net_gas(), &BigUint::from(650u64));
+        assert!(variation_quotes[0]
+            .transaction()
+            .is_some());
+    }
+
+    /// The encoder of a chain with no Tycho router fails every call. Each variation gets back
+    /// its own quotes, marked `EncodingFailed`, and a variation without quotes keeps its status.
+    #[tokio::test]
+    async fn test_encode_variations_without_router() {
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .expect("default encoders should always succeed");
+        let encoder =
+            Encoder::new(Chain::Starknet, registry).expect("a chain without a router builds");
+        let alternative_quote = make_single_quote(840).order().clone();
+        let variations_per_order = vec![vec![
+            VariationQuote::new(
+                Variation::NoRfq,
+                VariationStatus::Success,
+                vec![make_single_quote(850).order().clone()],
+            ),
+            VariationQuote::new(
+                build_alternatives(2),
+                VariationStatus::Success,
+                vec![alternative_quote.clone(), alternative_quote],
+            ),
+            VariationQuote::new(Variation::NoPamm, VariationStatus::Timeout, Vec::new()),
+        ]];
+
+        let encoded =
+            encode_variations(&encoder, variations_per_order, &EncodingOptions::new(0.01), None)
+                .await;
+
+        let variations = &encoded[0];
+        let net_amounts = |variation: &VariationQuote| -> Vec<u64> {
+            variation
+                .quotes()
+                .iter()
+                .map(|quote| {
+                    quote
+                        .amount_out_net_gas()
+                        .to_u64()
+                        .expect("test amount fits in u64")
+                })
+                .collect()
+        };
+        assert_eq!(net_amounts(&variations[0]), vec![850]);
+        assert_eq!(net_amounts(&variations[1]), vec![840, 840]);
+        for variation_quote in variations[0]
+            .quotes()
+            .iter()
+            .chain(variations[1].quotes())
+        {
+            assert_eq!(variation_quote.status(), QuoteStatus::EncodingFailed);
+            assert_eq!(variation_quote.block().number(), 1);
+            assert!(matches!(
+                variation_quote.no_route_cause(),
+                Some(SolveError::EncodingUnavailable(_))
+            ));
+        }
+        assert_eq!(variations[2].status(), VariationStatus::Timeout);
+        assert!(variations[2].quotes().is_empty());
+    }
+
     #[test]
     fn test_config_default() {
         let config = WorkerPoolRouterConfig::default();
@@ -2639,9 +3254,10 @@ mod tests {
             .await
             .expect("solve");
         assert_eq!(ranked.per_order().len(), 1);
-        assert_eq!(ranked.per_order()[0].len(), 2, "both candidates are kept, best first");
-        assert_eq!(*ranked.per_order()[0][0].amount_out_net_gas(), BigUint::from(950u64));
-        assert_eq!(*ranked.per_order()[0][1].amount_out_net_gas(), BigUint::from(800u64));
+        let candidates = ranked.per_order()[0].candidates();
+        assert_eq!(candidates.len(), 2, "both candidates are kept, best first");
+        assert_eq!(*candidates[0].amount_out_net_gas(), BigUint::from(950u64));
+        assert_eq!(*candidates[1].amount_out_net_gas(), BigUint::from(800u64));
 
         let staged = finalize_quote(ranked.into_best(), 7);
         let direct = worker_router
