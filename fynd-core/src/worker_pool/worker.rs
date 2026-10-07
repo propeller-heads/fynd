@@ -19,7 +19,7 @@ use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_
 
 use super::price_impact::PriceImpactError;
 use crate::{
-    algorithm::{request::SolveRequest, Algorithm},
+    algorithm::{request::SolveRequest, Algorithm, VariationRoutes},
     derived::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -34,7 +34,10 @@ use crate::{
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
-    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions, RouteResult},
+    types::{
+        internal::SolveTask, quote::ResolvedExclusions, Route, RouteExclusionFilter, RouteResult,
+        Variation, VariationOutcome,
+    },
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -66,39 +69,70 @@ fn should_drop_component(
         is_excluded_protocol(exclude_protocols, component)
 }
 
-/// The exclusions this request resolves to against `view`, resolved once and shared.
+/// The route filter a variation solves under: the request's filter plus the variation's
+/// excluded protocols.
+///
+/// The worker resolves this filter for the algorithm and checks the variation's routes against
+/// it, so both read the same exclusions.
+fn build_variation_filter(
+    request_filter: &RouteExclusionFilter,
+    variation: &Variation,
+) -> RouteExclusionFilter {
+    request_filter
+        .clone()
+        .with_excluded_protocols(variation.excluded_protocols())
+}
+
+/// The exclusions this request and each of its variations resolve to against `view`, resolved
+/// once and shared.
 ///
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The market's component membership is
 /// what the answer depends on, so a cached one stands until a component is added or removed.
 ///
+/// `variation_filters` holds one filter per variation of `params`, in request order.
+///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
-fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
+fn resolve_exclusions(
+    view: &MarketDataView<'_>,
+    params: &SolveParams,
+    variation_filters: &[RouteExclusionFilter],
+) -> ResolvedExclusions {
     let market = view.base_market_state();
     let generation = market.component_generation();
     let mut cache = params
         .cached_exclusions()
         .lock()
         .expect("route exclusion cache lock poisoned");
-    if let Some((cached_generation, exclusions)) = cache.as_ref() {
-        if *cached_generation == generation {
-            return exclusions.clone();
+    if let Some(resolved) = cache.as_ref() {
+        if resolved.generation == generation {
+            return resolved.clone();
         }
     }
     let filter = params.route_filter();
-    let exclusions = Arc::new(market.resolve_route_filter(filter));
+    let request = Arc::new(market.resolve_route_filter(filter));
+    let mut variations = Vec::with_capacity(variation_filters.len());
+    for (variation, variation_filter) in params
+        .variations()
+        .iter()
+        .zip(variation_filters)
+    {
+        let exclusions = Arc::new(market.resolve_route_filter(variation_filter));
+        variations.push((variation.clone(), exclusions));
+    }
     if !filter.is_empty() {
         debug!(
             component_generation = generation,
             named_pools = filter.excluded_pools().len(),
             named_protocols = filter.excluded_protocols().len(),
-            excluded_pools = exclusions.pools.len(),
-            excluded_tokens = exclusions.tokens.len(),
+            excluded_pools = request.pools.len(),
+            excluded_tokens = request.tokens.len(),
             "resolved a request's route filter"
         );
     }
-    *cache = Some((generation, exclusions.clone()));
-    exclusions
+    let resolved = ResolvedExclusions { generation, request, variations: Arc::from(variations) };
+    *cache = Some(resolved.clone());
+    resolved
 }
 
 /// Check every leg, including split branches, against the original request filter. Reading
@@ -446,6 +480,9 @@ where
     }
 
     /// Returns a quote for an order, optionally solved against a named state overlay.
+    ///
+    /// Each variation in `params` is another solve and adds to the solve time. The algorithm reads
+    /// the deadline in `params` as a request to stop solving variations.
     pub async fn quote(
         &mut self,
         order: &Order,
@@ -486,44 +523,35 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against, exclusions) = self.read_solve_state(&params).await?;
+        let variation_filters: Vec<RouteExclusionFilter> = params
+            .variations()
+            .iter()
+            .map(|variation| build_variation_filter(params.route_filter(), variation))
+            .collect();
+        let (block_info, solved_against, exclusions) = self
+            .read_solve_state(&params, &variation_filters)
+            .await?;
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
             .with_derived(self.derived_data.clone())
-            .with_shared_exclusions(exclusions);
+            .with_shared_exclusions(exclusions.request)
+            .with_variations(exclusions.variations);
         if let Some(label) = params.state_label().cloned() {
             request = request.with_label(label);
         }
-        let route_result = match self
+        if let Some(deadline) = params.deadline() {
+            request = request.with_deadline(deadline);
+        }
+        let (main_route, variation_routes) = match self
             .algorithm
-            .find_best_route(request)
+            .find_routes(request)
             .await
         {
-            Ok(route_result) => route_result,
+            Ok(solved) => solved.into_parts(),
             Err(err) => {
                 return Err(solve_error_from_algorithm_error(order.id(), order.amount(), err))
             }
         };
-
-        if let Err(err) = route_result
-            .route()
-            .validate()
-            .map_err(|err| err.to_string())
-            .and_then(|()| {
-                validate_route_filter(route_result.route(), order, params.route_filter())
-            })
-        {
-            error!(
-                order_id = %order.id(),
-                algorithm = self.algorithm.name(),
-                error = %err,
-                "algorithm produced an invalid route"
-            );
-            return Err(SolveError::AlgorithmError(format!(
-                "{} produced an invalid route: {err}",
-                self.algorithm.name()
-            )));
-        }
 
         let context = RouteQuoteContext {
             order,
@@ -531,36 +559,29 @@ where
             block_info,
             solved_against,
         };
-        let quote = self
-            .quote_route(route_result, &context, params.route_filter())
+        let order_quote = self
+            .quote_main_route(main_route, &context, params.route_filter())
             .await?;
-        let price_impact_started = Instant::now();
-        let price_impact_bps = compute_price_impact_bps(&quote);
-        let price_impact_outcome = match &price_impact_bps {
-            Ok(_) => "computed",
-            Err(error) => error.outcome(),
-        };
-        record_price_impact_metrics(
-            &self.pool_name,
-            price_impact_started.elapsed(),
-            price_impact_outcome,
-        );
-        let order_quote = self.attach_price_impact(quote, price_impact_bps);
+        let variations = self
+            .quote_variations(variation_routes, params.variations(), &variation_filters, &context)
+            .await;
 
         // The solve alone. Occupancy is timed by the caller, which also sees the failing
         // outcomes this point never reaches.
         let quote_duration = start_time.elapsed();
         record_quote_duration(&self.pool_name, quote_duration);
 
-        Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
+        Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64)
+            .with_variations(variations))
     }
 
     /// The block the solve reads, the state it is solved against, and the exclusions of the
-    /// request.
+    /// request and of each variation.
     async fn read_solve_state(
         &self,
         params: &SolveParams,
-    ) -> Result<(BlockInfo, String, Arc<RouteExclusions>), SolveError> {
+        variation_filters: &[RouteExclusionFilter],
+    ) -> Result<(BlockInfo, String, ResolvedExclusions), SolveError> {
         // Read briefly to capture block info; drop the lock before solving so it is not held
         // across the algorithm's own read call.
         let view = self
@@ -580,11 +601,48 @@ where
             .state_label()
             .cloned()
             .unwrap_or_else(|| last_block.number().to_string());
-        let exclusions = resolve_exclusions(&view, params);
+        let exclusions = resolve_exclusions(&view, params, variation_filters);
         Ok((block_info, solved_against, exclusions))
     }
 
-    /// Builds the quote for a route that passed validation, without its price impact.
+    /// Checks the main route, builds its quote, and records the price-impact metrics.
+    ///
+    /// Only the main route records price-impact metrics, so the dashboards count one calculation
+    /// per order.
+    async fn quote_main_route(
+        &self,
+        route_result: RouteResult,
+        context: &RouteQuoteContext<'_>,
+        filter: &RouteExclusionFilter,
+    ) -> Result<OrderQuote, SolveError> {
+        if let Err(error) = self.validate_route(route_result.route(), context.order, filter) {
+            error!(
+                order_id = %context.order.id(),
+                algorithm = self.algorithm.name(),
+                %error,
+                "algorithm produced an invalid route"
+            );
+            return Err(error);
+        }
+        let quote = self
+            .quote_route(route_result, context, filter)
+            .await?;
+        let price_impact_started = Instant::now();
+        let price_impact_bps = compute_price_impact_bps(&quote);
+        let price_impact_outcome = match &price_impact_bps {
+            Ok(_) => "computed",
+            Err(error) => error.outcome(),
+        };
+        record_price_impact_metrics(
+            &self.pool_name,
+            price_impact_started.elapsed(),
+            price_impact_outcome,
+        );
+        Ok(self.attach_price_impact(quote, price_impact_bps))
+    }
+
+    /// Builds the quote for a route that passed [`Self::validate_route`], without its price
+    /// impact.
     ///
     /// `filter` is the filter the route solved under.
     async fn quote_route(
@@ -630,6 +688,25 @@ where
         )
         .with_route(route)
         .with_gas_price(gas_price))
+    }
+
+    /// Rejects a route that is malformed or uses liquidity `filter` excludes.
+    fn validate_route(
+        &self,
+        route: &Route,
+        order: &Order,
+        filter: &RouteExclusionFilter,
+    ) -> Result<(), SolveError> {
+        route
+            .validate()
+            .map_err(|err| err.to_string())
+            .and_then(|()| validate_route_filter(route, order, filter))
+            .map_err(|err| {
+                SolveError::AlgorithmError(format!(
+                    "{} produced an invalid route: {err}",
+                    self.algorithm.name()
+                ))
+            })
     }
 
     /// Selects a fallback pool for every pAMM leg and sets the route's `fallback_amount_out` to the
@@ -711,6 +788,109 @@ where
                 quote
             }
         }
+    }
+
+    /// Builds quotes from each variation's routes, returning one outcome per requested variation
+    /// in request order.
+    ///
+    /// `variation_filters` holds the filter each variation solved under, in request order. The
+    /// router reads the outcomes by position, so an algorithm that returns a different number of
+    /// outcomes than `variations` fails every variation.
+    async fn quote_variations(
+        &self,
+        variation_routes: Option<VariationRoutes>,
+        variations: &[Variation],
+        variation_filters: &[RouteExclusionFilter],
+        context: &RouteQuoteContext<'_>,
+    ) -> Vec<VariationOutcome> {
+        let Some(variation_routes) = variation_routes else {
+            return vec![VariationOutcome::Unsupported; variations.len()];
+        };
+        if variation_routes.len() != variations.len() {
+            error!(
+                order_id = %context.order.id(),
+                algorithm = self.algorithm.name(),
+                requested = variations.len(),
+                returned = variation_routes.len(),
+                "algorithm returned the wrong number of variation outcomes"
+            );
+            let error = SolveError::AlgorithmError(format!(
+                "{} returned {} variation outcomes for {} variations",
+                self.algorithm.name(),
+                variation_routes.len(),
+                variations.len()
+            ));
+            return vec![VariationOutcome::Failed(error); variations.len()];
+        }
+        let mut outcomes = Vec::with_capacity(variations.len());
+        for ((variation, filter), variation_result) in variations
+            .iter()
+            .zip(variation_filters)
+            .zip(variation_routes)
+        {
+            let outcome = match variation_result {
+                Ok(routes) => {
+                    self.quote_variation_routes(routes, variation, filter, context)
+                        .await
+                }
+                // A variation can stop at the deadline, so its timeout is expected and is not
+                // worth the warning a main-solve timeout gets.
+                Err(crate::AlgorithmError::Timeout { elapsed_ms }) => {
+                    debug!(order_id = %context.order.id(), ?variation, elapsed_ms, "variation timeout");
+                    VariationOutcome::Failed(SolveError::Timeout { elapsed_ms })
+                }
+                Err(err) => VariationOutcome::Failed(solve_error_from_algorithm_error(
+                    context.order.id(),
+                    context.order.amount(),
+                    err,
+                )),
+            };
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    /// Quotes the routes one variation found and drops the routes that fail the checks.
+    async fn quote_variation_routes(
+        &self,
+        routes: Vec<RouteResult>,
+        variation: &Variation,
+        filter: &RouteExclusionFilter,
+        context: &RouteQuoteContext<'_>,
+    ) -> VariationOutcome {
+        let mut quotes = Vec::with_capacity(routes.len());
+        let mut last_error = None;
+        for route in routes {
+            // An invalid variation route costs only that route, so it is not an error for the
+            // order.
+            if let Err(error) = self.validate_route(route.route(), context.order, filter) {
+                debug!(
+                    order_id = %context.order.id(),
+                    algorithm = self.algorithm.name(),
+                    ?variation,
+                    %error,
+                    "algorithm produced an invalid variation route"
+                );
+                last_error = Some(error);
+                continue;
+            }
+            match self
+                .quote_route(route, context, filter)
+                .await
+            {
+                Ok(quote) => {
+                    let price_impact_bps = compute_price_impact_bps(&quote);
+                    quotes.push(self.attach_price_impact(quote, price_impact_bps));
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if !quotes.is_empty() {
+            return VariationOutcome::Solved(quotes);
+        }
+        VariationOutcome::Failed(
+            last_error.unwrap_or_else(|| SolveError::no_route_found(context.order.id())),
+        )
     }
 
     /// Waits for required derived data to become ready, or until timeout.
@@ -965,7 +1145,7 @@ where
 
                             // Process the task
                             let result = {
-                                let params = task.params().clone();
+                                let params = task.params().clone().with_deadline(task.deadline());
                                 let order = task.order();
                                 self.quote(order, params).await
                             };
