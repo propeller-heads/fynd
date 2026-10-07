@@ -500,8 +500,8 @@ mod solve_params_tests {
             .unwrap()
             .clone()
             .unwrap();
-        assert_eq!(cached.0, 7);
-        assert!(Arc::ptr_eq(&exclusions, &cached.1));
+        assert_eq!(cached.generation, 7);
+        assert!(Arc::ptr_eq(&exclusions, &cached.request));
     }
 }
 

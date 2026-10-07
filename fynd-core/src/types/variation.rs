@@ -157,3 +157,71 @@ pub(crate) enum VariationOutcome {
     /// The variation found no route that passed the worker's checks.
     Failed(SolveError),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alternatives(count: usize) -> Variation {
+        Variation::Alternatives(NonZeroUsize::new(count).unwrap())
+    }
+
+    #[test]
+    fn test_validate_variations_empty() {
+        assert_eq!(validate_variations(&[]), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_variations_at_limits() {
+        let variations = vec![
+            Variation::NoRfq,
+            Variation::NoPamm,
+            Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+            alternatives(MAX_ALTERNATIVES),
+        ];
+        assert_eq!(validate_variations(&variations), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_variations_too_many() {
+        let variations = vec![Variation::NoRfq; MAX_VARIATIONS + 1];
+        assert_eq!(
+            validate_variations(&variations),
+            Err(VariationsValidationError::TooManyVariations { count: MAX_VARIATIONS + 1 })
+        );
+    }
+
+    #[test]
+    fn test_validate_variations_too_many_alternatives() {
+        assert_eq!(
+            validate_variations(&[alternatives(MAX_ALTERNATIVES + 1)]),
+            Err(VariationsValidationError::TooManyAlternatives { count: MAX_ALTERNATIVES + 1 })
+        );
+    }
+
+    #[test]
+    fn test_alternatives_zero_deserialization() {
+        let parsed = serde_json::from_str::<Variation>(r#"{"alternatives": 0}"#);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn test_variation_status_serialization() {
+        let json = serde_json::to_string(&VariationStatus::NoRouteFound).unwrap();
+        assert_eq!(json, r#""no_route_found""#);
+    }
+
+    #[test]
+    fn test_excluded_protocols() {
+        assert_eq!(Variation::NoRfq.excluded_protocols(), vec!["rfq:", "fallback:rfq:"]);
+        assert_eq!(Variation::NoPamm.excluded_protocols(), vec!["fallback:"]);
+        assert_eq!(
+            Variation::ExcludeProtocols(vec!["uniswap_v2".to_string(), "vm:".to_string()])
+                .excluded_protocols(),
+            vec!["uniswap_v2", "vm:"]
+        );
+        assert!(alternatives(2)
+            .excluded_protocols()
+            .is_empty());
+    }
+}
