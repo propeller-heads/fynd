@@ -61,7 +61,8 @@ mod tests;
 // Re-export commonly used types for convenience
 pub use algorithm::{
     registry::AlgorithmRegistry, Algorithm, AlgorithmConfig, AlgorithmError, MostLiquidAlgorithm,
-    NoPathReason, PathFrankWolfeAlgorithm, SolveParts, SolveRequest,
+    NoPathReason, PathFrankWolfeAlgorithm, SolveParts, SolveRequest, SolvedRoutes,
+    VariationRouteResult, VariationRoutes,
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
@@ -93,11 +94,13 @@ pub use tycho_simulation::evm::stream::BlockStepController;
 /// to receive raw transaction deltas during pending-block simulation.
 pub use tycho_simulation::tycho_common::traits::TxDeltaIndexer;
 pub use types::{
-    BlockInfo, ClientFeeParams, ComponentId, EncodingOptions, EncodingOptionsError, FeeBreakdown,
-    Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails, PermitSingle, Quote,
-    QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
-    RouteValidationError, SimulationResult, SingleOrderQuote, SolveError, SolveParams, SolveResult,
-    SurplusInfo, Swap, TaskId, Transaction, UserTransferType,
+    validate_variations, BlockInfo, ClientFeeParams, ComponentId, EncodingOptions,
+    EncodingOptionsError, FeeBreakdown, Order, OrderQuote, OrderSide, OrderValidationError,
+    PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route,
+    RouteExclusionFilter, RouteExclusions, RouteValidationError, SimulationResult,
+    SingleOrderQuote, SolveError, SolveParams, SolveResult, SurplusInfo, Swap, TaskId, Transaction,
+    UserTransferType, Variation, VariationQuote, VariationStatus, VariationsValidationError,
+    MAX_ALTERNATIVES, MAX_VARIATIONS,
 };
 pub use worker_pool::{
     pool::{WorkerPool, WorkerPoolBuilder, WorkerPoolConfig},
@@ -106,5 +109,5 @@ pub use worker_pool::{
 };
 pub use worker_pool_router::{
     config::WorkerPoolRouterConfig, encode_quotes, finalize_quote, ExclusiveAccess, LiquidityScope,
-    RankedQuotes, SolverPoolHandle, WorkerPoolRouter,
+    RankedOrder, RankedQuotes, SolverPoolHandle, WorkerPoolRouter,
 };

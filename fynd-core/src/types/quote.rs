@@ -17,6 +17,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use num_bigint::{BigInt, BigUint};
@@ -32,7 +33,11 @@ use tycho_simulation::tycho_common::{
 };
 use uuid::Uuid;
 
-use super::{internal::SolveError, primitives::ComponentId};
+use super::{
+    internal::SolveError,
+    primitives::ComponentId,
+    variation::{Variation, VariationOutcome, VariationQuote},
+};
 use crate::{
     algorithm::NoPathReason, encoding::router_fees::LEGACY_BPS_DENOMINATOR,
     feed::market_data::StateLabel, price_guard::config::PriceGuardConfig, AlgorithmError,
@@ -234,6 +239,10 @@ pub struct QuoteOptions {
     /// wire type owns the request shape.
     #[serde(skip)]
     route_filter: RouteExclusionFilter,
+    /// Additional ways to solve each order alongside the main solve. Skipped during JSON
+    /// serialization because `fynd-rpc-types::QuoteOptions` defines the request's JSON format.
+    #[serde(skip)]
+    variations: Vec<Variation>,
 }
 
 impl QuoteOptions {
@@ -279,6 +288,13 @@ impl QuoteOptions {
         self
     }
 
+    /// Also solves each order under these variations. The router rejects variations that exceed
+    /// the limits checked by [`crate::types::validate_variations`].
+    pub fn with_variations(mut self, variations: Vec<Variation>) -> Self {
+        self.variations = variations;
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
@@ -320,9 +336,26 @@ impl QuoteOptions {
     pub fn route_filter(&self) -> &RouteExclusionFilter {
         &self.route_filter
     }
+
+    /// Returns the variations to solve beside the main solve. Empty unless some were set.
+    #[must_use]
+    pub fn variations(&self) -> &[Variation] {
+        &self.variations
+    }
 }
 
-type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<RouteExclusions>)>>>;
+/// A request's exclusions and each variation's, resolved against one component generation.
+#[derive(Clone)]
+pub(crate) struct ResolvedExclusions {
+    /// The market's component generation when these were resolved.
+    pub(crate) generation: u64,
+    /// What the request's route filter excludes.
+    pub(crate) request: Arc<RouteExclusions>,
+    /// Each variation, with what the request's filter and the variation's protocols exclude.
+    pub(crate) variations: Arc<[(Variation, Arc<RouteExclusions>)]>,
+}
+
+type SharedExclusionCache = Arc<Mutex<Option<ResolvedExclusions>>>;
 
 /// Parameters for a single solve operation.
 ///
@@ -336,6 +369,10 @@ pub struct SolveParams {
     /// Liquidity the request will not route through. Resolved against the market by the worker,
     /// which is where the protocol systems it names become pools.
     route_filter: RouteExclusionFilter,
+    /// The variations to solve beside the main solve, shared by all cloned solve tasks.
+    variations: Arc<[Variation]>,
+    /// When the router stops waiting for the answer, if it set a deadline.
+    deadline: Option<Instant>,
     /// Per-request resolved exclusions shared by all cloned solve tasks.
     #[doc(hidden)]
     exclusion_cache: SharedExclusionCache,
@@ -346,6 +383,8 @@ impl Clone for SolveParams {
         Self {
             state_label: self.state_label.clone(),
             route_filter: self.route_filter.clone(),
+            variations: self.variations.clone(),
+            deadline: self.deadline,
             exclusion_cache: self.exclusion_cache.clone(),
         }
     }
@@ -357,6 +396,8 @@ impl std::fmt::Debug for SolveParams {
             .debug_struct("SolveParams")
             .field("state_label", &self.state_label)
             .field("route_filter", &self.route_filter)
+            .field("variations", &self.variations)
+            .field("deadline", &self.deadline)
             .finish()
     }
 }
@@ -366,6 +407,8 @@ impl Default for SolveParams {
         Self {
             state_label: None,
             route_filter: RouteExclusionFilter::default(),
+            variations: Arc::from(Vec::new()),
+            deadline: None,
             exclusion_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -385,6 +428,20 @@ impl SolveParams {
         self
     }
 
+    /// Also solves the order under these variations.
+    pub fn with_variations(mut self, variations: impl Into<Arc<[Variation]>>) -> Self {
+        self.variations = variations.into();
+        self.exclusion_cache = Arc::new(Mutex::new(None));
+        self
+    }
+
+    /// Sets when the router stops waiting for the answer. The algorithm reads it as a request to
+    /// stop solving variations.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
@@ -393,6 +450,16 @@ impl SolveParams {
     /// Returns what the request excludes from a route. Empty unless one was set.
     pub fn route_filter(&self) -> &RouteExclusionFilter {
         &self.route_filter
+    }
+
+    /// Returns the variations to solve beside the main solve. Empty unless some were set.
+    pub fn variations(&self) -> &[Variation] {
+        &self.variations
+    }
+
+    /// Returns when the router stops waiting for the answer, if a deadline was set.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
     }
 
     pub(crate) fn cached_exclusions(&self) -> &SharedExclusionCache {
@@ -406,7 +473,11 @@ impl SolveParams {
         exclusions: RouteExclusions,
     ) -> Arc<RouteExclusions> {
         let exclusions = Arc::new(exclusions);
-        *self.exclusion_cache.lock().unwrap() = Some((generation, exclusions.clone()));
+        *self.exclusion_cache.lock().unwrap() = Some(ResolvedExclusions {
+            generation,
+            request: exclusions.clone(),
+            variations: Arc::from(Vec::new()),
+        });
         exclusions
     }
 }
@@ -1045,11 +1116,25 @@ pub struct SingleOrderQuote {
     order: OrderQuote,
     /// Time taken by this specific worker to compute the solution, in milliseconds.
     solve_time_ms: u64,
+    /// Each requested variation's outcome, in request order.
+    #[serde(skip)]
+    variations: Vec<VariationOutcome>,
 }
 
 impl SingleOrderQuote {
     pub(crate) fn new(order: OrderQuote, solve_time_ms: u64) -> Self {
-        Self { order, solve_time_ms }
+        Self { order, solve_time_ms, variations: Vec::new() }
+    }
+
+    /// Attaches each requested variation's outcome, in request order.
+    pub(crate) fn with_variations(mut self, variations: Vec<VariationOutcome>) -> Self {
+        self.variations = variations;
+        self
+    }
+
+    /// The solution, its solve time and the variation outcomes, moved out.
+    pub(crate) fn into_parts(self) -> (OrderQuote, u64, Vec<VariationOutcome>) {
+        (self.order, self.solve_time_ms, self.variations)
     }
 
     /// Returns the order solution.
@@ -1171,6 +1256,10 @@ pub struct OrderQuote {
     /// reporting data, not part of the wire format.
     #[serde(skip)]
     surplus: Option<SurplusInfo>,
+    /// Each requested variation's outcome, in request order. Empty when the request asked for
+    /// none, and on every quote inside a variation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    variations: Vec<VariationQuote>,
 }
 
 impl OrderQuote {
@@ -1209,6 +1298,7 @@ impl OrderQuote {
             solved_against,
             no_route_cause: None,
             surplus: None,
+            variations: Vec::new(),
         }
     }
 
@@ -1408,6 +1498,21 @@ impl OrderQuote {
     /// Returns the recorded failure cause, if any.
     pub fn no_route_cause(&self) -> Option<&SolveError> {
         self.no_route_cause.as_ref()
+    }
+
+    /// Returns each requested variation's quotes, in request order.
+    pub fn variations(&self) -> &[VariationQuote] {
+        &self.variations
+    }
+
+    /// Removes and returns all variation quotes, leaving this quote's variations empty.
+    pub fn take_variations(&mut self) -> Vec<VariationQuote> {
+        std::mem::take(&mut self.variations)
+    }
+
+    /// Attaches each requested variation's outcome, in request order.
+    pub(crate) fn set_variations(&mut self, variations: Vec<VariationQuote>) {
+        self.variations = variations;
     }
 
     /// Returns the no-route path reason, when the failure cause was a

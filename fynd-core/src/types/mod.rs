@@ -17,6 +17,8 @@ pub mod quote;
 #[cfg(any(test, feature = "test-utils"))]
 /// Builders for assembling quote types in tests, here and in dependent crates.
 pub mod test_utils;
+/// Extra ways to solve an order beside the main solve: `Variation`, `VariationQuote`.
+pub mod variation;
 
 // Re-export constants
 pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};
@@ -30,4 +32,9 @@ pub use quote::{
     QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
     RouteResult, RouteValidationError, SimulationResult, SingleOrderQuote, SolveParams,
     SurplusInfo, Swap, Transaction, UserTransferType,
+};
+pub(crate) use variation::VariationOutcome;
+pub use variation::{
+    validate_variations, Variation, VariationQuote, VariationStatus, VariationsValidationError,
+    MAX_ALTERNATIVES, MAX_VARIATIONS,
 };

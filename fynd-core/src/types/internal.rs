@@ -6,7 +6,7 @@ use num_bigint::BigUint;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use super::{quote::SolveParams, Order, SingleOrderQuote};
+use super::{quote::SolveParams, Order, SingleOrderQuote, VariationsValidationError};
 use crate::algorithm::NoPathReason;
 
 /// Unique identifier for a solve task.
@@ -196,6 +196,10 @@ pub enum SolveError {
     #[error("invalid worker pool allowlist: {0}")]
     InvalidWorkerPools(String),
 
+    /// The request asks for more variations, or more alternatives, than the limits allow.
+    #[error("invalid variations: {0}")]
+    InvalidVariations(VariationsValidationError),
+
     /// No workers are ready to solve.
     #[error("no workers ready: {0}")]
     NotReady(String),
@@ -292,6 +296,7 @@ impl SolveError {
             SolveError::QueueFull => "queue_full",
             SolveError::Internal(_) => "internal",
             SolveError::InvalidWorkerPools(_) => "invalid_worker_pools",
+            SolveError::InvalidVariations(_) => "invalid_variations",
             SolveError::PriceCheckFailed { .. } => "price_check_failed",
             SolveError::AlgorithmError(_) => "algorithm_error",
             SolveError::MarketDataStale { .. } => "market_data_stale",
