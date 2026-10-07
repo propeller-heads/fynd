@@ -17,6 +17,7 @@ use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
 use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
 
+use super::price_impact::PriceImpactError;
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
     derived::{
@@ -33,10 +34,19 @@ use crate::{
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
-    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions},
+    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions, RouteResult},
     worker_pool_router::LiquidityScope,
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
+
+/// What every quote built for one order shares: the order, the state it was solved against, and
+/// the block that state is at.
+struct RouteQuoteContext<'a> {
+    order: &'a Order,
+    state_label: Option<&'a StateLabel>,
+    block_info: BlockInfo,
+    solved_against: String,
+}
 
 /// Whether a worker with this scope and exclusion list must keep `component` out of its graph: an
 /// exclusive component in a `PublicOnly` worker pool, or a component of an excluded protocol
@@ -64,9 +74,8 @@ fn should_drop_component(
 ///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
 fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
-    let generation = view
-        .base_market_state()
-        .component_generation();
+    let market = view.base_market_state();
+    let generation = market.component_generation();
     let mut cache = params
         .cached_exclusions()
         .lock()
@@ -77,10 +86,7 @@ fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<Ro
         }
     }
     let filter = params.route_filter();
-    let exclusions = Arc::new(
-        view.base_market_state()
-            .resolve_route_filter(filter),
-    );
+    let exclusions = Arc::new(market.resolve_route_filter(filter));
     if !filter.is_empty() {
         debug!(
             component_generation = generation,
@@ -234,6 +240,15 @@ fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity
         "activity" => activity
     )
     .record(duration.as_secs_f64());
+}
+
+/// Returns the price impact of the quote's route in basis points.
+fn compute_price_impact_bps(quote: &OrderQuote) -> Result<i32, PriceImpactError> {
+    let Some(route) = quote.route() else {
+        return Err(PriceImpactError::EmptyRoute);
+    };
+    super::price_impact::route_price_impact(route, quote.amount_in(), quote.amount_out())
+        .and_then(super::price_impact::price_impact_to_basis_points)
 }
 
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
@@ -471,29 +486,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against, exclusions) = {
-            // Read briefly to capture block info; drop the lock before solving so it is not held
-            // across the algorithm's own read call.
-            let view = self
-                .read_market(params.state_label())
-                .await?;
-            let last_block = view
-                .last_updated()
-                .ok_or(SolveError::NotReady("No block info".to_string()))?;
-            let block_info = BlockInfo::new(
-                last_block.number(),
-                last_block.hash().to_string(),
-                last_block.timestamp(),
-            );
-            // When no overlay was requested, record the block number so callers always know which
-            // state the quote was computed against.
-            let solved_against = view
-                .state_label()
-                .cloned()
-                .unwrap_or_else(|| last_block.number().to_string());
-            let exclusions = resolve_exclusions(&view, &params);
-            (block_info, solved_against, exclusions)
-        };
+        let (block_info, solved_against, exclusions) = self.read_solve_state(&params).await?;
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
             .with_derived(self.derived_data.clone())
@@ -501,145 +494,58 @@ where
         if let Some(label) = params.state_label().cloned() {
             request = request.with_label(label);
         }
-        let result = self
+        let route_result = match self
             .algorithm
             .find_best_route(request)
-            .await;
-
-        let order_quote = match result {
-            Ok(result) => {
-                // Extract scalar values before consuming result with into_route()
-                let amount_out_net_gas = result
-                    .net_amount_out()
-                    .to_biguint()
-                    .unwrap_or(BigUint::ZERO);
-                let gas_price = result.gas_price().clone();
-                let mut route = result.into_route();
-
-                if let Err(err) = route
-                    .validate()
-                    .map_err(|err| err.to_string())
-                    .and_then(|()| validate_route_filter(&route, order, params.route_filter()))
-                {
-                    error!(
-                        order_id = %order.id(),
-                        algorithm = self.algorithm.name(),
-                        error = %err,
-                        "algorithm produced an invalid route"
-                    );
-                    return Err(SolveError::AlgorithmError(format!(
-                        "{} produced an invalid route: {err}",
-                        self.algorithm.name()
-                    )));
-                }
-
-                // A pAMM route is ranked on what its fallbacks pay against `min_amount_out`, so a
-                // leg with no fallback, or one that cannot be priced, is dropped here — there is
-                // no floor to check.
-                if has_fallback_leg(&route) {
-                    // The same view the algorithm solved against, so the fallback is selected and
-                    // priced on the requested overlay rather than the base state.
-                    let market = self
-                        .read_market(params.state_label())
-                        .await?;
-                    match price_through_fallbacks(
-                        &mut route,
-                        &market,
-                        self.pamm_admission.fallback_pools(),
-                        params.route_filter(),
-                        &self.exclude_protocols,
-                    ) {
-                        Ok(amount) => route.set_fallback_amount_out(amount),
-                        Err(error) => {
-                            let rejection = error.rejection();
-                            debug!(order_id = %order.id(), %error, "{rejection}");
-                            return Err(SolveError::route_rejected(order.id(), rejection));
-                        }
-                    }
-                }
-
-                // This is a first naive approach to getting the total gas of this quote
-                // A finer estimation is done during encoding
-                let gas_estimate = route.total_gas();
-                let amount_in_raw = if order.is_sell() {
-                    order.amount().clone()
-                } else {
-                    route.input_amount().ok_or_else(|| {
-                        error!(
-                            order_id = %order.id(),
-                            algorithm = self.algorithm.name(),
-                            "route missing swaps for buy order"
-                        );
-                        self.route_carries_no_swaps()
-                    })?
-                };
-                let amount_out_raw = if order.is_sell() {
-                    let output_token = route.output_token().ok_or_else(|| {
-                        error!(
-                            order_id = %order.id(),
-                            algorithm = self.algorithm.name(),
-                            "route missing swaps for sell order"
-                        );
-                        self.route_carries_no_swaps()
-                    })?;
-                    route.amount_out(&output_token)
-                } else {
-                    order.amount().clone()
-                };
-
-                let price_impact_started = Instant::now();
-                let price_impact_bps_result = super::price_impact::route_price_impact(
-                    &route,
-                    &amount_in_raw,
-                    &amount_out_raw,
-                )
-                .and_then(super::price_impact::price_impact_to_basis_points);
-                let price_impact_outcome = match &price_impact_bps_result {
-                    Ok(_) => "computed",
-                    Err(err) => err.outcome(),
-                };
-                record_price_impact_metrics(
-                    &self.pool_name,
-                    price_impact_started.elapsed(),
-                    price_impact_outcome,
-                );
-                let price_impact_bps = match price_impact_bps_result {
-                    Ok(basis_points) => Some(basis_points),
-                    Err(err) => {
-                        debug!(
-                            order_id = %order.id(),
-                            algorithm = self.algorithm.name(),
-                            error = %err,
-                            "price-impact calculation failed; omitting price_impact_bps from quote"
-                        );
-                        None
-                    }
-                };
-
-                let mut quote = OrderQuote::new(
-                    order.id().to_string(),
-                    QuoteStatus::Success,
-                    amount_in_raw,
-                    amount_out_raw,
-                    gas_estimate,
-                    amount_out_net_gas,
-                    block_info.clone(),
-                    self.algorithm.name().to_string(),
-                    Bytes::from(order.sender().as_ref()),
-                    Bytes::from(order.effective_receiver().as_ref()),
-                    solved_against,
-                )
-                .with_route(route)
-                .with_gas_price(gas_price);
-                if let Some(bps) = price_impact_bps {
-                    quote = quote.with_price_impact_bps(bps);
-                }
-                quote
-            }
+            .await
+        {
+            Ok(route_result) => route_result,
             Err(err) => {
                 return Err(solve_error_from_algorithm_error(order.id(), order.amount(), err))
             }
         };
+
+        if let Err(err) = route_result
+            .route()
+            .validate()
+            .map_err(|err| err.to_string())
+            .and_then(|()| {
+                validate_route_filter(route_result.route(), order, params.route_filter())
+            })
+        {
+            error!(
+                order_id = %order.id(),
+                algorithm = self.algorithm.name(),
+                error = %err,
+                "algorithm produced an invalid route"
+            );
+            return Err(SolveError::AlgorithmError(format!(
+                "{} produced an invalid route: {err}",
+                self.algorithm.name()
+            )));
+        }
+
+        let context = RouteQuoteContext {
+            order,
+            state_label: params.state_label(),
+            block_info,
+            solved_against,
+        };
+        let quote = self
+            .quote_route(route_result, &context, params.route_filter())
+            .await?;
+        let price_impact_started = Instant::now();
+        let price_impact_bps = compute_price_impact_bps(&quote);
+        let price_impact_outcome = match &price_impact_bps {
+            Ok(_) => "computed",
+            Err(error) => error.outcome(),
+        };
+        record_price_impact_metrics(
+            &self.pool_name,
+            price_impact_started.elapsed(),
+            price_impact_outcome,
+        );
+        let order_quote = self.attach_price_impact(quote, price_impact_bps);
 
         // The solve alone. Occupancy is timed by the caller, which also sees the failing
         // outcomes this point never reaches.
@@ -647,6 +553,164 @@ where
         record_quote_duration(&self.pool_name, quote_duration);
 
         Ok(SingleOrderQuote::new(order_quote, quote_duration.as_millis() as u64))
+    }
+
+    /// The block the solve reads, the state it is solved against, and the exclusions of the
+    /// request.
+    async fn read_solve_state(
+        &self,
+        params: &SolveParams,
+    ) -> Result<(BlockInfo, String, Arc<RouteExclusions>), SolveError> {
+        // Read briefly to capture block info; drop the lock before solving so it is not held
+        // across the algorithm's own read call.
+        let view = self
+            .read_market(params.state_label())
+            .await?;
+        let last_block = view
+            .last_updated()
+            .ok_or(SolveError::NotReady("No block info".to_string()))?;
+        let block_info = BlockInfo::new(
+            last_block.number(),
+            last_block.hash().to_string(),
+            last_block.timestamp(),
+        );
+        // When no overlay was requested, record the block number so callers always know which
+        // state the quote was computed against.
+        let solved_against = view
+            .state_label()
+            .cloned()
+            .unwrap_or_else(|| last_block.number().to_string());
+        let exclusions = resolve_exclusions(&view, params);
+        Ok((block_info, solved_against, exclusions))
+    }
+
+    /// Builds the quote for a route that passed validation, without its price impact.
+    ///
+    /// `filter` is the filter the route solved under.
+    async fn quote_route(
+        &self,
+        route_result: RouteResult,
+        context: &RouteQuoteContext<'_>,
+        filter: &RouteExclusionFilter,
+    ) -> Result<OrderQuote, SolveError> {
+        let order = context.order;
+        // Extract scalar values before consuming result with into_route()
+        let amount_out_net_gas = route_result
+            .net_amount_out()
+            .to_biguint()
+            .unwrap_or(BigUint::ZERO);
+        let gas_price = route_result.gas_price().clone();
+        let mut route = route_result.into_route();
+
+        // A pAMM route is ranked on what its fallbacks pay against `min_amount_out`, so a leg
+        // with no fallback, or one that cannot be priced, is dropped here — there is no floor to
+        // check.
+        if has_fallback_leg(&route) {
+            self.price_pamm_legs(&mut route, context, filter)
+                .await?;
+        }
+
+        // This is a first naive approach to getting the total gas of this quote
+        // A finer estimation is done during encoding
+        let gas_estimate = route.total_gas();
+        let (amount_in_raw, amount_out_raw) = self.compute_quoted_amounts(&route, order)?;
+
+        Ok(OrderQuote::new(
+            order.id().to_string(),
+            QuoteStatus::Success,
+            amount_in_raw,
+            amount_out_raw,
+            gas_estimate,
+            amount_out_net_gas,
+            context.block_info.clone(),
+            self.algorithm.name().to_string(),
+            Bytes::from(order.sender().as_ref()),
+            Bytes::from(order.effective_receiver().as_ref()),
+            context.solved_against.clone(),
+        )
+        .with_route(route)
+        .with_gas_price(gas_price))
+    }
+
+    /// Selects a fallback pool for every pAMM leg and sets the route's `fallback_amount_out` to the
+    /// output through those pools.
+    async fn price_pamm_legs(
+        &self,
+        route: &mut Route,
+        context: &RouteQuoteContext<'_>,
+        filter: &RouteExclusionFilter,
+    ) -> Result<(), SolveError> {
+        // The same view the algorithm solved against, so the fallback is selected and priced on
+        // the requested overlay rather than the base state.
+        let market = self
+            .read_market(context.state_label)
+            .await?;
+        match price_through_fallbacks(
+            route,
+            &market,
+            self.pamm_admission.fallback_pools(),
+            filter,
+            &self.exclude_protocols,
+        ) {
+            Ok(amount) => {
+                route.set_fallback_amount_out(amount);
+                Ok(())
+            }
+            Err(error) => {
+                let rejection = error.rejection();
+                debug!(order_id = %context.order.id(), %error, "{rejection}");
+                Err(SolveError::route_rejected(context.order.id(), rejection))
+            }
+        }
+    }
+
+    /// Returns the order's input and output amounts on `route`. Sell orders fix the input amount;
+    /// buy orders fix the output amount. The route supplies the other amount.
+    fn compute_quoted_amounts(
+        &self,
+        route: &Route,
+        order: &Order,
+    ) -> Result<(BigUint, BigUint), SolveError> {
+        if order.is_sell() {
+            let output_token = route.output_token().ok_or_else(|| {
+                error!(
+                    order_id = %order.id(),
+                    algorithm = self.algorithm.name(),
+                    "route missing swaps for sell order"
+                );
+                self.route_carries_no_swaps()
+            })?;
+            return Ok((order.amount().clone(), route.amount_out(&output_token)));
+        }
+        let amount_in = route.input_amount().ok_or_else(|| {
+            error!(
+                order_id = %order.id(),
+                algorithm = self.algorithm.name(),
+                "route missing swaps for buy order"
+            );
+            self.route_carries_no_swaps()
+        })?;
+        Ok((amount_in, order.amount().clone()))
+    }
+
+    /// Sets the quote's price impact, or logs why it is left out.
+    fn attach_price_impact(
+        &self,
+        quote: OrderQuote,
+        price_impact_bps: Result<i32, PriceImpactError>,
+    ) -> OrderQuote {
+        match price_impact_bps {
+            Ok(basis_points) => quote.with_price_impact_bps(basis_points),
+            Err(error) => {
+                debug!(
+                    order_id = %quote.order_id(),
+                    algorithm = self.algorithm.name(),
+                    %error,
+                    "price-impact calculation failed; omitting price_impact_bps from quote"
+                );
+                quote
+            }
+        }
     }
 
     /// Waits for required derived data to become ready, or until timeout.
