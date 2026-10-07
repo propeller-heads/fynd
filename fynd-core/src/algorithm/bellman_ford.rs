@@ -1343,6 +1343,30 @@ mod tests {
         assert_eq!(result.route().swaps()[1].component_id(), "bc");
     }
 
+    /// Bellman-Ford keeps the trait's default, which solves the main route and no variation.
+    #[tokio::test]
+    async fn test_find_routes_default_with_variations() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) =
+            setup_market_bf(vec![("pool", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let variations = vec![
+            (crate::types::Variation::NoRfq, Arc::default()),
+            (crate::types::Variation::Alternatives(std::num::NonZeroUsize::MIN), Arc::default()),
+        ];
+
+        let solved = bf_algorithm(1, 1000)
+            .find_routes(
+                SolveRequest::new(manager.graph(), market, &ord).with_variations(variations),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(solved.main_route().route().swaps()[0].component_id(), "pool");
+        assert!(solved.variation_routes().is_none());
+    }
+
     /// A pool the request excludes cannot carry a hop, so the pool that is left carries the order.
     #[tokio::test]
     async fn test_find_best_route_with_excluded_pool() {
