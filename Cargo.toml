@@ -172,8 +172,8 @@ metrics-exporter-prometheus = "0.16"
 metrics-util = "0.20"
 
 # Tycho
-tycho-execution = ">=0.443.0"
-tycho-simulation = ">=0.443.0"
+tycho-execution = ">=0.445.0"
+tycho-simulation = ">=0.445.0"
 typetag = "0.2"
 
 # Compression
@@ -231,11 +231,3 @@ debug = true
 # for derived data. The workspace's own code keeps the debug settings.
 [profile.dev.package."*"]
 opt-level = 2
-
-# MetricFallbackRouter and BebopFallbackRouter, propeller-heads/tycho#1518. Remove once released.
-[patch.crates-io]
-tycho-client = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
-tycho-common = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
-tycho-ethereum = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
-tycho-execution = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
-tycho-simulation = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/fallback-router-base" }
