@@ -544,6 +544,16 @@ pub use fynd_rpc_types::PriceGuardConfig;
 /// excluded unless the request names it. Re-exported from `fynd-rpc-types` for wire
 /// compatibility.
 pub use fynd_rpc_types::RouteFilter;
+/// One extra way to solve an order, asked for beside the main solve.
+///
+/// A request may ask for at most 4 variations, and `Alternatives` for at most 4 routes. Each
+/// variation's outcome is returned in [`Quote::variations`]. Each variation is another solve
+/// and adds solve time. Re-exported from `fynd-rpc-types` for wire compatibility.
+pub use fynd_rpc_types::Variation;
+/// How one variation of one order ended.
+///
+/// Re-exported from `fynd-rpc-types` for wire compatibility.
+pub use fynd_rpc_types::VariationStatus;
 
 /// Optional parameters that tune solving behaviour for a [`QuoteParams`] request.
 ///
@@ -555,6 +565,7 @@ pub struct QuoteOptions {
     pub(crate) max_gas: Option<BigUint>,
     pub(crate) encoding_options: Option<EncodingOptions>,
     pub(crate) route_filter: Option<RouteFilter>,
+    pub(crate) variations: Vec<Variation>,
 }
 
 impl QuoteOptions {
@@ -592,6 +603,13 @@ impl QuoteOptions {
         self
     }
 
+    /// Also solve the order under these variations. The server refuses more than 4, or an
+    /// `Alternatives` count above 4.
+    pub fn with_variations(mut self, variations: Vec<Variation>) -> Self {
+        self.variations = variations;
+        self
+    }
+
     /// The configured timeout in milliseconds, or `None` if using the server default.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -610,6 +628,11 @@ impl QuoteOptions {
     /// What this request excludes from a route, or `None` if nothing is excluded.
     pub fn route_filter(&self) -> Option<&RouteFilter> {
         self.route_filter.as_ref()
+    }
+
+    /// The variations to solve beside the main solve. Empty unless some were set.
+    pub fn variations(&self) -> &[Variation] {
+        &self.variations
     }
 }
 
@@ -913,6 +936,8 @@ pub struct Quote {
     /// Wall-clock time the server spent solving this request, in milliseconds.
     /// Populated by [`FyndClient::quote`](crate::FyndClient::quote).
     pub(crate) solve_time_ms: u64,
+    /// Quotes for each requested variation, in request order.
+    pub(crate) variations: Vec<VariationQuote>,
 }
 
 impl Quote {
@@ -1022,6 +1047,14 @@ impl Quote {
         self.solve_time_ms
     }
 
+    /// Quotes for each requested variation, in request order.
+    ///
+    /// Empty unless the request set [`QuoteOptions::with_variations`]. Quotes inside a variation
+    /// have no variations of their own.
+    pub fn variations(&self) -> &[VariationQuote] {
+        &self.variations
+    }
+
     /// Patches the 65-byte client fee EIP-712 signature into the transaction
     /// calldata at the offset returned by the server.
     ///
@@ -1116,7 +1149,42 @@ impl Quote {
             simulation_result: None,
             algorithm: None,
             solve_time_ms: 0,
+            variations: Vec::new(),
         }
+    }
+}
+
+/// The quotes for one requested [`Variation`] of one order.
+#[derive(Debug, Clone)]
+pub struct VariationQuote {
+    variation: Variation,
+    status: VariationStatus,
+    quotes: Vec<Quote>,
+}
+
+impl VariationQuote {
+    pub(crate) fn new(variation: Variation, status: VariationStatus, quotes: Vec<Quote>) -> Self {
+        Self { variation, status, quotes }
+    }
+
+    /// The variation that produced these quotes.
+    pub fn variation(&self) -> &Variation {
+        &self.variation
+    }
+
+    /// How the variation ended.
+    pub fn status(&self) -> VariationStatus {
+        self.status
+    }
+
+    /// The quotes this variation produced, best first. Empty unless [`Self::status`] is
+    /// [`VariationStatus::Success`].
+    ///
+    /// One quote for a filter variation, up to n for `Alternatives(n)`. Each is encoded like the
+    /// main quote. The server's price guard does not check it, and the server does not simulate
+    /// it.
+    pub fn quotes(&self) -> &[Quote] {
+        &self.quotes
     }
 }
 

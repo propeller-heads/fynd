@@ -11,7 +11,7 @@ use crate::{
     types::{
         BackendKind, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus,
         Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
-        QuoteStatus, Route, SimulationResult, Swap, Transaction, UserTransferType,
+        QuoteStatus, Route, SimulationResult, Swap, Transaction, UserTransferType, VariationQuote,
     },
 };
 // ============================================================================
@@ -140,7 +140,7 @@ impl TryFrom<QuoteOptions> for dto::QuoteOptions {
         if let Some(filter) = opts.route_filter {
             dto_opts = dto_opts.with_route_filter(filter);
         }
-        Ok(dto_opts)
+        Ok(dto_opts.with_variations(opts.variations))
     }
 }
 
@@ -270,6 +270,18 @@ fn order_quote_to_quote(
             }
             dto::SimulationResult::Failure { reason } => SimulationResult::Failure { reason },
         });
+    for variation_quote in order_quote.into_variations() {
+        let (variation, status, order_quotes) = variation_quote.into_parts();
+        let quotes = order_quotes
+            .into_iter()
+            .map(|nested| {
+                order_quote_to_quote(nested, quote.token_out().clone(), quote.receiver().clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        quote
+            .variations
+            .push(VariationQuote::new(variation, status, quotes));
+    }
     Ok(quote)
 }
 

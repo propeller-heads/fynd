@@ -513,6 +513,12 @@ export interface components {
             /** @description Status indicating whether a route was found. */
             status: components["schemas"]["QuoteStatus"];
             transaction?: null | components["schemas"]["Transaction"];
+            /**
+             * @description Quotes for each requested variation, one entry per variation, in request order.
+             *
+             *     Absent when the request asked for no variations, and on every quote inside a variation.
+             */
+            variations?: components["schemas"]["VariationQuote"][];
         };
         /**
          * @description Specifies the side of an order: sell (exact input) or buy (exact output).
@@ -648,6 +654,21 @@ export interface components {
              * @example 2000
              */
             timeout_ms?: number | null;
+            /**
+             * @description Extra ways to solve each order, beside the main solve. At most 4. Empty by default.
+             * @example [
+             *       "no_rfq",
+             *       {
+             *         "exclude_protocols": [
+             *           "uniswap_v2"
+             *         ]
+             *       },
+             *       {
+             *         "alternatives": 2
+             *       }
+             *     ]
+             */
+            variations?: components["schemas"]["Variation"][];
         };
         /** @description Request to solve one or more swap orders. */
         QuoteRequest: {
@@ -867,6 +888,50 @@ export interface components {
          * @enum {string}
          */
         UserTransferType: "transfer_from_permit2" | "transfer_from" | "use_vaults_funds";
+        /**
+         * @description One extra way to solve an order, asked for beside the main solve.
+         *
+         *     A request may ask for at most 4 variations. Each one gets an entry with a status and its
+         *     quotes in the order quote's `variations`, in request order. Each variation is another solve
+         *     and adds solve time. The filter variations are `no_rfq`, `no_pamm` and `exclude_protocols`.
+         *     Each one solves the order again with more liquidity excluded, on top of the request's
+         *     `route_filter`. When the request has encoding options, each variation quote is encoded like
+         *     the main quote. The price guard does not check a variation quote, and the server does not
+         *     simulate it.
+         */
+        Variation: "no_rfq" | "no_pamm" | {
+            /**
+             * @description Solve without these protocol systems. Matches exact names (`uniswap_v2`) or a family
+             *     prefix ending in `:` (`fallback:`).
+             */
+            exclude_protocols: string[];
+        } | {
+            /**
+             * @description Find up to this many more routes, from 1 to 4. Each route excludes every pool used by the
+             *     main route or by earlier alternatives.
+             */
+            alternatives: number;
+        };
+        /** @description The quotes for one requested [`Variation`] of one order. */
+        VariationQuote: {
+            /**
+             * @description The quotes this variation produced, best first. Empty unless `status` is `success`.
+             *
+             *     One quote for a filter variation, up to n for `alternatives: n`. Each quote is a full
+             *     order quote with a route, encoded like the main quote. The price guard does not check it,
+             *     and the server does not simulate it.
+             */
+            quotes: components["schemas"]["OrderQuote"][];
+            /** @description How the variation ended. */
+            status: components["schemas"]["VariationStatus"];
+            /** @description The variation that produced these quotes. */
+            variation: components["schemas"]["Variation"];
+        };
+        /**
+         * @description How one variation of one order ended.
+         * @enum {string}
+         */
+        VariationStatus: "success" | "no_route_found" | "insufficient_liquidity" | "timeout" | "unsupported";
     };
     responses: never;
     parameters: never;

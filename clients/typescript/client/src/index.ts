@@ -23,6 +23,9 @@ export type {
   Swap,
   Transaction,
   UserTransferType,
+  Variation,
+  VariationQuote,
+  VariationStatus,
 } from "./types.js";
 export { FyndError } from "./error.js";
 export type { ClientErrorCode, ErrorCode, ServerErrorCode } from "./error.js";

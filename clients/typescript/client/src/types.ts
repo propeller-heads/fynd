@@ -121,6 +121,21 @@ export interface RouteFilter {
   excludeTokens?: Address[];
 }
 
+/**
+ * One extra way to solve an order, asked for beside the main solve.
+ *
+ * `'no_rfq'` solves without RFQ liquidity, `'no_pamm'` without pAMM liquidity, and
+ * `excludeProtocols` without the protocol systems it names. `alternatives` finds up to that many
+ * more routes (1 to 4). Each route excludes every pool used by the main route or by earlier
+ * alternatives. A request may ask for at most 4 variations. The quotes are returned in
+ * {@link Quote.variations}. Each variation is another solve and adds solve time.
+ */
+export type Variation =
+  | 'no_rfq'
+  | 'no_pamm'
+  | { excludeProtocols: string[] }
+  | { alternatives: number };
+
 /** Optional parameters for a quote request. */
 export interface QuoteOptions {
   /** Server-side solver timeout in milliseconds. */
@@ -133,6 +148,8 @@ export interface QuoteOptions {
   encodingOptions?: EncodingOptions;
   /** Liquidity this request excludes from a route. */
   routeFilter?: RouteFilter;
+  /** Extra ways to solve the order, beside the main solve. At most 4. */
+  variations?: Variation[];
 }
 
 /** Input parameters for {@link FyndClient.quote}. */
@@ -215,6 +232,42 @@ export interface Quote {
   feeBreakdown?: FeeBreakdown;
   /** Simulation outcome; present when `encodingOptions.simulate` was set. */
   simulationResult?: SimulationResult;
+  /**
+   * Quotes for each requested variation, in request order. Present only when the request set
+   * `variations`. Quotes inside a variation have none of their own.
+   */
+  variations?: VariationQuote[];
+}
+
+/**
+ * How one variation of one order ended. Must stay in sync with the server schema.
+ *
+ * - `'success'`: the variation found at least one route, and its quotes are attached.
+ * - `'no_route_found'`: the variation found no usable route, or the order has no main quote.
+ * - `'insufficient_liquidity'`: the variation found paths, but none could take the order's amount.
+ * - `'timeout'`: the variation ran out of time before it found a route.
+ * - `'unsupported'`: the solver of the main quote does not solve variations.
+ */
+export type VariationStatus =
+  | 'success'
+  | 'no_route_found'
+  | 'insufficient_liquidity'
+  | 'timeout'
+  | 'unsupported';
+
+/** The quotes for one requested {@link Variation} of one order. */
+export interface VariationQuote {
+  /** The variation that produced these quotes. */
+  variation: Variation;
+  /** How the variation ended. */
+  status: VariationStatus;
+  /**
+   * The quotes this variation produced, best first. Empty unless `status` is `'success'`.
+   *
+   * One quote for a filter variation, up to n for `alternatives: n`. Each is encoded like the
+   * main quote. The server's price guard does not check it, and the server does not simulate it.
+   */
+  quotes: Quote[];
 }
 
 /** Solver health status and readiness information. */

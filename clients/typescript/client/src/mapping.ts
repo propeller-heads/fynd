@@ -18,6 +18,8 @@ import type {
     SimulationResult,
     Swap,
     Transaction,
+    Variation,
+    VariationQuote,
 } from "./types.js";
 
 type WireOrder = components["schemas"]["Order"];
@@ -37,6 +39,9 @@ type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
 type WireSimulationResult = components["schemas"]["SimulationResult"];
 type WireRouteFilter = components["schemas"]["RouteFilter"];
+type WireOrderQuote = components["schemas"]["OrderQuote"];
+type WireVariation = components["schemas"]["Variation"];
+type WireVariationQuote = components["schemas"]["VariationQuote"];
 
 
 export function toWireRequest(params: QuoteParams): WireSolutionRequest {
@@ -66,6 +71,9 @@ export function toWireRequest(params: QuoteParams): WireSolutionRequest {
             ...(params.options.routeFilter !== undefined
                 ? {route_filter: toWireRouteFilter(params.options.routeFilter)}
                 : {}),
+            ...(params.options.variations !== undefined
+                ? {variations: params.options.variations.map(toWireVariation)}
+                : {}),
         }
         : undefined;
     return {
@@ -84,6 +92,38 @@ function toWireRouteFilter(filter: RouteFilter): WireRouteFilter {
     };
 }
 
+function toWireVariation(variation: Variation): WireVariation {
+    if (typeof variation === 'string') {
+        return variation;
+    }
+    if ('excludeProtocols' in variation) {
+        return {exclude_protocols: variation.excludeProtocols};
+    }
+    return {alternatives: variation.alternatives};
+}
+
+function fromWireVariation(wire: WireVariation): Variation {
+    if (typeof wire === 'string') {
+        return wire;
+    }
+    if ('exclude_protocols' in wire) {
+        return {excludeProtocols: wire.exclude_protocols};
+    }
+    return {alternatives: wire.alternatives};
+}
+
+function fromWireVariationQuote(
+    wire: WireVariationQuote,
+    tokenOut: Address,
+    receiver: Address,
+): VariationQuote {
+    return {
+        variation: fromWireVariation(wire.variation),
+        status: wire.status,
+        quotes: wire.quotes.map((quote) => fromWireOrderQuote(quote, tokenOut, receiver)),
+    };
+}
+
 export function fromWireQuote(
     wire: WireSolution,
     tokenOut: Address,
@@ -93,6 +133,14 @@ export function fromWireQuote(
     if (orderSolution === undefined) {
         throw FyndError.config("server returned empty orders array");
     }
+    return fromWireOrderQuote(orderSolution, tokenOut, receiver);
+}
+
+function fromWireOrderQuote(
+    orderSolution: WireOrderQuote,
+    tokenOut: Address,
+    receiver: Address,
+): Quote {
     const route = orderSolution.route !== null && orderSolution.route !== undefined
         ? fromWireRoute(orderSolution.route)
         : undefined;
@@ -108,6 +156,9 @@ export function fromWireQuote(
     const simulationResult = orderSolution.simulation_result != null
         ? fromWireSimulationResult(orderSolution.simulation_result)
         : undefined;
+    const variations = orderSolution.variations?.map(
+        (variationQuote) => fromWireVariationQuote(variationQuote, tokenOut, receiver),
+    );
     return {
         orderId: orderSolution.order_id,
         status: orderSolution.status,
@@ -125,6 +176,7 @@ export function fromWireQuote(
         ...(algorithm !== undefined ? {algorithm} : {}),
         ...(feeBreakdown !== undefined ? {feeBreakdown} : {}),
         ...(simulationResult !== undefined ? {simulationResult} : {}),
+        ...(variations !== undefined ? {variations} : {}),
     };
 }
 
