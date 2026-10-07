@@ -1,7 +1,9 @@
 //! API error types and error response handling.
 
 use actix_web::{http::StatusCode, HttpResponse, ResponseError};
-use fynd_core::{EncodingOptionsError, OrderValidationError, SolveError};
+use fynd_core::{
+    EncodingOptionsError, OrderValidationError, SolveError, VariationsValidationError,
+};
 pub use fynd_rpc_types::ErrorResponse;
 use tracing::warn;
 
@@ -62,6 +64,9 @@ pub enum RequestValidationError {
     /// The encoding options failed [`fynd_core::EncodingOptions::validate`].
     #[error("invalid encoding options: {0}")]
     InvalidEncodingOptions(#[from] EncodingOptionsError),
+    /// The variations failed [`fynd_core::validate_variations`].
+    #[error("invalid variations: {0}")]
+    InvalidVariations(#[from] VariationsValidationError),
 }
 
 impl RequestValidationError {
@@ -85,6 +90,7 @@ impl RequestValidationError {
                     "INVALID_ENCODING_OPTIONS"
                 }
             },
+            Self::InvalidVariations(_) => "INVALID_VARIATIONS",
         }
     }
 }
@@ -107,6 +113,7 @@ pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
         SolveError::InvalidOrder(_) => "INVALID_ORDER",
         SolveError::Internal(_) => "INTERNAL_ERROR",
         SolveError::InvalidWorkerPools(_) => "INVALID_WORKER_POOLS",
+        SolveError::InvalidVariations(_) => "INVALID_VARIATIONS",
         SolveError::NotReady(_) => "NOT_READY",
         SolveError::ComputationFailed(_) => "COMPUTATION_FAILED",
         SolveError::FailedEncoding(_) => "FAILED_ENCODING",
@@ -133,6 +140,7 @@ impl ResponseError for ApiError {
                 SolveError::MarketDataStale { .. } => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::ComputationFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
                 SolveError::EncodingUnavailable(_) => StatusCode::NOT_IMPLEMENTED,
+                SolveError::InvalidVariations(_) => StatusCode::BAD_REQUEST,
                 _ => StatusCode::UNPROCESSABLE_ENTITY,
             },
             ApiError::ServiceOverloaded => StatusCode::SERVICE_UNAVAILABLE,

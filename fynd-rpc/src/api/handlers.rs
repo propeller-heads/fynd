@@ -124,8 +124,9 @@ pub async fn quote(
 /// # Errors
 ///
 /// [`ApiError::InvalidRequest`] naming the rule the request broke: no orders, an order that fails
-/// [`fynd_core::Order::validate`], or encoding options that fail
-/// [`fynd_core::EncodingOptions::validate`].
+/// [`fynd_core::Order::validate`], encoding options that fail
+/// [`fynd_core::EncodingOptions::validate`], or variations that fail
+/// [`fynd_core::validate_variations`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
@@ -147,6 +148,8 @@ pub fn validate_quote_request(
             .validate()
             .map_err(RequestValidationError::from)?;
     }
+    fynd_core::validate_variations(core_request.options().variations())
+        .map_err(RequestValidationError::from)?;
     Ok(core_request)
 }
 

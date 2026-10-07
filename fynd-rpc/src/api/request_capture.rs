@@ -96,6 +96,9 @@ impl ReplayExclusionRouteFilter {
 /// harness re-sends each as its proxy-injected header. An outcome that
 /// depended on `price_guard` may not reproduce on replay.
 ///
+/// The capture leaves out `variations`. A replay does not solve or encode them, so a load test
+/// built from replays understates the load of requests that asked for variations.
+///
 /// These field names are also the request half of the quote record's wire format, which
 /// `RequestRecord` flattens this type into. Renaming one is a collector-visible change, so it
 /// needs a `record::SCHEMA_VERSION` bump. Everything else about the serialized shape — which

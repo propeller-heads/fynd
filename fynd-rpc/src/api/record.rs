@@ -34,6 +34,9 @@ use crate::api::{
 pub const SCHEMA_VERSION: u16 = 1;
 
 /// One answered quote request, as the collector receives it.
+///
+/// The record leaves out variations: its request half has no `variations`, and its orders hold
+/// only the main quotes.
 #[must_use]
 #[serde_as]
 #[derive(Debug, Serialize)]

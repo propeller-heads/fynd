@@ -12,6 +12,8 @@
 //! - **`openapi`** — derives `utoipa::ToSchema` on all types for OpenAPI spec generation.
 //! - **`core`** — enables `Into` conversions between wire DTOs and `fynd-core` domain types.
 
+use std::num::NonZeroUsize;
+
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -209,6 +211,33 @@ impl RouteFilter {
     }
 }
 
+/// One extra way to solve an order, asked for beside the main solve.
+///
+/// A request may ask for at most 4 variations. Each one gets an entry with a status and its
+/// quotes in the order quote's `variations`, in request order. Each variation is another solve
+/// and adds solve time. The filter variations are `no_rfq`, `no_pamm` and `exclude_protocols`.
+/// Each one solves the order again with more liquidity excluded, on top of the request's
+/// `route_filter`. When the request has encoding options, each variation quote is encoded like
+/// the main quote. The price guard does not check a variation quote, and the server does not
+/// simulate it.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum Variation {
+    /// Solve without RFQ liquidity: the `rfq:` and `fallback:rfq:` protocol families.
+    NoRfq,
+    /// Solve without pAMM liquidity: the `fallback:` protocol family.
+    NoPamm,
+    /// Solve without these protocol systems. Matches exact names (`uniswap_v2`) or a family
+    /// prefix ending in `:` (`fallback:`).
+    ExcludeProtocols(Vec<String>),
+    /// Find up to this many more routes, from 1 to 4. Each route excludes every pool used by the
+    /// main route or by earlier alternatives.
+    #[cfg_attr(feature = "openapi", schema(value_type = usize))]
+    Alternatives(NonZeroUsize),
+}
+
 /// Options to customize the solving behavior.
 #[must_use]
 #[serde_as]
@@ -235,6 +264,17 @@ pub struct QuoteOptions {
     /// Liquidity this request excludes from a route. If None, nothing is excluded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     route_filter: Option<RouteFilter>,
+    /// Extra ways to solve each order, beside the main solve. At most 4. Empty by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(example = json!([
+            "no_rfq",
+            {"exclude_protocols": ["uniswap_v2"]},
+            {"alternatives": 2}
+        ]))
+    )]
+    variations: Vec<Variation>,
 }
 
 impl QuoteOptions {
@@ -268,6 +308,13 @@ impl QuoteOptions {
         self
     }
 
+    /// Also solves each order under these variations. The server refuses more than 4, or an
+    /// `alternatives` count above 4, with HTTP 400.
+    pub fn with_variations(mut self, variations: Vec<Variation>) -> Self {
+        self.variations = variations;
+        self
+    }
+
     /// Timeout in milliseconds, if set.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -291,6 +338,11 @@ impl QuoteOptions {
     /// What this request excludes from a route, if set.
     pub fn route_filter(&self) -> Option<&RouteFilter> {
         self.route_filter.as_ref()
+    }
+
+    /// The variations to solve beside the main solve. Empty unless some were set.
+    pub fn variations(&self) -> &[Variation] {
+        &self.variations
     }
 }
 
@@ -954,6 +1006,11 @@ pub struct OrderQuote {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "openapi", schema(example = "bellman_ford"))]
     algorithm: Option<String>,
+    /// Quotes for each requested variation, one entry per variation, in request order.
+    ///
+    /// Absent when the request asked for no variations, and on every quote inside a variation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    variations: Vec<VariationQuote>,
 }
 
 impl OrderQuote {
@@ -1026,6 +1083,75 @@ impl OrderQuote {
     pub fn simulation_result(&self) -> Option<&SimulationResult> {
         self.simulation_result.as_ref()
     }
+
+    /// Quotes for each requested variation, in request order. Empty when none were asked for.
+    pub fn variations(&self) -> &[VariationQuote] {
+        &self.variations
+    }
+
+    /// Consume this quote and return the quotes for each requested variation.
+    pub fn into_variations(self) -> Vec<VariationQuote> {
+        self.variations
+    }
+}
+
+/// The quotes for one requested [`Variation`] of one order.
+#[must_use]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct VariationQuote {
+    /// The variation that produced these quotes.
+    variation: Variation,
+    /// How the variation ended.
+    status: VariationStatus,
+    /// The quotes this variation produced, best first. Empty unless `status` is `success`.
+    ///
+    /// One quote for a filter variation, up to n for `alternatives: n`. Each quote is a full
+    /// order quote with a route, encoded like the main quote. The price guard does not check it,
+    /// and the server does not simulate it.
+    #[cfg_attr(feature = "openapi", schema(no_recursion))]
+    quotes: Vec<OrderQuote>,
+}
+
+impl VariationQuote {
+    /// The variation that produced these quotes.
+    pub fn variation(&self) -> &Variation {
+        &self.variation
+    }
+
+    /// How the variation ended.
+    pub fn status(&self) -> VariationStatus {
+        self.status
+    }
+
+    /// The quotes this variation produced, best first. Empty unless the status is
+    /// [`VariationStatus::Success`].
+    pub fn quotes(&self) -> &[OrderQuote] {
+        &self.quotes
+    }
+
+    /// Consume this entry and return the variation, its status and its quotes.
+    pub fn into_parts(self) -> (Variation, VariationStatus, Vec<OrderQuote>) {
+        (self.variation, self.status, self.quotes)
+    }
+}
+
+/// How one variation of one order ended.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum VariationStatus {
+    /// The variation found at least one route, and its quotes are attached.
+    Success,
+    /// The variation found no usable route, or the order has no main quote.
+    NoRouteFound,
+    /// The variation found paths, but none could take the order's amount.
+    InsufficientLiquidity,
+    /// The variation ran out of time before it found a route.
+    Timeout,
+    /// The solver of the main quote does not solve variations.
+    Unsupported,
 }
 
 /// Outcome of simulating an encoded quote on the latest block.
@@ -1818,7 +1944,25 @@ mod conversions {
             if let Some(filter) = self.route_filter {
                 opts = opts.with_route_filter(filter.into());
             }
-            opts
+            opts.with_variations(
+                self.variations
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            )
+        }
+    }
+
+    impl Into<fynd_core::Variation> for Variation {
+        fn into(self) -> fynd_core::Variation {
+            match self {
+                Variation::NoRfq => fynd_core::Variation::NoRfq,
+                Variation::NoPamm => fynd_core::Variation::NoPamm,
+                Variation::ExcludeProtocols(protocols) => {
+                    fynd_core::Variation::ExcludeProtocols(protocols)
+                }
+                Variation::Alternatives(count) => fynd_core::Variation::Alternatives(count),
+            }
         }
     }
 
@@ -1974,7 +2118,7 @@ mod conversions {
         // intentionally NOT mapped onto this public response DTO — they are internal (the per-leg
         // committed amount reaches the encoder; the order-level surplus is for observability).
         // Exposing them would leak the captured surplus to clients.
-        fn from(core: fynd_core::OrderQuote) -> Self {
+        fn from(mut core: fynd_core::OrderQuote) -> Self {
             let order_id = core.order_id().to_string();
             let status = core.status().into();
             let amount_in = core.amount_in().clone();
@@ -1997,6 +2141,11 @@ mod conversions {
                 .cloned()
                 .map(Into::into);
             let algorithm = (!core.algorithm().is_empty()).then(|| core.algorithm().to_string());
+            let variations = core
+                .take_variations()
+                .into_iter()
+                .map(Into::into)
+                .collect();
             let route = core.into_route().map(Into::into);
             Self {
                 order_id,
@@ -2013,6 +2162,58 @@ mod conversions {
                 fee_breakdown,
                 simulation_result,
                 algorithm,
+                variations,
+            }
+        }
+    }
+
+    impl From<fynd_core::VariationQuote> for VariationQuote {
+        fn from(core: fynd_core::VariationQuote) -> Self {
+            let (variation, status, quotes) = core.into_parts();
+            Self {
+                variation: variation.into(),
+                status: status.into(),
+                quotes: quotes
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            }
+        }
+    }
+
+    impl From<fynd_core::Variation> for Variation {
+        fn from(core: fynd_core::Variation) -> Self {
+            match core {
+                fynd_core::Variation::NoRfq => Self::NoRfq,
+                fynd_core::Variation::NoPamm => Self::NoPamm,
+                fynd_core::Variation::ExcludeProtocols(protocols) => {
+                    Self::ExcludeProtocols(protocols)
+                }
+                fynd_core::Variation::Alternatives(count) => Self::Alternatives(count),
+            }
+        }
+    }
+
+    impl From<fynd_core::VariationStatus> for VariationStatus {
+        fn from(core: fynd_core::VariationStatus) -> Self {
+            match core {
+                fynd_core::VariationStatus::Success => Self::Success,
+                fynd_core::VariationStatus::NoRouteFound => Self::NoRouteFound,
+                fynd_core::VariationStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
+                fynd_core::VariationStatus::Timeout => Self::Timeout,
+                fynd_core::VariationStatus::Unsupported => Self::Unsupported,
+            }
+        }
+    }
+
+    impl From<VariationStatus> for fynd_core::VariationStatus {
+        fn from(status: VariationStatus) -> Self {
+            match status {
+                VariationStatus::Success => Self::Success,
+                VariationStatus::NoRouteFound => Self::NoRouteFound,
+                VariationStatus::InsufficientLiquidity => Self::InsufficientLiquidity,
+                VariationStatus::Timeout => Self::Timeout,
+                VariationStatus::Unsupported => Self::Unsupported,
             }
         }
     }
