@@ -9,7 +9,11 @@
 //! 4. Ranking the solved sequences by net output (output less gas, in the output token)
 //! 5. Building swaps for the winner alone, with stats recorded to the tracing span
 
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use metrics::{counter, histogram};
 use num_bigint::{BigInt, BigUint};
@@ -23,7 +27,7 @@ use tycho_simulation::{
     tycho_core::models::{token::Token, Address},
 };
 
-use super::{Algorithm, AlgorithmConfig, NoPathReason};
+use super::{Algorithm, AlgorithmConfig, NoPathReason, SolvedRoutes, VariationRoutes};
 use crate::{
     algorithm::{
         path_scoring::{
@@ -36,11 +40,11 @@ use crate::{
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
     derived::{computation::ComputationRequirements, types::TokenGasPrices},
-    feed::market_data::MarketState,
+    feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
         GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
     },
-    types::{ComponentId, Order, Route, RouteExclusions, RouteResult, Swap},
+    types::{BlockInfo, ComponentId, Order, Route, RouteExclusions, RouteResult, Swap, Variation},
     AlgorithmError,
 };
 
@@ -71,19 +75,108 @@ type LegTokens<'a> = (&'a Token, &'a Token, Option<&'a Price>);
 /// What every candidate on one order is solved against.
 ///
 /// Fixed for the whole solve, so it travels as one argument rather than as five that would have to
-/// stay in step.
+/// stay in step. The graph has its own lifetime because the swap cache borrows from it and lives
+/// across the main solve and every variation, while the market snapshot can grow between them.
 #[derive(Clone, Copy)]
-struct SolveContext<'a> {
-    graph: &'a TopologyGraph<DepthAndPrice>,
-    market: &'a MarketState,
-    /// The pools and tokens this request excludes, checked before a pool is simulated.
-    exclusions: &'a RouteExclusions,
-    token_prices: Option<&'a TokenGasPrices>,
-    amount_in: &'a BigUint,
+struct SolveContext<'g, 'm> {
+    graph: &'g TopologyGraph<DepthAndPrice>,
+    market: &'m MarketState,
+    /// The pools and tokens this solve excludes, checked before a pool is simulated.
+    exclusions: &'m RouteExclusions,
+    token_prices: Option<&'m TokenGasPrices>,
+    amount_in: &'m BigUint,
     /// What a unit of gas costs, read once off the market snapshot.
-    gas_price: &'a BigUint,
+    gas_price: &'m BigUint,
     /// When the solve started, against which every candidate checks the timeout.
     start: Instant,
+    /// The request deadline a variation stops at. `None` for the main solve, which stops at the
+    /// timeout only.
+    deadline: Option<Instant>,
+}
+
+/// What the main solve and every variation of one order share.
+///
+/// One market snapshot, one swap cache and one read of the gas and token prices, so a variation
+/// costs a graph search and the simulations the main solve did not already make.
+struct OrderSolveState<'g> {
+    graph: &'g TopologyGraph<DepthAndPrice>,
+    order: &'g Order,
+    /// The live market, read again only to extend the snapshot.
+    live_market: MarketData,
+    label: Option<StateLabel>,
+    snapshot: MarketState,
+    /// Pools already requested while extending the snapshot, including pools missing from the
+    /// market. Remembering missing pools avoids another read lock for the same lookup in each
+    /// round.
+    requested_pool_ids: FxHashSet<&'g ComponentId>,
+    swaps: SwapCache<'g>,
+    token_prices: Option<Arc<TokenGasPrices>>,
+    gas_price: BigUint,
+    start: Instant,
+    /// The caller's deadline for receiving the result, if set.
+    deadline: Option<Instant>,
+}
+
+impl OrderSolveState<'_> {
+    /// Adds pools on `scored_paths` that are missing from the snapshot.
+    ///
+    /// A variation excludes more than the main solve, so its ranking and `max_routes` cut can
+    /// reach token sequences the main solve never simulated.
+    async fn extend_snapshot(
+        &mut self,
+        scored_paths: &[(TokenPath, f64)],
+        exclusions: &RouteExclusions,
+    ) {
+        let mut missing_pool_ids = collect_pools_on_paths(self.graph, scored_paths, exclusions);
+        missing_pool_ids.retain(|component_id| {
+            self.snapshot
+                .get_component(component_id)
+                .is_none() &&
+                !self
+                    .requested_pool_ids
+                    .contains(component_id)
+        });
+        if missing_pool_ids.is_empty() {
+            return;
+        }
+        self.requested_pool_ids
+            .extend(missing_pool_ids.iter().copied());
+
+        // If the labeled overlay has been evicted, the variation uses the existing snapshot, which
+        // remains valid.
+        let market = match paths::read_market(&self.live_market, self.label.clone()).await {
+            Ok(market) => market,
+            Err(error) => {
+                debug!(
+                    %error,
+                    components = missing_pool_ids.len(),
+                    "could not read the market to extend the snapshot"
+                );
+                return;
+            }
+        };
+        let extension = market.extract_subset_with_overlay(&missing_pool_ids);
+        drop(market);
+
+        let snapshot_block = self
+            .snapshot
+            .last_updated()
+            .map(BlockInfo::number);
+        let extension_block = extension
+            .last_updated()
+            .map(BlockInfo::number);
+        // The swap cache keeps amounts from the first read. The new pools join the snapshot, and
+        // the solve goes on with mixed blocks.
+        if snapshot_block != extension_block {
+            debug!(
+                ?snapshot_block,
+                ?extension_block,
+                components = missing_pool_ids.len(),
+                "market moved to a new block between snapshot reads"
+            );
+        }
+        self.snapshot.merge_subset(extension);
+    }
 }
 
 /// Returns pools connecting consecutive tokens in `scored_paths`, excluding pools in
@@ -109,6 +202,14 @@ fn collect_pools_on_paths<'g>(
         }
     }
     component_ids
+}
+
+fn exclude_route_pools(exclusions: &mut RouteExclusions, route: &Route) {
+    for swap in route.swaps() {
+        exclusions
+            .pools
+            .insert(swap.component_id().to_string());
+    }
 }
 
 fn measure_elapsed_ms(start: Instant) -> u64 {
@@ -167,7 +268,7 @@ struct SolveReport {
     paths_candidates: usize,
     /// Of those, the ones left after ranking and the `max_routes` cut.
     paths_to_simulate: usize,
-    /// Of those, the ones reached before the timeout stopped the solve.
+    /// Of those, the ones reached before the timeout or the deadline stopped the solve.
     paths_simulated: usize,
     /// Sequences the ranking could not place at all, so they were never simulated.
     scoring_failures: usize,
@@ -181,6 +282,22 @@ impl SolveReport {
     /// How much of what was worth simulating actually got simulated, as a percentage.
     fn coverage_pct(&self) -> f64 {
         (self.paths_simulated as f64 / self.paths_to_simulate as f64) * 100.0
+    }
+
+    /// Logs one variation's solve statistics and whether it found a route.
+    ///
+    /// A variation records no metric, so the solve metrics count main solves only.
+    fn log_variation(&self, variation: &Variation, route_found: bool) {
+        debug!(
+            ?variation,
+            route_found,
+            paths_candidates = self.paths_candidates,
+            paths_to_simulate = self.paths_to_simulate,
+            paths_simulated = self.paths_simulated,
+            simulation_failures = self.simulation_failures,
+            validation_failures = self.validation_failures,
+            "variation solved"
+        );
     }
 
     /// Records the counters and writes the line that says how the solve went.
@@ -448,7 +565,7 @@ impl MostLiquidAlgorithm {
     /// over a route whose hops name distinct pools -- and they cover protocols whose components
     /// share state behind the scenes.
     fn build_route(
-        ctx: &SolveContext<'_>,
+        ctx: &SolveContext<'_, '_>,
         token_path: &[NodeIndex],
         solved: &SolvedTokenPath,
     ) -> Result<Route, AlgorithmError> {
@@ -556,27 +673,166 @@ impl MostLiquidAlgorithm {
         Ok((scored_paths, report))
     }
 
+    /// Solves `scored_paths` against the shared snapshot and swap cache, under `exclusions`.
+    ///
+    /// `deadline` is `None` for the main solve, which keeps only the algorithm timeout.
+    fn solve_scored_paths<'g>(
+        &self,
+        state: &mut OrderSolveState<'g>,
+        scored_paths: &[(TokenPath, f64)],
+        report: &mut SolveReport,
+        exclusions: &RouteExclusions,
+        deadline: Option<Instant>,
+    ) -> Result<Option<RouteResult>, AlgorithmError> {
+        let OrderSolveState {
+            graph,
+            order,
+            live_market: _,
+            label: _,
+            snapshot,
+            requested_pool_ids: _,
+            swaps,
+            token_prices,
+            gas_price,
+            start,
+            deadline: _,
+        } = state;
+        let ctx = SolveContext {
+            graph,
+            market: snapshot,
+            exclusions,
+            token_prices: token_prices.as_deref(),
+            amount_in: order.amount(),
+            gas_price,
+            start: *start,
+            deadline,
+        };
+        self.solve_for_best_path(scored_paths, report, &ctx, swaps)
+    }
+
+    /// Whether a solve has run past the algorithm timeout or `deadline`.
+    fn is_out_of_time(&self, elapsed_ms: u64, deadline: Option<Instant>) -> bool {
+        elapsed_ms > self.timeout.as_millis() as u64 ||
+            deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    /// Returns `Timeout` if a solve that found no route ran past its timeout or `deadline`,
+    /// otherwise `InsufficientLiquidity`.
+    fn classify_no_route(&self, solve_time_ms: u64, deadline: Option<Instant>) -> AlgorithmError {
+        if self.is_out_of_time(solve_time_ms, deadline) {
+            AlgorithmError::Timeout { elapsed_ms: solve_time_ms }
+        } else {
+            AlgorithmError::InsufficientLiquidity
+        }
+    }
+
+    /// The best route that avoids `exclusions`, solved with the shared snapshot and swap cache.
+    ///
+    /// Stops at the algorithm timeout or the request deadline, whichever comes first, also in the
+    /// middle of the path loop.
+    ///
+    /// Each call gets its own pair winners: a pair's remembered winner can be a pool these
+    /// exclusions remove.
+    async fn solve_with_exclusions(
+        &self,
+        state: &mut OrderSolveState<'_>,
+        variation: &Variation,
+        exclusions: &RouteExclusions,
+    ) -> Result<RouteResult, AlgorithmError> {
+        let elapsed_ms = measure_elapsed_ms(state.start);
+        if self.is_out_of_time(elapsed_ms, state.deadline) {
+            return Err(AlgorithmError::Timeout { elapsed_ms });
+        }
+        let (scored_paths, mut report) =
+            self.rank_token_paths(state.graph, state.order, exclusions)?;
+        state
+            .extend_snapshot(&scored_paths, exclusions)
+            .await;
+        let deadline = state.deadline;
+        let route =
+            self.solve_scored_paths(state, &scored_paths, &mut report, exclusions, deadline)?;
+        report.log_variation(variation, route.is_some());
+        route.ok_or_else(|| self.classify_no_route(measure_elapsed_ms(state.start), deadline))
+    }
+
+    /// Up to `count` more routes after `main_route`, each avoiding every pool of the routes
+    /// before it.
+    ///
+    /// Stops when a round finds no route; returns an error only if the first round finds no
+    /// route.
+    async fn solve_alternatives(
+        &self,
+        state: &mut OrderSolveState<'_>,
+        variation: &Variation,
+        mut exclusions: RouteExclusions,
+        main_route: &RouteResult,
+        count: NonZeroUsize,
+    ) -> Result<Vec<RouteResult>, AlgorithmError> {
+        exclude_route_pools(&mut exclusions, main_route.route());
+        let mut alternatives = Vec::with_capacity(count.get());
+        while alternatives.len() < count.get() {
+            let alternative = match self
+                .solve_with_exclusions(state, variation, &exclusions)
+                .await
+            {
+                Ok(alternative) => alternative,
+                Err(error) if alternatives.is_empty() => return Err(error),
+                Err(error) => {
+                    debug!(%error, found = alternatives.len(), "no more alternative routes");
+                    break;
+                }
+            };
+            exclude_route_pools(&mut exclusions, alternative.route());
+            alternatives.push(alternative);
+        }
+        Ok(alternatives)
+    }
+
+    /// Solves each variation under its own exclusions, in request order.
+    async fn solve_variations(
+        &self,
+        state: &mut OrderSolveState<'_>,
+        main_route: &RouteResult,
+        variations: &[(Variation, Arc<RouteExclusions>)],
+    ) -> VariationRoutes {
+        let mut variation_routes = Vec::with_capacity(variations.len());
+        for (variation, exclusions) in variations {
+            let routes = match variation {
+                Variation::Alternatives(count) => {
+                    let exclusions = RouteExclusions::clone(exclusions);
+                    self.solve_alternatives(state, variation, exclusions, main_route, *count)
+                        .await
+                }
+                Variation::NoRfq | Variation::NoPamm | Variation::ExcludeProtocols(_) => self
+                    .solve_with_exclusions(state, variation, exclusions)
+                    .await
+                    .map(|route| vec![route]),
+            };
+            variation_routes.push(routes);
+        }
+        variation_routes
+    }
+
     /// Solves `scored_paths` in rank order and builds the winner.
     ///
-    /// Stops at the timeout. `Ok(None)` when no sequence could be settled, none was reached in
-    /// time, or the winner failed validation.
-    fn solve_for_best_path(
+    /// Stops at the timeout, or at `ctx.deadline` when one is set. `Ok(None)` when no sequence
+    /// could be settled, none was reached in time, or the winner failed validation.
+    fn solve_for_best_path<'g>(
         &self,
         scored_paths: &[(TokenPath, f64)],
         report: &mut SolveReport,
-        ctx: &SolveContext,
+        ctx: &SolveContext<'g, '_>,
+        swaps: &mut SwapCache<'g>,
     ) -> Result<Option<RouteResult>, AlgorithmError> {
         let mut best_route: Option<(&TokenPath, SolvedTokenPath)> = None;
         let mut winners = PairWinners::new(self.cache_pair_swaps);
-        let mut swaps = SwapCache::new();
-        let timeout_ms = self.timeout.as_millis() as u64;
 
         for (token_path, _) in scored_paths {
-            if measure_elapsed_ms(ctx.start) > timeout_ms {
+            if self.is_out_of_time(measure_elapsed_ms(ctx.start), ctx.deadline) {
                 break;
             }
 
-            let solved = match Self::solve_token_path(ctx, token_path, &mut winners, &mut swaps) {
+            let solved = match Self::solve_token_path(ctx, token_path, &mut winners, swaps) {
                 Ok(solved) => solved,
                 Err(e) => {
                     trace!(error = %e, "could not solve path");
@@ -636,8 +892,8 @@ impl MostLiquidAlgorithm {
     /// both hops of A -> B -> C -- and a circular sequence crosses the same pair in both
     /// directions. Sequences whose hops all run out of pools this way are dropped, the same as any
     /// other sequence that cannot be settled.
-    fn solve_token_path<'g>(
-        ctx: &SolveContext<'g>,
+    fn solve_token_path<'g, 'm>(
+        ctx: &SolveContext<'g, 'm>,
         token_path: &[NodeIndex],
         winners: &mut PairWinners,
         swaps: &mut SwapCache<'g>,
@@ -647,7 +903,7 @@ impl MostLiquidAlgorithm {
         // Resolved before any pool is asked anything. It is a registry lookup that cannot depend on
         // an amount, and a sequence naming a token the market does not hold is not worth simulating
         // the legs before it.
-        let mut legs: SmallVec<[LegPools<'g, DepthAndPrice, LegTokens<'g>>; INLINE_EDGES]> =
+        let mut legs: SmallVec<[LegPools<'g, DepthAndPrice, LegTokens<'m>>; INLINE_EDGES]> =
             SmallVec::new();
         for pair in token_path.windows(2) {
             legs.push(LegPools {
@@ -666,11 +922,13 @@ impl MostLiquidAlgorithm {
                     return None;
                 }
                 let (token_in, token_out, token_out_gas_price) = leg.data;
+                // The addresses come from the graph, not the snapshot's tokens, so the cache can
+                // outlive a snapshot that grows between variations.
                 let paid = swaps.swap(
                     PoolDirection {
                         component_id,
-                        address_in: &token_in.address,
-                        address_out: &token_out.address,
+                        address_in: &graph[leg.pair.0],
+                        address_out: &graph[leg.pair.1],
                     },
                     amount,
                     SELECTION,
@@ -712,10 +970,10 @@ impl MostLiquidAlgorithm {
         Ok(SolvedTokenPath { hops: scored.hops, net_amount_out })
     }
 
-    fn get_pair_data<'a>(
-        ctx: &SolveContext<'a>,
+    fn get_pair_data<'m>(
+        ctx: &SolveContext<'_, 'm>,
         pair: &[NodeIndex],
-    ) -> Result<LegTokens<'a>, MostLiquidError> {
+    ) -> Result<LegTokens<'m>, MostLiquidError> {
         let token_in = ctx
             .market
             .get_token(&ctx.graph[pair[0]])
@@ -745,13 +1003,25 @@ impl Algorithm for MostLiquidAlgorithm {
         "most_liquid"
     }
 
-    // TODO: Consider adding token pair symbols to the span for easier interpretation
-    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
     async fn find_best_route(
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
+        let solved = self
+            .find_routes(request.with_variations(Vec::new()))
+            .await?;
+        let (main_route, _) = solved.into_parts();
+        Ok(main_route)
+    }
+
+    // TODO: Consider adding token pair symbols to the span for easier interpretation
+    #[instrument(level = "debug", skip_all, fields(order_id = %request.order().id()))]
+    async fn find_routes(
+        &self,
+        request: SolveRequest<'_, Self::GraphType>,
+    ) -> Result<SolvedRoutes, AlgorithmError> {
+        let SolveParts { graph, order, market, label, derived, exclusions, variations, deadline } =
+            request.into_parts();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -771,36 +1041,40 @@ impl Algorithm for MostLiquidAlgorithm {
 
         let (scored_paths, mut report) = self.rank_token_paths(graph, order, &exclusions)?;
         let component_ids = collect_pools_on_paths(graph, &scored_paths, &exclusions);
-        let market_view = paths::read_market(&market, label).await?;
+        let market_view = paths::read_market(&market, label.clone()).await?;
         let snapshot = market_view.extract_subset_with_overlay(&component_ids);
         drop(market_view);
         let gas_price = paths::fetch_gas_price(&snapshot)?;
 
-        let ctx = SolveContext {
+        let mut state = OrderSolveState {
             graph,
-            market: &snapshot,
-            token_prices: token_prices.as_deref(),
-            amount_in: order.amount(),
-            gas_price: &gas_price,
+            order,
+            live_market: market,
+            label,
+            snapshot,
+            requested_pool_ids: FxHashSet::default(),
+            swaps: SwapCache::new(),
+            token_prices,
+            gas_price,
             start,
-            exclusions: &exclusions,
+            deadline,
         };
-        let best_route = self.solve_for_best_path(&scored_paths, &mut report, &ctx)?;
+        let main_route =
+            self.solve_scored_paths(&mut state, &scored_paths, &mut report, &exclusions, None)?;
         let solve_time_ms = measure_elapsed_ms(start);
         report.record(
-            best_route.as_ref(),
-            &snapshot,
+            main_route.as_ref(),
+            &state.snapshot,
             order.amount(),
             solve_time_ms,
-            snapshot.component_count(),
+            state.snapshot.component_count(),
         );
-        best_route.ok_or_else(|| {
-            if solve_time_ms > self.timeout.as_millis() as u64 {
-                AlgorithmError::Timeout { elapsed_ms: solve_time_ms }
-            } else {
-                AlgorithmError::InsufficientLiquidity
-            }
-        })
+        let main_route = main_route.ok_or_else(|| self.classify_no_route(solve_time_ms, None))?;
+
+        let variation_routes = self
+            .solve_variations(&mut state, &main_route, &variations)
+            .await;
+        Ok(SolvedRoutes::with_variation_routes(main_route, variation_routes))
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {

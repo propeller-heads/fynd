@@ -687,11 +687,12 @@ impl MarketState {
         }
     }
 
-    /// Absorbs another subset extracted from the same base state (the caller checks the labels
-    /// match), keeping this one's metadata. Component sets from `extract_subset` batches are
-    /// disjoint, so components and simulation states are never overwritten; a token shared by
-    /// two batches is overwritten with an identical clone from the same base state.
-    fn merge_subset(&mut self, other: MarketState) {
+    /// Absorbs another subset, keeping this one's metadata. The caller passes a disjoint set of
+    /// components, so components and simulation states are never overwritten; a token shared by
+    /// two subsets is overwritten with an identical clone.
+    ///
+    /// It does not check that both subsets are at the same block.
+    pub(crate) fn merge_subset(&mut self, other: MarketState) {
         self.components.extend(other.components);
         self.simulation_states
             .extend(other.simulation_states);
