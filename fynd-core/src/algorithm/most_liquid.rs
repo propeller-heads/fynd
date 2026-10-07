@@ -1105,14 +1105,14 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{
-            addr, component, order, setup_market_weighted, token, MockProtocolSim, ONE_ETH,
+            addr, component, order, setup_market_weighted, setup_market_weighted_boxed, token,
+            MockProtocolSim, ONE_ETH,
         },
         derived::{
             computation::{FailedItem, FailedItemError},
             types::TokenGasPrices,
             DerivedData, SharedDerivedDataRef,
         },
-        feed::market_data::MarketData,
         graph::GraphManager,
         types::OrderSide,
     };
@@ -2287,5 +2287,554 @@ mod tests {
             result,
             Err(AlgorithmError::InvalidConfiguration { reason }) if reason.contains("cannot exceed")
         ));
+    }
+
+    /// `find_routes`: the main route plus what each variation finds, from one snapshot and one
+    /// swap cache.
+    mod variations {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tycho_simulation::tycho_core::{
+            dto::ProtocolStateDelta,
+            simulation::{
+                errors::{SimulationError, TransitionError},
+                protocol_sim::{Balances, GetAmountOutResult},
+            },
+            Bytes,
+        };
+
+        use super::*;
+        use crate::{algorithm::test_utils::component_with_protocol, types::RouteExclusionFilter};
+
+        /// Counts simulated swaps across all clones of this simulator, and sleeps `delay` in each.
+        #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+        struct CountingSim {
+            inner: MockProtocolSim,
+            #[serde(skip)]
+            calls: Arc<AtomicUsize>,
+            #[serde(skip)]
+            delay: Duration,
+        }
+
+        #[typetag::serde]
+        impl ProtocolSim for CountingSim {
+            fn fee(&self) -> f64 {
+                self.inner.fee()
+            }
+
+            fn spot_price(&self, base: &Token, quote: &Token) -> Result<f64, SimulationError> {
+                self.inner.spot_price(base, quote)
+            }
+
+            fn get_amount_out(
+                &self,
+                amount_in: BigUint,
+                token_in: &Token,
+                token_out: &Token,
+            ) -> Result<GetAmountOutResult, SimulationError> {
+                self.calls
+                    .fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(self.delay);
+                self.inner
+                    .get_amount_out(amount_in, token_in, token_out)
+            }
+
+            fn get_limits(
+                &self,
+                sell_token: Bytes,
+                buy_token: Bytes,
+            ) -> Result<(BigUint, BigUint), SimulationError> {
+                self.inner
+                    .get_limits(sell_token, buy_token)
+            }
+
+            fn delta_transition(
+                &mut self,
+                delta: ProtocolStateDelta,
+                tokens: &std::collections::HashMap<Bytes, Token>,
+                balances: &Balances,
+            ) -> Result<(), TransitionError> {
+                self.inner
+                    .delta_transition(delta, tokens, balances)
+            }
+
+            fn clone_box(&self) -> Box<dyn ProtocolSim> {
+                Box::new(self.clone())
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+
+            fn eq(&self, other: &dyn ProtocolSim) -> bool {
+                other
+                    .as_any()
+                    .downcast_ref::<Self>()
+                    .is_some()
+            }
+        }
+
+        fn box_mock_sim(spot_price: f64) -> Box<dyn ProtocolSim> {
+            Box::new(MockProtocolSim::new(spot_price))
+        }
+
+        /// A pool for the test market: component id, protocol system, its two tokens, its state.
+        type ProtocolPool<'a> = (&'a str, &'a str, &'a Token, &'a Token, Box<dyn ProtocolSim>);
+
+        /// Builds a market whose pools carry the protocol system each entry names, and an
+        /// unweighted graph over it.
+        fn setup_market_by_protocol(
+            components: Vec<ProtocolPool<'_>>,
+        ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
+            let mut market = MarketState::new();
+            market.update_gas_price(BlockGasPrice {
+                block_number: 1,
+                block_hash: Default::default(),
+                block_timestamp: 0,
+                pricing: GasPrice::Legacy { gas_price: BigUint::from(1u64) },
+            });
+            for (component_id, protocol_system, token_in, token_out, state) in components {
+                let tokens = [token_in.clone(), token_out.clone()];
+                market.upsert_components([component_with_protocol(
+                    component_id,
+                    protocol_system,
+                    &tokens,
+                )]);
+                market.update_states([(component_id.to_string(), state)]);
+                market.upsert_tokens(tokens);
+            }
+
+            let mut manager = TopologyGraphManager::default();
+            manager.initialize_graph(&market.component_topology());
+            (wrap_market(market), manager)
+        }
+
+        fn build_algorithm(max_hops: usize, max_routes: Option<usize>) -> MostLiquidAlgorithm {
+            MostLiquidAlgorithm::with_config(
+                AlgorithmConfig::new(1, max_hops, Duration::from_secs(1), max_routes).unwrap(),
+            )
+            .unwrap()
+        }
+
+        fn collect_pool_ids(result: &RouteResult) -> Vec<&str> {
+            result
+                .route()
+                .swaps()
+                .iter()
+                .map(|swap| swap.component_id())
+                .collect()
+        }
+
+        fn alternatives(count: usize) -> Variation {
+            Variation::Alternatives(NonZeroUsize::new(count).unwrap())
+        }
+
+        /// Pairs each variation with the pools of the protocols it excludes, as the worker does.
+        async fn pair_with_exclusions(
+            market: &MarketData,
+            variations: Vec<Variation>,
+        ) -> Vec<(Variation, Arc<RouteExclusions>)> {
+            let market = market.read().await;
+            let mut paired = Vec::with_capacity(variations.len());
+            for variation in variations {
+                let filter = RouteExclusionFilter::default()
+                    .with_excluded_protocols(variation.excluded_protocols());
+                let exclusions = market
+                    .base_market_state()
+                    .resolve_route_filter(&filter);
+                paired.push((variation, Arc::new(exclusions)));
+            }
+            paired
+        }
+
+        /// Returns the pool IDs for each route a variation found, or panics with the variation's
+        /// error.
+        fn collect_variation_pool_ids(
+            solved: &SolvedRoutes,
+            variation_index: usize,
+        ) -> Vec<Vec<&str>> {
+            let variation_routes = solved
+                .variation_routes()
+                .expect("Most Liquid solves variations");
+            let routes = variation_routes[variation_index]
+                .as_ref()
+                .unwrap_or_else(|error| panic!("variation {variation_index} failed: {error}"));
+            routes
+                .iter()
+                .map(collect_pool_ids)
+                .collect()
+        }
+
+        /// A, B and C, with a pAMM that wins B -> C on the main solve.
+        fn setup_market_with_pamm(
+            token_a: &Token,
+            token_b: &Token,
+            token_c: &Token,
+        ) -> (MarketData, TopologyGraphManager<DepthAndPrice>) {
+            setup_market_by_protocol(vec![
+                ("ab", "uniswap_v2", token_a, token_b, box_mock_sim(2.0)),
+                ("bc_pamm", "fallback:fermiswap", token_b, token_c, box_mock_sim(5.0)),
+                ("bc_v2", "uniswap_v2", token_b, token_c, box_mock_sim(2.0)),
+                ("ac", "uniswap_v2", token_a, token_c, box_mock_sim(1.0)),
+            ])
+        }
+
+        #[tokio::test]
+        async fn test_find_routes_exclude_protocols() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let (market, manager) = setup_market_by_protocol(vec![
+                ("curve", "vm:curve", &token_a, &token_b, box_mock_sim(3.0)),
+                ("v2", "uniswap_v2", &token_a, &token_b, box_mock_sim(2.0)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+            let variations = pair_with_exclusions(
+                &market,
+                vec![Variation::ExcludeProtocols(vec!["vm:curve".to_string()])],
+            )
+            .await;
+
+            let solved = build_algorithm(1, None)
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order).with_variations(variations),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["curve"]);
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["v2"]]);
+        }
+
+        /// The pAMM wins B -> C on the main solve, so the main solve's pair winners remember it.
+        /// The variation must not be handed that pool.
+        #[tokio::test]
+        async fn test_find_routes_no_pamm_skips_main_pair_winner() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let token_c = token(0x03, "C");
+            let (market, manager) = setup_market_with_pamm(&token_a, &token_b, &token_c);
+            let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+            let variations = pair_with_exclusions(&market, vec![Variation::NoPamm]).await;
+
+            let solved = build_algorithm(2, None)
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order).with_variations(variations),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["ab", "bc_pamm"]);
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["ab", "bc_v2"]]);
+        }
+
+        #[tokio::test]
+        async fn test_find_routes_main_route_with_and_without_variations() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let token_c = token(0x03, "C");
+            let (market, manager) = setup_market_with_pamm(&token_a, &token_b, &token_c);
+            let order = order(&token_a, &token_c, 1000, OrderSide::Sell);
+            let algorithm = build_algorithm(2, None);
+            let variations = pair_with_exclusions(
+                &market,
+                vec![
+                    Variation::NoPamm,
+                    alternatives(2),
+                    Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+                ],
+            )
+            .await;
+
+            let alone = algorithm
+                .find_best_route(SolveRequest::new(manager.graph(), market.clone(), &order))
+                .await
+                .unwrap();
+            let solved = algorithm
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order).with_variations(variations),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), collect_pool_ids(&alone));
+            assert_eq!(solved.main_route().net_amount_out(), alone.net_amount_out());
+        }
+
+        /// Each alternative avoids every pool of the main route and of the alternatives before it.
+        #[tokio::test]
+        async fn test_find_routes_alternatives() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let (market, manager) = setup_market_by_protocol(vec![
+                ("p1", "uniswap_v2", &token_a, &token_b, box_mock_sim(5.0)),
+                ("p2", "uniswap_v2", &token_a, &token_b, box_mock_sim(4.0)),
+                ("p3", "uniswap_v2", &token_a, &token_b, box_mock_sim(3.0)),
+                ("p4", "uniswap_v2", &token_a, &token_b, box_mock_sim(2.0)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+            let solved = build_algorithm(1, None)
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order)
+                        .with_variations(vec![(alternatives(2), Arc::default())]),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["p1"]);
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["p2"], vec!["p3"]]);
+        }
+
+        #[tokio::test]
+        async fn test_find_routes_alternatives_stop_when_market_runs_out() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let (market, manager) = setup_market_by_protocol(vec![
+                ("p1", "uniswap_v2", &token_a, &token_b, box_mock_sim(5.0)),
+                ("p2", "uniswap_v2", &token_a, &token_b, box_mock_sim(4.0)),
+                ("p3", "uniswap_v2", &token_a, &token_b, box_mock_sim(3.0)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+            let solved = build_algorithm(1, None)
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order)
+                        .with_variations(vec![(alternatives(4), Arc::default())]),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["p2"], vec!["p3"]]);
+        }
+
+        #[tokio::test]
+        async fn test_find_routes_alternatives_single_pool() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let (market, manager) = setup_market_by_protocol(vec![(
+                "only",
+                "uniswap_v2",
+                &token_a,
+                &token_b,
+                box_mock_sim(2.0),
+            )]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+            let solved = build_algorithm(1, None)
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order)
+                        .with_variations(vec![(alternatives(1), Arc::default())]),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["only"]);
+            let variation_routes = solved.variation_routes().unwrap();
+            assert!(matches!(
+                &variation_routes[0],
+                Err(AlgorithmError::NoPath { reason: NoPathReason::NoGraphPath, .. })
+            ));
+        }
+
+        /// With `max_routes = 1` the main solve simulates only A -> B, so the snapshot holds only
+        /// `ab`. The alternative needs `ac` and `cb`, which a second market read adds.
+        #[tokio::test]
+        async fn test_find_routes_alternative_outside_main_snapshot() {
+            let token_a = token(0x01, "A");
+            let token_c = token(0x02, "C");
+            let token_b = token(0x03, "B");
+            let (market, manager) = setup_market_weighted(vec![
+                ("ab", &token_a, &token_b, MockProtocolSim::new(5.0).with_liquidity(10_000_000)),
+                ("ac", &token_a, &token_c, MockProtocolSim::new(1.5).with_liquidity(1_000_000)),
+                ("cb", &token_c, &token_b, MockProtocolSim::new(1.5).with_liquidity(1_000_000)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+            let solved = build_algorithm(2, Some(1))
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order)
+                        .with_variations(vec![(alternatives(1), Arc::default())]),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["ab"]);
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["ac", "cb"]]);
+        }
+
+        /// The variation reuses the main solve's cached swap results for the same pools and input
+        /// amount. Its one new simulation builds its winning route.
+        #[tokio::test]
+        async fn test_find_routes_variations_share_swap_cache() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let counting = |spot_price: f64| -> Box<dyn ProtocolSim> {
+                Box::new(CountingSim {
+                    inner: MockProtocolSim::new(spot_price),
+                    calls: Arc::clone(&calls),
+                    delay: Duration::ZERO,
+                })
+            };
+            let (market, manager) = setup_market_by_protocol(vec![
+                ("curve", "vm:curve", &token_a, &token_b, counting(3.0)),
+                ("v2", "uniswap_v2", &token_a, &token_b, counting(2.0)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+            let algorithm = build_algorithm(1, None);
+            algorithm
+                .find_best_route(SolveRequest::new(manager.graph(), market.clone(), &order))
+                .await
+                .unwrap();
+            let main_calls = calls.swap(0, Ordering::Relaxed);
+            let variations = pair_with_exclusions(
+                &market,
+                vec![Variation::ExcludeProtocols(vec!["vm:curve".to_string()])],
+            )
+            .await;
+
+            let solved = algorithm
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order).with_variations(variations),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["v2"]]);
+            assert_eq!(calls.load(Ordering::Relaxed), main_calls + 1);
+        }
+
+        /// The request's deadline passes before the main solve ends. The main route still comes
+        /// back, and each variation reports a timeout.
+        #[tokio::test]
+        async fn test_find_routes_past_deadline() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let (market, manager) = setup_market_by_protocol(vec![
+                ("p1", "uniswap_v2", &token_a, &token_b, box_mock_sim(5.0)),
+                ("p2", "uniswap_v2", &token_a, &token_b, box_mock_sim(4.0)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+
+            let solved = build_algorithm(1, None)
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order)
+                        .with_variations(vec![
+                            (Variation::NoRfq, Arc::default()),
+                            (alternatives(1), Arc::default()),
+                        ])
+                        .with_deadline(Instant::now()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["p1"]);
+            let variation_routes = solved.variation_routes().unwrap();
+            assert_eq!(variation_routes.len(), 2);
+            for routes in variation_routes {
+                assert!(matches!(routes, Err(AlgorithmError::Timeout { .. })));
+            }
+        }
+
+        /// The deadline passes while the variation simulates A -> D -> B, a path the main solve
+        /// did not reach. The variation keeps the route it has and does not simulate
+        /// A -> E -> B, although the algorithm timeout is still far away.
+        #[tokio::test]
+        async fn test_find_routes_deadline_during_variation_path_loop() {
+            let token_a = token(0x01, "A");
+            let token_c = token(0x02, "C");
+            let token_f = token(0x03, "F");
+            let token_d = token(0x04, "D");
+            let token_e = token(0x05, "E");
+            let token_b = token(0x06, "B");
+            let slow_calls = Arc::new(AtomicUsize::new(0));
+            let late_calls = Arc::new(AtomicUsize::new(0));
+            let mock = |liquidity: u128| MockProtocolSim::new(1.5).with_liquidity(liquidity);
+            let counting = |liquidity: u128, calls: &Arc<AtomicUsize>, delay: Duration| {
+                Box::new(CountingSim { inner: mock(liquidity), calls: Arc::clone(calls), delay })
+                    as Box<dyn ProtocolSim>
+            };
+            let slow = Duration::from_millis(100);
+            let (market, manager) = setup_market_weighted_boxed(vec![
+                (
+                    "ab",
+                    &token_a,
+                    &token_b,
+                    Box::new(MockProtocolSim::new(5.0).with_liquidity(10_000_000)),
+                ),
+                ("ac", &token_a, &token_c, Box::new(mock(5_000_000))),
+                ("cb", &token_c, &token_b, Box::new(mock(5_000_000))),
+                ("af", &token_a, &token_f, Box::new(mock(4_000_000))),
+                ("fb", &token_f, &token_b, Box::new(mock(4_000_000))),
+                ("ad", &token_a, &token_d, counting(2_000_000, &slow_calls, slow)),
+                ("db", &token_d, &token_b, counting(2_000_000, &slow_calls, slow)),
+                ("ae", &token_a, &token_e, counting(1_000_000, &late_calls, Duration::ZERO)),
+                ("eb", &token_e, &token_b, counting(1_000_000, &late_calls, Duration::ZERO)),
+            ]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+            let variation_exclusions = RouteExclusions::default().with_pools([
+                "ac".to_string(),
+                "cb".to_string(),
+                "af".to_string(),
+                "fb".to_string(),
+            ]);
+
+            let solved = build_algorithm(2, Some(3))
+                .find_routes(
+                    SolveRequest::new(manager.graph(), market, &order)
+                        .with_variations(vec![(Variation::NoRfq, Arc::new(variation_exclusions))])
+                        .with_deadline(Instant::now() + Duration::from_millis(50)),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(collect_pool_ids(solved.main_route()), vec!["ab"]);
+            assert_eq!(collect_variation_pool_ids(&solved, 0), vec![vec!["ab"]]);
+            assert!(slow_calls.load(Ordering::Relaxed) > 0);
+            assert_eq!(late_calls.load(Ordering::Relaxed), 0);
+        }
+
+        /// The overlay the request's label names is gone when a variation needs pools the
+        /// snapshot lacks. The variation goes on with the snapshot it has.
+        #[tokio::test]
+        async fn test_extend_snapshot_with_evicted_label() {
+            let token_a = token(0x01, "A");
+            let token_b = token(0x02, "B");
+            let (market, manager) = setup_market_by_protocol(vec![(
+                "ab",
+                "uniswap_v2",
+                &token_a,
+                &token_b,
+                box_mock_sim(2.0),
+            )]);
+            let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+            let exclusions = RouteExclusions::default();
+            let (scored_paths, _) = build_algorithm(1, None)
+                .rank_token_paths(manager.graph(), &order, &exclusions)
+                .unwrap();
+            let mut state = OrderSolveState {
+                graph: manager.graph(),
+                order: &order,
+                live_market: market,
+                label: Some("evicted".to_string()),
+                snapshot: MarketState::new(),
+                requested_pool_ids: FxHashSet::default(),
+                swaps: SwapCache::new(),
+                token_prices: None,
+                gas_price: BigUint::from(1u64),
+                start: Instant::now(),
+                deadline: None,
+            };
+
+            state
+                .extend_snapshot(&scored_paths, &exclusions)
+                .await;
+
+            assert_eq!(state.snapshot.component_count(), 0);
+        }
     }
 }
