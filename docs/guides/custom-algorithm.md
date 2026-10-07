@@ -8,12 +8,14 @@ Fynd exposes an `Algorithm` trait that lets you plug in custom routing logic wit
 
 ## The `Algorithm` trait
 
-The trait has four methods:
+The trait has four required methods:
 
 * `name()` — a string identifier used in config and logs
 * `find_best_route()` — given a `SolveRequest` (graph, market, order, overlay label, derived data, and the pools and tokens the caller excluded), return the best route. Use `request.into_parts()` to move out the owned fields. Honour the exclusions during search and simulation; the worker rejects returned routes that violate them. Call `Route::validate()` on each candidate and skip invalid ones (disconnected swaps, repeated tokens, malformed splits): the solver worker rejects an invalid route, which drops the whole solution for that worker pool, so prefer the next-best valid route instead
 * `computation_requirements()` — declares which derived data the algorithm needs (spot prices, depths, etc.)
 * `timeout()` — per-order solve deadline
+
+`find_routes()` has a default: it calls `find_best_route()` and solves no variation, so the worker pool reports each requested variation as unsupported. The main quote gets the variations its own solver built; when that solver does not solve them, each variation has status `unsupported` and no quotes. Override it only to solve variations. `SolveRequest::variations()` returns each variation paired with its `RouteExclusions`: the request's exclusions plus the variation's, resolved by the worker. Honour those exclusions in the variation's search. Each variation is another solve and adds solve time. `SolveRequest::deadline()` is when the caller stops waiting: an algorithm should stop solving variations at it. Most Liquid checks it inside each variation's path loop. Return `SolvedRoutes::with_variation_routes` with one result per variation, in request order.
 
 Your algorithm receives a read-only reference to the routing graph and shared market data. The worker infrastructure handles graph initialisation, event handling, and edge-weight updates.
 

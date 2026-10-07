@@ -82,6 +82,14 @@ sufficient).
 **`BatchQuoteParams`**, **`PriceGuardConfig`** — exported from the crate root alongside other
 client types (`Quote`, `Order`, `QuoteParams`, etc.).
 
+**`Variation`** (re-exported from `fynd-rpc-types`) — set with `QuoteOptions::with_variations`.
+Each `Quote::variations()` entry is a `VariationQuote`: the variation, its `VariationStatus`
+(re-exported from `fynd-rpc-types`) and its own `Quote`s, empty unless the status is `Success`. The
+TypeScript client has the same shape: `QuoteOptions.variations`, `Quote.variations` and a
+`VariationStatus` string union. Its string variations and statuses keep the wire spelling
+(`'no_rfq'`, `'no_route_found'`), like `QuoteStatus` values; object keys are camelCase
+(`excludeProtocols`).
+
 ### Backend Detection
 
 `FyndClientBuilder` auto-detects the `BackendKind` (Fynd vs Turbine) by checking the health

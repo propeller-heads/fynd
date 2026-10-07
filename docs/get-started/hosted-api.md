@@ -152,6 +152,7 @@ curl -X POST https://fynd-api.propellerheads.xyz/v1/ethereum/quote \
 | `encoding_options` | `null` | If set, the response includes a ready-to-submit `transaction` object. See [step 4](#4-encode-and-approve). |
 | `max_gas` | `null` | Cap on gas units the route may use. Routes exceeding it are rejected. |
 | `route_filter` | `null` | Liquidity to exclude from every route: `exclude_pools` (component ids), `exclude_protocols` (exact protocol system names, e.g. `uniswap_v2`, or family prefixes, e.g. `fallback:`) and `exclude_tokens` (tokens no route may pass through; the order's own two are always allowed). A name the server holds no pool for excludes nothing. |
+| `variations` | `[]` | Extra ways to solve each order, beside the main solve. Each entry is one of `"no_rfq"` (no RFQ liquidity: the `rfq:` and `fallback:rfq:` protocol families), `"no_pamm"` (no pAMM liquidity: the `fallback:` protocol family), `{"exclude_protocols": [..]}` (no liquidity from the named protocol systems or families) or `{"alternatives": n}` (up to `n` more routes, 1 to 4, each using no pool of the main route or of earlier alternatives). These exclusions add to `route_filter`. Each variation is another solve and adds solve time. At most 4 variations per request. A request over these limits gets `400` with code `INVALID_VARIATIONS`. |
 
 The response contains the route, the expected `amount_out`, gas estimate, and the `solve_time_ms` the server spent finding the route:
 
@@ -210,6 +211,7 @@ The response contains the route, the expected `amount_out`, gas estimate, and th
 | `block` | The block the quote is valid against. Submit the encoded transaction promptly — see [Quote validity](#quote-validity). |
 | `transaction` | `null` unless `encoding_options` is set. See step 4. |
 | `order_id` | Correlation ID for this quote. Not queryable after the fact. |
+| `variations` | One entry per requested variation, in request order: `variation` (the request entry), `status` and `quotes` (full order quotes from the solver that produced the main quote). `status` is `success`, `no_route_found` (no usable route, or the order has no main quote), `insufficient_liquidity`, `timeout`, or `unsupported` (the solver that produced the main quote does not solve variations). `quotes` is empty unless `status` is `success`. With `encoding_options`, each variation quote carries its own `transaction`, but the price guard does not check it and the server does not simulate it. Absent when the request asked for no variations. |
 
 A request may carry up to 10 orders. Each order is solved, priced, and encoded independently and gets its own transaction; one order failing leaves the others untouched. The hosted API rejects a request with more than 10 orders with `400` and code `TOO_MANY_ORDERS`.
 
@@ -535,6 +537,7 @@ A `400` carries a `code` naming what to fix. `BAD_REQUEST` means the body did no
 | `ZERO_AMOUNT` | An order's `amount` is `0` |
 | `INVALID_SLIPPAGE` | `encoding_options.slippage` is not a number from `0` to below `1` |
 | `CLIENT_FEE_TOO_HIGH` | `encoding_options.client_fee_params.bps` is above `10000` |
+| `INVALID_VARIATIONS` | `options.variations` holds more than 4 entries, or an `alternatives` count above `4` (a count of `0` does not parse: `BAD_REQUEST`) |
 
 A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — it means the solver ran but couldn't find a profitable route for the pair at the requested size. Check `/v1/{chain}/health` (`last_update_ms: 0` means the Tycho stream isn't delivering live state yet), try a different token pair or size, or confirm the tokens have [Tycho-indexed liquidity](https://docs.propellerheads.xyz/tycho) on that chain.
 

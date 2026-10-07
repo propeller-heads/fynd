@@ -83,11 +83,15 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 1. `RouterApi` validates the request
 2. `WorkerPoolRouter` allocates the worker pools serving each order (an exclusive-access pool only for a request granted access via the `x-exclusive-access` header) and fans out to them in parallel
 3. Each pool's `TaskQueue` dispatches to a `SolverWorker` on a dedicated OS thread
-4. Worker resolves request exclusions with `MarketState::resolve_route_filter`, then calls `Algorithm::find_best_route` with a `SolveRequest` carrying its local graph, shared market/derived data, and resolved pools/tokens. It rejects returned routes that violate the request filter, including excluded pAMM fallback pools
-5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order
+4. Worker resolves the request exclusions, and each variation's exclusions (request filter plus the variation's protocols), with `MarketState::resolve_route_filter` through one cache. It then calls `Algorithm::find_routes` with a `SolveRequest` carrying its local graph, shared market/derived data, resolved pools/tokens, the requested variations paired with their exclusions, and the task deadline from `SolveParams`. It rejects returned routes that violate the request filter, including excluded pAMM fallback pools. Each variation's routes become nested quotes in `OrderQuote::variations`. Only Most Liquid solves variations. Each variation is another solve and adds solve time; Most Liquid stops a variation at the deadline, also inside its path loop
+5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; if price guard is enabled it validates in rank order. The order's `RankedOrder` keeps the variation quotes of every pool that answered, until encoding settles the main quote. The main quote gets the variations its own solver built. Each variation entry has a `VariationStatus` (`Success`, `NoRouteFound`, `InsufficientLiquidity`, `Timeout`, `Unsupported`) and quotes only on `Success`. When the solver of the main quote does not solve variations, each variation is `Unsupported`
 6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata, one quote at a time: a
    quote that fails to encode gets `QuoteStatus::EncodingFailed` and no transaction, and the other
-   quotes keep theirs. Callers read the status of each quote, as they do for `NoRouteFound`
+   quotes keep theirs. Callers read the status of each quote, as they do for `NoRouteFound`.
+   Each variation encodes in its own encoder call, concurrently, until the request deadline. The
+   best candidate's variations encode with the main quotes; when an encoding retry picks another
+   candidate, that candidate's variations encode after the retry. The price guard and simulation
+   skip them
 7. Returns `Quote` response
 
 ### Threading Model

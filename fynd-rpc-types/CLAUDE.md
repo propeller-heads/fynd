@@ -18,9 +18,11 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 
 - `QuoteRequest` — orders + options
 - `Order` — token_in, token_out, amount, side (Sell only), sender, optional receiver
-- `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options, route_filter
+- `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options, route_filter, variations
 - `RouteFilter` — exclude_pools, exclude_protocols, exclude_tokens: the liquidity a request
   excludes from every route
+- `Variation` — one extra way to solve an order: `"no_rfq"`, `"no_pamm"`,
+  `{"exclude_protocols": [..]}`, `{"alternatives": n}`. At most 4 per request, n from 1 to 4
 - `EncodingOptions` — slippage, transfer_type, permit, permit2_signature, client_fee_params, price_guard (optional `PriceGuardConfig`)
 - `UserTransferType` — TransferFrom (default) / TransferFromPermit2 / UseVaultsFunds
 - `ClientFeeParams` — bps, receiver, max_subsidy, signature (client fee on swap output)
@@ -30,7 +32,9 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 ## Response Types
 
 - `Quote` — orders (Vec<OrderQuote>), total_gas_estimate, solve_time_ms
-- `OrderQuote` — order_id, status, route, amount_in/out, gas_estimate, price_impact_bps, amount_out_net_gas, block, gas_price, transaction, fee_breakdown, algorithm
+- `OrderQuote` — order_id, status, route, amount_in/out, gas_estimate, price_impact_bps, amount_out_net_gas, block, gas_price, transaction, fee_breakdown, algorithm, variations (absent when none were asked for)
+- `VariationQuote` — variation, status (`VariationStatus`), quotes (full `OrderQuote`s, best first; empty unless the status is `success`). The price guard does not check these quotes, and the server does not simulate them
+- `VariationStatus` — Success, NoRouteFound, InsufficientLiquidity, Timeout, Unsupported (the solver of the main quote does not solve variations). Converts to and from `fynd_core::VariationStatus`
 - `FeeBreakdown` — router_fee, client_fee, max_slippage, min_amount_received (all absolute token-out amounts, populated when encoding_options is set)
 - `QuoteStatus` — Success, NoRouteFound, InsufficientLiquidity, Timeout, NotReady, PriceCheckFailed
 - `Route` — Vec<Swap>
