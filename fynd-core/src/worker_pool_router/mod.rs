@@ -362,21 +362,22 @@ pub async fn encode_quotes(
     retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let encode_start = Instant::now();
-    let encoded = encode_with_retries(encoder, ranked, encoding_options, retry_budget).await;
+    let encoded =
+        encode_with_retries(encoder, ranked.into_per_order(), encoding_options, retry_budget).await;
     histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
     encoded
 }
 
 async fn encode_with_retries(
     encoder: &Encoder,
-    ranked: RankedQuotes,
+    per_order: Vec<Vec<OrderQuote>>,
     encoding_options: &EncodingOptions,
     retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let mut best_candidate_per_order = Vec::new();
     let mut best_has_rfq_leg_per_order = Vec::new();
     let mut retry_candidates_per_order = Vec::new();
-    for candidates in ranked.into_per_order() {
+    for candidates in per_order {
         let mut candidates = candidates.into_iter();
         // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
         if let Some(best_candidate) = candidates.next() {
@@ -609,35 +610,7 @@ impl WorkerPoolRouter {
             )?;
         }
 
-        // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
-        // `rank_quotes` produces the public ranking — the committed reference AND the price-guard
-        // fallback chain. When the allocation holds an exclusive-scope worker pool, the winning
-        // exclusive-access candidate is overlaid onto that ranked list (prepended) by
-        // `combine_with_surplus`, so the fallbacks are preserved. If the public worker pools find
-        // nothing, that ranking is the `NoRouteFound` placeholder. The exclusive candidate then
-        // uses a default fee.
-        let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
-            .iter()
-            .zip(&allocations)
-            .map(|(responses, allocation)| {
-                if allocation.exclusive_routing_active() {
-                    let public_ranked = self.rank_quotes(
-                        &responses.public_only(allocation.scopes()),
-                        request.options(),
-                    );
-                    combine_with_surplus(
-                        responses,
-                        allocation.scopes(),
-                        request.options(),
-                        public_ranked,
-                        *USER_IMPROVEMENT_SHARE_BPS,
-                        self.encoder.chain(),
-                    )
-                } else {
-                    self.rank_quotes(responses, request.options())
-                }
-            })
-            .collect();
+        let ranked_quotes = self.rank_orders(&order_responses, &allocations, request.options());
 
         // `join_all` preserves input order, so orders and responses line up one to one
         for (order, responses) in request
@@ -672,6 +645,42 @@ impl WorkerPoolRouter {
         };
 
         RankedQuotes::started_at(ranked_per_order, start)
+    }
+
+    /// Ranks every order's candidates by refined `amount_out_net_gas`, best first.
+    ///
+    /// `rank_quotes` produces the public ranking — the committed reference AND the price-guard
+    /// fallback chain. When the allocation holds an exclusive-scope worker pool, the winning
+    /// exclusive-access candidate is overlaid onto that ranked list (prepended) by
+    /// `combine_with_surplus`, so the fallbacks are preserved. If the public worker pools find
+    /// nothing, that ranking is the `NoRouteFound` placeholder. The exclusive candidate then
+    /// uses a default fee.
+    fn rank_orders(
+        &self,
+        order_responses: &[OrderResponses],
+        allocations: &[Allocation<'_>],
+        options: &QuoteOptions,
+    ) -> Vec<Vec<OrderQuote>> {
+        order_responses
+            .iter()
+            .zip(allocations)
+            .map(|(responses, allocation)| {
+                if allocation.exclusive_routing_active() {
+                    let public_ranked =
+                        self.rank_quotes(&responses.public_only(allocation.scopes()), options);
+                    combine_with_surplus(
+                        responses,
+                        allocation.scopes(),
+                        options,
+                        public_ranked,
+                        *USER_IMPROVEMENT_SHARE_BPS,
+                        self.encoder.chain(),
+                    )
+                } else {
+                    self.rank_quotes(responses, options)
+                }
+            })
+            .collect()
     }
 
     /// Returns a quote by fanning out to the worker pools that serve the request.
@@ -868,10 +877,7 @@ impl WorkerPoolRouter {
                             } else {
                                 true
                             };
-                            if min_responses > 0
-                                && quotes.len() >= min_responses
-                                && scope_ready
-                            {
+                            if min_responses > 0 && quotes.len() >= min_responses && scope_ready {
                                 debug!(
                                     order_id = %order_id,
                                     responses = quotes.len(),
@@ -948,7 +954,6 @@ impl WorkerPoolRouter {
             .filter(|wq| is_rankable(&wq.quote, options))
             .collect();
 
-        // Sort descending by amount_out_net_gas
         valid_quotes.sort_by(|a, b| {
             b.quote
                 .amount_out_net_gas()
@@ -969,89 +974,24 @@ impl WorkerPoolRouter {
                 .collect();
         }
 
-        // No valid quote found - return a NoRouteFound response
-        // Try to get any response to extract block info, or create a placeholder
-        let fallback = if let Some(WorkerPoolQuote { quote: any_q, .. }) = responses.quotes.first()
-        {
-            counter!("worker_router_orders_total", "status" => "no_route").increment(1);
-            let mut fallback = OrderQuote::new(
-                responses.order_id.clone(),
-                QuoteStatus::NoRouteFound,
-                any_q.amount_in().clone(),
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                any_q.block().clone(),
-                String::new(),
-                any_q.sender().clone(),
-                any_q.receiver().clone(),
-                any_q.solved_against().clone(),
-            );
-            // Only label the cause when a quote is actually over the request's
-            // max_gas, so a future filter or non-Success status cannot silently
-            // get attributed to the gas cap.
-            let over_max_gas = responses.quotes.iter().any(|pq| {
-                options
-                    .max_gas()
-                    .is_some_and(|max| pq.quote.gas_estimate() > max)
-            });
-            fallback.set_no_route_cause(over_max_gas.then_some(SolveError::MaxGasExceeded));
-            fallback
-        } else {
-            // No responses at all - determine status from failure types
-            let status = if responses.failed_solvers.is_empty() {
-                QuoteStatus::NoRouteFound
-            } else {
-                // If all failures are timeouts, report as Timeout
-                // Otherwise report as NoRouteFound (more general failure)
-                let all_timeouts = responses
-                    .failed_solvers
-                    .iter()
-                    .all(|(_, e)| matches!(e, SolveError::Timeout { .. }));
-                let all_not_ready = responses
-                    .failed_solvers
-                    .iter()
-                    .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
-                if all_timeouts {
-                    QuoteStatus::Timeout
-                } else if all_not_ready {
-                    QuoteStatus::NotReady
-                } else {
-                    QuoteStatus::NoRouteFound
-                }
-            };
-
-            // Record status metric
-            let status_label = match status {
-                QuoteStatus::Timeout => "timeout",
-                QuoteStatus::NotReady => "not_ready",
-                _ => "no_route",
-            };
-            counter!("worker_router_orders_total", "status" => status_label).increment(1);
-
-            // No worker responded — use the requested label if set, otherwise "0"
-            // (we have no block context here since no worker completed).
-            let label = options
-                .state_label()
-                .cloned()
-                .unwrap_or_else(|| "0".to_string());
-            let mut fallback = OrderQuote::new(
-                responses.order_id.clone(),
-                status,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BigUint::ZERO,
-                BlockInfo::new(0, String::new(), 0),
-                String::new(),
-                Bytes::default(),
-                Bytes::default(),
-                label,
-            );
-            fallback.set_no_route_cause(aggregate_no_route_cause(&responses.failed_solvers));
-            fallback
+        let quotes: Vec<&OrderQuote> = responses
+            .quotes
+            .iter()
+            .map(|wq| &wq.quote)
+            .collect();
+        let placeholder = build_no_route_placeholder(
+            &responses.order_id,
+            &quotes,
+            &responses.failed_solvers,
+            options,
+        );
+        let status_label = match placeholder.status() {
+            QuoteStatus::Timeout => "timeout",
+            QuoteStatus::NotReady => "not_ready",
+            _ => "no_route",
         };
-        vec![fallback]
+        counter!("worker_router_orders_total", "status" => status_label).increment(1);
+        vec![placeholder]
     }
 
     /// Returns the effective timeout for a request.
@@ -1061,6 +1001,87 @@ impl WorkerPoolRouter {
             .map(Duration::from_millis)
             .unwrap_or(self.config.default_timeout())
     }
+}
+
+/// Builds the quote that answers an order no worker pool found a route for.
+///
+/// `quotes` are the quotes the worker pools returned that could not be ranked. With one at hand,
+/// the placeholder copies its block and says `NoRouteFound`. Without one, `failed_solvers` decides
+/// the status and the `no_route_cause`.
+fn build_no_route_placeholder(
+    order_id: &str,
+    quotes: &[&OrderQuote],
+    failed_solvers: &[(String, SolveError)],
+    options: &QuoteOptions,
+) -> OrderQuote {
+    if let Some(any_q) = quotes.first() {
+        let mut fallback = OrderQuote::new(
+            order_id.to_string(),
+            QuoteStatus::NoRouteFound,
+            any_q.amount_in().clone(),
+            BigUint::ZERO,
+            BigUint::ZERO,
+            BigUint::ZERO,
+            any_q.block().clone(),
+            String::new(),
+            any_q.sender().clone(),
+            any_q.receiver().clone(),
+            any_q.solved_against().clone(),
+        );
+        // Only label the cause when a quote is actually over the request's
+        // max_gas, so a future filter or non-Success status cannot silently
+        // get attributed to the gas cap.
+        let over_max_gas = quotes.iter().any(|quote| {
+            options
+                .max_gas()
+                .is_some_and(|max| quote.gas_estimate() > max)
+        });
+        fallback.set_no_route_cause(over_max_gas.then_some(SolveError::MaxGasExceeded));
+        return fallback;
+    }
+
+    // No responses at all - determine status from failure types
+    let status = if failed_solvers.is_empty() {
+        QuoteStatus::NoRouteFound
+    } else {
+        // If all failures are timeouts, report as Timeout
+        // Otherwise report as NoRouteFound (more general failure)
+        let all_timeouts = failed_solvers
+            .iter()
+            .all(|(_, e)| matches!(e, SolveError::Timeout { .. }));
+        let all_not_ready = failed_solvers
+            .iter()
+            .all(|(_, e)| matches!(e, SolveError::NotReady(_)));
+        if all_timeouts {
+            QuoteStatus::Timeout
+        } else if all_not_ready {
+            QuoteStatus::NotReady
+        } else {
+            QuoteStatus::NoRouteFound
+        }
+    };
+
+    // No worker responded — use the requested label if set, otherwise "0"
+    // (we have no block context here since no worker completed).
+    let label = options
+        .state_label()
+        .cloned()
+        .unwrap_or_else(|| "0".to_string());
+    let mut fallback = OrderQuote::new(
+        order_id.to_string(),
+        status,
+        BigUint::ZERO,
+        BigUint::ZERO,
+        BigUint::ZERO,
+        BigUint::ZERO,
+        BlockInfo::new(0, String::new(), 0),
+        String::new(),
+        Bytes::default(),
+        Bytes::default(),
+        label,
+    );
+    fallback.set_no_route_cause(aggregate_no_route_cause(failed_solvers));
+    fallback
 }
 
 /// Builds the final ranked quote list for one order by deciding whether an exclusive-access
@@ -1536,27 +1557,45 @@ fn refine_gas_estimates(
 ) -> Result<(), SolveError> {
     for responses in order_responses {
         for WorkerPoolQuote { quote, .. } in &mut responses.quotes {
-            if quote.status() != QuoteStatus::Success {
-                continue;
-            }
-            let solution = Solution::try_from(&*quote)?
-                .with_user_transfer_type(encoding_options.transfer_type().clone());
-            let refined_gas = estimate_gas_usage(&solution, derive_strategy(quote));
-            let naive_gas = quote.gas_estimate().clone();
-            if naive_gas > BigUint::ZERO {
-                let gas_cost_in_token_out = quote.amount_out() - quote.amount_out_net_gas();
-                let new_gas_cost = &gas_cost_in_token_out * &refined_gas / &naive_gas;
-                let new_net = if new_gas_cost <= *quote.amount_out() {
-                    quote.amount_out() - &new_gas_cost
-                } else {
-                    BigUint::ZERO
-                };
-                quote.set_amount_out_net_gas(new_net);
-                quote.set_gas_estimate(refined_gas);
-            }
+            refine_gas_estimate(quote, encoding_options)?;
         }
     }
     Ok(())
+}
+
+fn refine_gas_estimate(
+    quote: &mut OrderQuote,
+    encoding_options: &EncodingOptions,
+) -> Result<(), SolveError> {
+    if quote.status() != QuoteStatus::Success {
+        return Ok(());
+    }
+    let solution = Solution::try_from(&*quote)?
+        .with_user_transfer_type(encoding_options.transfer_type().clone());
+    let refined_gas = estimate_gas_usage(&solution, derive_strategy(quote));
+    let naive_gas = quote.gas_estimate().clone();
+    if naive_gas > BigUint::ZERO {
+        let gas_cost_in_token_out = quote.amount_out() - quote.amount_out_net_gas();
+        let new_gas_cost = &gas_cost_in_token_out * &refined_gas / &naive_gas;
+        let new_net = if new_gas_cost <= *quote.amount_out() {
+            quote.amount_out() - &new_gas_cost
+        } else {
+            BigUint::ZERO
+        };
+        quote.set_amount_out_net_gas(new_net);
+        quote.set_gas_estimate(refined_gas);
+    }
+    Ok(())
+}
+
+/// What the pAMM floor check did to one quote.
+enum PammFloorOutcome {
+    /// The quote did not succeed or has no pAMM fallback, so there is no floor to check.
+    NotChecked,
+    /// The fallback pays at least the user's `min_amount_out`.
+    Kept,
+    /// The fallback pays less than the user's `min_amount_out`; the quote is now `NoRouteFound`.
+    Dropped,
 }
 
 /// Marks every candidate whose pAMM legs fall back below the user's `min_amount_out` as
@@ -1573,32 +1612,53 @@ fn drop_pamm_quotes_below_min_amount_out(
 ) -> Result<(), SolveError> {
     for responses in order_responses {
         for WorkerPoolQuote { worker_pool, quote, .. } in &mut responses.quotes {
-            if quote.status() != QuoteStatus::Success {
-                continue;
+            match drop_pamm_quote_below_min_amount_out(
+                encoder,
+                worker_pool,
+                quote,
+                encoding_options,
+            )? {
+                PammFloorOutcome::NotChecked => {}
+                PammFloorOutcome::Kept => {
+                    counter!("propamm_fallback_quotes_total", "outcome" => "kept").increment(1);
+                }
+                PammFloorOutcome::Dropped => {
+                    counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
+                }
             }
-            let Some(fallback) = quote
-                .route()
-                .and_then(|route| route.fallback_amount_out())
-                .cloned()
-            else {
-                continue;
-            };
-            if encoder.fallback_clears_min_amount_out(quote, encoding_options)? {
-                counter!("propamm_fallback_quotes_total", "outcome" => "kept").increment(1);
-                continue;
-            }
-            counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
-            debug!(
-                order_id = %quote.order_id(),
-                worker_pool = worker_pool.as_str(),
-                %fallback,
-                slippage = encoding_options.slippage(),
-                "dropping pAMM quote: the fallback pays less than the user's min_amount_out"
-            );
-            quote.set_status(QuoteStatus::NoRouteFound);
         }
     }
     Ok(())
+}
+
+fn drop_pamm_quote_below_min_amount_out(
+    encoder: &Encoder,
+    worker_pool: &str,
+    quote: &mut OrderQuote,
+    encoding_options: &EncodingOptions,
+) -> Result<PammFloorOutcome, SolveError> {
+    if quote.status() != QuoteStatus::Success {
+        return Ok(PammFloorOutcome::NotChecked);
+    }
+    let Some(fallback) = quote
+        .route()
+        .and_then(|route| route.fallback_amount_out())
+        .cloned()
+    else {
+        return Ok(PammFloorOutcome::NotChecked);
+    };
+    if encoder.fallback_clears_min_amount_out(quote, encoding_options)? {
+        return Ok(PammFloorOutcome::Kept);
+    }
+    debug!(
+        order_id = %quote.order_id(),
+        worker_pool,
+        %fallback,
+        slippage = encoding_options.slippage(),
+        "dropping pAMM quote: the fallback pays less than the user's min_amount_out"
+    );
+    quote.set_status(QuoteStatus::NoRouteFound);
+    Ok(PammFloorOutcome::Dropped)
 }
 
 fn derive_strategy(quote: &OrderQuote) -> Strategy {
