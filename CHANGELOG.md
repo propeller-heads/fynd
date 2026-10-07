@@ -1,4 +1,15 @@
 
+## [0.111.1](https://github.com/propeller-heads/fynd/compare/0.111.0...0.111.1) (2026-10-07)
+
+### Features
+
+* **deps:** build against tycho 0.445.0 ([da87e5b](https://github.com/propeller-heads/fynd/commit/da87e5bf5e796129efa3cecf3128dd7794271186))
+* stream RFQ venues through their Tycho fallback router ([324ea19](https://github.com/propeller-heads/fynd/commit/324ea19fbbbc3ed964fcb4719a711b1bd9e47411))
+* **deps:** build against the tycho fallback router branch ([fb0fd6e](https://github.com/propeller-heads/fynd/commit/fb0fd6eb477c1e61a5802e921322914ed55760f4))
+* pin the tycho branch that runs Metric fallbacks on Robinhood ([15daddb](https://github.com/propeller-heads/fynd/commit/15daddb6dbf5fe73d8049ac512adedc2b35f6607))
+* stream Hashflow through its Tycho fallback router ([f72582d](https://github.com/propeller-heads/fynd/commit/f72582d28c0c820c5b98854ac9a7e18cd1364846))
+
+
 ## [0.111.0](https://github.com/propeller-heads/fynd/compare/0.110.8...0.111.0) (2026-10-07)
 
 ### Features
