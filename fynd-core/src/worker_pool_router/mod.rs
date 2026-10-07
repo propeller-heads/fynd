@@ -55,6 +55,7 @@ use crate::{
     feed::{exclusivity::is_exclusive, protocol_registry::RFQ_PREFIX},
     price_guard::guard::PriceGuard,
     simulation::simulator::QuoteSimulator,
+    types::{validate_variations, Variation, VariationOutcome, VariationQuote, VariationStatus},
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
     QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
@@ -205,6 +206,8 @@ pub(crate) struct WorkerPoolQuote {
     quote: OrderQuote,
     /// Wall time the worker spent on this order, in milliseconds.
     solve_time_ms: u64,
+    /// Each requested variation's outcome in that worker pool, in request order.
+    variations: Vec<VariationOutcome>,
 }
 
 /// Collected responses for a single order from multiple solvers.
@@ -261,19 +264,84 @@ pub struct WorkerPoolRouter {
 /// Ranked, unencoded candidates for every order of a request — the output of
 /// [`WorkerPoolRouter::solve`].
 ///
-/// One inner list per request order, in request order, best candidate first. An order with no
-/// route yields a single `NoRouteFound`/`Timeout` placeholder, so every list is non-empty. When
-/// the request enables the price guard, `PriceGuard::validate` has already dropped the candidates
-/// that fail it; an order where none pass holds only its best candidate, as `PriceCheckFailed`.
+/// One entry per request order, in request order, best candidate first. An order with no
+/// route yields a single `NoRouteFound`/`Timeout` placeholder, so every candidate list is
+/// non-empty. When the request enables the price guard, `PriceGuard::validate` has already dropped
+/// the candidates that fail it; an order where none pass holds only its best candidate, as
+/// `PriceCheckFailed`.
 #[must_use]
 #[derive(Debug)]
 pub struct RankedQuotes {
-    per_order: Vec<Vec<OrderQuote>>,
+    per_order: Vec<RankedOrder>,
     started: Instant,
+    /// The request deadline, when the router stops waiting and variation encoding stops.
+    deadline: Option<Instant>,
+}
+
+/// One order's ranked candidates, and the variation quotes of every worker pool that answered it.
+///
+/// Encoding can still replace the best candidate with another one, so the order keeps the
+/// variations of every candidate until the main quote is settled. The main quote then gets the
+/// variations that its own solver built.
+#[derive(Debug)]
+pub struct RankedOrder {
+    candidates: Vec<OrderQuote>,
+    variations: OrderVariations,
+}
+
+impl RankedOrder {
+    /// Ranked candidates, best first. Never empty.
+    pub fn candidates(&self) -> &[OrderQuote] {
+        &self.candidates
+    }
+
+    /// The variation quotes of the best candidate, one per requested variation, in request order.
+    /// Empty when the request asked for none.
+    pub fn variations(&self) -> &[VariationQuote] {
+        match self.candidates.first() {
+            Some(best_candidate) => self.variations.of(best_candidate),
+            None => &[],
+        }
+    }
+}
+
+/// The variation quotes of every worker pool that answered one order.
+#[derive(Debug, Default)]
+struct OrderVariations {
+    /// Each answering worker pool's variation quotes, in request order, keyed by worker pool name.
+    by_worker_pool: FxHashMap<String, Vec<VariationQuote>>,
+    /// One `NoRouteFound` entry per requested variation, for a main quote that is not `Success`.
+    without_main_quote: Vec<VariationQuote>,
+}
+
+impl OrderVariations {
+    /// Returns the variation quotes that belong to `main_quote`.
+    fn of(&self, main_quote: &OrderQuote) -> &[VariationQuote] {
+        if main_quote.status() != QuoteStatus::Success {
+            return &self.without_main_quote;
+        }
+        self.by_worker_pool
+            .get(main_quote.worker_pool())
+            .map_or(&self.without_main_quote, Vec::as_slice)
+    }
+
+    /// Removes and returns the variation quotes that belong to `main_quote`.
+    fn take_of(&mut self, main_quote: &OrderQuote) -> Vec<VariationQuote> {
+        if main_quote.status() != QuoteStatus::Success {
+            return std::mem::take(&mut self.without_main_quote);
+        }
+        match self
+            .by_worker_pool
+            .remove(main_quote.worker_pool())
+        {
+            Some(variations) => variations,
+            None => std::mem::take(&mut self.without_main_quote),
+        }
+    }
 }
 
 impl RankedQuotes {
-    /// Wraps already-ranked candidates and starts the solve clock now.
+    /// Wraps already-ranked candidates, with no variations, and starts the solve clock now.
     ///
     /// Every inner list must be non-empty — an order without a route is represented by a
     /// non-`Success` `OrderQuote` (e.g. `QuoteStatus::NoRouteFound`), not by an empty list, per
@@ -283,18 +351,26 @@ impl RankedQuotes {
     ///
     /// Returns `Err(SolveError::Internal)` if any inner list is empty.
     pub fn new(per_order: Vec<Vec<OrderQuote>>) -> Result<Self, SolveError> {
-        Self::started_at(per_order, Instant::now())
+        let per_order = per_order
+            .into_iter()
+            .map(|candidates| RankedOrder { candidates, variations: OrderVariations::default() })
+            .collect();
+        Self::started_at(per_order, Instant::now(), None)
     }
 
-    /// Wraps already-ranked candidates with an explicit start time, rejecting empty inner lists.
+    /// Wraps already-ranked orders with an explicit start time, rejecting empty candidate lists.
     ///
     /// Every `RankedQuotes` is built here, so the non-empty invariant holds for every instance
     /// and [`Self::into_best`] cannot hit an empty list. [`WorkerPoolRouter::solve`] feeds it
     /// `rank_quotes` output, which always yields at least a `NoRouteFound`/`Timeout` placeholder
     /// per order, so the error path is unreachable there but stays checked rather than assumed.
-    fn started_at(per_order: Vec<Vec<OrderQuote>>, started: Instant) -> Result<Self, SolveError> {
-        for (index, candidates) in per_order.iter().enumerate() {
-            if candidates.is_empty() {
+    fn started_at(
+        per_order: Vec<RankedOrder>,
+        started: Instant,
+        deadline: Option<Instant>,
+    ) -> Result<Self, SolveError> {
+        for (index, ranked_order) in per_order.iter().enumerate() {
+            if ranked_order.candidates.is_empty() {
                 return Err(SolveError::Internal(format!(
                     "order {index} has no candidates: represent an order without a quote by a \
                      non-Success OrderQuote (e.g. QuoteStatus::NoRouteFound), which is how the \
@@ -302,29 +378,27 @@ impl RankedQuotes {
                 )));
             }
         }
-        Ok(Self { per_order, started })
+        Ok(Self { per_order, started, deadline })
     }
 
-    /// Ranked candidates per order, best first.
+    /// Ranked candidates and variation quotes per order.
     #[must_use]
-    pub fn per_order(&self) -> &[Vec<OrderQuote>] {
+    pub fn per_order(&self) -> &[RankedOrder] {
         &self.per_order
     }
 
-    /// Consumes the ranking, returning the candidates per order.
-    #[must_use]
-    pub fn into_per_order(self) -> Vec<Vec<OrderQuote>> {
-        self.per_order
-    }
-
-    /// Consumes the ranking, keeping only the best candidate of every order.
+    /// Consumes the ranking, keeping only the best candidate of every order, with the variations
+    /// of that candidate attached.
     #[must_use]
     pub fn into_best(self) -> Vec<OrderQuote> {
-        self.per_order
-            .into_iter()
+        let mut best_per_order = Vec::with_capacity(self.per_order.len());
+        for RankedOrder { mut candidates, mut variations } in self.per_order {
             // Cannot panic: `started_at` rejects empty lists, and it is the only constructor.
-            .map(|mut candidates| candidates.swap_remove(0))
-            .collect()
+            let mut best = candidates.swap_remove(0);
+            best.set_variations(variations.take_of(&best));
+            best_per_order.push(best);
+        }
+        best_per_order
     }
 
     /// When solving started; pass its elapsed time to [`finalize_quote`] after encoding.
@@ -352,20 +426,169 @@ impl RankedQuotes {
 /// its attestation cache is cold: it fetches the attestation inline, for up to 3s, and the budget
 /// gives up on it instead.
 ///
+/// Each quote gets the variations that the solver of that quote built. The variations of each
+/// best candidate encode at the same time as the main quotes. When a retry makes another
+/// candidate the main quote, the variations of that candidate encode after the retry. Each
+/// variation encodes in its own call to the encoder, with no retries, until the request deadline.
+/// A variation quote that fails to encode, or is not encoded by the deadline, gets
+/// [`QuoteStatus::EncodingFailed`]. `encoding_duration_seconds` times the main quotes only.
+///
 /// An error returned here fails the whole call, and `http_requests_total` counts it under its
 /// error status. A quote that fails to encode is not an error here: [`Encoder::encode`] reports
-/// it on the quote.
+/// it on the quote. A variation never fails the call.
 pub async fn encode_quotes(
     encoder: &Encoder,
     ranked: RankedQuotes,
     encoding_options: &EncodingOptions,
     retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
-    let encode_start = Instant::now();
-    let encoded =
-        encode_with_retries(encoder, ranked.into_per_order(), encoding_options, retry_budget).await;
-    histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
-    encoded
+    let RankedQuotes { per_order, started: _, deadline } = ranked;
+    let mut candidates_per_order = Vec::with_capacity(per_order.len());
+    let mut best_worker_pools = Vec::with_capacity(per_order.len());
+    let mut best_variations_per_order = Vec::with_capacity(per_order.len());
+    let mut variations_per_order = Vec::with_capacity(per_order.len());
+    for RankedOrder { candidates, mut variations } in per_order {
+        // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
+        if let Some(best_candidate) = candidates.first() {
+            best_worker_pools.push(best_candidate.worker_pool().to_string());
+            best_variations_per_order.push(variations.take_of(best_candidate));
+        }
+        candidates_per_order.push(candidates);
+        variations_per_order.push(variations);
+    }
+    let encode_main_quotes = async {
+        let encode_start = Instant::now();
+        let encoded =
+            encode_with_retries(encoder, candidates_per_order, encoding_options, retry_budget)
+                .await;
+        histogram!("encoding_duration_seconds").record(encode_start.elapsed().as_secs_f64());
+        encoded
+    };
+    let (main_quotes, mut encoded_variations_per_order) = tokio::join!(
+        encode_main_quotes,
+        encode_variations(encoder, best_variations_per_order, encoding_options, deadline)
+    );
+    let mut quote_per_order = main_quotes?;
+
+    let mut retried_orders = Vec::new();
+    let mut retried_variations_per_order = Vec::new();
+    for (order_index, quote) in quote_per_order.iter().enumerate() {
+        if quote.worker_pool() == best_worker_pools[order_index] {
+            continue;
+        }
+        debug!(
+            order_id = %quote.order_id(),
+            worker_pool = quote.worker_pool(),
+            "an encoding retry changed the main quote; encoding the variations of its solver"
+        );
+        retried_orders.push(order_index);
+        retried_variations_per_order.push(variations_per_order[order_index].take_of(quote));
+    }
+    let retried_variations_per_order =
+        encode_variations(encoder, retried_variations_per_order, encoding_options, deadline).await;
+    for (order_index, variations) in retried_orders
+        .into_iter()
+        .zip(retried_variations_per_order)
+    {
+        encoded_variations_per_order[order_index] = variations;
+    }
+
+    for (quote, variations) in quote_per_order
+        .iter_mut()
+        .zip(encoded_variations_per_order)
+    {
+        quote.set_variations(variations);
+    }
+    Ok(quote_per_order)
+}
+
+/// Encodes the variation quotes of every order, one encoder call per variation, all at once.
+async fn encode_variations(
+    encoder: &Encoder,
+    variations_per_order: Vec<Vec<VariationQuote>>,
+    encoding_options: &EncodingOptions,
+    deadline: Option<Instant>,
+) -> Vec<Vec<VariationQuote>> {
+    futures::future::join_all(
+        variations_per_order
+            .into_iter()
+            .map(|variations| {
+                futures::future::join_all(
+                    variations
+                        .into_iter()
+                        .map(|variation_quote| {
+                            encode_variation(encoder, variation_quote, encoding_options, deadline)
+                        }),
+                )
+            }),
+    )
+    .await
+}
+
+/// Encodes the quotes of one variation, with no retries, until `deadline`.
+///
+/// A variation is extra information beside the main quote, so it gets no share of the retry
+/// budget, and its failures stay on its own quotes. A variation that starts after the deadline
+/// does not reach the encoder: an RFQ leg would ask its maker for a firm quote that nobody reads.
+async fn encode_variation(
+    encoder: &Encoder,
+    variation_quote: VariationQuote,
+    encoding_options: &EncodingOptions,
+    deadline: Option<Instant>,
+) -> VariationQuote {
+    let (variation, status, mut quotes) = variation_quote.into_parts();
+    if quotes.is_empty() {
+        return VariationQuote::new(variation, status, quotes);
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        debug!(quotes = quotes.len(), "the request deadline passed; variation quotes not encoded");
+        for quote in &mut quotes {
+            quote.set_status(QuoteStatus::EncodingFailed);
+        }
+        return VariationQuote::new(variation, status, quotes);
+    }
+    // The encoder takes the quotes and returns none on an error, so the failure keeps a copy
+    // without the route.
+    let mut failed_quotes: Vec<OrderQuote> = quotes
+        .iter()
+        .map(build_encoding_failed_quote)
+        .collect();
+    match encoder
+        .encode_until(quotes, encoding_options.clone(), deadline)
+        .await
+    {
+        Ok(encoded) => VariationQuote::new(variation, status, encoded),
+        Err(error) => {
+            warn!(
+                quotes = failed_quotes.len(),
+                %error,
+                "variation quotes failed to encode; the main quote is kept"
+            );
+            for failed_quote in &mut failed_quotes {
+                failed_quote.set_no_route_cause(Some(error.clone()));
+            }
+            VariationQuote::new(variation, status, failed_quotes)
+        }
+    }
+}
+
+/// Builds the `EncodingFailed` copy of `quote`, without its route.
+fn build_encoding_failed_quote(quote: &OrderQuote) -> OrderQuote {
+    let mut failed_quote = OrderQuote::new(
+        quote.order_id().to_string(),
+        QuoteStatus::EncodingFailed,
+        quote.amount_in().clone(),
+        quote.amount_out().clone(),
+        quote.gas_estimate().clone(),
+        quote.amount_out_net_gas().clone(),
+        quote.block().clone(),
+        quote.algorithm().to_string(),
+        quote.sender().clone(),
+        quote.receiver().clone(),
+        quote.solved_against().clone(),
+    );
+    failed_quote.set_worker_pool(quote.worker_pool().to_string());
+    failed_quote
 }
 
 async fn encode_with_retries(
@@ -539,6 +762,9 @@ impl WorkerPoolRouter {
         request: &QuoteRequest,
         access: ExclusiveAccess,
     ) -> Result<RankedQuotes, SolveError> {
+        validate_variations(request.options().variations())
+            .map_err(SolveError::InvalidVariations)?;
+
         let start = Instant::now();
         let deadline = start + self.effective_timeout(request.options());
         let min_responses = request
@@ -550,8 +776,9 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
-        let mut params =
-            SolveParams::default().with_route_filter(request.options().route_filter().clone());
+        let mut params = SolveParams::default()
+            .with_route_filter(request.options().route_filter().clone())
+            .with_variations(request.options().variations());
         if let Some(label) = request.options().state_label().cloned() {
             params = params.with_state_label(label);
         }
@@ -644,7 +871,12 @@ impl WorkerPoolRouter {
             _ => ranked_quotes,
         };
 
-        RankedQuotes::started_at(ranked_per_order, start)
+        // Variation quotes stay out of the main ranking, the exclusive overlay and the price
+        // guard. Encoding can still change which candidate becomes the main quote, so each order
+        // keeps the variations of every candidate. The main quote gets the variations that its
+        // own solver built.
+        let per_order = build_ranked_orders(order_responses, ranked_per_order, request.options());
+        RankedQuotes::started_at(per_order, start, Some(deadline))
     }
 
     /// Ranks every order's candidates by refined `amount_out_net_gas`, best first.
@@ -859,12 +1091,17 @@ impl WorkerPoolRouter {
                                 has_public_response = true;
                             }
 
-                            let mut quote = single_quote.order().clone();
+                            let (mut quote, solve_time_ms, mut variations) =
+                                single_quote.into_parts();
                             quote.set_worker_pool(worker_pool_name.clone());
+                            for variation_quote in iter_solved_variation_quotes(&mut variations) {
+                                variation_quote.set_worker_pool(worker_pool_name.clone());
+                            }
                             quotes.push(WorkerPoolQuote {
                                 worker_pool: worker_pool_name.clone(),
                                 quote,
-                                solve_time_ms: single_quote.solve_time_ms(),
+                                solve_time_ms,
+                                variations,
                             });
 
                             // Scope-aware early return: when the allocation routes through
@@ -1082,6 +1319,131 @@ fn build_no_route_placeholder(
     );
     fallback.set_no_route_cause(aggregate_no_route_cause(failed_solvers));
     fallback
+}
+
+/// Returns mutable references to quotes in `VariationOutcome::Solved`.
+fn iter_solved_variation_quotes(
+    variations: &mut [VariationOutcome],
+) -> impl Iterator<Item = &mut OrderQuote> {
+    variations
+        .iter_mut()
+        .flat_map(|outcome| match outcome {
+            VariationOutcome::Solved(quotes) => quotes.iter_mut(),
+            VariationOutcome::Unsupported | VariationOutcome::Failed(_) => [].iter_mut(),
+        })
+}
+
+/// Pairs each order's ranked candidates with the variation quotes of every worker pool that
+/// answered it.
+///
+/// Variation quotes are never ranked or mixed across worker pools: each candidate gets the
+/// variations that its own solver built.
+fn build_ranked_orders(
+    order_responses: Vec<OrderResponses>,
+    ranked_per_order: Vec<Vec<OrderQuote>>,
+    options: &QuoteOptions,
+) -> Vec<RankedOrder> {
+    let mut ranked_orders = Vec::with_capacity(ranked_per_order.len());
+    for (responses, candidates) in order_responses
+        .into_iter()
+        .zip(ranked_per_order)
+    {
+        let variations = collect_order_variations(responses, options);
+        ranked_orders.push(RankedOrder { candidates, variations });
+    }
+    ranked_orders
+}
+
+/// Moves the variation outcomes of every worker pool that answered one order into variation
+/// quotes.
+fn collect_order_variations(responses: OrderResponses, options: &QuoteOptions) -> OrderVariations {
+    let requested = options.variations();
+    if requested.is_empty() {
+        return OrderVariations::default();
+    }
+    let mut by_worker_pool = FxHashMap::default();
+    for WorkerPoolQuote { worker_pool, variations, .. } in responses.quotes {
+        let variation_quotes = build_variation_quotes(requested, variations, options);
+        by_worker_pool.insert(worker_pool, variation_quotes);
+    }
+    let mut without_main_quote = Vec::with_capacity(requested.len());
+    for variation in requested {
+        without_main_quote.push(VariationQuote::new(
+            variation.clone(),
+            VariationStatus::NoRouteFound,
+            Vec::new(),
+        ));
+    }
+    OrderVariations { by_worker_pool, without_main_quote }
+}
+
+/// Builds one worker pool's variation quotes from its outcomes, one per requested variation.
+///
+/// A variation without an outcome is `Unsupported`: the worker pool did not solve it.
+fn build_variation_quotes(
+    requested: &[Variation],
+    outcomes: Vec<VariationOutcome>,
+    options: &QuoteOptions,
+) -> Vec<VariationQuote> {
+    let mut outcomes = outcomes.into_iter();
+    let mut variation_quotes = Vec::with_capacity(requested.len());
+    for variation in requested {
+        let (status, quotes) = match outcomes.next() {
+            Some(outcome) => resolve_variation_outcome(outcome, options),
+            None => (VariationStatus::Unsupported, Vec::new()),
+        };
+        variation_quotes.push(VariationQuote::new(variation.clone(), status, quotes));
+    }
+    variation_quotes
+}
+
+/// Returns the status and the rankable quotes of one variation outcome.
+///
+/// Solved quotes keep the worker pool's order. A solved variation with no rankable quote, for
+/// example one over `max_gas`, has no route the caller can use.
+fn resolve_variation_outcome(
+    outcome: VariationOutcome,
+    options: &QuoteOptions,
+) -> (VariationStatus, Vec<OrderQuote>) {
+    match outcome {
+        VariationOutcome::Solved(quotes) => {
+            let rankable: Vec<OrderQuote> = quotes
+                .into_iter()
+                .filter(|quote| is_rankable(quote, options))
+                .collect();
+            if rankable.is_empty() {
+                return (VariationStatus::NoRouteFound, rankable);
+            }
+            (VariationStatus::Success, rankable)
+        }
+        VariationOutcome::Failed(error) => (variation_failure_status(&error), Vec::new()),
+        VariationOutcome::Unsupported => (VariationStatus::Unsupported, Vec::new()),
+    }
+}
+
+/// Returns the variation status that a failed variation solve reports.
+fn variation_failure_status(error: &SolveError) -> VariationStatus {
+    match error {
+        SolveError::Timeout { .. } => VariationStatus::Timeout,
+        SolveError::InsufficientLiquidity { .. } => VariationStatus::InsufficientLiquidity,
+        SolveError::NoRouteFound { .. } |
+        SolveError::RouteRejected { .. } |
+        SolveError::AlgorithmError(_) |
+        SolveError::MarketDataStale { .. } |
+        SolveError::QueueFull |
+        SolveError::InvalidOrder(_) |
+        SolveError::Internal(_) |
+        SolveError::InvalidWorkerPools(_) |
+        SolveError::InvalidVariations(_) |
+        SolveError::NotReady(_) |
+        SolveError::ComputationFailed(_) |
+        SolveError::FailedEncoding(_) |
+        SolveError::EncodingUnavailable(_) |
+        SolveError::PriceCheckFailed { .. } |
+        SolveError::MaxGasExceeded |
+        SolveError::MissingData(_) |
+        SolveError::SimulationFailed(_) => VariationStatus::NoRouteFound,
+    }
 }
 
 /// Builds the final ranked quote list for one order by deciding whether an exclusive-access
@@ -1543,6 +1905,7 @@ fn cause_tier(error: &SolveError) -> u8 {
         SolveError::QueueFull |
         SolveError::Internal(_) |
         SolveError::InvalidWorkerPools(_) |
+        SolveError::InvalidVariations(_) |
         SolveError::InvalidOrder(_) |
         SolveError::FailedEncoding(_) |
         SolveError::EncodingUnavailable(_) |
@@ -1556,8 +1919,18 @@ fn refine_gas_estimates(
     encoding_options: &EncodingOptions,
 ) -> Result<(), SolveError> {
     for responses in order_responses {
-        for WorkerPoolQuote { quote, .. } in &mut responses.quotes {
+        for WorkerPoolQuote { quote, variations, .. } in &mut responses.quotes {
             refine_gas_estimate(quote, encoding_options)?;
+            for variation_quote in iter_solved_variation_quotes(variations) {
+                if let Err(error) = refine_gas_estimate(variation_quote, encoding_options) {
+                    warn!(
+                        order_id = %variation_quote.order_id(),
+                        %error,
+                        "variation quote failed gas refinement; it is dropped"
+                    );
+                    variation_quote.set_status(QuoteStatus::NoRouteFound);
+                }
+            }
         }
     }
     Ok(())
@@ -1605,13 +1978,15 @@ enum PammFloorOutcome {
 /// `encoding_options`, which the workers solving the route do not have, and ranking collapses the
 /// candidates to one quote per order. Dropping such a candidate any later leaves the order
 /// answering "no route" while a route the user could have executed is still in the list.
+///
+/// `propamm_fallback_quotes_total` counts the main candidates only.
 fn drop_pamm_quotes_below_min_amount_out(
     encoder: &Encoder,
     order_responses: &mut [OrderResponses],
     encoding_options: &EncodingOptions,
 ) -> Result<(), SolveError> {
     for responses in order_responses {
-        for WorkerPoolQuote { worker_pool, quote, .. } in &mut responses.quotes {
+        for WorkerPoolQuote { worker_pool, quote, variations, .. } in &mut responses.quotes {
             match drop_pamm_quote_below_min_amount_out(
                 encoder,
                 worker_pool,
@@ -1624,6 +1999,23 @@ fn drop_pamm_quotes_below_min_amount_out(
                 }
                 PammFloorOutcome::Dropped => {
                     counter!("propamm_fallback_quotes_total", "outcome" => "dropped").increment(1);
+                }
+            }
+            for variation_quote in iter_solved_variation_quotes(variations) {
+                let checked = drop_pamm_quote_below_min_amount_out(
+                    encoder,
+                    worker_pool,
+                    variation_quote,
+                    encoding_options,
+                );
+                if let Err(error) = checked {
+                    warn!(
+                        order_id = %variation_quote.order_id(),
+                        worker_pool,
+                        %error,
+                        "variation quote failed the pAMM floor check; it is dropped"
+                    );
+                    variation_quote.set_status(QuoteStatus::NoRouteFound);
                 }
             }
         }
