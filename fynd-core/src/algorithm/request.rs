@@ -1,11 +1,11 @@
 //! What an algorithm is given to solve one order.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use crate::{
     derived::SharedDerivedDataRef,
     feed::market_data::{MarketData, StateLabel},
-    types::{quote::RouteExclusions, Order},
+    types::{quote::RouteExclusions, Order, Variation},
 };
 
 /// A [`SolveRequest`] taken apart, so an algorithm owns the market and the derived data.
@@ -22,6 +22,11 @@ pub struct SolveParts<'a, G> {
     pub derived: Option<SharedDerivedDataRef>,
     /// The pools and tokens this solve must not use.
     pub exclusions: Arc<RouteExclusions>,
+    /// The variations to solve beside the main route, in request order, each with the pools and
+    /// tokens it must not use.
+    pub variations: Arc<[(Variation, Arc<RouteExclusions>)]>,
+    /// The caller's deadline for receiving the result, if set.
+    pub deadline: Option<Instant>,
 }
 
 /// One order to solve, and everything the algorithm reads to solve it.
@@ -32,6 +37,8 @@ pub struct SolveRequest<'a, G> {
     label: Option<StateLabel>,
     derived: Option<SharedDerivedDataRef>,
     exclusions: Arc<RouteExclusions>,
+    variations: Arc<[(Variation, Arc<RouteExclusions>)]>,
+    deadline: Option<Instant>,
 }
 
 impl<'a, G> SolveRequest<'a, G> {
@@ -45,10 +52,13 @@ impl<'a, G> SolveRequest<'a, G> {
             label: self.label,
             derived: self.derived,
             exclusions: self.exclusions,
+            variations: self.variations,
+            deadline: self.deadline,
         }
     }
 
-    /// A solve against the live market state, with no derived data and nothing excluded.
+    /// A solve against the live market state, with no derived data, nothing excluded, no
+    /// variations and no deadline.
     pub fn new(graph: &'a G, market: MarketData, order: &'a Order) -> Self {
         Self {
             graph,
@@ -57,6 +67,8 @@ impl<'a, G> SolveRequest<'a, G> {
             label: None,
             derived: None,
             exclusions: Arc::new(RouteExclusions::default()),
+            variations: Arc::from(Vec::new()),
+            deadline: None,
         }
     }
 
@@ -84,6 +96,27 @@ impl<'a, G> SolveRequest<'a, G> {
 
     pub(crate) fn with_shared_exclusions(mut self, exclusions: Arc<RouteExclusions>) -> Self {
         self.exclusions = exclusions;
+        self
+    }
+
+    /// Also solve the order under these variations, read by [`crate::Algorithm::find_routes`].
+    ///
+    /// Each variation comes with its exclusions: the request's, plus the pools of the protocols
+    /// the variation excludes.
+    #[must_use]
+    pub fn with_variations(
+        mut self,
+        variations: impl Into<Arc<[(Variation, Arc<RouteExclusions>)]>>,
+    ) -> Self {
+        self.variations = variations.into();
+        self
+    }
+
+    /// Asks the algorithm to stop solving variations at `deadline`, when the caller stops waiting
+    /// for the answer. An algorithm can ignore it.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 
@@ -115,5 +148,16 @@ impl<'a, G> SolveRequest<'a, G> {
     /// The pools and tokens this solve request must not use.
     pub fn exclusions(&self) -> &RouteExclusions {
         &self.exclusions
+    }
+
+    /// The variations to solve beside the main route, in request order, each with the pools and
+    /// tokens it must not use.
+    pub fn variations(&self) -> &[(Variation, Arc<RouteExclusions>)] {
+        &self.variations
+    }
+
+    /// The caller's deadline for receiving the result, if set.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
     }
 }

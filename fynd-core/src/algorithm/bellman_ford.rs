@@ -219,7 +219,16 @@ impl BellmanFordAlgorithm {
         &self,
         request: SolveRequest<'_, StableDiGraph<()>>,
     ) -> Result<BellmanFordContext, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
+        let SolveParts {
+            graph,
+            order,
+            market,
+            label,
+            derived,
+            exclusions,
+            variations: _,
+            deadline: _,
+        } = request.into_parts();
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }

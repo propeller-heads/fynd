@@ -219,7 +219,16 @@ impl WaterFillAlgorithm {
         request: SolveRequest<'a, TopologyGraph<DepthAndPrice>>,
         deadline: Deadline,
     ) -> Result<SetupResult<'a, 'a>, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
+        let SolveParts {
+            graph,
+            order,
+            market,
+            label,
+            derived,
+            exclusions,
+            variations: _,
+            deadline: _,
+        } = request.into_parts();
         // The hop bounds are this algorithm's, the exclusions are the request's; a search borrows
         // both.
         let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };

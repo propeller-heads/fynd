@@ -215,6 +215,23 @@ pub trait Algorithm: Send + Sync {
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError>;
 
+    /// Finds the order's best route and the routes for each requested variation.
+    ///
+    /// The default solves the main route with [`Algorithm::find_best_route`] and solves no
+    /// variation. An algorithm that supports variations overrides it and reads them through
+    /// [`SolveRequest::variations`]. Each variation is another solve and adds solve time, so it
+    /// should stop at [`SolveRequest::deadline`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the main solve's error without solving variations if the main solve fails.
+    async fn find_routes(
+        &self,
+        request: SolveRequest<'_, Self::GraphType>,
+    ) -> Result<SolvedRoutes, AlgorithmError> {
+        Ok(SolvedRoutes::new(self.find_best_route(request).await?))
+    }
+
     /// Returns the derived data computation requirements for this algorithm.
     ///
     /// Algorithms declare freshness requirements for derived data:
@@ -232,6 +249,57 @@ pub trait Algorithm: Send + Sync {
     /// Workers use this to set the maximum time to wait for derived data
     /// before failing a solve request.
     fn timeout(&self) -> Duration;
+}
+
+/// What one variation found: its routes, best first, or why it found none.
+pub type VariationRouteResult = Result<Vec<RouteResult>, AlgorithmError>;
+
+/// One [`VariationRouteResult`] per requested variation, in request order.
+pub type VariationRoutes = Vec<VariationRouteResult>;
+
+/// The main route and each variation's routes or error, in request order.
+#[derive(Debug)]
+pub struct SolvedRoutes {
+    main_route: RouteResult,
+    /// One entry per requested variation, or `None` when the algorithm solves no variation. A
+    /// filter variation holds one route; `Alternatives(n)` holds up to n.
+    variation_routes: Option<VariationRoutes>,
+}
+
+impl SolvedRoutes {
+    /// The main route of an algorithm that solves no variation.
+    #[must_use]
+    pub fn new(main_route: RouteResult) -> Self {
+        Self { main_route, variation_routes: None }
+    }
+
+    /// The main route and one outcome per requested variation, in request order.
+    #[must_use]
+    pub fn with_variation_routes(
+        main_route: RouteResult,
+        variation_routes: VariationRoutes,
+    ) -> Self {
+        Self { main_route, variation_routes: Some(variation_routes) }
+    }
+
+    /// The best route for the order without applying variations.
+    #[must_use]
+    pub fn main_route(&self) -> &RouteResult {
+        &self.main_route
+    }
+
+    /// What each variation found, in request order. `None` when the algorithm solves no
+    /// variation.
+    #[must_use]
+    pub fn variation_routes(&self) -> Option<&[VariationRouteResult]> {
+        self.variation_routes.as_deref()
+    }
+
+    /// Consumes this result and returns the main route and variation outcomes.
+    #[must_use]
+    pub fn into_parts(self) -> (RouteResult, Option<VariationRoutes>) {
+        (self.main_route, self.variation_routes)
+    }
 }
 
 /// Errors that can occur during route finding.
