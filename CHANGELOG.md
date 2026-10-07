@@ -1,4 +1,23 @@
 
+## [0.111.1](https://github.com/propeller-heads/fynd/compare/0.110.8...0.111.1) (2026-10-07)
+
+### Features
+
+* **core:** fail an RFQ encode when its signed quote exceeds slippage ([1765e90](https://github.com/propeller-heads/fynd/commit/1765e9001cecd7311dfc653f490662f30df88b7b))
+* **core:** give up on a route that takes too long to encode ([43e7da6](https://github.com/propeller-heads/fynd/commit/43e7da68209bda0fc1164291609407f20c31ce45))
+* **core:** make the encoding retry budget configurable ([3d0eda9](https://github.com/propeller-heads/fynd/commit/3d0eda95ad266dcdd8f38e4ea49892053fde209f))
+* **core:** label encoding failures cut off by the retry budget ([aa3b80b](https://github.com/propeller-heads/fynd/commit/aa3b80bce39d8348c73c74056e4061dda243bc77))
+* **core:** cap encoding fallback rounds at 5ms ([b434dd1](https://github.com/propeller-heads/fynd/commit/b434dd100b329a4c9c242a36d204ca5910c7d3e8))
+* **core:** skip RFQ candidates when falling back on encoding ([84b774a](https://github.com/propeller-heads/fynd/commit/84b774aabae77c1779cdf8b179ba2f7ef801e925))
+* encode the next-best candidate when the best fails to encode ([fba51cd](https://github.com/propeller-heads/fynd/commit/fba51cdeacdcd66c9f006c6f149962c9c64f1e48))
+
+### Bug Fixes
+
+* **core:** treat fallback:rfq legs as RFQ when falling back on encoding ([0508476](https://github.com/propeller-heads/fynd/commit/0508476abc879ebf818d4e451287a26f106b9a4b))
+* **core:** count encoding failures once per order ([a657a2a](https://github.com/propeller-heads/fynd/commit/a657a2a59b6294bf03893b73030deb1f5048a8c8))
+* **core:** keep every price-checked candidate per order ([9e9d629](https://github.com/propeller-heads/fynd/commit/9e9d6292bd11d80cd240c881aac925a97a05ab7b))
+
+
 ## [0.111.0](https://github.com/propeller-heads/fynd/compare/0.110.8...0.111.0) (2026-10-07)
 
 ### Features
