@@ -77,6 +77,21 @@ describe('toWireRequest', () => {
     });
   });
 
+  it('sends variations under snake_case wire names', () => {
+    const wire = toWireRequest({
+      ...baseParams,
+      options: {
+        variations: ['no_rfq', 'no_pamm', { excludeProtocols: ['uniswap_v2'] }, { alternatives: 2 }],
+      },
+    });
+    expect(wire.options?.variations).toEqual([
+      'no_rfq',
+      'no_pamm',
+      { exclude_protocols: ['uniswap_v2'] },
+      { alternatives: 2 },
+    ]);
+  });
+
   it('omits receiver key when order.receiver is undefined', () => {
     const wire = toWireRequest(baseParams);
     expect(wire.orders[0]).not.toHaveProperty('receiver');
@@ -453,6 +468,63 @@ describe('fromWireQuote', () => {
     const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
     expect(quote.transaction?.clientFeeSignatureOffset).toBeUndefined();
     expect(quote.feeBreakdown?.swapsHash).toBeUndefined();
+  });
+});
+
+describe('fromWireQuote variations', () => {
+  const mainQuote = baseWireSolution.orders[0]!;
+
+  it('maps each variation and its nested quotes', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...mainQuote,
+          variations: [
+            {
+              variation: 'no_rfq',
+              status: 'success',
+              quotes: [{ ...mainQuote, amount_out: '3400000000' }],
+            },
+            { variation: { alternatives: 2 }, status: 'no_route_found', quotes: [] },
+            {
+              variation: { exclude_protocols: ['uniswap_v2'] },
+              status: 'success',
+              quotes: [mainQuote],
+            },
+          ],
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.variations).toHaveLength(3);
+    expect(quote.variations?.[0]?.variation).toBe('no_rfq');
+    expect(quote.variations?.[0]?.status).toBe('success');
+    expect(quote.variations?.[0]?.quotes[0]?.amountOut).toBe(3400000000n);
+    expect(quote.variations?.[0]?.quotes[0]?.receiver).toBe(SENDER);
+    expect(quote.variations?.[1]?.variation).toEqual({ alternatives: 2 });
+    expect(quote.variations?.[1]?.status).toBe('no_route_found');
+    expect(quote.variations?.[1]?.quotes).toEqual([]);
+    expect(quote.variations?.[2]?.variation).toEqual({ excludeProtocols: ['uniswap_v2'] });
+  });
+
+  it('maps an unsupported variation with no quotes', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...mainQuote,
+          variations: [{ variation: 'no_pamm', status: 'unsupported', quotes: [] }],
+        },
+      ],
+    };
+    const quote = fromWireQuote(wire, TOKEN_OUT, SENDER);
+    expect(quote.variations).toEqual([{ variation: 'no_pamm', status: 'unsupported', quotes: [] }]);
+  });
+
+  it('leaves variations unset when the quote carries none', () => {
+    const quote = fromWireQuote(baseWireSolution, TOKEN_OUT, SENDER);
+    expect(quote).not.toHaveProperty('variations');
   });
 });
 

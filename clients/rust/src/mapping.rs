@@ -856,6 +856,87 @@ mod tests {
         assert_eq!(filter.excluded_protocols(), ["uniswap_v2".to_string()]);
     }
 
+    #[test]
+    fn test_quote_options_to_dto_variations() {
+        use crate::types::{QuoteOptions, Variation};
+
+        let variations = vec![
+            Variation::NoRfq,
+            Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+            Variation::Alternatives(std::num::NonZeroUsize::new(2).unwrap()),
+        ];
+        let opts = QuoteOptions::default().with_variations(variations.clone());
+
+        let dto_opts = dto::QuoteOptions::try_from(opts).unwrap();
+
+        assert_eq!(dto_opts.variations(), variations);
+    }
+
+    /// Nested quotes map like the main quote and carry its order's token and receiver.
+    #[test]
+    fn test_quote_from_dto_variations() {
+        let order_quote: dto::OrderQuote = serde_json::from_str(
+            r#"{
+            "order_id": "test-order-id",
+            "status": "success",
+            "amount_in": "1000",
+            "amount_out": "999",
+            "gas_estimate": "100000",
+            "amount_out_net_gas": "998",
+            "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1730000000},
+            "variations": [{
+                "variation": "no_rfq",
+                "status": "success",
+                "quotes": [{
+                    "order_id": "test-order-id",
+                    "status": "success",
+                    "amount_in": "1000",
+                    "amount_out": "990",
+                    "gas_estimate": "100000",
+                    "amount_out_net_gas": "989",
+                    "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1730000000}
+                }]
+            }]
+        }"#,
+        )
+        .expect("valid order quote JSON");
+        let receiver = Bytes::from_static(&[0xAB; 20]);
+
+        let quote = order_quote_to_quote(order_quote, Bytes::new(), receiver.clone()).unwrap();
+
+        let variation = &quote.variations()[0];
+        assert_eq!(variation.variation(), &crate::types::Variation::NoRfq);
+        assert_eq!(variation.status(), crate::types::VariationStatus::Success);
+        let nested = &variation.quotes()[0];
+        assert!(matches!(nested.status(), QuoteStatus::Success));
+        assert_eq!(nested.receiver(), &receiver);
+        assert!(nested.variations().is_empty());
+    }
+
+    #[test]
+    fn test_quote_from_dto_unsupported_variation() {
+        let order_quote: dto::OrderQuote = serde_json::from_str(
+            r#"{
+            "order_id": "test-order-id",
+            "status": "success",
+            "amount_in": "1000",
+            "amount_out": "999",
+            "gas_estimate": "100000",
+            "amount_out_net_gas": "998",
+            "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1730000000},
+            "variations": [{"variation": "no_pamm", "status": "unsupported", "quotes": []}]
+        }"#,
+        )
+        .expect("valid order quote JSON");
+
+        let quote = order_quote_to_quote(order_quote, Bytes::new(), Bytes::new()).unwrap();
+
+        let variation = &quote.variations()[0];
+        assert_eq!(variation.variation(), &crate::types::Variation::NoPamm);
+        assert_eq!(variation.status(), crate::types::VariationStatus::Unsupported);
+        assert!(variation.quotes().is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // batch_quote_params_to_dto
     // -----------------------------------------------------------------------

@@ -184,6 +184,7 @@ mod tests {
             "ZERO_AMOUNT",
             "INVALID_SLIPPAGE",
             "CLIENT_FEE_TOO_HIGH",
+            "INVALID_VARIATIONS",
         ] {
             assert_eq!(ErrorCode::from_server_code(code), ErrorCode::BadRequest, "{code}");
         }
