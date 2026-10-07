@@ -7952,9 +7952,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.438.0"
+version = "0.443.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "595c8393cfaef26c1f7c6ba15b74d6176379726006708c8ca56b4bba446e2616"
+checksum = "07000d26942057a6c2ad86277ed5330b15b2b432c12af9b8bab403d6f88a72e6"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7982,9 +7982,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.438.0"
+version = "0.443.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d4e74569024f8e3463bd02d1a3e054d6d6bd3a0f53cf6208b6e1e705637d7a6"
+checksum = "a1c5fed291cad476993e363ba9db8d26233ea66dbbb343815fe71d9d23937f73"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8011,9 +8011,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.438.0"
+version = "0.443.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ecd8dddcd1a789cb13f331325bae4f729ed6b94d379a1f45c4faea80bd91ff7"
+checksum = "892b8e0089de2fcb96652c53f79c6b93568b71a0fd2439dbcd54522b14248d4c"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8033,15 +8033,16 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.438.0"
+version = "0.443.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dbabae5eef28a42d6cfb34a7c0c272d9b3b933c5343c418c581d1ead4ce33bb"
+checksum = "e83e110a032eb0c37537fcdc93480ddea7fbfdfe9e1cbdd56ba9d86971a9b44c"
 dependencies = [
  "alloy",
  "chrono",
  "clap",
  "dotenvy",
  "hex",
+ "metrics",
  "num-bigint",
  "once_cell",
  "reqwest 0.12.28",
@@ -8057,9 +8058,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.438.0"
+version = "0.443.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40413f1600d47e904d1af8f136fb8532d13c0f4ef40d4316c9f596f1bd01b49e"
+checksum = "df1a53010173ae84c58571dc3967ddf6977fac34c54f0b57def6ccad5589a683"
 dependencies = [
  "alloy",
  "alloy-chains",
