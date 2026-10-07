@@ -36,11 +36,11 @@ use crate::{
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
     derived::{computation::ComputationRequirements, types::TokenGasPrices},
-    feed::market_data::{MarketData, MarketState, StateLabel},
+    feed::market_data::MarketState,
     graph::{
         GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
     },
-    types::{ComponentId, Route, RouteExclusions, RouteResult, Swap},
+    types::{ComponentId, Order, Route, RouteExclusions, RouteResult, Swap},
     AlgorithmError,
 };
 
@@ -84,6 +84,35 @@ struct SolveContext<'a> {
     gas_price: &'a BigUint,
     /// When the solve started, against which every candidate checks the timeout.
     start: Instant,
+}
+
+/// Returns pools connecting consecutive tokens in `scored_paths`, excluding pools in
+/// `exclusions`.
+fn collect_pools_on_paths<'g>(
+    graph: &'g TopologyGraph<DepthAndPrice>,
+    scored_paths: &[(TokenPath, f64)],
+    exclusions: &RouteExclusions,
+) -> FxHashSet<&'g ComponentId> {
+    let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
+    for (token_path, _) in scored_paths {
+        for pair in token_path.windows(2) {
+            pairs.insert((pair[0], pair[1]));
+        }
+    }
+    let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
+    for &(from, to) in &pairs {
+        for pool in graph.pools_between(from, to) {
+            if exclusions.excludes_pool(&pool.component_id) {
+                continue;
+            }
+            component_ids.insert(&pool.component_id);
+        }
+    }
+    component_ids
+}
+
+fn measure_elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis() as u64
 }
 
 /// A token sequence with every hop solved, before any swap is built.
@@ -487,50 +516,63 @@ impl MostLiquidAlgorithm {
         Ok(Route::new(swaps, tokens)?)
     }
 
-    async fn snapshot_market_state(
+    /// Finds the token sequences between the order's tokens, ranks them, and keeps the best
+    /// `max_routes`.
+    fn rank_token_paths(
+        &self,
         graph: &TopologyGraph<DepthAndPrice>,
-        market: MarketData,
-        label: Option<StateLabel>,
-        scored_paths: &[(TokenPath, f64)],
+        order: &Order,
         exclusions: &RouteExclusions,
-    ) -> Result<MarketState, AlgorithmError> {
-        let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
-        for (token_path, _) in scored_paths {
-            for pair in token_path.windows(2) {
-                pairs.insert((pair[0], pair[1]));
-            }
-        }
-        let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
-        for &(from, to) in &pairs {
-            for pool in graph.pools_between(from, to) {
-                if exclusions.excludes_pool(&pool.component_id) {
-                    continue;
-                }
-                component_ids.insert(&pool.component_id);
-            }
+    ) -> Result<(Vec<(TokenPath, f64)>, SolveReport), AlgorithmError> {
+        // Pools are chosen per hop during simulation, so a route here is a sequence of tokens.
+        let search = RouteSearch { bounds: &self.query, exclusions };
+        let all_paths =
+            paths::find_token_paths(graph, order.token_in(), order.token_out(), search)?;
+        let n_paths = all_paths.len();
+        let no_path = |reason| AlgorithmError::NoPath {
+            from: order.token_in().clone(),
+            to: order.token_out().clone(),
+            reason,
+        };
+        if all_paths.is_empty() {
+            return Err(no_path(NoPathReason::NoGraphPath));
         }
 
-        let market = paths::read_market(&market, label).await?;
-        let market_subset = market.extract_subset_with_overlay(&component_ids);
-        drop(market);
-        Ok(market_subset)
+        // No lock needed — scoring uses only local graph data.
+        let mut scored_paths = rank_by_heuristic(graph, all_paths, exclusions);
+        if scored_paths.is_empty() {
+            return Err(no_path(NoPathReason::NoScorablePaths));
+        }
+
+        let mut report = SolveReport {
+            paths_candidates: n_paths,
+            scoring_failures: n_paths - scored_paths.len(),
+            ..SolveReport::default()
+        };
+        if let Some(max_routes) = self.max_routes {
+            scored_paths.truncate(max_routes);
+        }
+        report.paths_to_simulate = scored_paths.len();
+        Ok((scored_paths, report))
     }
 
+    /// Solves `scored_paths` in rank order and builds the winner.
+    ///
+    /// Stops at the timeout. `Ok(None)` when no sequence could be settled, none was reached in
+    /// time, or the winner failed validation.
     fn solve_for_best_path(
         &self,
         scored_paths: &[(TokenPath, f64)],
         report: &mut SolveReport,
         ctx: &SolveContext,
-    ) -> Result<RouteResult, AlgorithmError> {
+    ) -> Result<Option<RouteResult>, AlgorithmError> {
         let mut best_route: Option<(&TokenPath, SolvedTokenPath)> = None;
         let mut winners = PairWinners::new(self.cache_pair_swaps);
         let mut swaps = SwapCache::new();
         let timeout_ms = self.timeout.as_millis() as u64;
 
         for (token_path, _) in scored_paths {
-            // Check timeout
-            let elapsed_ms = ctx.start.elapsed().as_millis() as u64;
-            if elapsed_ms > timeout_ms {
+            if measure_elapsed_ms(ctx.start) > timeout_ms {
                 break;
             }
 
@@ -558,40 +600,17 @@ impl MostLiquidAlgorithm {
 
         // Only the winner is built into swaps: that is what copies a component and a pool state per
         // hop, and every other candidate would have thrown them away.
-        let best = match best_route {
-            Some((token_path, solved)) => {
-                let route = Self::build_route(ctx, token_path, &solved)?;
-                if let Err(e) = route.validate() {
-                    trace!(error = %e, "best route failed validation");
-                    report.validation_failures += 1;
-                    None
-                } else {
-                    let amount_out = swap_on_route(&route, ctx.token_prices, ctx.gas_price);
-                    Some(RouteResult::new(route, amount_out, ctx.gas_price.clone()))
-                }
-            }
-            None => None,
+        let Some((token_path, solved)) = best_route else {
+            return Ok(None);
         };
-
-        let solve_time_ms = ctx.start.elapsed().as_millis() as u64;
-        report.record(
-            best.as_ref(),
-            ctx.market,
-            ctx.amount_in,
-            solve_time_ms,
-            ctx.market.component_count(),
-        );
-
-        match best {
-            Some(best_route) => Ok(best_route),
-            None => {
-                if solve_time_ms > timeout_ms {
-                    Err(AlgorithmError::Timeout { elapsed_ms: solve_time_ms })
-                } else {
-                    Err(AlgorithmError::InsufficientLiquidity)
-                }
-            }
+        let route = Self::build_route(ctx, token_path, &solved)?;
+        if let Err(e) = route.validate() {
+            trace!(error = %e, "best route failed validation");
+            report.validation_failures += 1;
+            return Ok(None);
         }
+        let amount_out = swap_on_route(&route, ctx.token_prices, ctx.gas_price);
+        Ok(Some(RouteResult::new(route, amount_out, ctx.gas_price.clone())))
     }
 
     /// Solves a fixed token sequence, choosing the pool to swap through on each hop.
@@ -750,58 +769,38 @@ impl Algorithm for MostLiquidAlgorithm {
             None => None,
         };
 
-        let amount_in = order.amount().clone();
+        let (scored_paths, mut report) = self.rank_token_paths(graph, order, &exclusions)?;
+        let component_ids = collect_pools_on_paths(graph, &scored_paths, &exclusions);
+        let market_view = paths::read_market(&market, label).await?;
+        let snapshot = market_view.extract_subset_with_overlay(&component_ids);
+        drop(market_view);
+        let gas_price = paths::fetch_gas_price(&snapshot)?;
 
-        // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
-        // simulation.
-        let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };
-        let all_paths =
-            paths::find_token_paths(graph, order.token_in(), order.token_out(), search)?;
-        let n_paths = all_paths.len();
-        let no_path = |reason| AlgorithmError::NoPath {
-            from: order.token_in().clone(),
-            to: order.token_out().clone(),
-            reason,
-        };
-        if all_paths.is_empty() {
-            return Err(no_path(NoPathReason::NoGraphPath));
-        }
-
-        // Step 2: Score and sort all paths by estimated output (higher score = better)
-        // No lock needed — scoring uses only local graph data.
-        let mut scored_paths = rank_by_heuristic(graph, all_paths, &exclusions);
-        if scored_paths.is_empty() {
-            return Err(no_path(NoPathReason::NoScorablePaths));
-        }
-
-        let mut report = SolveReport {
-            paths_candidates: n_paths,
-            scoring_failures: n_paths - scored_paths.len(),
-            ..SolveReport::default()
-        };
-
-        if let Some(max_routes) = self.max_routes {
-            scored_paths.truncate(max_routes);
-        }
-        report.paths_to_simulate = scored_paths.len();
-
-        // Step 3: Fetch all pools in scored_paths.
-        let market =
-            Self::snapshot_market_state(graph, market, label, &scored_paths, &exclusions).await?;
-        let gas_price = paths::fetch_gas_price(&market)?;
-
-        // Step 4: Solve all paths in score order and return the best one
         let ctx = SolveContext {
             graph,
-            market: &market,
+            market: &snapshot,
             token_prices: token_prices.as_deref(),
-            amount_in: &amount_in,
+            amount_in: order.amount(),
             gas_price: &gas_price,
             start,
             exclusions: &exclusions,
         };
-
-        self.solve_for_best_path(&scored_paths, &mut report, &ctx)
+        let best_route = self.solve_for_best_path(&scored_paths, &mut report, &ctx)?;
+        let solve_time_ms = measure_elapsed_ms(start);
+        report.record(
+            best_route.as_ref(),
+            &snapshot,
+            order.amount(),
+            solve_time_ms,
+            snapshot.component_count(),
+        );
+        best_route.ok_or_else(|| {
+            if solve_time_ms > self.timeout.as_millis() as u64 {
+                AlgorithmError::Timeout { elapsed_ms: solve_time_ms }
+            } else {
+                AlgorithmError::InsufficientLiquidity
+            }
+        })
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
@@ -839,6 +838,7 @@ mod tests {
             types::TokenGasPrices,
             DerivedData, SharedDerivedDataRef,
         },
+        feed::market_data::MarketData,
         graph::GraphManager,
         types::OrderSide,
     };
