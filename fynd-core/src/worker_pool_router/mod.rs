@@ -374,11 +374,15 @@ async fn encode_with_retries(
     retry_budget: Duration,
 ) -> Result<Vec<OrderQuote>, SolveError> {
     let mut best_candidate_per_order = Vec::new();
+    let mut best_has_rfq_leg_per_order = Vec::new();
     let mut retry_candidates_per_order = Vec::new();
     for candidates in ranked.into_per_order() {
         let mut candidates = candidates.into_iter();
         // `RankedQuotes` rejects empty candidate lists, so every order has a best candidate.
-        best_candidate_per_order.extend(candidates.next());
+        if let Some(best_candidate) = candidates.next() {
+            best_has_rfq_leg_per_order.push(has_rfq_leg(&best_candidate));
+            best_candidate_per_order.push(best_candidate);
+        }
         retry_candidates_per_order.push(candidates.filter(|candidate| {
             candidate.status() == QuoteStatus::Success && !has_rfq_leg(candidate)
         }));
@@ -426,6 +430,9 @@ async fn encode_with_retries(
         {
             if retried_quote.status() == QuoteStatus::Success {
                 debug!(order_id = %retried_quote.order_id(), "encoded the next-best candidate");
+                let best_route =
+                    if best_has_rfq_leg_per_order[order_index] { "rfq" } else { "other" };
+                counter!("encoding_retry_successes_total", "best_route" => best_route).increment(1);
                 quote_per_order[order_index] = retried_quote;
             }
         }
@@ -2199,6 +2206,46 @@ mod tests {
         assert_eq!(staged.solve_time_ms(), 7);
         worker_a.abort();
         worker_b.abort();
+    }
+
+    #[rstest]
+    #[case::rfq_best("rfq:bebop", "best_route=rfq")]
+    #[case::other_best("no_such_protocol", "best_route=other")]
+    fn test_encode_quotes_counts_retry_successes(#[case] best_protocol: &str, #[case] label: &str) {
+        let ranked = RankedQuotes::new(vec![vec![
+            make_single_quote_on(best_protocol, 950)
+                .order()
+                .clone(),
+            make_single_quote(800).order().clone(),
+        ]])
+        .expect("the order has candidates");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let quotes = metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(encode_quotes(
+                &default_encoder(),
+                ranked,
+                &EncodingOptions::new(0.01),
+                Duration::from_millis(5),
+            ))
+        })
+        .expect("a failing candidate is reported on the order, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::Success);
+        let successes: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "encoding_retry_successes_total")
+            .map(|(_, labels, value)| (labels, value))
+            .collect();
+        assert_eq!(
+            successes,
+            vec![(vec![label.to_string()], metrics_util::debugging::DebugValue::Counter(1))]
+        );
     }
 
     #[tokio::test]
