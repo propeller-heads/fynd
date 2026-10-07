@@ -735,6 +735,46 @@ mod tests {
                 .expect("a fee of 100% and a slippage of 0.5% are valid");
         }
 
+        /// A request for one valid order, solved under `variations`.
+        fn dto_request_with_variations(variations: serde_json::Value) -> dto::QuoteRequest {
+            serde_json::from_value(serde_json::json!({
+                "orders": [dto_order()],
+                "options": {"variations": variations}
+            }))
+            .expect("valid request json")
+        }
+
+        #[rstest]
+        #[case::too_many_variations(serde_json::json!(vec!["no_rfq"; 5]))]
+        #[case::too_many_alternatives(serde_json::json!([{"alternatives": 5}]))]
+        fn test_validate_quote_request_variations_over_limits(
+            #[case] variations: serde_json::Value,
+        ) {
+            let request = dto_request_with_variations(variations);
+
+            assert_eq!(rejection_code(request), "INVALID_VARIATIONS");
+        }
+
+        #[test]
+        fn test_validate_quote_request_variations_at_limits() {
+            let request = dto_request_with_variations(serde_json::json!([
+                "no_rfq",
+                "no_pamm",
+                {"exclude_protocols": ["uniswap_v2"]},
+                {"alternatives": 4}
+            ]));
+
+            let core_request = validate_quote_request(request).expect("4 variations are valid");
+
+            assert_eq!(
+                core_request
+                    .options()
+                    .variations()
+                    .len(),
+                4
+            );
+        }
+
         #[test]
         fn test_validate_quote_request_converts_valid_orders() {
             let core_request =

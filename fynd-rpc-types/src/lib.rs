@@ -1737,6 +1737,139 @@ mod wire_format_tests {
         }
     }
 
+    /// The wire shape of each variation, and what an order quote carries for them.
+    mod variations {
+        use super::*;
+
+        const ORDER_QUOTE_JSON: &str = r#"{
+            "order_id": "order-1",
+            "status": "success",
+            "amount_in": "1000",
+            "amount_out": "2000",
+            "gas_estimate": "150000",
+            "amount_out_net_gas": "1999",
+            "block": { "number": 21000000, "hash": "0xdeadbeef", "timestamp": 1700000000 }
+        }"#;
+
+        #[test]
+        fn test_quote_options_variations_json() {
+            let options = QuoteOptions::default().with_variations(vec![
+                Variation::NoRfq,
+                Variation::NoPamm,
+                Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+                Variation::Alternatives(NonZeroUsize::new(3).unwrap()),
+            ]);
+
+            let json = serde_json::to_value(&options).unwrap();
+
+            assert_eq!(
+                json["variations"],
+                serde_json::json!([
+                    "no_rfq",
+                    "no_pamm",
+                    {"exclude_protocols": ["uniswap_v2"]},
+                    {"alternatives": 3}
+                ])
+            );
+            let parsed: QuoteOptions = serde_json::from_value(json).unwrap();
+            assert_eq!(parsed.variations(), options.variations());
+        }
+
+        #[test]
+        fn test_quote_options_without_variations_json() {
+            let json = serde_json::to_value(QuoteOptions::default()).unwrap();
+
+            assert!(json.get("variations").is_none());
+        }
+
+        #[test]
+        fn test_alternatives_zero_deserialization() {
+            let parsed = serde_json::from_str::<Variation>(r#"{"alternatives": 0}"#);
+
+            assert!(parsed.is_err());
+        }
+
+        #[test]
+        fn test_order_quote_variations_json() {
+            let mut json: serde_json::Value = serde_json::from_str(ORDER_QUOTE_JSON).unwrap();
+            // A serialized quote always carries `transaction`, even when it has none.
+            let mut nested = json.clone();
+            nested["transaction"] = serde_json::Value::Null;
+            json["variations"] = serde_json::json!([
+                {"variation": {"alternatives": 1}, "status": "success", "quotes": [nested]}
+            ]);
+
+            let quote: OrderQuote = serde_json::from_value(json.clone()).unwrap();
+
+            let variation = &quote.variations()[0];
+            assert_eq!(
+                variation.variation(),
+                &Variation::Alternatives(NonZeroUsize::new(1).unwrap())
+            );
+            assert_eq!(variation.status(), VariationStatus::Success);
+            assert_eq!(variation.quotes()[0].order_id(), "order-1");
+            assert!(variation.quotes()[0]
+                .variations()
+                .is_empty());
+            assert_eq!(serde_json::to_value(&quote).unwrap()["variations"], json["variations"]);
+        }
+
+        #[test]
+        fn test_order_quote_failed_variations_json() {
+            let mut json: serde_json::Value = serde_json::from_str(ORDER_QUOTE_JSON).unwrap();
+            json["variations"] = serde_json::json!([
+                {"variation": "no_rfq", "status": "unsupported", "quotes": []},
+                {"variation": "no_pamm", "status": "no_route_found", "quotes": []},
+                {
+                    "variation": {"alternatives": 2},
+                    "status": "insufficient_liquidity",
+                    "quotes": []
+                },
+                {"variation": {"exclude_protocols": ["vm:"]}, "status": "timeout", "quotes": []}
+            ]);
+
+            let quote: OrderQuote = serde_json::from_value(json.clone()).unwrap();
+
+            let statuses: Vec<VariationStatus> = quote
+                .variations()
+                .iter()
+                .map(VariationQuote::status)
+                .collect();
+            assert_eq!(
+                statuses,
+                [
+                    VariationStatus::Unsupported,
+                    VariationStatus::NoRouteFound,
+                    VariationStatus::InsufficientLiquidity,
+                    VariationStatus::Timeout,
+                ]
+            );
+            assert!(quote
+                .variations()
+                .iter()
+                .all(|variation| variation.quotes().is_empty()));
+            assert_eq!(serde_json::to_value(&quote).unwrap()["variations"], json["variations"]);
+        }
+
+        #[test]
+        fn test_variation_quote_without_status_json() {
+            let parsed = serde_json::from_value::<VariationQuote>(
+                serde_json::json!({"variation": "no_rfq", "quotes": []}),
+            );
+
+            assert!(parsed.is_err());
+        }
+
+        #[test]
+        fn test_order_quote_without_variations_json() {
+            let quote: OrderQuote = serde_json::from_str(ORDER_QUOTE_JSON).unwrap();
+
+            assert!(quote.variations().is_empty());
+            let json = serde_json::to_value(&quote).unwrap();
+            assert!(json.get("variations").is_none());
+        }
+    }
+
     // ── Order: full request JSON shape ────────────────────────────────────────
     //
     // Verifies field names, side as "sell" (not "Sell"), amount as decimal
@@ -2336,6 +2469,7 @@ mod conversions {
                     max_gas: None,
                     encoding_options: None,
                     route_filter: None,
+                    variations: Vec::new(),
                 },
             };
 
@@ -2375,6 +2509,105 @@ mod conversions {
                 .with_excluded_protocols(["uniswap_v2".to_string()])
                 .with_excluded_tokens([TychoBytes::from(usdt)]);
             assert_eq!(core.route_filter(), &expected);
+        }
+
+        #[test]
+        fn test_variations_into_core() {
+            let alternatives = NonZeroUsize::new(2).unwrap();
+            let dto = QuoteOptions::default().with_variations(vec![
+                Variation::NoRfq,
+                Variation::NoPamm,
+                Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+                Variation::Alternatives(alternatives),
+            ]);
+
+            let core: fynd_core::QuoteOptions = dto.into();
+
+            assert_eq!(
+                core.variations(),
+                [
+                    fynd_core::Variation::NoRfq,
+                    fynd_core::Variation::NoPamm,
+                    fynd_core::Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()]),
+                    fynd_core::Variation::Alternatives(alternatives),
+                ]
+            );
+        }
+
+        #[test]
+        fn test_variation_round_trip_through_core() {
+            let variations = [
+                Variation::NoRfq,
+                Variation::NoPamm,
+                Variation::ExcludeProtocols(vec!["uniswap_v2".to_string(), "vm:".to_string()]),
+                Variation::Alternatives(NonZeroUsize::new(4).unwrap()),
+            ];
+            for variation in variations {
+                let core: fynd_core::Variation = variation.clone().into();
+                assert_eq!(Variation::from(core), variation);
+            }
+        }
+
+        /// Each variation quote maps like a main quote, and nested quotes carry no variations.
+        #[test]
+        fn test_order_quote_with_variations_from_core() {
+            let quote_json = serde_json::json!({
+                "order_id": "order-1",
+                "status": "success",
+                "amount_in": "1000",
+                "amount_out": "2000",
+                "gas_estimate": "150000",
+                "amount_out_net_gas": "1999",
+                "block": {"number": 21000000, "hash": "0xdeadbeef", "timestamp": 1700000000},
+                "gas_price": null,
+                "transaction": null,
+                "sender": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "receiver": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "solved_against": "21000000"
+            });
+            let mut main_json = quote_json.clone();
+            main_json["variations"] = serde_json::json!([
+                {"variation": "no_pamm", "status": "success", "quotes": [quote_json]},
+                {
+                    "variation": {"exclude_protocols": ["uniswap_v2"]},
+                    "status": "no_route_found",
+                    "quotes": []
+                }
+            ]);
+            let core: fynd_core::OrderQuote = serde_json::from_value(main_json).unwrap();
+
+            let dto = OrderQuote::from(core);
+
+            let variations = dto.variations();
+            assert_eq!(variations.len(), 2);
+            assert_eq!(variations[0].variation(), &Variation::NoPamm);
+            assert_eq!(variations[0].status(), VariationStatus::Success);
+            assert_eq!(variations[0].quotes()[0].status(), QuoteStatus::Success);
+            assert_eq!(*variations[0].quotes()[0].amount_out(), BigUint::from(2000u64));
+            assert!(variations[0].quotes()[0]
+                .variations()
+                .is_empty());
+            assert_eq!(
+                variations[1].variation(),
+                &Variation::ExcludeProtocols(vec!["uniswap_v2".to_string()])
+            );
+            assert_eq!(variations[1].status(), VariationStatus::NoRouteFound);
+            assert!(variations[1].quotes().is_empty());
+        }
+
+        #[test]
+        fn test_variation_status_round_trip_through_core() {
+            let statuses = [
+                VariationStatus::Success,
+                VariationStatus::NoRouteFound,
+                VariationStatus::InsufficientLiquidity,
+                VariationStatus::Timeout,
+                VariationStatus::Unsupported,
+            ];
+            for status in statuses {
+                let core: fynd_core::VariationStatus = status.into();
+                assert_eq!(VariationStatus::from(core), status);
+            }
         }
 
         #[test]

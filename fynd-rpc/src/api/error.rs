@@ -302,6 +302,18 @@ mod tests {
         assert_eq!(body["code"], "ENCODING_UNAVAILABLE");
     }
 
+    /// The router's variation check returns HTTP 400 with `INVALID_VARIATIONS`, as the handler's
+    /// check does.
+    #[actix_web::test]
+    async fn test_invalid_variations_via_solve_failed() {
+        let err = SolveError::InvalidVariations(
+            fynd_core::VariationsValidationError::TooManyVariations { count: 5 },
+        );
+        let (status, body) = json_body(ApiError::SolveFailed(err)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_VARIATIONS");
+    }
+
     #[actix_web::test]
     async fn test_failed_encoding_returns_422() {
         let err = SolveError::FailedEncoding("missing permit2 signature".to_string());
