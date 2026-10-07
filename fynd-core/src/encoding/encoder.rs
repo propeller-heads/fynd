@@ -88,17 +88,19 @@ impl TryFrom<&OrderQuote> for Solution {
     type Error = SolveError;
 
     fn try_from(quote: &OrderQuote) -> Result<Self, Self::Error> {
-        solution_from_quote(quote, quote.amount_out().clone())
+        solution_from_quote(quote, quote.amount_out().clone(), None)
     }
 }
 
 /// Maps a successful quote onto an encodable solution with an explicit `min_amount_out`.
 ///
 /// `min_amount_out` is the router's revert guardrail: it must be non-zero, and the router rejects
-/// a value above `expected_amount_out` (the quoted output).
+/// a value above `expected_amount_out` (the quoted output). With `max_signed_quote_shortfall_bps`,
+/// encoding an RFQ swap fails when the maker signs further below its price levels than that.
 fn solution_from_quote(
     quote: &OrderQuote,
     min_amount_out: BigUint,
+    max_signed_quote_shortfall_bps: Option<u32>,
 ) -> Result<Solution, SolveError> {
     if quote.status() != QuoteStatus::Success {
         return Err(SolveError::FailedEncoding(format!(
@@ -145,6 +147,10 @@ fn solution_from_quote(
             .with_split(*s.split())
             .with_protocol_state(Arc::from(s.protocol_state().clone_box()))
             .with_estimated_amount_in(s.amount_in().clone());
+            let swap = match max_signed_quote_shortfall_bps {
+                Some(max_bps) => swap.with_max_signed_quote_shortfall_bps(max_bps),
+                None => swap,
+            };
             // `TychoFallbackRouter` refuses a swap that does not name its fallback, and the
             // fallback pool goes in `user_data`.
             let Some(fallback) = s.fallback() else { return Ok(swap) };
@@ -166,6 +172,45 @@ fn solution_from_quote(
         min_amount_out,
         swaps,
     ))
+}
+
+/// Converts a slippage fraction (`0.005` = 0.5%) to whole basis points, clamped to 0..=10_000.
+fn slippage_bps(slippage: f64) -> u32 {
+    (slippage * 10_000.0)
+        .round()
+        .clamp(0.0, 10_000.0) as u32
+}
+
+/// Counts an RFQ leg rejected because its signed quote fell short of the user's slippage, by
+/// protocol and route shape. The leg-level check is exact only for a single-hop route, so the
+/// shape shows how many rejections a route-level check could have let through.
+///
+/// tycho-execution reports the rejection as a `RecoverableError` reading
+/// `"{protocol} signed {n} bps below its price levels; the swap allows {max} bps"`.
+fn record_signed_quote_shortfall(quote: &OrderQuote, error: &EncodingError) {
+    let EncodingError::RecoverableError(message) = error else { return };
+    if !message.contains("bps below its price levels") {
+        return;
+    }
+    let Some((protocol, _)) = message.split_once(' ') else { return };
+    let route_shape = match quote.route().map(|route| route.swaps()) {
+        None => "unknown",
+        Some([_]) => "single_hop",
+        Some(swaps)
+            if swaps
+                .iter()
+                .any(|swap| *swap.split() > 0.0) =>
+        {
+            "split"
+        }
+        Some(_) => "multi_hop",
+    };
+    metrics::counter!(
+        "rfq_slippage_rejections_total",
+        "protocol" => protocol.to_string(),
+        "route_shape" => route_shape
+    )
+    .increment(1);
 }
 
 impl Encoder {
@@ -351,6 +396,7 @@ impl Encoder {
                 prepared,
                 &encoding_options,
             ) {
+                record_signed_quote_shortfall(&quotes[quote_index], &e);
                 failures.push((quote_index, SolveError::FailedEncoding(e.to_string())));
             }
         }
@@ -388,11 +434,15 @@ impl Encoder {
         )?;
         Self::check_min_amount_out(fee_breakdown.min_amount_received())?;
 
+        // A signed RFQ quote further below its levels than the user's slippage is likely to leave
+        // the route under `min_amount_out` and revert on-chain, so it fails here instead. Not
+        // certain: in a split route the other legs may make up the shortfall.
         let solution = solution_from_quote(
             quote,
             fee_breakdown
                 .min_amount_received()
                 .clone(),
+            Some(slippage_bps(encoding_options.slippage())),
         )?
         .with_user_transfer_type(encoding_options.transfer_type().clone());
         let solution = match &self.exclusive_swap_signer {
@@ -2305,5 +2355,155 @@ mod tests {
         let breakdown = result[0].fee_breakdown().unwrap();
         // 1% of 1_000_000_000.
         assert_eq!(*breakdown.router_fee(), BigUint::from(10_000_000u64));
+    }
+
+    #[rstest]
+    #[case::half_percent(0.005, 50)]
+    #[case::zero(0.0, 0)]
+    #[case::twenty_percent(0.2, 2_000)]
+    #[case::above_one(1.5, 10_000)]
+    #[case::negative(-0.1, 0)]
+    fn test_slippage_bps(#[case] slippage: f64, #[case] expected_bps: u32) {
+        assert_eq!(slippage_bps(slippage), expected_bps);
+    }
+
+    #[test]
+    fn test_try_from_sets_no_signed_quote_limit() {
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+
+        let solution = Solution::try_from(&quote).unwrap();
+
+        assert_eq!(solution.swaps()[0].max_signed_quote_shortfall_bps(), None);
+    }
+
+    /// Answers every solution with a signed-quote shortfall, keeping the limit each swap carried.
+    #[derive(Default)]
+    struct ShortfallTychoEncoder {
+        limits: std::sync::Mutex<Vec<Option<u32>>>,
+    }
+
+    impl TychoEncoder for ShortfallTychoEncoder {
+        fn encode_solutions(
+            &self,
+            solutions: Vec<Solution>,
+        ) -> Result<Vec<EncodedSolution>, EncodingError> {
+            let mut limits = self
+                .limits
+                .lock()
+                .expect("the limits lock is not poisoned");
+            for solution in &solutions {
+                for swap in solution.swaps() {
+                    limits.push(swap.max_signed_quote_shortfall_bps());
+                }
+            }
+            Err(EncodingError::RecoverableError(
+                "rfq:hashflow signed 80 bps below its price levels; the swap allows 50 bps"
+                    .to_string(),
+            ))
+        }
+
+        fn validate_solution(&self, _solution: &Solution) -> Result<(), EncodingError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_encode_fails_on_signed_quote_shortfall() {
+        let tycho_encoder = Arc::new(ShortfallTychoEncoder::default());
+        let encoder = encoder_with(Chain::Ethereum, tycho_encoder.clone());
+        let quote = make_order_quote(990).with_route(make_route_with_tokens(&[
+            (make_address(0x01), make_address(0x02)),
+            (make_address(0x02), make_address(0x03)),
+        ]));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // A current-thread runtime polls the encoder on this thread, where the local recorder is
+        // installed.
+        let quotes = metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(encoder.encode(vec![quote], EncodingOptions::new(0.005)))
+        })
+        .expect("a failing quote is reported on the quote, not on the call");
+
+        assert_eq!(quotes[0].status(), QuoteStatus::EncodingFailed);
+        assert_eq!(
+            *tycho_encoder
+                .limits
+                .lock()
+                .expect("the limits lock is not poisoned"),
+            vec![Some(50), Some(50)]
+        );
+        let rejections: Vec<_> = crate::tests::metrics::recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "rfq_slippage_rejections_total")
+            .collect();
+        assert_eq!(
+            rejections,
+            vec![(
+                "rfq_slippage_rejections_total".to_string(),
+                vec!["protocol=rfq:hashflow".to_string(), "route_shape=multi_hop".to_string()],
+                metrics_util::debugging::DebugValue::Counter(1),
+            )]
+        );
+    }
+
+    #[test]
+    fn test_record_signed_quote_shortfall_route_shapes() {
+        let (a, b, c) = (make_address(0x01), make_address(0x02), make_address(0x03));
+        let single_hop =
+            make_order_quote(990).with_route(make_route_with_tokens(&[(a.clone(), b.clone())]));
+        let multi_hop = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(a.clone(), b.clone()), (b.clone(), c)]));
+        let split_tokens = FxHashMap::from_iter([
+            (a.clone(), make_token(a.clone())),
+            (b.clone(), make_token(b.clone())),
+        ]);
+        let split = make_order_quote(990).with_route(
+            crate::types::Route::new(
+                vec![
+                    make_route_swap_addrs(a.clone(), b.clone()).with_split(0.4),
+                    make_route_swap_addrs(a, b),
+                ],
+                split_tokens,
+            )
+            .expect("non-empty route"),
+        );
+        let shortfall = EncodingError::RecoverableError(
+            "rfq:bebop signed 80 bps below its price levels; the swap allows 50 bps".to_string(),
+        );
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            for quote in [&single_hop, &multi_hop, &split] {
+                record_signed_quote_shortfall(quote, &shortfall);
+            }
+            record_signed_quote_shortfall(&single_hop, &EncodingError::FatalError("x".into()));
+            record_signed_quote_shortfall(
+                &single_hop,
+                &EncodingError::RecoverableError("the maker did not answer".into()),
+            );
+        });
+
+        let mut shapes: Vec<_> = crate::tests::metrics::recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(metric, _, _)| metric == "rfq_slippage_rejections_total")
+            .map(|(_, labels, value)| (labels[1].clone(), value))
+            .collect();
+        shapes.sort_by(|left, right| left.0.cmp(&right.0));
+        let counter = |count| metrics_util::debugging::DebugValue::Counter(count);
+        assert_eq!(
+            shapes,
+            vec![
+                ("route_shape=multi_hop".to_string(), counter(1)),
+                ("route_shape=single_hop".to_string(), counter(1)),
+                ("route_shape=split".to_string(), counter(1)),
+            ]
+        );
     }
 }

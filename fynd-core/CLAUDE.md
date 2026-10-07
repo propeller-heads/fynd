@@ -122,7 +122,14 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
    When an order's best candidate fails to encode, the next successful candidate without an RFQ
    leg is encoded instead, until one encodes, none remain, or the encoding retry budget (5ms by
    default, `WorkerPoolRouterConfig::with_encoding_retry_budget`) has passed since the first
-   encode. A retry still encoding then is given up; the best candidates have no time limit
+   encode. A retry still encoding then is given up; the best candidates have no time limit.
+   `encoding_retry_successes_total{best_route=rfq|other}` counts the orders a retry rescued. An RFQ
+   leg fails to encode when the maker signs further below its price levels than the user's slippage,
+   since the route is then likely to revert on-chain: `Encoder` sets the slippage as each swap's
+   `max_signed_quote_shortfall_bps`, tycho-execution returns a `RecoverableError` reading "… bps
+   below its price levels …", and `rfq_slippage_rejections_total{protocol,route_shape}` counts it.
+   The check is per leg, exact for a `single_hop` route and stricter than needed for `multi_hop` and
+   `split` ones.
 
 Steps 0-2 are exposed as the public `WorkerPoolRouter::solve`, returning every order's ranked
 candidates as `RankedQuotes`; step 3 splits into the public `encode_quotes`,
