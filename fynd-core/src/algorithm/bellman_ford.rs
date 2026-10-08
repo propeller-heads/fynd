@@ -30,8 +30,7 @@ use std::{
 };
 
 use num_bigint::{BigInt, BigUint};
-use num_rational::BigRational;
-use num_traits::Zero;
+use num_traits::{Float, Zero};
 use petgraph::{graph::NodeIndex, prelude::EdgeRef, stable_graph::EdgeReference};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
@@ -893,16 +892,31 @@ impl BellmanFordAlgorithm {
         // output atoms or saturate large prices before final ceiling-rounded gas accounting.
         if spot_product > 0.0 {
             if let Some(in_price) = token_in_addr.and_then(|a| prices.get(a)) {
-                let spot = BigRational::from_float(spot_product)?;
-                let input_rate = BigRational::new(
-                    BigInt::from(in_price.numerator.clone()),
-                    BigInt::from(in_price.denominator.clone()),
-                );
-                let estimated_rate = input_rate * spot;
-                return Some(Price {
-                    numerator: estimated_rate.numer().to_biguint()?,
-                    denominator: estimated_rate.denom().to_biguint()?,
-                });
+                if !spot_product.is_finite() ||
+                    spot_product <= 0.0 ||
+                    in_price.numerator.is_zero() ||
+                    in_price.denominator.is_zero()
+                {
+                    return None;
+                }
+
+                // A finite f64 is exactly `sign * mantissa * 2^exponent`. Preserve that value as
+                // an integer ratio instead of routing through BigRational, whose normalization is
+                // expensive in this per-edge fallback.
+                let (mantissa, exponent, sign) = spot_product.integer_decode();
+                if sign <= 0 || mantissa == 0 {
+                    return None;
+                }
+                let mut numerator = &in_price.numerator * BigUint::from(mantissa);
+                let mut denominator = in_price.denominator.clone();
+                let shift = usize::from(exponent.unsigned_abs());
+                if exponent >= 0 {
+                    numerator <<= shift;
+                } else {
+                    denominator <<= shift;
+                }
+
+                return Some(Price { numerator, denominator });
             }
         }
 
@@ -1314,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_price_preserves_fractional_atoms_for_ceiling_deduction() {
+    fn test_fallback_price_preserves_fractional_atoms_for_ceiling_deduction() {
         let token_in = token(0x01, "IN");
         let token_out = token(0x02, "OUT");
         let mut prices = TokenGasPrices::default();
@@ -1338,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_price_supports_values_larger_than_u128() {
+    fn test_fallback_price_supports_values_larger_than_u128() {
         let token_in = token(0x01, "IN");
         let token_out = token(0x02, "OUT");
         let mut prices = TokenGasPrices::default();
@@ -1357,6 +1371,53 @@ mod tests {
 
         assert!(estimated.numerator > BigUint::from(u128::MAX));
         assert_eq!(estimated.denominator, BigUint::from(1u8));
+    }
+
+    #[test]
+    fn test_fallback_price_rejects_invalid_input_price() {
+        let token_in = token(0x01, "IN");
+        let token_out = token(0x02, "OUT");
+        let mut prices = TokenGasPrices::default();
+        for invalid_price in [
+            Price { numerator: BigUint::ZERO, denominator: BigUint::from(1u8) },
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::ZERO },
+        ] {
+            prices.insert(token_in.address.clone(), invalid_price);
+
+            assert_eq!(
+                BellmanFordAlgorithm::resolve_token_price(
+                    Some(&token_out.address),
+                    Some(&prices),
+                    1.5,
+                    Some(&token_in.address),
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn test_fallback_price_preserves_more_than_64_fractional_bits() {
+        let token_in = token(0x01, "IN");
+        let token_out = token(0x02, "OUT");
+        let mut prices = TokenGasPrices::default();
+        prices.insert(
+            token_in.address.clone(),
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(1u8) },
+        );
+
+        let estimated = BellmanFordAlgorithm::resolve_token_price(
+            Some(&token_out.address),
+            Some(&prices),
+            2.0f64.powi(-65),
+            Some(&token_in.address),
+        )
+        .expect("finite positive fallback price");
+
+        assert_eq!(
+            gas_cost_in_token(&(BigUint::from(1u8) << 65usize), &estimated),
+            Some(BigUint::from(1u8))
+        );
     }
 
     // ==================== Unit Tests ====================

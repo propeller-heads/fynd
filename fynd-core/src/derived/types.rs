@@ -46,6 +46,28 @@ pub type TokenGasPriceKey = Address;
 /// its buy and sell rates — a token's exit cost is already reflected in its price.
 pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 
+/// Converts an internal native-gas-denominated price back to routable gas-token units.
+///
+/// Internal quote accounting uses token raw units per native gas raw unit. Public consumers use
+/// token raw units per routable gas-token raw unit, so this divides by the exact
+/// routable-per-native conversion. Returns `None` for a zero numerator or denominator.
+pub fn price_in_routable_units(price: &Price, native_to_routable_unit: &Price) -> Option<Price> {
+    if price.numerator == BigUint::from(0u8) ||
+        price.denominator == BigUint::from(0u8) ||
+        native_to_routable_unit.numerator == BigUint::from(0u8) ||
+        native_to_routable_unit.denominator == BigUint::from(0u8)
+    {
+        return None;
+    }
+    if native_to_routable_unit.numerator == native_to_routable_unit.denominator {
+        return Some(price.clone());
+    }
+    Some(Price {
+        numerator: &price.numerator * &native_to_routable_unit.denominator,
+        denominator: &price.denominator * &native_to_routable_unit.numerator,
+    })
+}
+
 /// Converts a native gas cost into raw units of a token using a derived token price.
 ///
 /// Prices are exact fractions in token raw units per native gas raw unit. Division rounds up so a

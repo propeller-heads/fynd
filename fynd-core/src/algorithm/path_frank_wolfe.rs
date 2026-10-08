@@ -785,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_gas_cost_stays_above_f64_precision_boundary() {
+    async fn test_exact_gas_cost_stays_above_f64_precision_boundary() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let (market, graph_manager) = setup_market_unweighted(vec![(
