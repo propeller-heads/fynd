@@ -3,9 +3,9 @@
 //! State overrides only help when they land on the slots a token actually reads. Most ERC-20s
 //! use Solidity's `keccak256(holder || base_slot)` mapping convention, but real tokens also use
 //! Vyper's reversed order, deep inheritance slots, proxies whose storage lives elsewhere, rebasing
-//! shares, and mappings under a namespaced base (OpenZeppelin v5, Base's B20, Animoca). This
-//! module traces the token's read-only access, validates the observed slot with a sentinel
-//! override, then recovers the mapping convention needed to fund a simulated swap.
+//! shares, mappings under a namespaced base (OpenZeppelin v5, Base's B20, Animoca) and Solady's
+//! seeded keys. This module traces the token's read-only access, validates the observed slot
+//! with a sentinel override, then recovers the mapping convention needed to fund a simulated swap.
 
 use alloy::{
     eips::BlockId,
@@ -77,6 +77,11 @@ const NAMESPACE_BASES: [B256; 6] = [
     ANIMOCA_BALANCES_NS,
     ANIMOCA_ALLOWANCES_NS,
 ];
+/// The seed Solady's ERC-20 hashes after the holder's address to compute the balance slot.
+const SOLADY_BALANCE_SEED: [u8; 4] = alloy::hex!("87a211a2");
+/// The seed Solady's ERC-20 hashes between the owner and spender addresses to compute the
+/// allowance slot.
+const SOLADY_ALLOWANCE_SEED: [u8; 4] = alloy::hex!("7f5e9f20");
 
 sol! {
     interface IERC20LayoutProbe {
@@ -117,6 +122,10 @@ pub enum MappingPosition {
         /// The mapping's base slot.
         base: B256,
     },
+    /// Solady's ERC-20, which hashes each key with a fixed seed rather than with a base slot. The
+    /// seed follows from the mapping being addressed, so a balance uses the balance seed and an
+    /// allowance the allowance seed.
+    Solady,
 }
 
 /// The slots needed to fund and approve one simulated token input.
@@ -387,7 +396,7 @@ fn recover_position(
             return Some(namespaced);
         }
     }
-    None
+    (slot_for(MappingPosition::Solady) == slot).then_some(MappingPosition::Solady)
 }
 
 /// Slot holding one holder's balance under a given convention.
@@ -398,6 +407,12 @@ fn balance_slot(holder: Address, position: MappingPosition) -> B256 {
         }
         MappingPosition::Direct { base, key_order: KeyOrder::Vyper } => vyper_mapping(holder, base),
         MappingPosition::Namespaced { base } => solidity_mapping(holder, base),
+        MappingPosition::Solady => {
+            let mut hash_input = [0_u8; 32];
+            hash_input[..20].copy_from_slice(holder.as_slice());
+            hash_input[28..].copy_from_slice(&SOLADY_BALANCE_SEED);
+            keccak256(hash_input)
+        }
     }
 }
 
@@ -416,6 +431,13 @@ fn allowance_slot(owner: Address, spender: Address, position: MappingPosition) -
         }
         MappingPosition::Namespaced { base } => {
             solidity_mapping(spender, solidity_mapping(owner, base))
+        }
+        MappingPosition::Solady => {
+            let mut hash_input = [0_u8; 52];
+            hash_input[..20].copy_from_slice(owner.as_slice());
+            hash_input[28..32].copy_from_slice(&SOLADY_ALLOWANCE_SEED);
+            hash_input[32..].copy_from_slice(spender.as_slice());
+            keccak256(hash_input)
         }
     }
 }
