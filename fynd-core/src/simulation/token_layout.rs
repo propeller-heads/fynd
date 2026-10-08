@@ -218,7 +218,9 @@ async fn find_accessed_slot(
             token_call(token, calldata),
             BlockId::latest(),
             GethDebugTracingCallOptions::new(GethDebugTracingOptions::prestate_tracer(
-                PreStateConfig::default(),
+                // The skip below needs each account's code, so the request asks for it rather than
+                // relying on the node's default.
+                PreStateConfig { disable_code: Some(false), ..Default::default() },
             )),
         )
         .await
@@ -233,6 +235,16 @@ async fn find_accessed_slot(
     // that end reaches the mapping on a token that reads many fixed slots.
     let mut candidates: Vec<(Address, B256)> = Vec::new();
     for (&storage_contract, account) in trace.pre_state() {
+        // A token keeps its balances in a contract, so an account without code is never the
+        // storage contract. ArbOS on Arbitrum chains is one such account: every call reads it, and
+        // the node refuses to override it.
+        if account
+            .code
+            .as_ref()
+            .is_none_or(|code| code.is_empty())
+        {
+            continue;
+        }
         candidates.extend(
             account
                 .storage
