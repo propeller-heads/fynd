@@ -119,13 +119,20 @@ fn mocked_provider(asserter: &Asserter) -> RootProvider<Ethereum> {
     RootProvider::new(RpcClient::mocked(asserter.clone()))
 }
 
-/// A prestate trace naming one account and the slots its read touched.
+/// A prestate trace holding one contract and the storage slots the call read.
 fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
+    serde_json::json!({ format!("{contract:#x}"): traced_account(Some("0x6000"), slots) })
+}
+
+fn traced_account(code: Option<&str>, slots: &[B256]) -> serde_json::Value {
     let storage: serde_json::Map<String, serde_json::Value> = slots
         .iter()
         .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
         .collect();
-    serde_json::json!({ format!("{contract:#x}"): { "code": "0x6000", "storage": storage } })
+    match code {
+        Some(code) => serde_json::json!({ "code": code, "storage": storage }),
+        None => serde_json::json!({ "storage": storage }),
+    }
 }
 
 fn sentinel_word() -> Vec<u8> {
@@ -160,6 +167,32 @@ async fn test_find_accessed_slot_takes_the_candidate_that_moves_the_answer() {
         .expect("the second candidate answers");
 
     assert_eq!(found, (contract, mapping));
+}
+
+/// ArbOS sorts before most tokens and has no code. The asserter holds one probe response, so a
+/// probe of the ArbOS slot would take it, and the lookup would return ArbOS instead of the token.
+/// A node either leaves the code out or reports it empty.
+#[rstest]
+#[case::code_left_out(None)]
+#[case::code_empty(Some("0x"))]
+#[tokio::test]
+async fn test_find_accessed_slot_skips_accounts_without_code(#[case] arbos_code: Option<&str>) {
+    let holder = Address::repeat_byte(1);
+    let arbos = address!("0xA4b05FffffFffFFFFfFFfffFfffFFfffFfFfFFFf");
+    let token = Address::repeat_byte(0xe9);
+    let mapping = balance_slot(holder, solidity(0));
+    let asserter = Asserter::new();
+    asserter.push_success(&serde_json::json!({
+        format!("{arbos:#x}"): traced_account(arbos_code, &[B256::repeat_byte(0xef)]),
+        format!("{token:#x}"): traced_account(Some("0x6000"), &[mapping]),
+    }));
+    asserter.push_success(&Bytes::from(sentinel_word()));
+
+    let found = find_accessed_slot(&mocked_provider(&asserter), token, &[0x70])
+        .await
+        .expect("the token's balance slot is found");
+
+    assert_eq!(found, (token, mapping));
 }
 
 /// Every probe reverting means every candidate is genuinely wrong, which is a property of the
@@ -258,27 +291,47 @@ async fn test_discover_balance_falls_back_to_the_shares_view() {
     assert_eq!(position, solidity(0));
 }
 
-/// Exercises the exact layouts that motivated the trace-guided path: USDT, whose storage the
-/// sentinel probe could not place, and stETH, whose balance is derived from shares.
+/// Live discovery against one chain, checked by writing the discovered slots.
 ///
-/// Asserts the property the discovery exists for -- writing the discovered slot changes what the
-/// token reports -- rather than that two slots differ, which two keccak hashes always do.
-/// Requires an endpoint serving `debug_traceCall`, so it stays opt-in.
+/// Requires the case's RPC URL with `debug_traceCall` support, so it stays opt-in.
+#[rstest]
+// USDT, whose storage the sentinel probe could not place, and stETH, whose balance is derived
+// from shares.
+#[case::mainnet("RPC_URL", &[
+    address!("0xdAC17F958D2ee523a2206206994597C13D831ec7"), // USDT
+    address!("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"), // stETH
+])]
+// Every call on an Arbitrum chain reads ArbOS state. The node refuses to override ArbOS state, so
+// these tokens resolve only when discovery skips the ArbOS account.
+#[case::arbitrum("ARBITRUM_RPC_URL", &[
+    address!("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"), // USDC
+    address!("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"), // USDT
+    address!("0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8"), // USDC.e
+])]
+#[case::robinhood("ROBINHOOD_RPC_URL", &[
+    address!("0xe934e36a439c94017b64a3fece66af12099abf50"), // STONKBROKER, Solidity base 0
+])]
 #[tokio::test]
-#[ignore = "requires RPC_URL with debug_traceCall support"]
-async fn test_discovers_mainnet_usdt_and_steth_layouts() {
-    let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL for the live layout test");
+#[ignore = "requires the case's RPC URL with debug_traceCall support"]
+async fn test_discover_layout_live(#[case] rpc_env: &str, #[case] tokens: &[Address]) {
+    assert_discovered_layouts_fund_and_approve(rpc_env, tokens).await;
+}
+
+/// Checks that writing the discovered slots changes what the token reports, rather than comparing
+/// two keccak hashes, which always differ.
+async fn assert_discovered_layouts_fund_and_approve(rpc_env: &str, tokens: &[Address]) {
+    let rpc_url = std::env::var(rpc_env).unwrap_or_else(|_| {
+        panic!("set {rpc_env} to the chain's HTTP RPC URL for the live layout test")
+    });
     let provider = ProviderBuilder::default().connect_http(
         rpc_url
             .parse()
-            .expect("RPC_URL must be a valid HTTP URL"),
+            .unwrap_or_else(|_| panic!("{rpc_env} must be a valid HTTP URL")),
     );
     let holder = address!("0x0000000000000000000000000000000000000001");
     let spender = address!("0x0000000000000000000000000000000000000002");
-    let usdt = address!("0xdAC17F958D2ee523a2206206994597C13D831ec7");
-    let steth = address!("0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84");
 
-    for token in [usdt, steth] {
+    for &token in tokens {
         let layout = discover_layout(&provider, token, holder, spender)
             .await
             .unwrap_or_else(|error| panic!("{token:#x} layout discovery failed: {error}"));
