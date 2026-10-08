@@ -264,7 +264,7 @@ fn prestate(contract: Address, slots: &[B256]) -> serde_json::Value {
         .iter()
         .map(|slot| (format!("{slot:#x}"), serde_json::json!(format!("{:#x}", B256::ZERO))))
         .collect();
-    serde_json::json!({ format!("{contract:#x}"): { "storage": storage } })
+    serde_json::json!({ format!("{contract:#x}"): { "code": "0x6000", "storage": storage } })
 }
 
 /// Queues one full discovery: a balance trace and probe, then an allowance trace and probe.

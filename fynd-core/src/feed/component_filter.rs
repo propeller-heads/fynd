@@ -17,8 +17,8 @@ use crate::{
 /// Whether `component` belongs to a protocol system in `exclude_protocols`.
 ///
 /// An entry names a protocol system exactly (`uniswap_v2`), or, when it ends with `:`, the whole
-/// family under that prefix: `fallback:` excludes `fallback:fermiswap` and every other pAMM the
-/// `TychoFallbackRouter` executes. An empty list excludes nothing.
+/// family under that prefix: `fallback:` excludes `fallback:fermiswap`, `fallback:rfq:metric` and
+/// every other `fallback:` venue. An empty list excludes nothing.
 pub(crate) fn is_excluded_protocol(
     exclude_protocols: &[String],
     component: &ProtocolComponent,

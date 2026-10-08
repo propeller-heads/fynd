@@ -2,8 +2,9 @@
 //!
 //! State overrides only help when they land on the slots a token actually reads. Most ERC-20s
 //! use Solidity's `keccak256(holder || base_slot)` mapping convention, but real tokens also use
-//! Vyper's reversed order, deep inheritance slots, proxies whose storage lives elsewhere, and
-//! rebasing shares. This module traces the token's read-only access, validates the observed slot
+//! Vyper's reversed order, deep inheritance slots, proxies whose storage lives elsewhere, rebasing
+//! shares, mappings under a namespaced base (OpenZeppelin v5, Base's B20, Animoca) and Solady's
+//! seeded keys. This module traces the token's read-only access, validates the observed slot
 //! with a sentinel override, then recovers the mapping convention needed to fund a simulated swap.
 
 use alloy::{
@@ -48,6 +49,39 @@ const OZ_V5_BALANCES_NS: B256 =
 /// Allowances are field 1 of `ERC20Storage`, so their namespace is the balances namespace plus one.
 const OZ_V5_ALLOWANCES_NS: B256 =
     B256::new(alloy::hex!("52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace01"));
+/// The balances mapping of B20, Base's native token standard.
+///
+/// B20 keeps `B20CoreStorage` under the `base.b20` ERC-7201 namespace, and balances are its field
+/// 4: `(keccak256(abi.encode(uint256(keccak256("base.b20")) - 1)) & ~bytes32(uint256(0xff))) + 4`.
+const B20_BALANCES_NS: B256 =
+    B256::new(alloy::hex!("c78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed48434004"));
+/// The allowances mapping of B20, field 5 of `B20CoreStorage`.
+const B20_ALLOWANCES_NS: B256 =
+    B256::new(alloy::hex!("c78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed48434005"));
+/// The balances mapping of Animoca's ERC-20 library, at
+/// `uint256(keccak256("animoca.core.token.ERC20.ERC20.storage")) - 1`.
+const ANIMOCA_BALANCES_NS: B256 =
+    B256::new(alloy::hex!("1da92899d3da68bf9787824388a37ea2bfa79780bcef91b9716c390eec8ecbee"));
+/// The allowances mapping of Animoca's ERC-20 library, the field after its balances.
+const ANIMOCA_ALLOWANCES_NS: B256 =
+    B256::new(alloy::hex!("1da92899d3da68bf9787824388a37ea2bfa79780bcef91b9716c390eec8ecbef"));
+/// The fixed base slots of every known namespaced balances and allowances mapping.
+///
+/// Balance and allowance recovery both search the whole list. A base of the other kind never
+/// matches, because the slot it gives is a different keccak hash.
+const NAMESPACE_BASES: [B256; 6] = [
+    OZ_V5_BALANCES_NS,
+    OZ_V5_ALLOWANCES_NS,
+    B20_BALANCES_NS,
+    B20_ALLOWANCES_NS,
+    ANIMOCA_BALANCES_NS,
+    ANIMOCA_ALLOWANCES_NS,
+];
+/// The seed Solady's ERC-20 hashes after the holder's address to compute the balance slot.
+const SOLADY_BALANCE_SEED: [u8; 4] = alloy::hex!("87a211a2");
+/// The seed Solady's ERC-20 hashes between the owner and spender addresses to compute the
+/// allowance slot.
+const SOLADY_ALLOWANCE_SEED: [u8; 4] = alloy::hex!("7f5e9f20");
 
 sol! {
     interface IERC20LayoutProbe {
@@ -81,9 +115,17 @@ pub enum MappingPosition {
         /// Which way the implementation hashes the key and the base.
         key_order: KeyOrder,
     },
-    /// OpenZeppelin v5's namespaced storage. Which namespace applies follows from the mapping
-    /// being addressed, so a balance reads the balances one and an allowance the allowances one.
-    OpenZeppelinV5,
+    /// A Solidity mapping with a fixed 32-byte base slot, as namespaced storage such as ERC-7201
+    /// uses. A balance position holds the balances base, and an allowance position holds the
+    /// allowances base.
+    Namespaced {
+        /// The mapping's base slot.
+        base: B256,
+    },
+    /// Solady's ERC-20, which hashes each key with a fixed seed rather than with a base slot. The
+    /// seed follows from the mapping being addressed, so a balance uses the balance seed and an
+    /// allowance the allowance seed.
+    Solady,
 }
 
 /// The slots needed to fund and approve one simulated token input.
@@ -218,7 +260,9 @@ async fn find_accessed_slot(
             token_call(token, calldata),
             BlockId::latest(),
             GethDebugTracingCallOptions::new(GethDebugTracingOptions::prestate_tracer(
-                PreStateConfig::default(),
+                // The skip below needs each account's code, so the request asks for it rather than
+                // relying on the node's default.
+                PreStateConfig { disable_code: Some(false), ..Default::default() },
             )),
         )
         .await
@@ -233,6 +277,16 @@ async fn find_accessed_slot(
     // that end reaches the mapping on a token that reads many fixed slots.
     let mut candidates: Vec<(Address, B256)> = Vec::new();
     for (&storage_contract, account) in trace.pre_state() {
+        // A token keeps its balances in a contract, so an account without code is never the
+        // storage contract. ArbOS on Arbitrum chains is one such account: every call reads it, and
+        // the node refuses to override it.
+        if account
+            .code
+            .as_ref()
+            .is_none_or(|code| code.is_empty())
+        {
+            continue;
+        }
         candidates.extend(
             account
                 .storage
@@ -336,7 +390,13 @@ fn recover_position(
             }
         }
     }
-    (slot_for(MappingPosition::OpenZeppelinV5) == slot).then_some(MappingPosition::OpenZeppelinV5)
+    for base in NAMESPACE_BASES {
+        let namespaced = MappingPosition::Namespaced { base };
+        if slot_for(namespaced) == slot {
+            return Some(namespaced);
+        }
+    }
+    (slot_for(MappingPosition::Solady) == slot).then_some(MappingPosition::Solady)
 }
 
 /// Slot holding one holder's balance under a given convention.
@@ -346,7 +406,13 @@ fn balance_slot(holder: Address, position: MappingPosition) -> B256 {
             solidity_mapping(holder, B256::from(U256::from(base)))
         }
         MappingPosition::Direct { base, key_order: KeyOrder::Vyper } => vyper_mapping(holder, base),
-        MappingPosition::OpenZeppelinV5 => solidity_mapping(holder, OZ_V5_BALANCES_NS),
+        MappingPosition::Namespaced { base } => solidity_mapping(holder, base),
+        MappingPosition::Solady => {
+            let mut hash_input = [0_u8; 32];
+            hash_input[..20].copy_from_slice(holder.as_slice());
+            hash_input[28..].copy_from_slice(&SOLADY_BALANCE_SEED);
+            keccak256(hash_input)
+        }
     }
 }
 
@@ -363,8 +429,15 @@ fn allowance_slot(owner: Address, spender: Address, position: MappingPosition) -
             buffer[44..].copy_from_slice(spender.as_slice());
             keccak256(buffer)
         }
-        MappingPosition::OpenZeppelinV5 => {
-            solidity_mapping(spender, solidity_mapping(owner, OZ_V5_ALLOWANCES_NS))
+        MappingPosition::Namespaced { base } => {
+            solidity_mapping(spender, solidity_mapping(owner, base))
+        }
+        MappingPosition::Solady => {
+            let mut hash_input = [0_u8; 52];
+            hash_input[..20].copy_from_slice(owner.as_slice());
+            hash_input[28..32].copy_from_slice(&SOLADY_ALLOWANCE_SEED);
+            hash_input[32..].copy_from_slice(spender.as_slice());
+            keccak256(hash_input)
         }
     }
 }

@@ -28,7 +28,7 @@ timeout_ms = 500
 
 # Example: a worker pool that never routes through a protocol system. An entry names a system
 # exactly ("uniswap_v2"), or a whole family when it ends with ":" — "fallback:" covers every
-# pAMM the TychoFallbackRouter executes. Absent = no restriction, which is the default.
+# pAMM and every "fallback:rfq:" RFQ venue. Absent = no restriction, which is the default.
 # [pools.no_pamm]
 # algorithm = "bellman_ford"
 # num_workers = 3
