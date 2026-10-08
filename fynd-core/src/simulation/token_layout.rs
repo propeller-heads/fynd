@@ -48,6 +48,11 @@ const OZ_V5_BALANCES_NS: B256 =
 /// Allowances are field 1 of `ERC20Storage`, so their namespace is the balances namespace plus one.
 const OZ_V5_ALLOWANCES_NS: B256 =
     B256::new(alloy::hex!("52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace01"));
+/// The fixed base slots of every known namespaced balances and allowances mapping.
+///
+/// Balance and allowance recovery both search the whole list. A base of the other kind never
+/// matches, because the slot it gives is a different keccak hash.
+const NAMESPACE_BASES: [B256; 2] = [OZ_V5_BALANCES_NS, OZ_V5_ALLOWANCES_NS];
 
 sol! {
     interface IERC20LayoutProbe {
@@ -81,9 +86,13 @@ pub enum MappingPosition {
         /// Which way the implementation hashes the key and the base.
         key_order: KeyOrder,
     },
-    /// OpenZeppelin v5's namespaced storage. Which namespace applies follows from the mapping
-    /// being addressed, so a balance reads the balances one and an allowance the allowances one.
-    OpenZeppelinV5,
+    /// A Solidity mapping with a fixed 32-byte base slot, as namespaced storage such as ERC-7201
+    /// uses. A balance position holds the balances base, and an allowance position holds the
+    /// allowances base.
+    Namespaced {
+        /// The mapping's base slot.
+        base: B256,
+    },
 }
 
 /// The slots needed to fund and approve one simulated token input.
@@ -348,7 +357,13 @@ fn recover_position(
             }
         }
     }
-    (slot_for(MappingPosition::OpenZeppelinV5) == slot).then_some(MappingPosition::OpenZeppelinV5)
+    for base in NAMESPACE_BASES {
+        let namespaced = MappingPosition::Namespaced { base };
+        if slot_for(namespaced) == slot {
+            return Some(namespaced);
+        }
+    }
+    None
 }
 
 /// Slot holding one holder's balance under a given convention.
@@ -358,7 +373,7 @@ fn balance_slot(holder: Address, position: MappingPosition) -> B256 {
             solidity_mapping(holder, B256::from(U256::from(base)))
         }
         MappingPosition::Direct { base, key_order: KeyOrder::Vyper } => vyper_mapping(holder, base),
-        MappingPosition::OpenZeppelinV5 => solidity_mapping(holder, OZ_V5_BALANCES_NS),
+        MappingPosition::Namespaced { base } => solidity_mapping(holder, base),
     }
 }
 
@@ -375,8 +390,8 @@ fn allowance_slot(owner: Address, spender: Address, position: MappingPosition) -
             buffer[44..].copy_from_slice(spender.as_slice());
             keccak256(buffer)
         }
-        MappingPosition::OpenZeppelinV5 => {
-            solidity_mapping(spender, solidity_mapping(owner, OZ_V5_ALLOWANCES_NS))
+        MappingPosition::Namespaced { base } => {
+            solidity_mapping(spender, solidity_mapping(owner, base))
         }
     }
 }

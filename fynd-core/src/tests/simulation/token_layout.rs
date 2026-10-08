@@ -25,6 +25,10 @@ fn solidity(base: u16) -> MappingPosition {
     MappingPosition::Direct { base, key_order: KeyOrder::Solidity }
 }
 
+fn namespaced(base: B256) -> MappingPosition {
+    MappingPosition::Namespaced { base }
+}
+
 /// Known-good hashes, computed outside this crate. They pin the mapping arithmetic itself, so a
 /// change to `solidity_mapping` fails here rather than only failing against a live token.
 #[rstest]
@@ -60,8 +64,8 @@ fn test_allowance_slot_is_distinct_and_ordered() {
 
 #[test]
 fn test_openzeppelin_v5_slots_collide_with_no_standard_base() {
-    let balance = balance_slot(usdc(), MappingPosition::OpenZeppelinV5);
-    let allowance = allowance_slot(usdc(), weth(), MappingPosition::OpenZeppelinV5);
+    let balance = balance_slot(usdc(), namespaced(OZ_V5_BALANCES_NS));
+    let allowance = allowance_slot(usdc(), weth(), namespaced(OZ_V5_ALLOWANCES_NS));
     for base in 0..=MAX_STANDARD_BASE {
         assert_ne!(balance, balance_slot(usdc(), solidity(base)));
         assert_ne!(allowance, allowance_slot(usdc(), weth(), solidity(base)));
@@ -89,7 +93,7 @@ fn test_openzeppelin_v5_namespaces_match_erc7201() {
 #[case::deep_solidity(MappingPosition::Direct { base: 516, key_order: KeyOrder::Solidity })]
 #[case::shallow_solidity(solidity(0))]
 #[case::vyper(MappingPosition::Direct { base: 17, key_order: KeyOrder::Vyper })]
-#[case::openzeppelin_v5(MappingPosition::OpenZeppelinV5)]
+#[case::openzeppelin_v5(namespaced(OZ_V5_BALANCES_NS))]
 fn test_recover_position_round_trip(#[case] position: MappingPosition) {
     let owner = Address::repeat_byte(0x11);
     let spender = Address::repeat_byte(0x22);
