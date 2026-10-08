@@ -67,4 +67,4 @@ pub mod types;
 pub use computation::FailedItemError;
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::{ComputationStatus, DerivedData};
-pub use types::{ComponentDepths, TokenGasPrices};
+pub use types::{price_in_routable_units, ComponentDepths, TokenGasPrices};

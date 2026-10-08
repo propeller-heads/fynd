@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Instant};
 
 use actix_web::{web, HttpRequest, HttpResponse};
 #[cfg(feature = "experimental")]
-use fynd_core::derived::TokenGasPrices;
+use fynd_core::derived::{price_in_routable_units, TokenGasPrices};
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -13,9 +13,9 @@ use tracing::{debug, info, warn};
 use super::{dto, ApiError, AppState, RouteConfigurator};
 #[cfg(feature = "experimental")]
 use crate::api::prices::{
-    price_in_routable_units, price_to_decimal_string, ComponentDepthEntry, ComputationDataStatus,
-    ComputationDataStatuses, DataStatus, IncludeField, PricesQuery, PricesResponse, SpotPriceEntry,
-    TokenPriceEntry, TychoDataStatus,
+    price_to_decimal_string, ComponentDepthEntry, ComputationDataStatus, ComputationDataStatuses,
+    DataStatus, IncludeField, PricesQuery, PricesResponse, SpotPriceEntry, TokenPriceEntry,
+    TychoDataStatus,
 };
 #[cfg(feature = "experimental")]
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
@@ -606,6 +606,8 @@ mod tests {
         feed::market_data::MarketData,
         worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
     };
+    #[cfg(feature = "experimental")]
+    use num_bigint::BigUint;
     use serde_json::Value;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::tycho_common::{models::Chain, Bytes};
@@ -974,9 +976,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_with_only_the_gas_token_priced() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let state = make_test_state();
         seed_tycho_head(&state).await;
         {
@@ -1012,9 +1011,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_preserve_routable_units_for_shared_balance_gas_token() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let state = make_test_state();
         let native_to_routable = Price {
             numerator: BigUint::from(1_000_000u64),
@@ -1066,9 +1062,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_returns_200_once_a_token_is_priced() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let state = make_test_state();
         seed_tycho_head(&state).await;
         {
@@ -1183,8 +1176,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_applies_limit_boundaries() {
-        use num_bigint::BigUint;
-
         let mut state = make_test_state();
         seed_tycho_head(&state).await;
         let token = test_addr(1);
@@ -1440,9 +1431,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_tokens_handler_returns_ranked_graph_tokens() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let addr = test_addr;
         let mut state = make_test_state();
         state.gas_token = addr(0x0a);
