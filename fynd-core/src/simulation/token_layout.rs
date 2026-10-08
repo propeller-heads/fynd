@@ -2,9 +2,10 @@
 //!
 //! State overrides only help when they land on the slots a token actually reads. Most ERC-20s
 //! use Solidity's `keccak256(holder || base_slot)` mapping convention, but real tokens also use
-//! Vyper's reversed order, deep inheritance slots, proxies whose storage lives elsewhere, and
-//! rebasing shares. This module traces the token's read-only access, validates the observed slot
-//! with a sentinel override, then recovers the mapping convention needed to fund a simulated swap.
+//! Vyper's reversed order, deep inheritance slots, proxies whose storage lives elsewhere, rebasing
+//! shares, and mappings under a namespaced base (OpenZeppelin v5, Base's B20, Animoca). This
+//! module traces the token's read-only access, validates the observed slot with a sentinel
+//! override, then recovers the mapping convention needed to fund a simulated swap.
 
 use alloy::{
     eips::BlockId,
@@ -48,11 +49,34 @@ const OZ_V5_BALANCES_NS: B256 =
 /// Allowances are field 1 of `ERC20Storage`, so their namespace is the balances namespace plus one.
 const OZ_V5_ALLOWANCES_NS: B256 =
     B256::new(alloy::hex!("52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace01"));
+/// The balances mapping of B20, Base's native token standard.
+///
+/// B20 keeps `B20CoreStorage` under the `base.b20` ERC-7201 namespace, and balances are its field
+/// 4: `(keccak256(abi.encode(uint256(keccak256("base.b20")) - 1)) & ~bytes32(uint256(0xff))) + 4`.
+const B20_BALANCES_NS: B256 =
+    B256::new(alloy::hex!("c78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed48434004"));
+/// The allowances mapping of B20, field 5 of `B20CoreStorage`.
+const B20_ALLOWANCES_NS: B256 =
+    B256::new(alloy::hex!("c78b71fee795ddd74aff64ea9b2474194c938c3196430e10bb5f01ed48434005"));
+/// The balances mapping of Animoca's ERC-20 library, at
+/// `uint256(keccak256("animoca.core.token.ERC20.ERC20.storage")) - 1`.
+const ANIMOCA_BALANCES_NS: B256 =
+    B256::new(alloy::hex!("1da92899d3da68bf9787824388a37ea2bfa79780bcef91b9716c390eec8ecbee"));
+/// The allowances mapping of Animoca's ERC-20 library, the field after its balances.
+const ANIMOCA_ALLOWANCES_NS: B256 =
+    B256::new(alloy::hex!("1da92899d3da68bf9787824388a37ea2bfa79780bcef91b9716c390eec8ecbef"));
 /// The fixed base slots of every known namespaced balances and allowances mapping.
 ///
 /// Balance and allowance recovery both search the whole list. A base of the other kind never
 /// matches, because the slot it gives is a different keccak hash.
-const NAMESPACE_BASES: [B256; 2] = [OZ_V5_BALANCES_NS, OZ_V5_ALLOWANCES_NS];
+const NAMESPACE_BASES: [B256; 6] = [
+    OZ_V5_BALANCES_NS,
+    OZ_V5_ALLOWANCES_NS,
+    B20_BALANCES_NS,
+    B20_ALLOWANCES_NS,
+    ANIMOCA_BALANCES_NS,
+    ANIMOCA_ALLOWANCES_NS,
+];
 
 sol! {
     interface IERC20LayoutProbe {
