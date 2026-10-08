@@ -72,41 +72,104 @@ fn test_openzeppelin_v5_slots_collide_with_no_standard_base() {
     }
 }
 
+/// ERC-7201: the hash of the name, minus one, hashed again, with the low byte cleared.
+fn erc7201_root(name: &str) -> U256 {
+    let name_hash = keccak256(name.as_bytes());
+    let encoded = (U256::from_be_bytes(*name_hash) - U256::from(1_u8)).to_be_bytes::<32>();
+    let mut root = *keccak256(encoded);
+    root[31] = 0;
+    U256::from_be_bytes(root)
+}
+
 /// The namespace is a constant here but a derivation in OpenZeppelin, so it is re-derived rather
-/// than restated.
+/// than restated. Balances and allowances are fields 0 and 1 of `ERC20Storage`.
 #[test]
 fn test_openzeppelin_v5_namespaces_match_erc7201() {
-    let name_hash = keccak256(b"openzeppelin.storage.ERC20");
-    let encoded = (U256::from_be_bytes(*name_hash) - U256::from(1_u8)).to_be_bytes::<32>();
-    let mut derived = *keccak256(encoded);
-    derived[31] = 0;
+    let root = erc7201_root("openzeppelin.storage.ERC20");
+    assert_eq!(U256::from_be_bytes(*OZ_V5_BALANCES_NS), root);
+    assert_eq!(U256::from_be_bytes(*OZ_V5_ALLOWANCES_NS), root + U256::from(1_u8));
+}
 
-    assert_eq!(B256::new(derived), OZ_V5_BALANCES_NS);
-    // Allowances are the next field of the same struct.
-    assert_eq!(
-        U256::from_be_bytes(*OZ_V5_ALLOWANCES_NS),
-        U256::from_be_bytes(*OZ_V5_BALANCES_NS) + U256::from(1_u8)
-    );
+/// Balances and allowances are fields 4 and 5 of `B20CoreStorage`.
+#[test]
+fn test_b20_namespace_derivation() {
+    let root = erc7201_root("base.b20");
+    assert_eq!(U256::from_be_bytes(*B20_BALANCES_NS), root + U256::from(4_u8));
+    assert_eq!(U256::from_be_bytes(*B20_ALLOWANCES_NS), root + U256::from(5_u8));
+}
+
+/// Animoca predates ERC-7201: its base is the name's hash minus one, with no second hash.
+#[test]
+fn test_animoca_namespace_derivation() {
+    let base = U256::from_be_bytes(*keccak256(b"animoca.core.token.ERC20.ERC20.storage")) -
+        U256::from(1_u8);
+    assert_eq!(U256::from_be_bytes(*ANIMOCA_BALANCES_NS), base);
+    assert_eq!(U256::from_be_bytes(*ANIMOCA_ALLOWANCES_NS), base + U256::from(1_u8));
+}
+
+/// Slots read from live Base traces of `balanceOf(0xc0ffee…4979)` and
+/// `allowance(0xc0ffee…4979, 0x…beef)`: OpenUSD (B20), OFC (Animoca) and LFI (Solady).
+#[rstest]
+#[case::b20(
+    namespaced(B20_BALANCES_NS),
+    namespaced(B20_ALLOWANCES_NS),
+    hex!("d4666ef49e7c6c6a37b3873bce5266884781ced670ce5ed2dcfbc78e2cd20706"),
+    hex!("d524dc3d8422ac9498448108b07f9c43110f9a5385981596483772e407b4a087"),
+)]
+#[case::animoca(
+    namespaced(ANIMOCA_BALANCES_NS),
+    namespaced(ANIMOCA_ALLOWANCES_NS),
+    hex!("abad80d1fe36c6fbade5c6bbcdfac77698a145d0b3ba32d1107f89dc1128fe27"),
+    hex!("6a583ab0f4452d4d791a09f89017f8ad7cddbcd8baf297533afd4f198a30e1b7"),
+)]
+#[case::solady(
+    MappingPosition::Solady,
+    MappingPosition::Solady,
+    hex!("8b6da50b2a928d7a8d7a1fee25fede2ee334b79973fb83f03fdf45abc1d31a12"),
+    hex!("eff26bf61dd4e6cecc5d59debad89becaf6d85bdde35b8e89e2672b7564a3638"),
+)]
+fn test_traced_slot_vectors(
+    #[case] balance: MappingPosition,
+    #[case] allowance: MappingPosition,
+    #[case] balance_vector: [u8; 32],
+    #[case] allowance_vector: [u8; 32],
+) {
+    let holder = address!("0xc0ffee254729296a45a3885639ac7e10f9d54979");
+    let spender = address!("0x000000000000000000000000000000000000beef");
+    assert_eq!(balance_slot(holder, balance).0, balance_vector);
+    assert_eq!(allowance_slot(holder, spender, allowance).0, allowance_vector);
 }
 
 #[rstest]
-#[case::deep_solidity(MappingPosition::Direct { base: 516, key_order: KeyOrder::Solidity })]
-#[case::shallow_solidity(solidity(0))]
-#[case::vyper(MappingPosition::Direct { base: 17, key_order: KeyOrder::Vyper })]
-#[case::openzeppelin_v5(namespaced(OZ_V5_BALANCES_NS))]
-fn test_recover_position_round_trip(#[case] position: MappingPosition) {
+#[case::deep_solidity(
+    MappingPosition::Direct { base: 516, key_order: KeyOrder::Solidity },
+    MappingPosition::Direct { base: 517, key_order: KeyOrder::Solidity },
+)]
+#[case::shallow_solidity(solidity(0), solidity(1))]
+#[case::vyper(
+    MappingPosition::Direct { base: 17, key_order: KeyOrder::Vyper },
+    MappingPosition::Direct { base: 18, key_order: KeyOrder::Vyper },
+)]
+#[case::openzeppelin_v5(namespaced(OZ_V5_BALANCES_NS), namespaced(OZ_V5_ALLOWANCES_NS))]
+#[case::b20(namespaced(B20_BALANCES_NS), namespaced(B20_ALLOWANCES_NS))]
+#[case::animoca(namespaced(ANIMOCA_BALANCES_NS), namespaced(ANIMOCA_ALLOWANCES_NS))]
+#[case::solady(MappingPosition::Solady, MappingPosition::Solady)]
+fn test_recover_position_round_trip(
+    #[case] balance: MappingPosition,
+    #[case] allowance: MappingPosition,
+) {
     let owner = Address::repeat_byte(0x11);
     let spender = Address::repeat_byte(0x22);
 
     assert_eq!(
-        recover_position(balance_slot(owner, position), |candidate| balance_slot(owner, candidate)),
-        Some(position)
+        recover_position(balance_slot(owner, balance), |candidate| balance_slot(owner, candidate)),
+        Some(balance)
     );
     assert_eq!(
-        recover_position(allowance_slot(owner, spender, position), |candidate| allowance_slot(
+        recover_position(allowance_slot(owner, spender, allowance), |candidate| allowance_slot(
             owner, spender, candidate
         )),
-        Some(position)
+        Some(allowance)
     );
 }
 
@@ -314,6 +377,14 @@ async fn test_discover_balance_falls_back_to_the_shares_view() {
 ])]
 #[case::robinhood("ROBINHOOD_RPC_URL", &[
     address!("0xe934e36a439c94017b64a3fece66af12099abf50"), // STONKBROKER, Solidity base 0
+    address!("0x63ee32ac3077d1fbd8a77ebba2a6ed4b8e9c1e18"), // INU, Solady
+])]
+// Two tokens on B20 (Base's native standard), one on Animoca's ERC-20 library and one on Solady's.
+#[case::base("BASE_RPC_URL", &[
+    address!("0xb2000000000000000000002feb517dfec7415344"), // OpenUSD, B20
+    address!("0xb200000000000000000000cfbdf64a8706a94a01"), // B20
+    address!("0x752c5a95d202972e124390f30a50154409d3c858"), // OFC, Animoca
+    address!("0x3722264ab15a1dfce5a5af89e6547f7949a8aba3"), // LFI, Solady
 ])]
 #[tokio::test]
 #[ignore = "requires the case's RPC URL with debug_traceCall support"]
