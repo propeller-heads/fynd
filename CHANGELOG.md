@@ -1,4 +1,13 @@
 
+## [0.112.0](https://github.com/propeller-heads/fynd/compare/0.111.1...0.112.0) (2026-10-08)
+
+### Bug Fixes
+
+* **core:** place Solady token mappings ([5f03e1e](https://github.com/propeller-heads/fynd/commit/5f03e1ef5fe7037d63ec68f3f25e936ad1e943a0))
+* **core:** place B20 and Animoca token mappings ([05246f9](https://github.com/propeller-heads/fynd/commit/05246f90140f599ed30a0ef25b177401a54c52a5))
+* **core:** skip accounts without code when probing token slots ([ca452c4](https://github.com/propeller-heads/fynd/commit/ca452c4a8896545a012f2b03eb2afa29a2fa1743))
+
+
 ## [0.111.1](https://github.com/propeller-heads/fynd/compare/0.110.8...0.111.1) (2026-10-07)
 
 ### Features
