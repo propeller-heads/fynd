@@ -70,6 +70,10 @@ fn empty_replay() -> Box<Replay> {
     Box::new(Replay { parent_block: 0, payload: SimulatePayload::default() })
 }
 
+fn test_next_block() -> NextBlock {
+    NextBlock { parent_number: 100, timestamp: 1_700_000_000 }
+}
+
 fn test_envelope() -> SimulationEnvelope {
     SimulationEnvelope { gas_limit: SIMULATION_MIN_GAS_LIMIT, gas_price: 1 }
 }
@@ -102,36 +106,36 @@ fn test_envelope_prices_a_quote_that_carries_no_gas_price() {
 
 #[test]
 fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
-    let overrides = block_overrides();
+    let overrides = block_overrides(test_next_block());
     assert_eq!(overrides.coinbase, Some(SIMULATION_COINBASE));
     assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
     assert_ne!(overrides.random, Some(B256::ZERO));
     assert!(overrides.random.is_some());
 }
 
-/// `eth_simulateV1` numbers its own block, and `debug_traceCall` at latest runs one below it, so
-/// the trace has to be pinned to the block the simulation reported. Predicting that number instead
-/// makes the node refuse the call outright once a block lands mid-quote.
 #[test]
-fn test_executed_in_pins_the_block_without_touching_the_rest() {
-    let base = block_overrides();
-    let pinned = executed_in(base.clone(), 25_903_761, 1_788_531_000);
+fn test_block_overrides_follow_the_parent_block() {
+    let overrides = block_overrides(test_next_block());
 
-    assert_eq!(pinned.number, Some(U256::from(25_903_761_u64)));
-    assert_eq!(pinned.time, Some(1_788_531_000));
-    assert_eq!(pinned.coinbase, base.coinbase);
-    assert_eq!(pinned.gas_limit, base.gas_limit);
-    assert_eq!(pinned.random, base.random);
+    assert_eq!(overrides.number, Some(U256::from(101)));
+    assert_eq!(overrides.time, Some(1_700_000_000));
 }
 
-/// The simulation itself must leave the number unset, or the node rejects a block that does not
-/// sit above the head.
-#[test]
-fn test_block_overrides_leave_the_block_for_the_node_to_number() {
-    let overrides = block_overrides();
+/// The node's default clock is the parent plus 12 seconds. On a chain with 100 ms blocks that
+/// fails every pool that rejects an oracle price older than a few seconds.
+#[rstest::rstest]
+#[case::ethereum(12, 1_700_000_012)]
+#[case::robinhood(1, 1_700_000_001)]
+fn test_next_block_is_one_block_time_after_the_parent(
+    #[case] block_time_secs: u64,
+    #[case] timestamp: u64,
+) {
+    let parent_block = BlockInfo::new(100, "0x64".to_string(), 1_700_000_000);
 
-    assert_eq!(overrides.number, None);
-    assert_eq!(overrides.time, None);
+    let next_block = NextBlock::after(&parent_block, block_time_secs);
+
+    assert_eq!(next_block.parent_number, 100);
+    assert_eq!(next_block.timestamp, timestamp);
 }
 
 /// The funding value is what makes a simulated sender solvent, and it is bounded on both sides:
@@ -156,6 +160,7 @@ fn mocked_simulator(asserter: &Asserter, timeout: Duration) -> QuoteSimulator {
     QuoteSimulator::with_provider(
         RootProvider::new(RpcClient::mocked(asserter.clone())),
         Address::repeat_byte(9),
+        1,
         timeout,
     )
 }
@@ -189,6 +194,7 @@ async fn test_simulate_call_against_mocked_provider() {
             router: Address::repeat_byte(2),
             value: U256::ZERO,
             data: &[0x12],
+            next_block: test_next_block(),
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -211,6 +217,7 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
             router: Address::repeat_byte(2),
             value: U256::ZERO,
             data: &[],
+            next_block: test_next_block(),
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -239,6 +246,7 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
             router: Address::repeat_byte(2),
             value: U256::ZERO,
             data: &[],
+            next_block: test_next_block(),
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -379,6 +387,7 @@ async fn simulate_reverting_call(asserter: Asserter) -> SimulationAttempt {
                 router: Address::repeat_byte(2),
                 value: U256::ZERO,
                 data: &[0x12],
+                next_block: test_next_block(),
             },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
@@ -428,23 +437,26 @@ async fn test_simulate_keeps_the_node_message_when_the_trace_fails() {
 }
 
 /// A reverted call is only reproducible against the block it ran in: a signed RFQ quote expires,
-/// and `prevrandao` is drawn per call. The replay has to carry that block, not the head's.
+/// and `prevrandao` is drawn per call. The replay has to carry the quote's block.
 #[tokio::test]
 async fn test_reverted_simulation_carries_a_replay_pinned_to_its_block() {
     let asserter = Asserter::new();
-    let mut response = simulated_response(
+    asserter.push_success(&simulated_response(
         crate::simulation::revert::RouterErrors::TychoRouter__EmptySwaps {}.abi_encode(),
         false,
         0,
-    );
-    response[0].inner.header.inner.number = 101;
-    response[0].inner.header.inner.timestamp = 1_700_000_000;
-    asserter.push_success(&response);
+    ));
     let sender = Address::repeat_byte(1);
 
     let outcome = simulate_with_overrides(
         &RootProvider::new(RpcClient::mocked(asserter)),
-        SimulatedCall { sender, router: Address::repeat_byte(2), value: U256::ZERO, data: &[0x12] },
+        SimulatedCall {
+            sender,
+            router: Address::repeat_byte(2),
+            value: U256::ZERO,
+            data: &[0x12],
+            next_block: test_next_block(),
+        },
         native_balance_override(sender),
         test_envelope(),
         TEST_TIMEOUT,
@@ -506,6 +518,7 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
                 router: Address::repeat_byte(2),
                 value: U256::ZERO,
                 data: &[0x12],
+                next_block: test_next_block(),
             },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
@@ -627,18 +640,25 @@ fn test_record_outcome_failed() {
             labels.contains(&"outcome=failed".to_string())));
 }
 
-/// Drives the real call path against a live node: the simulation must be accepted (the node
-/// numbers its own block) and a reverting call must come back named by the trace.
+/// Drives the real call path against a live node: the simulation must be accepted on top of the
+/// head and a reverting call must come back named by the trace.
 #[tokio::test]
 #[ignore = "requires RPC_URL"]
 async fn test_live_simulate_and_trace() {
     let rpc_url = std::env::var("RPC_URL").expect("set RPC_URL");
-    let provider = alloy::providers::ProviderBuilder::default()
+    let provider: RootProvider<Ethereum> = alloy::providers::ProviderBuilder::default()
         .connect_http(rpc_url.parse().expect("valid URL"));
     let sender = Address::repeat_byte(0x11);
     let usdt = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
         .parse::<Address>()
         .expect("valid address");
+    let head = provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await
+        .expect("fetch the head block")
+        .expect("the node has a head block");
+    let next_block =
+        NextBlock { parent_number: head.header.number, timestamp: head.header.timestamp + 12 };
 
     for (name, data) in [
         // A selector USDT does not implement: reverts with an empty payload, which is the path
@@ -655,7 +675,7 @@ async fn test_live_simulate_and_trace() {
     ] {
         let outcome = simulate_with_overrides(
             &provider,
-            SimulatedCall { sender, router: usdt, value: U256::ZERO, data: &data },
+            SimulatedCall { sender, router: usdt, value: U256::ZERO, data: &data, next_block },
             native_balance_override(sender),
             test_envelope(),
             Duration::from_secs(10),
