@@ -36,7 +36,7 @@ use crate::{
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
     solver::defaults::SIMULATION_LAYOUT_DISCOVERY_TIMEOUT,
-    OrderQuote, SimulationResult,
+    BlockInfo, OrderQuote, SimulationResult,
 };
 
 /// Balance and allowance every simulated account is given.
@@ -86,16 +86,35 @@ const SIMULATION_TRACE_TIMEOUT: Duration = Duration::from_millis(500);
 /// One token's layout, or the reason this build cannot resolve one, resolved once per token.
 type LayoutCell = Arc<OnceCell<Result<TokenLayout, String>>>;
 
-/// The call a simulation runs.
+/// The call a simulation runs, and the block it runs on top of.
 ///
-/// The four travel together and always come from the same quote, so they are passed as one rather
-/// than as four parameters a caller could pair up wrongly.
+/// The five travel together and always come from the same quote, so they are passed as one rather
+/// than as five parameters a caller could pair up wrongly.
 #[derive(Clone, Copy)]
 pub(crate) struct SimulatedCall<'a> {
     pub(crate) sender: Address,
     pub(crate) router: Address,
     pub(crate) value: U256,
     pub(crate) data: &'a [u8],
+    pub(crate) next_block: NextBlock,
+}
+
+/// The block a simulated call runs in: the one after the block its quote was solved on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NextBlock {
+    /// The block the quote was solved on, which the simulation runs on top of.
+    pub(crate) parent_number: u64,
+    /// The parent's timestamp plus the chain's block time, in Unix seconds.
+    pub(crate) timestamp: u64,
+}
+
+impl NextBlock {
+    fn after(parent_block: &BlockInfo, block_time_secs: u64) -> Self {
+        Self {
+            parent_number: parent_block.number(),
+            timestamp: parent_block.timestamp() + block_time_secs,
+        }
+    }
 }
 
 /// Simulates encoded quote transactions with temporary sender funding.
@@ -107,6 +126,8 @@ pub struct QuoteSimulator {
     /// rather than each running their own trace and probes.
     layout_cache: Mutex<FxHashMap<Address, LayoutCell>>,
     native_token: Address,
+    /// The chain's block time, which spaces a simulated block from its parent.
+    block_time_secs: u64,
     request_timeout: std::time::Duration,
 }
 
@@ -156,7 +177,8 @@ impl QuoteSimulator {
     ///
     /// # Errors
     ///
-    /// Returns an error when `rpc_url` is not a valid URL or the chain has no native token.
+    /// Returns an error when `rpc_url` is not a valid URL, or the chain has no native token or no
+    /// block time.
     pub fn new(
         rpc_url: &str,
         chain: Chain,
@@ -168,9 +190,13 @@ impl QuoteSimulator {
         let native_token = chain
             .try_native_token()
             .map_err(|error| format!("native token for {chain:?}: {error}"))?;
+        let block_time_secs = chain
+            .try_block_time_secs()
+            .map_err(|error| format!("block time for {chain:?}: {error}"))?;
         Ok(Self::with_provider(
             ProviderBuilder::default().connect_http(url),
             Address::from_slice(native_token.address.as_ref()),
+            block_time_secs,
             request_timeout,
         ))
     }
@@ -224,7 +250,13 @@ impl QuoteSimulator {
                 .as_slice(),
         );
         self.simulate_within_timeout(
-            SimulatedCall { sender, router, value, data: transaction.data() },
+            SimulatedCall {
+                sender,
+                router,
+                value,
+                data: transaction.data(),
+                next_block: NextBlock::after(quote.block(), self.block_time_secs),
+            },
             overrides,
             SimulationEnvelope::for_quote(quote),
         )
@@ -261,12 +293,14 @@ impl QuoteSimulator {
     pub(crate) fn with_provider(
         provider: RootProvider<Ethereum>,
         native_token: Address,
+        block_time_secs: u64,
         request_timeout: std::time::Duration,
     ) -> Self {
         Self {
             provider,
             layout_cache: Mutex::new(FxHashMap::default()),
             native_token,
+            block_time_secs,
             request_timeout,
         }
     }
@@ -460,28 +494,21 @@ fn failure_with(reason: String) -> SimulationAttempt {
     SimulationAttempt::Failure { reason }
 }
 
-/// Block environment for a simulated call.
+/// Block environment for a call simulated in `next_block`.
 ///
-/// `eth_simulateV1` builds on the real head, so the block number, timestamp, base fee, chain id and
-/// the ancestor hashes `blockhash` reads are already the ones the next block will carry. What it
-/// leaves at zero is what a pool can read to recognise a simulation, so those are set here.
-fn block_overrides() -> BlockOverrides {
+/// The node's own default timestamp is the parent plus 12 seconds, Ethereum's slot time, which on
+/// a fast chain lies many blocks in the future and fails a pool that rejects stale oracle prices.
+/// Base fee, chain id and the ancestor hashes `blockhash` reads come from the parent. What the
+/// node leaves at zero is what a pool can read to recognise a simulation, so those are set here.
+fn block_overrides(next_block: NextBlock) -> BlockOverrides {
     BlockOverrides {
+        number: Some(U256::from(next_block.parent_number + 1)),
+        time: Some(next_block.timestamp),
         coinbase: Some(SIMULATION_COINBASE),
         random: Some(B256::from(rand::random::<[u8; 32]>())),
         gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
         ..Default::default()
     }
-}
-
-/// The same environment, reporting the height and clock a simulated block actually carried.
-///
-/// `eth_simulateV1` numbers its own block on top of the head, so the number cannot be set in
-/// advance: a block landing between the solve and the simulation makes any prediction collide
-/// with the head, which the node refuses outright. It reports what it used, so the trace is
-/// pinned to that rather than to a guess.
-fn executed_in(environment: BlockOverrides, number: u64, timestamp: u64) -> BlockOverrides {
-    BlockOverrides { number: Some(U256::from(number)), time: Some(timestamp), ..environment }
 }
 
 /// Runs the simulated call, and names the revert when the call reverted without saying why.
@@ -508,9 +535,13 @@ async fn simulate_with_overrides(
     // The trace has to observe the same environment as `eth_simulateV1` to reproduce the same
     // revert. `prevrandao` is drawn at random per call, so it is built once and reused rather
     // than regenerated.
-    let environment = block_overrides();
+    let parent_number = simulated.next_block.parent_number;
+    let environment = block_overrides(simulated.next_block);
     let payload = simulate_payload(call.clone(), overrides.clone(), environment.clone());
-    let response = match timeout(request_timeout, provider.simulate(&payload)).await {
+    let request = provider
+        .simulate(&payload)
+        .number(parent_number);
+    let response = match timeout(request_timeout, request).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => {
             return CallOutcome::Failure(format!(
@@ -533,12 +564,7 @@ async fn simulate_with_overrides(
         );
     };
     if !result.status {
-        let number = block.inner.header.number;
-        let executed = executed_in(environment, number, block.inner.header.timestamp);
-        let replay = Box::new(Replay {
-            parent_block: number.saturating_sub(1),
-            payload: simulate_payload(call.clone(), overrides.clone(), executed.clone()),
-        });
+        let replay = Box::new(Replay { parent_block: parent_number, payload });
         if let Some(decoded) = revert::decode_error(&result.return_data) {
             return CallOutcome::Reverted { reason: decoded, replay };
         }
@@ -552,7 +578,7 @@ async fn simulate_with_overrides(
         // produced it.
         let traced = timeout(
             SIMULATION_TRACE_TIMEOUT,
-            traced_revert_reason(provider, call, overrides, executed),
+            traced_revert_reason(provider, call, overrides, environment, parent_number),
         )
         .await
         .ok()
@@ -589,7 +615,7 @@ fn simulate_payload(
 /// What it takes to rerun a reverted simulation exactly.
 ///
 /// The payload carries the call, the funding overrides and the block environment, with the number,
-/// timestamp and `prevrandao` the simulated block actually had. Sent to `eth_simulateV1` on top of
+/// timestamp and `prevrandao` the simulated block had. Sent to `eth_simulateV1` on top of
 /// `parent_block`, it executes the same call against the same state. A route can revert on any of
 /// those inputs, a signed RFQ quote on the timestamp alone, so none of them is left to a guess.
 #[derive(Debug)]
@@ -676,14 +702,16 @@ fn token_overrides(
 
 /// Replays a reverting call under the call tracer and reads the reason off it.
 ///
-/// Runs against the same block and the same overrides as the simulation, so it reproduces the
-/// revert rather than a different one. Returns `None` when the node serves no `debug_traceCall`
-/// or the trace carries no reason, which leaves the caller the message it already has.
+/// Runs on the same parent block, with the same overrides and environment as the simulation, so
+/// it reproduces the revert rather than a different one. Returns `None` when the node serves no
+/// `debug_traceCall` or the trace carries no reason, which leaves the caller the message it already
+/// has.
 async fn traced_revert_reason(
     provider: &RootProvider<Ethereum>,
     call: TransactionRequest,
     overrides: StateOverride,
     environment: BlockOverrides,
+    parent_number: u64,
 ) -> Option<String> {
     let options = GethDebugTracingCallOptions::default()
         .with_tracing_options(
@@ -697,7 +725,7 @@ async fn traced_revert_reason(
         .with_block_overrides(environment);
 
     match provider
-        .debug_trace_call_callframe(call, BlockNumberOrTag::Latest.into(), options)
+        .debug_trace_call_callframe(call, BlockNumberOrTag::Number(parent_number).into(), options)
         .await
     {
         Ok(frame) => revert::reason_from_frame(&frame),

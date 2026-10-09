@@ -1890,6 +1890,7 @@ mod tests {
                 asserter.clone(),
             )),
             alloy::primitives::Address::repeat_byte(0x01),
+            1,
             Duration::from_secs(1),
         )
     }
