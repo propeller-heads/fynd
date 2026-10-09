@@ -1,4 +1,11 @@
 
+## [0.112.1](https://github.com/propeller-heads/fynd/compare/0.112.0...0.112.1) (2026-10-09)
+
+### Features
+
+* **deps:** build against tycho 0.451.0 ([2237a86](https://github.com/propeller-heads/fynd/commit/2237a8685c5d8b1e6879fea4c3deb3cc22d37fa9))
+
+
 ## [0.112.0](https://github.com/propeller-heads/fynd/compare/0.111.1...0.112.0) (2026-10-08)
 
 ### Bug Fixes
