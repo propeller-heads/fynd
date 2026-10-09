@@ -450,10 +450,9 @@ fn register_exchange(
         "uniswap_v4" => builder.exchange::<UniswapV4State>("uniswap_v4", tvl_filter.clone(), None),
         "ekubo_v2" => builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None),
         "vm:curve" => {
-            // Tycho's curve_filter keeps standard coins and, since 0.428.0, oracle coins
-            // with trusted rate providers (including weETH getRate()). Since 0.451.0 it also
-            // keeps the two ETH/stETH pools (0xdc24…7022, 0x21e2…843a). Untrusted oracle,
-            // other rebasing and ERC4626 coins remain excluded from the hybrid CurveState.
+            // Tycho's curve_filter drops pools with rate-bearing or rebasing coins, which the
+            // hybrid CurveState can misprice, unless Tycho has verified the pool or its rate
+            // provider.
             builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
         }
         "uniswap_v4_hooks" => builder.exchange::<UniswapV4State>(
