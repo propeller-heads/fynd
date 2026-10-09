@@ -4,6 +4,8 @@
 use std::{sync::Arc, time::Instant};
 
 use actix_web::{web, HttpRequest, HttpResponse};
+#[cfg(feature = "experimental")]
+use fynd_core::derived::{price_in_routable_units, TokenGasPrices};
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -357,11 +359,19 @@ pub async fn get_prices(
         .tycho_head_status()
         .await
         .ok_or_else(|| ApiError::NotReady("Tycho head is unavailable".to_string()))?;
+    let native_to_routable_unit = snapshot
+        .token_prices
+        .get(&state.gas_token)
+        .ok_or_else(|| ApiError::NotReady("Gas-token price has not been computed".to_string()))?;
 
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
     for (address, price) in snapshot.token_prices.iter() {
-        match price_to_decimal_string(&price.numerator, &price.denominator) {
+        let routable_price = price_in_routable_units(price, native_to_routable_unit);
+        match routable_price
+            .as_ref()
+            .and_then(|price| price_to_decimal_string(&price.numerator, &price.denominator))
+        {
             Some(price) => prices.push(TokenPriceEntry { token: address.clone(), price }),
             None => {
                 debug!(
@@ -540,11 +550,21 @@ pub async fn get_tokens(
         let market = state.market_data.read().await;
         (market.component_topology(), market.token_registry_ref().clone())
     };
+    let native_to_routable_unit = token_prices
+        .get(&state.gas_token)
+        .ok_or_else(|| ApiError::NotReady("Gas-token price has not been computed".to_string()))?;
+    let routable_token_prices: TokenGasPrices = token_prices
+        .iter()
+        .filter_map(|(address, price)| {
+            price_in_routable_units(price, native_to_routable_unit)
+                .map(|price| (address.clone(), price))
+        })
+        .collect();
     let entries = build_token_entries(
         &topology,
         &token_registry,
         depths.as_ref(),
-        Some(token_prices.as_ref()),
+        Some(&routable_token_prices),
     );
 
     let cache = TokensCache { key, entries: std::sync::Arc::new(entries) };
@@ -586,6 +606,8 @@ mod tests {
         feed::market_data::MarketData,
         worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
     };
+    #[cfg(feature = "experimental")]
+    use num_bigint::BigUint;
     use serde_json::Value;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::tycho_common::{models::Chain, Bytes};
@@ -954,9 +976,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_with_only_the_gas_token_priced() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let state = make_test_state();
         seed_tycho_head(&state).await;
         {
@@ -991,10 +1010,58 @@ mod tests {
 
     #[cfg(feature = "experimental")]
     #[actix_web::test]
-    async fn test_prices_returns_200_once_a_token_is_priced() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
+    async fn test_prices_preserve_routable_units_for_shared_balance_gas_token() {
+        let state = make_test_state();
+        let native_to_routable = Price {
+            numerator: BigUint::from(1_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+        seed_tycho_head(&state).await;
+        state
+            .derived_data
+            .write()
+            .await
+            .set_token_prices(
+                [
+                    (test_addr(0x00), native_to_routable.clone()),
+                    (
+                        test_addr(0x0b),
+                        Price {
+                            numerator: &native_to_routable.numerator * BigUint::from(2u8),
+                            denominator: native_to_routable.denominator,
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
 
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/prices")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = body_json(resp).await;
+        assert_eq!(body["prices"].as_array().map(Vec::len), Some(2), "body was: {body}");
+        assert_eq!(body["prices"][0]["price"], "1", "body was: {body}");
+        assert_eq!(body["prices"][1]["price"], "2", "body was: {body}");
+    }
+
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_returns_200_once_a_token_is_priced() {
         let state = make_test_state();
         seed_tycho_head(&state).await;
         {
@@ -1039,7 +1106,14 @@ mod tests {
         seed_tycho_head(&state).await;
         {
             let mut store = state.derived_data.write().await;
-            store.set_token_prices(Default::default(), vec![], 19_000_000, true);
+            store.set_token_prices(
+                [(test_addr(0x00), Price::new(1u8.into(), 1u8.into()))]
+                    .into_iter()
+                    .collect(),
+                vec![],
+                19_000_000,
+                true,
+            );
             store.set_spot_prices(Default::default(), vec![], 18_999_999, true);
             store.set_component_depths(Default::default(), vec![], 18_999_998, true);
         }
@@ -1102,11 +1176,10 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_applies_limit_boundaries() {
-        use num_bigint::BigUint;
-
-        let state = make_test_state();
+        let mut state = make_test_state();
         seed_tycho_head(&state).await;
         let token = test_addr(1);
+        state.gas_token = token.clone();
         let token_in = test_addr(2);
         let token_out = test_addr(3);
         let spot_prices = (0usize..1001)
@@ -1207,6 +1280,7 @@ mod tests {
         // (address, numerator, denominator, expected decimal string), pre-sorted by address
         // because the handler sorts entries for a deterministic wire order.
         let cases = [
+            (gas_token, 1u128, 1u128, "1"),
             ("0x0000000000000000000000000000000000000006", 3u128, 1_000_000_000u128, "0.000000003"),
             ("0x0000000000000000000000000000000000000008", 5, 1_000_000_000_000, "0.000000000005"),
             ("0x0000000000000000000000000000000000000018", 1500, 1, "1500"),
@@ -1261,10 +1335,11 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_skips_non_serializable_prices() {
-        let state = make_test_state();
+        let mut state = make_test_state();
         seed_tycho_head(&state).await;
         let mut token_prices = rustc_hash::FxHashMap::default();
         let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
+        state.gas_token = valid.clone();
         token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));
         // Struct literal because Price::new panics on a zero numerator — this state is
         // constructor-unreachable, and the skip path is exercised defensively.
@@ -1306,7 +1381,7 @@ mod tests {
             .as_str()
             .unwrap()
             .eq_ignore_ascii_case(&valid.to_string()));
-        assert_eq!(prices[0]["price"], "0.5");
+        assert_eq!(prices[0]["price"], "1");
     }
 
     #[cfg(feature = "experimental")]
@@ -1356,11 +1431,9 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_tokens_handler_returns_ranked_graph_tokens() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let addr = test_addr;
-        let state = make_test_state();
+        let mut state = make_test_state();
+        state.gas_token = addr(0x0a);
         {
             let mut market = state.market_data.write().await;
             market.upsert_tokens([

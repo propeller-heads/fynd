@@ -46,6 +46,52 @@ pub type TokenGasPriceKey = Address;
 /// its buy and sell rates — a token's exit cost is already reflected in its price.
 pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 
+/// Converts an internal native-gas-denominated price back to routable gas-token units.
+///
+/// Internal quote accounting uses token raw units per native gas raw unit. Public consumers use
+/// token raw units per routable gas-token raw unit, so this divides by the exact
+/// routable-per-native conversion. Returns `None` for a zero numerator or denominator.
+pub fn price_in_routable_units(price: &Price, native_to_routable_unit: &Price) -> Option<Price> {
+    if price.numerator == BigUint::from(0u8) ||
+        price.denominator == BigUint::from(0u8) ||
+        native_to_routable_unit.numerator == BigUint::from(0u8) ||
+        native_to_routable_unit.denominator == BigUint::from(0u8)
+    {
+        return None;
+    }
+    if native_to_routable_unit.numerator == native_to_routable_unit.denominator {
+        return Some(price.clone());
+    }
+    Some(Price {
+        numerator: &price.numerator * &native_to_routable_unit.denominator,
+        denominator: &price.denominator * &native_to_routable_unit.numerator,
+    })
+}
+
+/// Converts a native gas cost into raw units of a token using a derived token price.
+///
+/// Prices are exact fractions in token raw units per native gas raw unit. Division rounds up so a
+/// fractional output-token atom never understates gas cost.
+pub(crate) fn gas_cost_in_token(gas_cost: &BigUint, price: &Price) -> Option<BigUint> {
+    mul_div_ceil(gas_cost, &price.numerator, &price.denominator)
+}
+
+/// Multiplies two unsigned integers, divides by `denominator`, and rounds any remainder up.
+///
+/// Returns `None` for a zero denominator. This keeps every gas-cost conversion and refinement on
+/// the same conservative integer rounding rule.
+pub(crate) fn mul_div_ceil(
+    value: &BigUint,
+    multiplier: &BigUint,
+    denominator: &BigUint,
+) -> Option<BigUint> {
+    if denominator == &BigUint::from(0u8) {
+        return None;
+    }
+    let scaled = value * multiplier;
+    Some((scaled + denominator - BigUint::from(1u8)) / denominator)
+}
+
 /// Token price with the components that must re-price it when they change.
 #[derive(Debug, Clone)]
 pub struct TokenPriceEntry {
@@ -61,3 +107,36 @@ pub struct TokenPriceEntry {
 ///
 /// Used internally by `TokenGasPriceComputation` to enable incremental updates.
 pub type TokenPricesWithDeps = FxHashMap<TokenGasPriceKey, TokenPriceEntry>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mul_div_ceil_preserves_fractional_refined_gas_cost() {
+        assert_eq!(
+            mul_div_ceil(&BigUint::from(1u8), &BigUint::from(11u8), &BigUint::from(10u8),),
+            Some(BigUint::from(2u8))
+        );
+    }
+
+    #[test]
+    fn gas_cost_conversion_rounds_up_fractional_output_atoms() {
+        let price =
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) };
+
+        assert_eq!(gas_cost_in_token(&BigUint::from(1u8), &price), Some(BigUint::from(1u8)));
+        assert_eq!(
+            gas_cost_in_token(&BigUint::from(10u64).pow(12), &price),
+            Some(BigUint::from(1u8))
+        );
+        assert_eq!(gas_cost_in_token(&BigUint::from(0u8), &price), Some(BigUint::from(0u8)));
+    }
+
+    #[test]
+    fn gas_cost_conversion_rejects_zero_denominator() {
+        let price = Price { numerator: BigUint::from(1u8), denominator: BigUint::from(0u8) };
+
+        assert_eq!(gas_cost_in_token(&BigUint::from(1u8), &price), None);
+    }
+}

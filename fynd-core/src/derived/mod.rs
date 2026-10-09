@@ -33,7 +33,7 @@
 //!
 //! ```ignore
 //! // Create the computation manager
-//! let config = ComputationManagerConfig::new().with_gas_token(weth_address);
+//! let config = ComputationManagerConfig::new().with_chain_gas_token(&chain)?;
 //! let manager = ComputationManager::new(config, shared_market_data)?;
 //!
 //! // Get a reference to the store for workers
@@ -67,4 +67,4 @@ pub mod types;
 pub use computation::FailedItemError;
 pub use manager::{ComputationManager, ComputationManagerConfig, SharedDerivedDataRef};
 pub use store::{ComputationStatus, DerivedData};
-pub use types::{ComponentDepths, TokenGasPrices};
+pub use types::{price_in_routable_units, ComponentDepths, TokenGasPrices};
