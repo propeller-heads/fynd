@@ -451,8 +451,9 @@ fn register_exchange(
         "ekubo_v2" => builder.exchange::<EkuboState>("ekubo_v2", tvl_filter.clone(), None),
         "vm:curve" => {
             // Tycho's curve_filter keeps standard coins and, since 0.428.0, oracle coins
-            // with trusted rate providers (including weETH getRate()). Untrusted oracle,
-            // rebasing and ERC4626 coins remain excluded from the hybrid CurveState.
+            // with trusted rate providers (including weETH getRate()). Since 0.451.0 it also
+            // keeps the two ETH/stETH pools (0xdc24…7022, 0x21e2…843a). Untrusted oracle,
+            // other rebasing and ERC4626 coins remain excluded from the hybrid CurveState.
             builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
         }
         "uniswap_v4_hooks" => builder.exchange::<UniswapV4State>(
@@ -979,6 +980,35 @@ mod tests {
                 ..Default::default()
             },
             state: ProtocolComponentState::new("curve_pool", HashMap::new(), HashMap::new()),
+            component_tvl: None,
+            entrypoints: vec![],
+        };
+        assert_eq!(curve_filter(&component), kept);
+    }
+
+    // Guard the upstream filter behavior Fynd relies on when updating Tycho dependencies.
+    #[rstest::rstest]
+    #[case::legacy_steth("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022", true)]
+    #[case::steth_ng("0x21e27a5e5513d6e65c4f830167390997aa84843a", true)]
+    #[case::other_steth_pool("0x1111111111111111111111111111111111111111", false)]
+    fn test_curve_filter_rebasing_pool(#[case] pool_id: &str, #[case] kept: bool) {
+        use tycho_simulation::tycho_common::models::protocol::{
+            ProtocolComponent, ProtocolComponentState,
+        };
+
+        let steth = vec!["0xae7ab96520de3a18e5e111b5eaab095312d7fe84"];
+        let static_attributes = HashMap::from([(
+            "rebase_tokens".to_string(),
+            Bytes::from(serde_json::to_vec(&steth).unwrap()),
+        )]);
+        let component = ComponentWithState {
+            component: ProtocolComponent {
+                id: pool_id.to_string(),
+                protocol_system: "vm:curve".to_string(),
+                static_attributes,
+                ..Default::default()
+            },
+            state: ProtocolComponentState::new(pool_id, HashMap::new(), HashMap::new()),
             component_tvl: None,
             entrypoints: vec![],
         };

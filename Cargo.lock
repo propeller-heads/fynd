@@ -7952,9 +7952,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.445.0"
+version = "0.451.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50ffb0652a1f94e56d81b0782a645cc730ad65aaacea65e11416637b99876c1c"
+checksum = "1b82d304914d1a51eec072c993e1e5d1159f379887212078c5eb5b957eda3aff"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7982,9 +7982,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.445.0"
+version = "0.451.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f91bc107c03aa87e4b909828d8da061074d7b04eed53f1837ef403ba1fa46ae0"
+checksum = "787e7be0f1a51c85be7f896bdae2d86b68559fe1a01eadd6932c76cb44b11da6"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8011,9 +8011,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.445.0"
+version = "0.451.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db38c904370b58219d9e6b5e18e8d092dd9a63a5f5c367f6ea2dd5b9b8a4e91"
+checksum = "31d0731f12356fb9f3b8e3cedf5e48987be38d24c6dce362d1b2ff54a059dde7"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8033,9 +8033,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.445.0"
+version = "0.451.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "236d0bd308051fb0af81b4f3b7164dfd4810aa19f67cadb1cf992d8b0ffbaf8b"
+checksum = "66e32d7c5d41b5093be3544765cfadfb9d77cfc401e8269450ace3304d7d6434"
 dependencies = [
  "alloy",
  "chrono",
@@ -8058,9 +8058,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.445.0"
+version = "0.451.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dffd6e6bdee88cbe16e0d3e06f66a50ff25b92ec74f83a47845d5656662bf358"
+checksum = "2832d06a97ef349cd0528a557e92fba48d608e1e0b686156add81e2479454a4b"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8069,7 +8069,9 @@ dependencies = [
  "async-trait",
  "balancer-maths-rust",
  "base64",
+ "bytes",
  "chrono",
+ "derive_more 2.1.1",
  "dotenv",
  "ekubo_sdk",
  "enum_delegate",
@@ -8081,6 +8083,7 @@ dependencies = [
  "http 1.4.2",
  "itertools 0.13.0",
  "lunarbase-pmm-math",
+ "metrics",
  "num-bigint",
  "num-traits",
  "prost 0.13.5",
