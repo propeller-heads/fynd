@@ -444,7 +444,8 @@ impl Encoder {
                 .clone(),
             Some(slippage_bps(encoding_options.slippage())),
         )?
-        .with_user_transfer_type(encoding_options.transfer_type().clone());
+        .with_user_transfer_type(encoding_options.transfer_type().clone())
+        .with_origin(quote.sender().clone());
         let solution = match &self.exclusive_swap_signer {
             Some(signer) => {
                 Self::stamp_exclusive_swaps(solution, quote, signer, encoding_options.slippage())?
@@ -1688,6 +1689,24 @@ mod tests {
             .await
             .expect("a failing order is reported on the order, not on the call");
         assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
+    }
+
+    #[test]
+    fn test_prepare_solution_origin() {
+        let encoder = real_encoder();
+        let quote = make_order_quote(990)
+            .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+
+        let prepared = encoder
+            .prepare_solution(
+                0,
+                &quote,
+                &EncodingOptions::new(0.01),
+                &encoder.router_fees().snapshot(),
+            )
+            .expect("a valid quote prepares a solution");
+
+        assert_eq!(prepared.solution.origin(), Some(quote.sender()));
     }
 
     #[tokio::test]
