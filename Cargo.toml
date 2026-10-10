@@ -231,3 +231,9 @@ debug = true
 # for derived data. The workspace's own code keeps the debug settings.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Temporary: tycho#1576 (per-request origin). Replace with the released version.
+[patch.crates-io]
+tycho-common = { git = "https://github.com/propeller-heads/tycho", rev = "d66410bb3421655e9ea5400ad60c43c8332c09c4" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "d66410bb3421655e9ea5400ad60c43c8332c09c4" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "d66410bb3421655e9ea5400ad60c43c8332c09c4" }
