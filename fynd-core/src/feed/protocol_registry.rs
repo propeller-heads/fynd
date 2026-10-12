@@ -1073,16 +1073,20 @@ mod tests {
         chain: Chain,
         entries: &[&str],
     ) -> Result<RFQStreamBuilder, DataFeedError> {
-        register_rfq(
-            RFQStreamBuilder::new(),
-            chain,
-            1.0,
-            &entries
-                .iter()
-                .map(|entry| (*entry).to_string())
-                .collect::<Vec<_>>(),
-            std::collections::HashSet::new(),
-        )
+        let protocols = entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0);
+        register_rfq(RFQStreamBuilder::new(), &config, std::collections::HashSet::new())
+    }
+
+    #[rstest::rstest]
+    #[case::per_pair(false, ComponentLayout::PerPair)]
+    #[case::aggregated(true, ComponentLayout::AllPairs)]
+    fn test_rfq_layout(#[case] aggregate: bool, #[case] expected: ComponentLayout) {
+        assert_eq!(rfq_layout(aggregate), expected);
     }
 
     fn price_level_stream(
