@@ -30,7 +30,10 @@ use tycho_simulation::{
 
 use crate::{
     feed::component_filter::protocol_matches,
-    types::{BlockInfo, ComponentId, RouteExclusionFilter, RouteExclusions},
+    types::{
+        swap_directions, BlockInfo, ComponentId, ComponentTopology, RouteExclusionFilter,
+        RouteExclusions, SwapDirection,
+    },
 };
 
 /// A label identifying an overlay state layer.
@@ -328,6 +331,11 @@ impl<'a> MarketDataView<'a> {
         subset
     }
 
+    /// Returns the tokens and swap directions of one component in the base data.
+    pub(crate) fn topology_of(&self, id: &str) -> Option<ComponentTopology> {
+        self.guard.topology_of(id)
+    }
+
     /// Returns the component topology from the base data.
     pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
         self.guard.component_topology()
@@ -374,6 +382,22 @@ impl<'a> MarketDataView<'a> {
     }
 }
 
+/// A component with the swap directions computed when it was stored.
+#[derive(Debug, Clone)]
+struct StoredComponent {
+    component: Arc<ProtocolComponent>,
+    swap_directions: Arc<[SwapDirection]>,
+}
+
+/// What `MarketState::upsert_components` found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UpsertedComponents {
+    /// Ids the market did not hold before.
+    pub new: Vec<ComponentId>,
+    /// Ids the market held, stored again with other swap directions.
+    pub reshaped: Vec<ComponentId>,
+}
+
 /// Shared market data containing all component states and market information.
 ///
 /// This struct is the single source of truth for market data.
@@ -386,8 +410,8 @@ pub struct MarketState {
     /// `extract_subset_with_overlay` when an overlay is active. Empty string until the first block
     /// is applied.
     label: StateLabel,
-    /// All components indexed by their ID.
-    components: FxHashMap<ComponentId, Arc<ProtocolComponent>>,
+    /// All components indexed by their ID, each with its swap directions.
+    components: FxHashMap<ComponentId, StoredComponent>,
     /// All states indexed by their component ID.
     simulation_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
     /// All tokens indexed by their address. Shared for the same reason as `components`.
@@ -403,8 +427,17 @@ pub struct MarketState {
     /// excludes a protocol names that system's pools without scanning the component map, and so
     /// the metrics sampler can count them without one either.
     components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
-    /// Changes only when a component is added or removed, not when its state changes.
+    /// Changes only when a component is added or removed, not when its state or directions change.
     component_generation: u64,
+}
+
+impl StoredComponent {
+    fn topology(&self) -> ComponentTopology {
+        ComponentTopology {
+            tokens: self.component.tokens.clone(),
+            swap_directions: Arc::clone(&self.swap_directions),
+        }
+    }
 }
 
 impl MarketState {
@@ -500,13 +533,22 @@ impl MarketState {
     pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
         self.components
             .iter()
-            .map(|(id, component)| (id.clone(), component.tokens.clone()))
+            .map(|(id, stored)| (id.clone(), stored.component.tokens.clone()))
             .collect()
+    }
+
+    /// Returns the tokens and swap directions of one component.
+    pub(crate) fn topology_of(&self, id: &str) -> Option<ComponentTopology> {
+        self.components
+            .get(id)
+            .map(StoredComponent::topology)
     }
 
     /// Gets a component by ID.
     pub fn get_component(&self, id: &str) -> Option<&ProtocolComponent> {
-        self.components.get(id).map(Arc::as_ref)
+        self.components
+            .get(id)
+            .map(|stored| stored.component.as_ref())
     }
 
     /// The ids of every component this protocol system holds. Empty for a system the market does
@@ -523,7 +565,9 @@ impl MarketState {
 
     /// Gets a component by ID as a shared handle, for callers that need to keep it.
     pub fn get_component_shared(&self, id: &str) -> Option<&Arc<ProtocolComponent>> {
-        self.components.get(id)
+        self.components
+            .get(id)
+            .map(|stored| &stored.component)
     }
 
     /// Gets a simulation state by ID.
@@ -555,26 +599,41 @@ impl MarketState {
         &self.tokens
     }
 
-    /// Inserts or updates a component.
-    pub fn upsert_components(&mut self, components: impl IntoIterator<Item = ProtocolComponent>) {
+    /// Inserts or updates components. Reports the ids that are new and the ids stored again with
+    /// other swap directions.
+    pub fn upsert_components(
+        &mut self,
+        components: impl IntoIterator<Item = ProtocolComponent>,
+    ) -> UpsertedComponents {
+        let mut upserted = UpsertedComponents::default();
         for component in components {
             let protocol_system = component.protocol_system.clone();
             let component_id = component.id.clone();
-            let is_new = !self
-                .components
-                .contains_key(&component_id);
-            self.components
-                .insert(component_id.clone(), Arc::new(component));
+            let swap_directions = swap_directions(&component);
+            match self.components.get(&component_id) {
+                None => {
+                    upserted.new.push(component_id.clone());
+                    self.component_generation = self
+                        .component_generation
+                        .wrapping_add(1);
+                }
+                Some(stored) if stored.swap_directions != swap_directions => {
+                    upserted
+                        .reshaped
+                        .push(component_id.clone());
+                }
+                Some(_) => {}
+            }
+            self.components.insert(
+                component_id.clone(),
+                StoredComponent { component: Arc::new(component), swap_directions },
+            );
             self.components_by_protocol
                 .entry(protocol_system)
                 .or_default()
                 .insert(component_id);
-            if is_new {
-                self.component_generation = self
-                    .component_generation
-                    .wrapping_add(1);
-            }
         }
+        upserted
     }
 
     /// Inserts or updates tokens.
@@ -599,13 +658,13 @@ impl MarketState {
     /// Removes a component.
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
-            if let Some(component) = self.components.remove(id) {
+            if let Some(stored) = self.components.remove(id) {
                 self.component_generation = self
                     .component_generation
                     .wrapping_add(1);
                 if let Some(ids) = self
                     .components_by_protocol
-                    .get_mut(&component.protocol_system)
+                    .get_mut(&stored.component.protocol_system)
                 {
                     ids.remove(id);
                 }
@@ -653,9 +712,9 @@ impl MarketState {
             FxHashSet::with_capacity_and_hasher(component_ids.len() * 2, rustc_hash::FxBuildHasher);
 
         for &id in component_ids {
-            if let Some(component) = self.components.get(id) {
-                token_addresses.extend(&component.tokens);
-                components.insert(id.clone(), component.clone());
+            if let Some(stored) = self.components.get(id) {
+                token_addresses.extend(&stored.component.tokens);
+                components.insert(id.clone(), stored.clone());
             }
             // A component without a simulation state is legitimate: the recording skips `vm:*`
             // states, and a component can be announced a block before its first state arrives.
@@ -701,12 +760,12 @@ impl MarketState {
 
 /// Groups component ids by the protocol system their component carries.
 fn index_by_protocol(
-    components: &FxHashMap<ComponentId, Arc<ProtocolComponent>>,
+    components: &FxHashMap<ComponentId, StoredComponent>,
 ) -> FxHashMap<String, FxHashSet<ComponentId>> {
     let mut index: FxHashMap<String, FxHashSet<ComponentId>> = FxHashMap::default();
-    for (id, component) in components {
+    for (id, stored) in components {
         index
-            .entry(component.protocol_system.clone())
+            .entry(stored.component.protocol_system.clone())
             .or_default()
             .insert(id.clone());
     }

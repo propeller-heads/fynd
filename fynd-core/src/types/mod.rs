@@ -17,6 +17,8 @@ pub mod quote;
 #[cfg(any(test, feature = "test-utils"))]
 /// Builders for assembling quote types in tests, here and in dependent crates.
 pub mod test_utils;
+/// A component's tokens and swap directions.
+pub mod topology;
 
 // Re-export constants
 pub use constants::{native_token, parse_chain, ParseChainError, UnsupportedChainError};
@@ -31,3 +33,5 @@ pub use quote::{
     RouteResult, RouteValidationError, SimulationResult, SingleOrderQuote, SolveParams,
     SurplusInfo, Swap, Transaction, UserTransferType,
 };
+pub(crate) use topology::swap_directions;
+pub use topology::{ComponentTopology, SwapDirection};
