@@ -729,6 +729,7 @@ mod tests {
     use num_bigint::BigUint;
     use tycho_simulation::{
         protocol::models::{ProtocolComponent, Update},
+        rfq::protocols::component::{encode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
         tycho_common::{
             models::{token::Token, Chain},
             Bytes,
@@ -1246,6 +1247,68 @@ mod tests {
                 updated_components: vec![component_id.to_string()],
             }
         );
+    }
+
+    const VENUE: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// Sends a venue that lists `directions`, given as indexes into `tokens`, the way tycho
+    /// re-sends an aggregated RFQ venue.
+    async fn send_venue(feed: &TychoFeed, tokens: &[Token], directions: &[(usize, usize)]) {
+        let directions: std::collections::BTreeSet<_> = directions
+            .iter()
+            .map(|&(token_in, token_out)| {
+                (tokens[token_in].address.clone(), tokens[token_out].address.clone())
+            })
+            .collect();
+        let mut venue = create_test_component(VENUE, tokens.to_vec());
+        venue
+            .static_attributes
+            .insert(SWAP_DIRECTIONS_ATTRIBUTE.to_string(), encode_swap_directions(&directions));
+        let states = HashMap::from([(
+            VENUE.to_string(),
+            Box::new(FeedMockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+        )]);
+        let update = Update::new(12345, states, HashMap::from([(VENUE.to_string(), venue)]));
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle message");
+    }
+
+    /// A re-sent venue with the same swap directions is a state update. With other swap
+    /// directions it is added again.
+    #[tokio::test]
+    async fn test_handle_message_resent_component() {
+        let feed = TychoFeed::new(create_test_config(), new_shared_market_data());
+        let mut event_rx = feed.subscribe();
+        let tokens = [
+            create_test_token("0x1111111111111111111111111111111111111111", "TKN1"),
+            create_test_token("0x2222222222222222222222222222222222222222", "TKN2"),
+        ];
+
+        send_venue(&feed, &tokens, &[(0, 1)]).await;
+        send_venue(&feed, &tokens, &[(0, 1)]).await;
+        send_venue(&feed, &tokens, &[(0, 1), (1, 0)]).await;
+
+        let MarketEvent::MarketUpdated { added_components, .. } = event_rx.try_recv().unwrap();
+        assert_eq!(
+            added_components[VENUE]
+                .swap_directions
+                .len(),
+            1
+        );
+        let MarketEvent::MarketUpdated { added_components, updated_components, .. } =
+            event_rx.try_recv().unwrap();
+        assert!(added_components.is_empty());
+        assert_eq!(updated_components, vec![VENUE.to_string()]);
+        let MarketEvent::MarketUpdated { added_components, updated_components, .. } =
+            event_rx.try_recv().unwrap();
+        assert_eq!(
+            added_components[VENUE]
+                .swap_directions
+                .len(),
+            2
+        );
+        assert!(updated_components.is_empty());
     }
 
     #[tokio::test]
