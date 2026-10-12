@@ -22,7 +22,7 @@ use crate::{
         market_data::MarketDataView,
     },
     graph::GraphError,
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 
 /// Data stored on each edge of the graph.
@@ -161,10 +161,10 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// tokens). All components not included in the error were successfully added.
     ///
     /// Arguments:
-    /// - components: A map of component IDs to their tokens.
+    /// - components: A map of component IDs to their tokens and swap directions.
     fn add_components(
         &mut self,
-        components: &FxHashMap<ComponentId, Vec<Address>>,
+        components: &FxHashMap<ComponentId, ComponentTopology>,
     ) -> Result<(), GraphError> {
         let mut invalid_components = Vec::new();
         let mut skipped_duplicates = 0usize;
@@ -173,7 +173,8 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         let mut sorted_components: Vec<_> = components.iter().collect();
         sorted_components.sort_by_key(|(id, _)| *id);
 
-        for (comp_id, tokens) in sorted_components {
+        for (comp_id, topology) in sorted_components {
+            let tokens = &topology.tokens;
             if self.edge_map.contains_key(comp_id) {
                 trace!(component_id = %comp_id, "skipping already-tracked component");
                 skipped_duplicates += 1;
@@ -395,7 +396,7 @@ impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
 }
 
 impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDiGraphManager<D> {
-    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, Vec<Address>>) {
+    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, ComponentTopology>) {
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
         self.edge_map.clear();
@@ -407,7 +408,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         // graph structure each run.
         let mut unique_tokens: Vec<Address> = component_topology
             .values()
-            .flat_map(|v| v.iter())
+            .flat_map(|topology| topology.tokens.iter())
             .cloned()
             .collect::<FxHashSet<_>>()
             .into_iter()
@@ -423,7 +424,8 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         let mut sorted_components: Vec<_> = component_topology.iter().collect();
         sorted_components.sort_by_key(|(id, _)| *id);
 
-        for (comp_id, tokens) in sorted_components {
+        for (comp_id, topology) in sorted_components {
+            let tokens = &topology.tokens;
             let mut sorted_tokens: Vec<&Address> = tokens.iter().collect();
             sorted_tokens.sort();
             let node_indices: Vec<NodeIndex> = sorted_tokens

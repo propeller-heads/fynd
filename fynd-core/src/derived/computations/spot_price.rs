@@ -102,14 +102,15 @@ impl DerivedComputation for SpotPriceComputation {
 
         for component_id in &components_to_compute {
             // Get token addresses: changed.added for new components, topology for existing.
-            let token_addresses = changed
+            let component_topology = changed
                 .added
                 .get(component_id)
                 .or_else(|| topology.get(component_id));
 
-            let Some(token_addresses) = token_addresses else {
+            let Some(component_topology) = component_topology else {
                 continue;
             };
+            let token_addresses = &component_topology.tokens;
 
             let Some(sim_state) = market_guard.get_simulation_state(component_id) else {
                 warn!(component_id, "missing simulation state, skipping component");

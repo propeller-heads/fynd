@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fynd_core::{
     derived::{ComponentDepths, TokenGasPrices},
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -101,7 +101,7 @@ fn gas_units_per_token_unit(price: &Price) -> Option<f64> {
 /// token's gas price (token raw units per gas-token raw unit); tokens without a computed
 /// gas price get `None` and sort after priced ones.
 pub fn build_token_entries(
-    topology: &FxHashMap<ComponentId, Vec<Address>>,
+    topology: &FxHashMap<ComponentId, ComponentTopology>,
     token_registry: &FxHashMap<Address, Arc<Token>>,
     depths: Option<&ComponentDepths>,
     token_prices: Option<&TokenGasPrices>,
@@ -109,8 +109,8 @@ pub fn build_token_entries(
     use num_traits::ToPrimitive;
 
     let mut component_counts: FxHashMap<Address, u32> = FxHashMap::default();
-    for tokens in topology.values() {
-        for address in tokens {
+    for component in topology.values() {
+        for address in &component.tokens {
             *component_counts
                 .entry(address.clone())
                 .or_default() += 1;

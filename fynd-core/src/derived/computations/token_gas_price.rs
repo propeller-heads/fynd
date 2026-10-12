@@ -161,7 +161,7 @@ use crate::{
         protocol_registry::is_rfq_system,
     },
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, OrderSide, RouteExclusions},
+    types::{ComponentId, ComponentTopology, Order, OrderSide, RouteExclusions},
 };
 
 /// Whether pricing leaves `component` out of its graph.
@@ -1466,11 +1466,11 @@ impl TokenGasPriceComputation {
     /// Every token in the graph but the gas token.
     fn tokens_to_price(
         &self,
-        topology: &FxHashMap<ComponentId, Vec<Address>>,
+        topology: &FxHashMap<ComponentId, ComponentTopology>,
     ) -> FxHashSet<Address> {
         topology
             .values()
-            .flatten()
+            .flat_map(|component| &component.tokens)
             .filter(|token| *token != &self.gas_token)
             .cloned()
             .collect()
@@ -1546,7 +1546,11 @@ impl TokenGasPriceComputation {
             // quoted until it has a price. These rank ahead of everything else in the pass.
             let mut arrived: FxHashSet<Address> = FxHashSet::default();
             let mut new_tokens = 0usize;
-            for token in changed.added.values().flatten() {
+            for token in changed
+                .added
+                .values()
+                .flat_map(|component| &component.tokens)
+            {
                 // Every added pool carries the gas token, which no pass ever attempts.
                 if *token == self.gas_token || !arrived.insert(token.clone()) {
                     continue;

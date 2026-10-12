@@ -337,7 +337,7 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Returns the component topology from the base data.
-    pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
+    pub fn component_topology(&self) -> FxHashMap<ComponentId, ComponentTopology> {
         self.guard.component_topology()
     }
 
@@ -528,12 +528,11 @@ impl MarketState {
             .get(protocol_system)
     }
 
-    /// Returns the component topology.
-    /// This is a simple mapping from component ID to their token addresses.
-    pub fn component_topology(&self) -> FxHashMap<ComponentId, Vec<Address>> {
+    /// Returns each component's tokens and swap directions. The directions are shared, not copied.
+    pub fn component_topology(&self) -> FxHashMap<ComponentId, ComponentTopology> {
         self.components
             .iter()
-            .map(|(id, stored)| (id.clone(), stored.component.tokens.clone()))
+            .map(|(id, stored)| (id.clone(), stored.topology()))
             .collect()
     }
 

@@ -8,6 +8,7 @@
 use std::{collections::HashSet, pin::Pin, time::Instant};
 
 use metrics::{gauge, histogram};
+use rustc_hash::FxHashMap;
 use tokio::{
     sync::{broadcast, oneshot},
     task::JoinHandle,
@@ -37,7 +38,7 @@ use crate::{
         },
         DataFeedError, TychoFeedConfig,
     },
-    types::BlockInfo,
+    types::{BlockInfo, ComponentId, ComponentTopology},
 };
 
 /// The Tycho indexer that keeps market data synchronized.
@@ -626,6 +627,11 @@ impl TychoFeed {
         let update_start = Instant::now();
         let mut latest_component_count = 0;
         let mut token_count = 0;
+        let mut added_topology: FxHashMap<ComponentId, ComponentTopology> = FxHashMap::default();
+        let added_ids: Vec<ComponentId> = added_components
+            .values()
+            .map(|component| component.id.to_string())
+            .collect();
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
                 market_data.upsert_components(
@@ -664,6 +670,10 @@ impl TychoFeed {
                     market_data.update_last_updated(block_info);
                 }
 
+                added_topology = added_ids
+                    .iter()
+                    .filter_map(|id| Some((id.clone(), market_data.topology_of(id)?)))
+                    .collect();
                 latest_component_count = market_data.component_count();
                 token_count = market_data.token_count();
             })
@@ -687,19 +697,7 @@ impl TychoFeed {
             !updated_components_ids.is_empty()
         {
             let market_update_event = MarketEvent::MarketUpdated {
-                added_components: added_components
-                    .into_iter()
-                    .map(|(id, component)| {
-                        (
-                            id,
-                            component
-                                .tokens
-                                .into_iter()
-                                .map(|token| token.address)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
+                added_components: added_topology,
                 removed_components: removed_components.into_keys().collect(),
                 updated_components: updated_components_ids
                     .into_iter()

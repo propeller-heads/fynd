@@ -183,8 +183,8 @@ async fn score_tokens(market_data: &MarketData) -> HashMap<Address, TokenScore> 
 
     // Count component appearances per token.
     let mut component_count: HashMap<Address, usize> = HashMap::new();
-    for tokens in topology.values() {
-        for addr in tokens {
+    for component in topology.values() {
+        for addr in &component.tokens {
             *component_count
                 .entry(addr.clone())
                 .or_insert(0) += 1;

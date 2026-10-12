@@ -20,7 +20,7 @@ use tycho_simulation::{
 use crate::{
     derived::DerivedData,
     feed::market_data::MarketDataView,
-    types::{ComponentId, RouteExclusions},
+    types::{ComponentId, ComponentTopology, RouteExclusions},
 };
 
 /// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
@@ -129,8 +129,8 @@ where
     /// Initializes the graph from the market topology.
     ///
     /// Arguments:
-    /// - components: A map of component IDs to their tokens addresses.
-    fn initialize_graph(&mut self, components: &FxHashMap<ComponentId, Vec<Address>>);
+    /// - components: A map of component IDs to their tokens and swap directions.
+    fn initialize_graph(&mut self, components: &FxHashMap<ComponentId, ComponentTopology>);
 
     /// Returns a reference to the managed graph.
     fn graph(&self) -> &G;

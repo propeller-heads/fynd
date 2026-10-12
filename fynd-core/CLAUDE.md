@@ -41,7 +41,7 @@ pub trait Algorithm: Send + Sync {
 
 ```rust
 pub trait GraphManager<G>: Send + Sync {
-    fn initialize_graph(&mut self, components: &HashMap<ComponentId, Vec<Address>>);
+    fn initialize_graph(&mut self, components: &HashMap<ComponentId, ComponentTopology>);
     fn graph(&self) -> &G;
 }
 ```

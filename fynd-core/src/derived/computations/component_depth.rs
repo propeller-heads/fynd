@@ -143,7 +143,7 @@ impl DerivedComputation for ComponentDepthComputation {
         let mut failed_items: Vec<FailedItem> = Vec::new();
         for component_id in &components_to_compute {
             // Get token addresses: changed.added for new components, topology for existing
-            let Some(token_addresses) = changed
+            let Some(component_topology) = changed
                 .added
                 .get(component_id)
                 .or_else(|| topology.get(component_id))
@@ -152,7 +152,7 @@ impl DerivedComputation for ComponentDepthComputation {
             };
             let pair_depths = self.compute_component_depths(
                 component_id,
-                token_addresses,
+                &component_topology.tokens,
                 &snapshot,
                 &spot_prices,
             );

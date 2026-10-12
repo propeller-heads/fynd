@@ -21,7 +21,7 @@ use crate::{
         events::{EventError, MarketEvent, MarketEventHandler},
         market_data::MarketDataView,
     },
-    types::{ComponentId, RouteExclusions},
+    types::{ComponentId, ComponentTopology, RouteExclusions},
 };
 
 /// The pools that trade one directed token pair.
@@ -584,7 +584,7 @@ impl<D: Clone> TopologyGraphManager<D> {
     /// added.
     fn add_components(
         &mut self,
-        components: &FxHashMap<ComponentId, Vec<Address>>,
+        components: &FxHashMap<ComponentId, ComponentTopology>,
     ) -> Result<(), GraphError> {
         let mut invalid = Vec::new();
         let mut skipped = 0usize;
@@ -593,7 +593,8 @@ impl<D: Clone> TopologyGraphManager<D> {
         let mut sorted: Vec<_> = components.iter().collect();
         sorted.sort_by_key(|(id, _)| *id);
 
-        for (component_id, tokens) in sorted {
+        for (component_id, topology) in sorted {
+            let tokens = &topology.tokens;
             if self
                 .component_pairs
                 .contains_key(component_id)
@@ -769,7 +770,7 @@ impl<D: Clone> Default for TopologyGraphManager<D> {
 }
 
 impl<D: Clone + Send + Sync> GraphManager<TopologyGraph<D>> for TopologyGraphManager<D> {
-    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, Vec<Address>>) {
+    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, ComponentTopology>) {
         self.graph = TopologyGraph::default();
         self.component_pairs.clear();
 
@@ -777,7 +778,7 @@ impl<D: Clone + Send + Sync> GraphManager<TopologyGraph<D>> for TopologyGraphMan
         // order is seeded per process and would otherwise vary run to run.
         let mut tokens: Vec<Address> = component_topology
             .values()
-            .flat_map(|addresses| addresses.iter())
+            .flat_map(|topology| topology.tokens.iter())
             .cloned()
             .collect::<FxHashSet<_>>()
             .into_iter()

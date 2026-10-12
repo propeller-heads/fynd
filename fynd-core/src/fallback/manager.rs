@@ -6,12 +6,12 @@
 
 use metrics::counter;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
     fallback::{is_pamm, must_withhold_pamm, FallbackPoolIndex},
     feed::{events::MarketEvent, market_data::MarketDataView},
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 
 /// Where one pAMM stands with a worker's graph.
@@ -68,7 +68,7 @@ impl PammManager {
     pub(crate) fn withhold_from_graph(
         &mut self,
         market: &MarketDataView<'_>,
-        topology: &FxHashMap<ComponentId, Vec<Address>>,
+        topology: &FxHashMap<ComponentId, ComponentTopology>,
         caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
     ) -> FxHashSet<ComponentId> {
         self.fallback_pools = FallbackPoolIndex::build(market);
@@ -162,14 +162,16 @@ impl PammManager {
             .filter(|(_, state)| **state == PammState::Withheld)
             .filter_map(|(component_id, _)| {
                 let component = market.get_component(component_id)?;
-                (!must_withhold_pamm(component, fallback_pools))
-                    .then(|| (component_id.clone(), component.tokens.clone()))
+                if must_withhold_pamm(component, fallback_pools) {
+                    return None;
+                }
+                Some((component_id.clone(), market.topology_of(component_id)?))
             })
             .collect();
-        for (component_id, tokens) in readmitted {
+        for (component_id, topology) in readmitted {
             states.insert(component_id.clone(), PammState::Admitted);
             count("admitted");
-            added_components.insert(component_id, tokens);
+            added_components.insert(component_id, topology);
         }
 
         let mut evicted = Vec::new();
