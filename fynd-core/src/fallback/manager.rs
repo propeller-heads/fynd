@@ -82,7 +82,7 @@ impl PammManager {
             if !is_pamm(component) || caller_drops(component) {
                 continue;
             }
-            let state = if must_withhold_pamm(component, &self.fallback_pools) {
+            let state = if must_withhold_pamm(market, component, &self.fallback_pools) {
                 withheld.insert(component_id.clone());
                 PammState::Withheld
             } else {
@@ -127,7 +127,7 @@ impl PammManager {
         let unbacked = |component_id: &ComponentId| {
             market
                 .get_component(component_id)
-                .is_some_and(|component| must_withhold_pamm(component, fallback_pools))
+                .is_some_and(|component| must_withhold_pamm(market, component, fallback_pools))
         };
         let count = |outcome: &'static str| {
             counter!("propamm_admissions_total", "outcome" => outcome, "pool" => worker_pool_name.clone())
@@ -147,7 +147,7 @@ impl PammManager {
             if !is_pamm(component) || caller_drops(component) {
                 return true;
             }
-            if must_withhold_pamm(component, fallback_pools) {
+            if must_withhold_pamm(market, component, fallback_pools) {
                 states.insert(component_id.clone(), PammState::Withheld);
                 count("withheld");
                 return false;
@@ -162,7 +162,7 @@ impl PammManager {
             .filter(|(_, state)| **state == PammState::Withheld)
             .filter_map(|(component_id, _)| {
                 let component = market.get_component(component_id)?;
-                if must_withhold_pamm(component, fallback_pools) {
+                if must_withhold_pamm(market, component, fallback_pools) {
                     return None;
                 }
                 Some((component_id.clone(), market.topology_of(component_id)?))

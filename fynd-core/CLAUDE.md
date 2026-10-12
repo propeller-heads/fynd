@@ -201,6 +201,10 @@ component per venue instead of one per token pair. Metric always streams per pai
 the swap directions it quotes in its `swap_directions` static attribute, and tycho re-sends the
 component as a new pair on every poll.
 
+A component's graph edges follow its swap directions, as `types::swap_directions` reads them: the
+attribute when present, otherwise every direction between its tokens. A direction the venue drops
+loses its edge.
+
 ## Exclusive Liquidity (restricted)
 
 A limited, opt-in service for specific deployments — **not** part of the normal routing path. With no

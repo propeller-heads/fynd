@@ -64,22 +64,26 @@ pub(crate) fn is_pamm(component: &ProtocolComponent) -> bool {
         .starts_with(FALLBACK_PREFIX)
 }
 
-/// Whether a graph must leave `component` out because nothing can serve as its fallback.
-///
-/// A `fallback:` leg only reaches the chain through its fallback, so a pAMM no pair of
-/// whose tokens has a candidate pool in this market can never produce a quotable route. The pairs
-/// are the ones `FallbackPoolIndex::insert` files a candidate under, so a multi-token pAMM stays
-/// in the graph while any one of its pairs is backed. Returns `false` for any other protocol
-/// system.
-pub(crate) fn must_withhold_pamm(component: &ProtocolComponent, index: &FallbackPoolIndex) -> bool {
+/// Whether a graph must leave `component` out: a pAMM with no fallback candidate pool for any swap
+/// direction `market` stores for it. `false` for any other protocol system.
+pub(crate) fn must_withhold_pamm(
+    market: &MarketDataView<'_>,
+    component: &ProtocolComponent,
+    index: &FallbackPoolIndex,
+) -> bool {
     if !is_pamm(component) {
         return false;
     }
-    !token_pairs(&component.tokens).any(|(token_a, token_b)| {
-        !index
-            .candidates_for(token_a, token_b)
-            .is_empty()
-    })
+    let swap_directions = market
+        .swap_directions_of(&component.id)
+        .unwrap_or_default();
+    !swap_directions
+        .iter()
+        .any(|(token_in, token_out)| {
+            !index
+                .candidates_for(token_in, token_out)
+                .is_empty()
+        })
 }
 
 /// Stamps a fallback pool on every pAMM leg of `route` and returns what the route delivers

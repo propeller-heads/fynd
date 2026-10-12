@@ -331,6 +331,11 @@ impl<'a> MarketDataView<'a> {
         subset
     }
 
+    /// Returns the swap directions of one component in the base data.
+    pub(crate) fn swap_directions_of(&self, id: &str) -> Option<&[SwapDirection]> {
+        self.guard.swap_directions_of(id)
+    }
+
     /// Returns the tokens and swap directions of one component in the base data.
     pub(crate) fn topology_of(&self, id: &str) -> Option<ComponentTopology> {
         self.guard.topology_of(id)
@@ -534,6 +539,13 @@ impl MarketState {
             .iter()
             .map(|(id, stored)| (id.clone(), stored.topology()))
             .collect()
+    }
+
+    /// Returns the swap directions of one component.
+    pub(crate) fn swap_directions_of(&self, id: &str) -> Option<&[SwapDirection]> {
+        self.components
+            .get(id)
+            .map(|stored| &stored.swap_directions[..])
     }
 
     /// Returns the tokens and swap directions of one component.
