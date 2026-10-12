@@ -1094,45 +1094,53 @@ mod tests {
     /// pAMM the market cannot back is withheld.
     #[test]
     fn test_must_withhold_pamm() {
+        let market = market_with_fallback_pools();
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
         let index = FallbackPoolIndex::default();
         let uniswap = util::component_with_protocol(
             "0xuni",
             "uniswap_v3",
             &[util::token(3, "DAI"), util::token(4, "WBTC")],
         );
-        assert!(!must_withhold_pamm(&uniswap, &index));
+        assert!(!must_withhold_pamm(&view, &uniswap, &index));
 
         let pamm = util::component_with_protocol(
             PAMM_COMPONENT,
             PAMM_PROTOCOL,
             &[util::token(3, "DAI"), util::token(4, "WBTC")],
         );
-        assert!(must_withhold_pamm(&pamm, &index));
+        assert!(must_withhold_pamm(&view, &pamm, &index));
     }
 
-    /// A pAMM is judged on every pair of its tokens, so a wider one stays in the graph while one
-    /// pair is backed and leaves when none is.
+    /// A pAMM is judged on every swap direction the market stores for it, so a wider one stays in
+    /// the graph while one direction is backed and leaves when none is.
     #[test]
     fn test_must_withhold_pamm_multi_token_component() {
+        let backed = util::component_with_protocol(
+            PAMM_COMPONENT,
+            PAMM_PROTOCOL,
+            &[util::token(1, "WETH"), util::token(2, "USDC"), util::token(3, "DAI")],
+        );
         let market = market_with_fallback_pools();
+        market
+            .try_write()
+            .expect("uncontended")
+            .upsert_components([backed.clone()]);
         let view = market
             .try_read_blocking()
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
         // Only the (1, 2) pair has candidate pools; (1, 3) and (2, 3) have none.
-        let backed = util::component_with_protocol(
-            PAMM_COMPONENT,
-            PAMM_PROTOCOL,
-            &[util::token(1, "WETH"), util::token(2, "USDC"), util::token(3, "DAI")],
-        );
-        assert!(!must_withhold_pamm(&backed, &index));
+        assert!(!must_withhold_pamm(&view, &backed, &index));
 
         let unbacked = util::component_with_protocol(
-            PAMM_COMPONENT,
+            UNBACKED_PAMM,
             PAMM_PROTOCOL,
             &[util::token(3, "DAI"), util::token(4, "WBTC"), util::token(5, "USDT")],
         );
-        assert!(must_withhold_pamm(&unbacked, &index));
+        assert!(must_withhold_pamm(&view, &unbacked, &index));
     }
 }

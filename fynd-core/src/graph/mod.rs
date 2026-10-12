@@ -231,3 +231,104 @@ pub trait EdgeWeightUpdaterWithDerived {
         derived: &DerivedData,
     ) -> usize;
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::{
+        algorithm::test_utils::{addr, topology_with_directions},
+        feed::events::{MarketEvent, MarketEventHandler},
+    };
+
+    /// A graph manager that reports, for a swap direction of a component, whether it has an edge
+    /// and whether that edge has a weight.
+    trait DirectionGraph: MarketEventHandler {
+        fn set_weight(&mut self, component_id: &str, token_in: &Address, token_out: &Address);
+        fn weight(
+            &self,
+            component_id: &str,
+            token_in: &Address,
+            token_out: &Address,
+        ) -> Option<bool>;
+    }
+
+    impl DirectionGraph for PetgraphStableDiGraphManager<()> {
+        fn set_weight(&mut self, component_id: &str, token_in: &Address, token_out: &Address) {
+            self.set_edge_weight(&component_id.to_string(), token_in, token_out, (), false)
+                .unwrap();
+        }
+
+        fn weight(
+            &self,
+            component_id: &str,
+            token_in: &Address,
+            token_out: &Address,
+        ) -> Option<bool> {
+            let graph = self.graph();
+            graph.edge_indices().find_map(|edge| {
+                let (from, to) = graph.edge_endpoints(edge)?;
+                let data = &graph[edge];
+                (data.component_id == component_id &&
+                    graph[from] == *token_in &&
+                    graph[to] == *token_out)
+                    .then(|| data.data.is_some())
+            })
+        }
+    }
+
+    impl DirectionGraph for TopologyGraphManager<()> {
+        fn set_weight(&mut self, component_id: &str, token_in: &Address, token_out: &Address) {
+            self.set_pool_weight(&component_id.to_string(), token_in, token_out, (), false)
+                .unwrap();
+        }
+
+        fn weight(
+            &self,
+            component_id: &str,
+            token_in: &Address,
+            token_out: &Address,
+        ) -> Option<bool> {
+            let graph = self.graph();
+            let (from, to) = (graph.get_token_ix(token_in)?, graph.get_token_ix(token_out)?);
+            graph
+                .pools_between(from, to)
+                .iter()
+                .find(|pool| pool.component_id == component_id)
+                .map(|pool| pool.data.is_some())
+        }
+    }
+
+    #[rstest]
+    #[case::petgraph(PetgraphStableDiGraphManager::<()>::default())]
+    #[case::topology(TopologyGraphManager::<()>::default())]
+    #[tokio::test]
+    async fn test_swap_directions_become_edges(#[case] mut manager: impl DirectionGraph) {
+        let (a, b, c) = (addr(0x01), addr(0x02), addr(0x03));
+        let add_venue = |directions: &[(&Address, &Address)]| MarketEvent::MarketUpdated {
+            added_components: FxHashMap::from_iter([(
+                "venue".to_string(),
+                topology_with_directions(&[&a, &b, &c], directions),
+            )]),
+            removed_components: Vec::new(),
+            updated_components: Vec::new(),
+        };
+        let edges = |manager: &dyn DirectionGraph| {
+            [(&a, &b), (&b, &a), (&b, &c)].map(|(from, to)| manager.weight("venue", from, to))
+        };
+
+        manager
+            .handle_event(&add_venue(&[(&a, &b), (&b, &a)]))
+            .await
+            .unwrap();
+        assert_eq!(edges(&manager), [Some(false), Some(false), None]);
+
+        manager.set_weight("venue", &a, &b);
+        manager
+            .handle_event(&add_venue(&[(&a, &b), (&b, &c)]))
+            .await
+            .unwrap();
+        assert_eq!(edges(&manager), [Some(true), None, Some(false)]);
+    }
+}
