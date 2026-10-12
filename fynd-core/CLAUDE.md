@@ -203,7 +203,8 @@ component as a new pair on every poll.
 
 A component's graph edges follow its swap directions, as `types::swap_directions` reads them: the
 attribute when present, otherwise every direction between its tokens. A direction the venue drops
-loses its edge.
+loses its edge. Spot prices and depths exist for those directions only, and a dropped direction
+loses its entries and failures.
 
 ## Exclusive Liquidity (restricted)
 

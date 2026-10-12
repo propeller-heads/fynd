@@ -1,6 +1,7 @@
 //! Spot price computation.
 //!
-//! Computes spot prices for all components in both directions using `ProtocolSim::spot_price()`.
+//! Computes spot prices for every swap direction of every component using
+//! `ProtocolSim::spot_price()`.
 //! Spot prices are the instantaneous exchange rates without slippage.
 //!
 //! `ProtocolSim::spot_price()` is cheap for all component types: VM components return a
@@ -9,7 +10,6 @@
 //! than paying the cost of cloning simulation states via `extract_subset()`.
 
 use async_trait::async_trait;
-use itertools::Itertools;
 use tracing::{debug, instrument, warn, Span};
 
 use crate::{
@@ -17,6 +17,7 @@ use crate::{
         computation::{
             ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
         },
+        computations::drop_unlisted_directions,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
@@ -27,9 +28,7 @@ use crate::{
 
 /// Computes spot prices for all components.
 ///
-/// For each component with tokens A and B, computes:
-/// - Spot price A -> B
-/// - Spot price B -> A
+/// Computes the spot price for each swap direction of a component.
 ///
 /// Uses `ProtocolSim::spot_price()` to compute the instantaneous exchange rate.
 #[derive(Debug, Default)]
@@ -96,12 +95,13 @@ impl DerivedComputation for SpotPriceComputation {
                 .collect()
         };
 
+        drop_unlisted_directions(&mut spot_prices, &changed.added);
+
         let mut succeeded = 0usize;
         let mut failed_items: Vec<FailedItem> = Vec::new();
         let num_components_to_compute = components_to_compute.len();
 
         for component_id in &components_to_compute {
-            // Get token addresses: changed.added for new components, topology for existing.
             let component_topology = changed
                 .added
                 .get(component_id)
@@ -110,40 +110,39 @@ impl DerivedComputation for SpotPriceComputation {
             let Some(component_topology) = component_topology else {
                 continue;
             };
-            let token_addresses = &component_topology.tokens;
+            let directions = &component_topology.swap_directions;
 
             let Some(sim_state) = market_guard.get_simulation_state(component_id) else {
                 warn!(component_id, "missing simulation state, skipping component");
                 spot_prices.retain(|key, _| &key.0 != component_id);
-                for perm in token_addresses.iter().permutations(2) {
+                for (token_in, token_out) in directions.iter() {
                     failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                        key: format!("{component_id}/{token_in}/{token_out}"),
                         error: FailedItemError::MissingSimulationState,
                     });
                 }
                 continue;
             };
 
-            let component_tokens: Result<Vec<_>, _> = token_addresses
-                .iter()
-                .map(|addr| tokens.get(addr).ok_or(addr))
-                .collect();
-            let Ok(component_tokens) = component_tokens else {
-                warn!(component_id, "missing token metadata, skipping component");
-                spot_prices.retain(|key, _| &key.0 != component_id);
-                for perm in token_addresses.iter().permutations(2) {
+            for (token_in_address, token_out_address) in directions.iter() {
+                let key =
+                    (component_id.clone(), token_in_address.clone(), token_out_address.clone());
+                let (Some(token_in), Some(token_out)) =
+                    (tokens.get(token_in_address), tokens.get(token_out_address))
+                else {
+                    warn!(
+                        component_id,
+                        %token_in_address,
+                        %token_out_address,
+                        "missing token metadata, skipping swap direction"
+                    );
+                    spot_prices.remove(&key);
                     failed_items.push(FailedItem {
-                        key: format!("{}/{}/{}", component_id, perm[0], perm[1]),
+                        key: format!("{component_id}/{token_in_address}/{token_out_address}"),
                         error: FailedItemError::MissingTokenMetadata,
                     });
-                }
-                continue;
-            };
-
-            for perm in component_tokens.iter().permutations(2) {
-                let (token_in, token_out) = (*perm[0], *perm[1]);
-                let key =
-                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+                    continue;
+                };
 
                 match sim_state.spot_price(token_in, token_out) {
                     Ok(price) => {

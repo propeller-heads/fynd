@@ -15,7 +15,10 @@ use super::{
         TokenGasPrices, TokenPricesWithDeps,
     },
 };
-use crate::{derived::SharedDerivedDataRef, types::ComponentId};
+use crate::{
+    derived::{computations::drop_unlisted_directions, SharedDerivedDataRef},
+    types::{ComponentId, ComponentTopology},
+};
 
 /// A computed value paired with the block it was computed for.
 #[derive(Debug)]
@@ -449,6 +452,16 @@ impl DerivedData {
             .retain(|(component_id, _, _), _| !removed.contains(component_id));
         self.component_depths_failed
             .retain(|(component_id, _, _), _| !removed.contains(component_id));
+    }
+
+    /// Drops the spot price and component depth failures of a swap direction an added component
+    /// no longer offers.
+    pub(crate) fn drop_failures_of_unlisted_directions(
+        &mut self,
+        added: &FxHashMap<ComponentId, ComponentTopology>,
+    ) {
+        drop_unlisted_directions(&mut self.spot_prices_failed, added);
+        drop_unlisted_directions(&mut self.component_depths_failed, added);
     }
 
     /// Clears all stored data, including all failure maps.

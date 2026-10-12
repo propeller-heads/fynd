@@ -404,11 +404,10 @@ impl ComputationManager {
             .event_tx
             .send(DerivedDataEvent::NewBlock { block });
 
-        if !changed.removed.is_empty() {
-            self.store
-                .write()
-                .await
-                .drop_failures_of_removed(&changed.removed);
+        if !changed.removed.is_empty() || !changed.added.is_empty() {
+            let mut store = self.store.write().await;
+            store.drop_failures_of_removed(&changed.removed);
+            store.drop_failures_of_unlisted_directions(&changed.added);
         }
 
         let nodes: Vec<(ComputationId, ComputationRequirements)> = self
