@@ -977,15 +977,17 @@ mod tests {
 
     use rstest::rstest;
     use rustc_hash::FxHashMap;
-    use tycho_simulation::tycho_core::simulation::protocol_sim::ProtocolSim;
+    use tycho_simulation::tycho_core::{
+        models::token::Token, simulation::protocol_sim::ProtocolSim,
+    };
 
     use super::*;
     use crate::{
         algorithm::{
             most_liquid::DepthAndPrice,
             test_utils::{
-                component, component_with_protocol, order, setup_market_weighted, token,
-                MockProtocolSim,
+                component, component_with_directions, component_with_protocol, order,
+                setup_market_weighted, token, MockProtocolSim,
             },
         },
         derived::{
@@ -995,6 +997,7 @@ mod tests {
         },
         fallback::{manager::PammState, FALLBACK_PREFIX},
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        tests::metrics::recorded_metrics,
         types::{
             ComponentId, ComponentTopology, OrderSide, Route, RouteExclusionFilter, RouteRejection,
             RouteResult, Swap,
@@ -1924,6 +1927,62 @@ mod tests {
             removed_ids(&event)
         );
         assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
+    }
+
+    /// A pAMM re-sent with other swap directions can turn unbacked while the graph holds it. The
+    /// event then has to take it out of the graph.
+    #[test]
+    fn test_apply_pamm_admission_evicts_a_resent_pamm_that_turns_unbacked() {
+        let (a, b, c) = (token(0x01, "A"), token(0x02, "B"), token(0x03, "C"));
+        let listing_pamm = |directions: &[(&Token, &Token)]| {
+            let mut pamm =
+                component_with_directions(PAMM, &[a.clone(), b.clone(), c.clone()], directions);
+            pamm.protocol_system = "fallback:fermiswap".to_string();
+            pamm
+        };
+        let market = market_with_pamm_and_fallback();
+        market
+            .try_write()
+            .expect("uncontended")
+            .upsert_components([listing_pamm(&[(&a, &b)])]);
+        let mut worker = admission_worker(market.clone());
+        admit(&mut worker, &market, added_component_event(PAMM));
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Admitted));
+        market
+            .try_write()
+            .expect("uncontended")
+            .upsert_components([listing_pamm(&[(&a, &c)])]);
+
+        let event = admit(&mut worker, &market, added_component_event(PAMM));
+
+        assert_eq!(removed_ids(&event), vec![PAMM.to_string()]);
+        assert!(added_ids(&event).is_empty());
+        assert_eq!(worker.pamm_admission.state_of(PAMM), Some(PammState::Withheld));
+    }
+
+    /// The admitted counter counts a pAMM when it enters the graph, not each time the market
+    /// sends it again.
+    #[test]
+    fn test_apply_pamm_admission_counts_an_admitted_pamm_once() {
+        let market = market_with_pamm_and_fallback();
+        let mut worker = admission_worker(market.clone());
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            admit(&mut worker, &market, added_component_event(PAMM));
+            admit(&mut worker, &market, added_component_event(PAMM));
+        });
+
+        let admitted: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .filter(|(name, labels, _)| {
+                name == "propamm_admissions_total" &&
+                    labels.contains(&"outcome=admitted".to_string())
+            })
+            .map(|(_, _, value)| value)
+            .collect();
+        assert_eq!(admitted, vec![metrics_util::debugging::DebugValue::Counter(1)]);
     }
 
     /// The market names a component in `added_components` once, so the event that adds the
