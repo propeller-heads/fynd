@@ -6,12 +6,12 @@
 
 use metrics::counter;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
     fallback::{is_pamm, must_withhold_pamm, FallbackPoolIndex},
     feed::{events::MarketEvent, market_data::MarketDataView},
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 
 /// Where one pAMM stands with a worker's graph.
@@ -68,7 +68,7 @@ impl PammManager {
     pub(crate) fn withhold_from_graph(
         &mut self,
         market: &MarketDataView<'_>,
-        topology: &FxHashMap<ComponentId, Vec<Address>>,
+        topology: &FxHashMap<ComponentId, ComponentTopology>,
         caller_drops: &dyn Fn(&ProtocolComponent) -> bool,
     ) -> FxHashSet<ComponentId> {
         self.fallback_pools = FallbackPoolIndex::build(market);
@@ -82,7 +82,7 @@ impl PammManager {
             if !is_pamm(component) || caller_drops(component) {
                 continue;
             }
-            let state = if must_withhold_pamm(component, &self.fallback_pools) {
+            let state = if must_withhold_pamm(market, component, &self.fallback_pools) {
                 withheld.insert(component_id.clone());
                 PammState::Withheld
             } else {
@@ -127,7 +127,7 @@ impl PammManager {
         let unbacked = |component_id: &ComponentId| {
             market
                 .get_component(component_id)
-                .is_some_and(|component| must_withhold_pamm(component, fallback_pools))
+                .is_some_and(|component| must_withhold_pamm(market, component, fallback_pools))
         };
         let count = |outcome: &'static str| {
             counter!("propamm_admissions_total", "outcome" => outcome, "pool" => worker_pool_name.clone())
@@ -147,13 +147,20 @@ impl PammManager {
             if !is_pamm(component) || caller_drops(component) {
                 return true;
             }
-            if must_withhold_pamm(component, fallback_pools) {
-                states.insert(component_id.clone(), PammState::Withheld);
-                count("withheld");
+            let prior = states.get(component_id).copied();
+            if must_withhold_pamm(market, component, fallback_pools) {
+                // The graph still holds an admitted pAMM that turned unbacked, so the eviction
+                // below removes it and records the new state.
+                if prior != Some(PammState::Admitted) {
+                    states.insert(component_id.clone(), PammState::Withheld);
+                    count("withheld");
+                }
                 return false;
             }
             states.insert(component_id.clone(), PammState::Admitted);
-            count("admitted");
+            if prior != Some(PammState::Admitted) {
+                count("admitted");
+            }
             true
         });
 
@@ -162,14 +169,16 @@ impl PammManager {
             .filter(|(_, state)| **state == PammState::Withheld)
             .filter_map(|(component_id, _)| {
                 let component = market.get_component(component_id)?;
-                (!must_withhold_pamm(component, fallback_pools))
-                    .then(|| (component_id.clone(), component.tokens.clone()))
+                if must_withhold_pamm(market, component, fallback_pools) {
+                    return None;
+                }
+                Some((component_id.clone(), market.topology_of(component_id)?))
             })
             .collect();
-        for (component_id, tokens) in readmitted {
+        for (component_id, topology) in readmitted {
             states.insert(component_id.clone(), PammState::Admitted);
             count("admitted");
-            added_components.insert(component_id, tokens);
+            added_components.insert(component_id, topology);
         }
 
         let mut evicted = Vec::new();

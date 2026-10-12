@@ -9,7 +9,8 @@
 //! amount. A reverse sell swaps that amount back along the buy route. Both include fees and
 //! slippage. Gas-aware scoring is off because it reads the prices this computation produces.
 //! Pricing leaves out pAMMs: a pAMM's quote ladder can pay almost nothing back at the probe size
-//! for a block, and its spot prices do not show it.
+//! for a block, and its spot prices do not show it. Pricing also leaves out RFQ venues, so a
+//! token that only an RFQ venue reaches gets no price.
 //!
 //! The price is the arithmetic mean of the buy and sell rates, kept as an exact fraction.
 //! Both rates are in token units per gas token unit: the bought amount divided by `probe_amount`
@@ -121,6 +122,7 @@
 //! The gas token gets a price of one and no dependencies.
 
 use std::{
+    borrow::Cow,
     ops::RangeInclusive,
     sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::{Duration, Instant},
@@ -133,7 +135,7 @@ use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn, Span};
 use tycho_simulation::{
-    tycho_common::models::{token::Token, Address},
+    tycho_common::models::{protocol::ProtocolComponent, token::Token, Address},
     tycho_core::simulation::protocol_sim::{Price, ProtocolSim},
 };
 
@@ -154,10 +156,18 @@ use crate::{
         types::{TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     fallback::is_pamm,
-    feed::{component_filter::remove_components, market_data::MarketData},
+    feed::{
+        component_filter::remove_components, market_data::MarketData,
+        protocol_registry::is_rfq_system,
+    },
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, OrderSide, RouteExclusions},
+    types::{ComponentId, ComponentTopology, Order, OrderSide, RouteExclusions},
 };
+
+/// Whether pricing leaves `component` out of its graph.
+fn is_left_out_of_pricing(component: &ProtocolComponent) -> bool {
+    is_pamm(component) || is_rfq_system(&component.protocol_system)
+}
 
 /// The range of `spot(a→b) * spot(b→a)` for a pool whose two spot prices agree. A pool with no
 /// fee gives 1, and a fee moves the product away from 1 by about twice the fee. Token pricing
@@ -1339,8 +1349,11 @@ impl TokenGasPriceComputation {
                 .last_updated()
                 .map(|b| b.number())
                 .unwrap_or(0);
-            let topology =
-                remove_components(guard.base_market_state(), guard.component_topology(), &is_pamm);
+            let topology = remove_components(
+                guard.base_market_state(),
+                guard.component_topology(),
+                &is_left_out_of_pricing,
+            );
             (topology, block)
         };
 
@@ -1453,14 +1466,40 @@ impl TokenGasPriceComputation {
     /// Every token in the graph but the gas token.
     fn tokens_to_price(
         &self,
-        topology: &FxHashMap<ComponentId, Vec<Address>>,
+        topology: &FxHashMap<ComponentId, ComponentTopology>,
     ) -> FxHashSet<Address> {
         topology
             .values()
-            .flatten()
+            .flat_map(|component| &component.tokens)
             .filter(|token| *token != &self.gas_token)
             .cloned()
             .collect()
+    }
+
+    /// `changed` without the added components that pricing leaves out. Their tokens are no
+    /// arrivals, as no pass can price a token that only they reach.
+    async fn without_left_out_arrivals<'a>(
+        &self,
+        market: &MarketData,
+        changed: &'a ChangedComponents,
+    ) -> Cow<'a, ChangedComponents> {
+        if changed.added.is_empty() {
+            return Cow::Borrowed(changed);
+        }
+        let guard = market.read().await;
+        let left_out = |id: &ComponentId| {
+            guard
+                .get_component(id)
+                .is_some_and(is_left_out_of_pricing)
+        };
+        if !changed.added.keys().any(left_out) {
+            return Cow::Borrowed(changed);
+        }
+        let mut priced = changed.clone();
+        priced
+            .added
+            .retain(|id, _| !left_out(id));
+        Cow::Owned(priced)
     }
 
     /// Offers the pass the tokens a change could have moved, ranked so the cap cuts the least
@@ -1507,7 +1546,11 @@ impl TokenGasPriceComputation {
             // quoted until it has a price. These rank ahead of everything else in the pass.
             let mut arrived: FxHashSet<Address> = FxHashSet::default();
             let mut new_tokens = 0usize;
-            for token in changed.added.values().flatten() {
+            for token in changed
+                .added
+                .values()
+                .flat_map(|component| &component.tokens)
+            {
                 // Every added pool carries the gas token, which no pass ever attempts.
                 if *token == self.gas_token || !arrived.insert(token.clone()) {
                     continue;
@@ -1715,6 +1758,10 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        let changed = self
+            .without_left_out_arrivals(market, changed)
+            .await;
+        let changed = &*changed;
         let block = market
             .read()
             .await
@@ -2118,7 +2165,10 @@ mod tests {
         // else in the selection points at it. BBB's component did not change, so BBB is not
         // selected and keeps what it had, even though its market moved too.
         let mut added = FxHashMap::default();
-        added.insert("eth_aaa_v2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
+        added.insert(
+            "eth_aaa_v2".to_string(),
+            vec![eth.address.clone(), aaa.address.clone()].into(),
+        );
         let output = computation
             .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
             .await
@@ -2170,7 +2220,7 @@ mod tests {
         }
 
         let mut added = FxHashMap::default();
-        added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()]);
+        added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()].into());
         let output = computation
             .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
             .await
@@ -2435,7 +2485,7 @@ mod tests {
         }
 
         let mut added = FxHashMap::default();
-        added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()]);
+        added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()].into());
         let output = computation
             .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
             .await
@@ -2477,7 +2527,10 @@ mod tests {
                 "eth_aaa_2".to_string(),
                 Box::new(MockProtocolSim::new(9000.0)) as Box<dyn ProtocolSim>,
             )]);
-            added.insert("eth_aaa_2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
+            added.insert(
+                "eth_aaa_2".to_string(),
+                vec![eth.address.clone(), aaa.address.clone()].into(),
+            );
         }
 
         let output = computation
@@ -2534,8 +2587,14 @@ mod tests {
                     Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
                 ),
             ]);
-            added.insert("eth_aaa_2".to_string(), vec![eth.address.clone(), aaa.address.clone()]);
-            added.insert("eth_ccc".to_string(), vec![eth.address.clone(), ccc.address.clone()]);
+            added.insert(
+                "eth_aaa_2".to_string(),
+                vec![eth.address.clone(), aaa.address.clone()].into(),
+            );
+            added.insert(
+                "eth_ccc".to_string(),
+                vec![eth.address.clone(), ccc.address.clone()].into(),
+            );
         }
         let cut = computation
             .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
@@ -2598,7 +2657,7 @@ mod tests {
                     id.clone(),
                     Box::new(MockProtocolSim::new(5000.0)) as Box<dyn ProtocolSim>,
                 )]);
-                added.insert(id, vec![eth.address.clone(), arrival.address.clone()]);
+                added.insert(id, vec![eth.address.clone(), arrival.address.clone()].into());
             }
         }
 
@@ -3101,6 +3160,49 @@ mod tests {
             .expect("deps are stored")[&x.address]
             .path_components;
         assert_eq!(deps, &FxHashSet::from_iter(["plain".to_string()]));
+    }
+
+    /// X trades only on an RFQ venue, which pricing leaves out, so X gets no price. The venue
+    /// in `added` is no arrival either.
+    #[tokio::test]
+    async fn test_rfq_venue_left_out() {
+        let (eth, aaa, x) = (token(0, "ETH"), token(1, "AAA"), token(2, "X"));
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("rfq_x", &eth, &x, MockProtocolSim::new(5.0)),
+        ]);
+        market
+            .write()
+            .await
+            .upsert_components([component_with_protocol(
+                "rfq_x",
+                "rfq:bebop",
+                &[eth.clone(), x.clone()],
+            )]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        let seeded = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        assert!(!seeded.data.contains_key(&x.address));
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+        let added = FxHashMap::from_iter([(
+            "rfq_x".to_string(),
+            vec![eth.address.clone(), x.address.clone()].into(),
+        )]);
+
+        computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+
+        assert!(computation
+            .lock_pass_history()
+            .pending_arrivals
+            .is_empty());
     }
 
     #[tokio::test]

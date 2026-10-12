@@ -218,6 +218,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Streams each Bebop and Hashflow venue as one component instead of one per token pair
+    /// (default: `false`). Metric always streams per pair.
+    pub fn aggregate_rfqs(mut self, enabled: bool) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .aggregate_rfqs(enabled);
+        self
+    }
+
     /// Sets how far from the gas token the token pricing pass reaches. Leaving this unset keeps
     /// the computation's default.
     pub fn set_pricing_max_hops(mut self, max_hops: usize) -> Self {

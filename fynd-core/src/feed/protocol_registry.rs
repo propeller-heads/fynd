@@ -41,9 +41,16 @@ use tycho_simulation::{
     price_level_stream::{config::default_served_pamms, stream::PriceLevelStreamBuilder},
     protocol::models::Update,
     rfq::{
+        models::ComponentLayout,
         protocols::{
-            bebop::{client_builder::BebopClientBuilder, state::BebopState},
-            hashflow::{client_builder::HashflowClientBuilder, state::HashflowState},
+            bebop::{
+                all_pairs_state::BebopAllPairsState, client_builder::BebopClientBuilder,
+                state::BebopState,
+            },
+            hashflow::{
+                all_pairs_state::HashflowAllPairsState, client_builder::HashflowClientBuilder,
+                state::HashflowState,
+            },
             metric::{client_builder::MetricClientBuilder, state::MetricState},
         },
         stream::RFQStreamBuilder,
@@ -53,7 +60,7 @@ use tycho_simulation::{
     tycho_core::Bytes,
 };
 
-use super::DataFeedError;
+use super::{DataFeedError, TychoFeedConfig};
 use crate::fallback::FALLBACK_PREFIX;
 
 /// Opts a protocol into streaming its exclusive pools, e.g. `exclusive:ekubo_v3`.
@@ -528,14 +535,34 @@ fn register_exchange(
     Registration::Registered(registered)
 }
 
+/// Whether `protocol_system` names an RFQ venue, direct (`rfq:bebop`) or through its fallback
+/// router (`fallback:rfq:bebop`).
+pub(crate) fn is_rfq_system(protocol_system: &str) -> bool {
+    protocol_system
+        .strip_prefix(FALLBACK_PREFIX)
+        .unwrap_or(protocol_system)
+        .starts_with(RFQ_PREFIX)
+}
+
+/// The layout Bebop and Hashflow stream in. Metric has no aggregated layout.
+fn rfq_layout(aggregate: bool) -> ComponentLayout {
+    if aggregate {
+        ComponentLayout::AllPairs
+    } else {
+        ComponentLayout::PerPair
+    }
+}
+
+/// Registers an RFQ client and its state decoder for each `rfq:` entry in `config.protocols`.
+/// A decoder registers under the name its client tags its messages with.
 pub(crate) fn register_rfq(
     mut rfq_stream_builder: RFQStreamBuilder,
-    chain: Chain,
-    min_tvl: f64,
-    protocols: &[String],
+    config: &TychoFeedConfig,
     rfq_tokens: std::collections::HashSet<Bytes>,
 ) -> Result<RFQStreamBuilder, DataFeedError> {
-    for (protocol, rfq_entry) in parse_rfq_entries(protocols)? {
+    let (chain, min_tvl) = (config.chain, config.min_tvl);
+    let layout = rfq_layout(config.aggregate_rfqs);
+    for (protocol, rfq_entry) in parse_rfq_entries(&config.protocols)? {
         match rfq_entry.protocol() {
             "rfq:bebop" => {
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
@@ -545,15 +572,24 @@ pub(crate) fn register_rfq(
                 info!("Adding {protocol} RFQ client...");
                 let mut bebop_builder = BebopClientBuilder::new(chain, key)
                     .tokens(rfq_tokens.clone())
-                    .tvl_threshold(min_tvl);
+                    .tvl_threshold(min_tvl)
+                    .component_layout(layout);
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
                     bebop_builder = bebop_builder.with_fallback_router();
                 }
                 let bebop_client = bebop_builder
                     .build()
                     .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                rfq_stream_builder =
-                    rfq_stream_builder.add_client::<BebopState>("bebop", Box::new(bebop_client));
+                rfq_stream_builder = match layout {
+                    ComponentLayout::PerPair => {
+                        rfq_stream_builder.add_client::<BebopState>("bebop", Box::new(bebop_client))
+                    }
+                    ComponentLayout::AllPairs => rfq_stream_builder
+                        .add_client::<BebopAllPairsState>(
+                            "bebop_all_pairs",
+                            Box::new(bebop_client),
+                        ),
+                };
             }
             "rfq:hashflow" => {
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
@@ -565,15 +601,23 @@ pub(crate) fn register_rfq(
                 let mut hashflow_builder = HashflowClientBuilder::new(chain, user, key)
                     .tokens(rfq_tokens.clone())
                     .tvl_threshold(min_tvl)
-                    .poll_time(Duration::from_secs(30));
+                    .poll_time(Duration::from_secs(30))
+                    .component_layout(layout);
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
                     hashflow_builder = hashflow_builder.with_fallback_router();
                 }
                 let hashflow_client = hashflow_builder
                     .build()
                     .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                rfq_stream_builder = rfq_stream_builder
-                    .add_client::<HashflowState>("hashflow", Box::new(hashflow_client));
+                rfq_stream_builder = match layout {
+                    ComponentLayout::PerPair => rfq_stream_builder
+                        .add_client::<HashflowState>("hashflow", Box::new(hashflow_client)),
+                    ComponentLayout::AllPairs => rfq_stream_builder
+                        .add_client::<HashflowAllPairsState>(
+                            "hashflow_all_pairs",
+                            Box::new(hashflow_client),
+                        ),
+                };
             }
             "rfq:metric" => {
                 if let RfqEntry::ViaFallbackRouter(_) = rfq_entry {
@@ -1029,16 +1073,20 @@ mod tests {
         chain: Chain,
         entries: &[&str],
     ) -> Result<RFQStreamBuilder, DataFeedError> {
-        register_rfq(
-            RFQStreamBuilder::new(),
-            chain,
-            1.0,
-            &entries
-                .iter()
-                .map(|entry| (*entry).to_string())
-                .collect::<Vec<_>>(),
-            std::collections::HashSet::new(),
-        )
+        let protocols = entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0);
+        register_rfq(RFQStreamBuilder::new(), &config, std::collections::HashSet::new())
+    }
+
+    #[rstest::rstest]
+    #[case::per_pair(false, ComponentLayout::PerPair)]
+    #[case::aggregated(true, ComponentLayout::AllPairs)]
+    fn test_rfq_layout(#[case] aggregate: bool, #[case] expected: ComponentLayout) {
+        assert_eq!(rfq_layout(aggregate), expected);
     }
 
     fn price_level_stream(

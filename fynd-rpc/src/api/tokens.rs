@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fynd_core::{
     derived::{ComponentDepths, TokenGasPrices},
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -101,7 +101,7 @@ fn gas_units_per_token_unit(price: &Price) -> Option<f64> {
 /// token's gas price (token raw units per gas-token raw unit); tokens without a computed
 /// gas price get `None` and sort after priced ones.
 pub fn build_token_entries(
-    topology: &FxHashMap<ComponentId, Vec<Address>>,
+    topology: &FxHashMap<ComponentId, ComponentTopology>,
     token_registry: &FxHashMap<Address, Arc<Token>>,
     depths: Option<&ComponentDepths>,
     token_prices: Option<&TokenGasPrices>,
@@ -109,8 +109,8 @@ pub fn build_token_entries(
     use num_traits::ToPrimitive;
 
     let mut component_counts: FxHashMap<Address, u32> = FxHashMap::default();
-    for tokens in topology.values() {
-        for address in tokens {
+    for component in topology.values() {
+        for address in &component.tokens {
             *component_counts
                 .entry(address.clone())
                 .or_default() += 1;
@@ -189,11 +189,12 @@ mod tests {
     }
 
     /// Topology + registry for three tokens: A and B share two components, C sits in one.
-    fn test_market() -> (FxHashMap<ComponentId, Vec<Address>>, FxHashMap<Address, Arc<Token>>) {
+    fn test_market() -> (FxHashMap<ComponentId, ComponentTopology>, FxHashMap<Address, Arc<Token>>)
+    {
         let topology = FxHashMap::from_iter([
-            ("c1".to_string(), vec![addr(0x0a), addr(0x0b)]),
-            ("c2".to_string(), vec![addr(0x0a), addr(0x0b)]),
-            ("c3".to_string(), vec![addr(0x0a), addr(0x0c)]),
+            ("c1".to_string(), vec![addr(0x0a), addr(0x0b)].into()),
+            ("c2".to_string(), vec![addr(0x0a), addr(0x0b)].into()),
+            ("c3".to_string(), vec![addr(0x0a), addr(0x0c)].into()),
         ]);
         let registry =
             [test_token(0x0a, "AAA", 18), test_token(0x0b, "BBB", 6), test_token(0x0c, "CCC", 8)]

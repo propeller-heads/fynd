@@ -64,22 +64,26 @@ pub(crate) fn is_pamm(component: &ProtocolComponent) -> bool {
         .starts_with(FALLBACK_PREFIX)
 }
 
-/// Whether a graph must leave `component` out because nothing can serve as its fallback.
-///
-/// A `fallback:` leg only reaches the chain through its fallback, so a pAMM no pair of
-/// whose tokens has a candidate pool in this market can never produce a quotable route. The pairs
-/// are the ones `FallbackPoolIndex::insert` files a candidate under, so a multi-token pAMM stays
-/// in the graph while any one of its pairs is backed. Returns `false` for any other protocol
-/// system.
-pub(crate) fn must_withhold_pamm(component: &ProtocolComponent, index: &FallbackPoolIndex) -> bool {
+/// Whether a graph must leave `component` out: a pAMM with no fallback candidate pool for any swap
+/// direction `market` stores for it. `false` for any other protocol system.
+pub(crate) fn must_withhold_pamm(
+    market: &MarketDataView<'_>,
+    component: &ProtocolComponent,
+    index: &FallbackPoolIndex,
+) -> bool {
     if !is_pamm(component) {
         return false;
     }
-    !token_pairs(&component.tokens).any(|(token_a, token_b)| {
-        !index
-            .candidates_for(token_a, token_b)
-            .is_empty()
-    })
+    let swap_directions = market
+        .swap_directions_of(&component.id)
+        .unwrap_or_default();
+    !swap_directions
+        .iter()
+        .any(|(token_in, token_out)| {
+            !index
+                .candidates_for(token_in, token_out)
+                .is_empty()
+        })
 }
 
 /// Stamps a fallback pool on every pAMM leg of `route` and returns what the route delivers
@@ -487,7 +491,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::algorithm::test_utils::{self as util, addr};
+    use crate::{
+        algorithm::test_utils::{self as util, addr},
+        types::ComponentTopology,
+    };
 
     /// A pAMM quoting 2x against fallback pools quoting 1x and 1.5x, so the result is visibly the
     /// fallback and the better fallback is visibly chosen.
@@ -771,7 +778,10 @@ mod tests {
             .expect("uncontended");
         let mut index = FallbackPoolIndex::build(&view);
         let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(BETTER_POOL.to_string(), Vec::new())]),
+            added_components: FxHashMap::from_iter([(
+                BETTER_POOL.to_string(),
+                ComponentTopology::default(),
+            )]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
         };
@@ -848,7 +858,10 @@ mod tests {
         index.apply_event(
             &view,
             &MarketEvent::MarketUpdated {
-                added_components: FxHashMap::from_iter([(BETTER_POOL.to_string(), Vec::new())]),
+                added_components: FxHashMap::from_iter([(
+                    BETTER_POOL.to_string(),
+                    ComponentTopology::default(),
+                )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
             },
@@ -1081,45 +1094,53 @@ mod tests {
     /// pAMM the market cannot back is withheld.
     #[test]
     fn test_must_withhold_pamm() {
+        let market = market_with_fallback_pools();
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
         let index = FallbackPoolIndex::default();
         let uniswap = util::component_with_protocol(
             "0xuni",
             "uniswap_v3",
             &[util::token(3, "DAI"), util::token(4, "WBTC")],
         );
-        assert!(!must_withhold_pamm(&uniswap, &index));
+        assert!(!must_withhold_pamm(&view, &uniswap, &index));
 
         let pamm = util::component_with_protocol(
             PAMM_COMPONENT,
             PAMM_PROTOCOL,
             &[util::token(3, "DAI"), util::token(4, "WBTC")],
         );
-        assert!(must_withhold_pamm(&pamm, &index));
+        assert!(must_withhold_pamm(&view, &pamm, &index));
     }
 
-    /// A pAMM is judged on every pair of its tokens, so a wider one stays in the graph while one
-    /// pair is backed and leaves when none is.
+    /// A pAMM is judged on every swap direction the market stores for it, so a wider one stays in
+    /// the graph while one direction is backed and leaves when none is.
     #[test]
     fn test_must_withhold_pamm_multi_token_component() {
+        let backed = util::component_with_protocol(
+            PAMM_COMPONENT,
+            PAMM_PROTOCOL,
+            &[util::token(1, "WETH"), util::token(2, "USDC"), util::token(3, "DAI")],
+        );
         let market = market_with_fallback_pools();
+        market
+            .try_write()
+            .expect("uncontended")
+            .upsert_components([backed.clone()]);
         let view = market
             .try_read_blocking()
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
         // Only the (1, 2) pair has candidate pools; (1, 3) and (2, 3) have none.
-        let backed = util::component_with_protocol(
-            PAMM_COMPONENT,
-            PAMM_PROTOCOL,
-            &[util::token(1, "WETH"), util::token(2, "USDC"), util::token(3, "DAI")],
-        );
-        assert!(!must_withhold_pamm(&backed, &index));
+        assert!(!must_withhold_pamm(&view, &backed, &index));
 
         let unbacked = util::component_with_protocol(
-            PAMM_COMPONENT,
+            UNBACKED_PAMM,
             PAMM_PROTOCOL,
             &[util::token(3, "DAI"), util::token(4, "WBTC"), util::token(5, "USDT")],
         );
-        assert!(must_withhold_pamm(&unbacked, &index));
+        assert!(must_withhold_pamm(&view, &unbacked, &index));
     }
 }

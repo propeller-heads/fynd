@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use fynd_core::{
     graph::{GraphManager, TopologyGraphManager},
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 use fynd_test_fixtures::read_recording;
 use rustc_hash::FxHashMap;
@@ -33,7 +33,7 @@ fn address(hex: &str) -> Address {
 }
 
 /// The component topology the recording announces: every component, and the tokens it holds.
-fn recorded_topology() -> FxHashMap<ComponentId, Vec<Address>> {
+fn recorded_topology() -> FxHashMap<ComponentId, ComponentTopology> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/market_recording.json.zst");
     let recording = read_recording(&path).expect("market recording fixture");
@@ -51,7 +51,8 @@ fn recorded_topology() -> FxHashMap<ComponentId, Vec<Address>> {
                     .tokens
                     .into_iter()
                     .map(|token| token.address)
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             );
         }
     }

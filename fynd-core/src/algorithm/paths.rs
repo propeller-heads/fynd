@@ -544,7 +544,7 @@ mod tests {
         let mut topology = market.component_topology();
         topology.insert(
             "component2".to_string(),
-            vec![token_b.address.clone(), token_c.address.clone()],
+            vec![token_b.address.clone(), token_c.address.clone()].into(),
         );
         let mut manager = TopologyGraphManager::<DepthAndPrice>::default();
         manager.initialize_graph(&topology);

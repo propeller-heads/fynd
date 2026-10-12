@@ -12,7 +12,7 @@ use petgraph::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tracing::{debug, trace};
+use tracing::debug;
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{EdgeData, GraphError, GraphManager, Path, RouteSearch, INLINE_EDGES, INLINE_TOKENS};
@@ -21,7 +21,7 @@ use crate::{
         events::{EventError, MarketEvent, MarketEventHandler},
         market_data::MarketDataView,
     },
-    types::{ComponentId, RouteExclusions},
+    types::{ComponentId, ComponentTopology, RouteExclusions, SwapDirection},
 };
 
 /// The pools that trade one directed token pair.
@@ -544,9 +544,9 @@ impl<D> Default for TopologyGraph<D> {
 /// One per worker.
 pub struct TopologyGraphManager<D: Clone> {
     graph: TopologyGraph<D>,
-    /// The token pairs each component trades, so removing a component does not mean searching
-    /// every edge for it.
-    component_pairs: FxHashMap<ComponentId, Vec<(NodeIndex, NodeIndex)>>,
+    /// The token pair of each swap direction a component offers. A component is tracked when it
+    /// has an entry here, even if it offers no direction.
+    component_pairs: FxHashMap<ComponentId, FxHashMap<SwapDirection, (NodeIndex, NodeIndex)>>,
 }
 
 impl<D: Clone> TopologyGraphManager<D> {
@@ -555,28 +555,69 @@ impl<D: Clone> TopologyGraphManager<D> {
         Self { graph: TopologyGraph::default(), component_pairs: FxHashMap::default() }
     }
 
-    /// Adds an edge each way between every pair of the component's tokens.
-    fn add_component_edges(&mut self, component_id: &ComponentId, nodes: &[NodeIndex]) {
-        let pairs: Vec<(NodeIndex, NodeIndex)> = nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, &from)| {
-                nodes
-                    .iter()
-                    .skip(i + 1)
-                    .flat_map(move |&to| [(from, to), (to, from)])
-            })
-            .collect();
+    /// Makes the pairs of a component match `swap_directions`, one pair per direction. A pool of
+    /// a direction that stays keeps its weight.
+    fn sync_component_pairs(
+        &mut self,
+        component_id: &ComponentId,
+        swap_directions: &[SwapDirection],
+    ) {
+        let wanted: FxHashSet<&SwapDirection> = swap_directions.iter().collect();
+        let mut pairs = self
+            .component_pairs
+            .remove(component_id)
+            .unwrap_or_default();
 
-        for &(from, to) in &pairs {
+        let mut dropped = 0usize;
+        pairs.retain(|direction, (from, to)| {
+            let keep = wanted.contains(direction);
+            if !keep {
+                self.graph
+                    .remove_component(*from, *to, component_id);
+                dropped += 1;
+            }
+            keep
+        });
+
+        let mut added = 0usize;
+        for direction in swap_directions {
+            if pairs.contains_key(direction) {
+                continue;
+            }
+            let (token_in, token_out) = direction;
+            let from = self.graph.add_token(token_in.clone());
+            let to = self.graph.add_token(token_out.clone());
             self.graph
                 .add_component(from, to, component_id);
+            pairs.insert(direction.clone(), (from, to));
+            added += 1;
         }
         self.component_pairs
             .insert(component_id.clone(), pairs);
+
+        if dropped > 0 && added > 0 {
+            debug!(component_id = %component_id, dropped, added, "swap directions changed");
+        }
+    }
+
+    /// Removes the pairs of a component and stops tracking it. Returns whether it was tracked.
+    fn remove_component_pairs(&mut self, component_id: &ComponentId) -> bool {
+        let Some(pairs) = self
+            .component_pairs
+            .remove(component_id)
+        else {
+            return false;
+        };
+        for (from, to) in pairs.into_values() {
+            self.graph
+                .remove_component(from, to, component_id);
+        }
+        true
     }
 
     /// Adds components to the topology graph.
+    ///
+    /// A tracked component loses the pairs of dropped swap directions and gains the new ones.
     ///
     /// # Errors
     ///
@@ -584,41 +625,28 @@ impl<D: Clone> TopologyGraphManager<D> {
     /// added.
     fn add_components(
         &mut self,
-        components: &FxHashMap<ComponentId, Vec<Address>>,
+        components: &FxHashMap<ComponentId, ComponentTopology>,
     ) -> Result<(), GraphError> {
         let mut invalid = Vec::new();
-        let mut skipped = 0usize;
 
         // Sorted, so nodes and edges land in the same order whatever the map's iteration order.
         let mut sorted: Vec<_> = components.iter().collect();
         sorted.sort_by_key(|(id, _)| *id);
 
-        for (component_id, tokens) in sorted {
-            if self
-                .component_pairs
-                .contains_key(component_id)
-            {
-                trace!(component_id = %component_id, "skipping already-tracked component");
-                skipped += 1;
-                continue;
-            }
-            if tokens.len() < 2 {
+        for (component_id, topology) in sorted {
+            if topology.tokens.len() < 2 {
                 invalid.push(component_id.clone());
                 continue;
             }
 
-            let mut sorted_tokens: Vec<&Address> = tokens.iter().collect();
+            let mut sorted_tokens: Vec<&Address> = topology.tokens.iter().collect();
             sorted_tokens.sort();
-            let nodes: Vec<NodeIndex> = sorted_tokens
-                .iter()
-                .map(|token| self.graph.add_token((*token).clone()))
-                .collect();
-            self.add_component_edges(component_id, &nodes);
+            for token in sorted_tokens {
+                self.graph.add_token(token.clone());
+            }
+            self.sync_component_pairs(component_id, &topology.swap_directions);
         }
 
-        if skipped > 0 {
-            debug!(skipped_duplicates = skipped, "skipped duplicate components during add");
-        }
         if !invalid.is_empty() {
             return Err(GraphError::InvalidComponents(invalid));
         }
@@ -635,17 +663,8 @@ impl<D: Clone> TopologyGraphManager<D> {
         let mut missing = Vec::new();
 
         for component_id in components {
-            let Some(pairs) = self
-                .component_pairs
-                .remove(component_id)
-            else {
+            if !self.remove_component_pairs(component_id) {
                 missing.push(component_id.clone());
-                continue;
-            };
-
-            for (from, to) in pairs {
-                self.graph
-                    .remove_component(from, to, component_id);
             }
         }
 
@@ -769,7 +788,7 @@ impl<D: Clone> Default for TopologyGraphManager<D> {
 }
 
 impl<D: Clone + Send + Sync> GraphManager<TopologyGraph<D>> for TopologyGraphManager<D> {
-    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, Vec<Address>>) {
+    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, ComponentTopology>) {
         self.graph = TopologyGraph::default();
         self.component_pairs.clear();
 
@@ -777,7 +796,7 @@ impl<D: Clone + Send + Sync> GraphManager<TopologyGraph<D>> for TopologyGraphMan
         // order is seeded per process and would otherwise vary run to run.
         let mut tokens: Vec<Address> = component_topology
             .values()
-            .flat_map(|addresses| addresses.iter())
+            .flat_map(|topology| topology.tokens.iter())
             .cloned()
             .collect::<FxHashSet<_>>()
             .into_iter()
@@ -855,7 +874,7 @@ mod tests {
         let mut manager = TopologyGraphManager::<()>::new();
         manager.initialize_graph(&FxHashMap::from_iter([(
             "first".to_string(),
-            vec![a.clone(), b.clone()],
+            vec![a.clone(), b.clone()].into(),
         )]));
 
         let (from, to) = (
@@ -878,7 +897,10 @@ mod tests {
         );
 
         let added = |id: &str| MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(id.to_string(), vec![a.clone(), b.clone()])]),
+            added_components: FxHashMap::from_iter([(
+                id.to_string(),
+                vec![a.clone(), b.clone()].into(),
+            )]),
             removed_components: vec![],
             updated_components: vec![],
         };
@@ -948,7 +970,7 @@ mod tests {
             .handle_event(&MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     "fourth".to_string(),
-                    vec![c.clone(), d.clone()],
+                    vec![c.clone(), d.clone()].into(),
                 )]),
                 removed_components: vec![],
                 updated_components: vec![],
@@ -1179,8 +1201,8 @@ mod tests {
         manager.initialize_graph(&FxHashMap::default());
 
         let result = manager.add_components(&FxHashMap::from_iter([
-            ("solo".to_string(), vec![a.clone()]),
-            ("pair".to_string(), vec![a.clone(), b.clone()]),
+            ("solo".to_string(), vec![a.clone()].into()),
+            ("pair".to_string(), vec![a.clone(), b.clone()].into()),
         ]));
 
         match result {
@@ -1199,7 +1221,7 @@ mod tests {
         let mut manager = TopologyGraphManager::<()>::new();
         manager.initialize_graph(&FxHashMap::from_iter([(
             "pair".to_string(),
-            vec![a.clone(), b.clone()],
+            vec![a.clone(), b.clone()].into(),
         )]));
 
         let result = manager.remove_components(&["pair".to_string(), "ghost".to_string()]);
@@ -1377,7 +1399,7 @@ mod tests {
             ("sy1", &s, &y),
             ("st1", &s, &t),
         ] {
-            topology.insert(id.to_string(), vec![from.clone(), to.clone()]);
+            topology.insert(id.to_string(), vec![from.clone(), to.clone()].into());
         }
 
         let mut manager = TopologyGraphManager::<DepthAndPrice>::new();
@@ -1445,12 +1467,12 @@ mod tests {
         let e = addr(0x0E);
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
-        t.insert("ae".into(), vec![a.clone(), e.clone()]);
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("be".into(), vec![b, e.clone()]);
-        t.insert("ac".into(), vec![a.clone(), c.clone()]);
-        t.insert("cd".into(), vec![c, d.clone()]);
-        t.insert("de".into(), vec![d, e.clone()]);
+        t.insert("ae".into(), vec![a.clone(), e.clone()].into());
+        t.insert("ab".into(), vec![a.clone(), b.clone()].into());
+        t.insert("be".into(), vec![b, e.clone()].into());
+        t.insert("ac".into(), vec![a.clone(), c.clone()].into());
+        t.insert("cd".into(), vec![c, d.clone()].into());
+        t.insert("de".into(), vec![d, e.clone()].into());
         m.initialize_graph(&t);
         let g = m.graph();
 

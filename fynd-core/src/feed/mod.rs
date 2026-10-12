@@ -59,6 +59,8 @@ pub(crate) struct TychoFeedConfig {
     /// Number of delta messages buffered for each Tycho subscription. When unset, Tycho keeps
     /// its native default.
     pub(crate) subscription_buffer_size: Option<usize>,
+    /// Stream each Bebop and Hashflow venue as one component instead of one per token pair.
+    pub(crate) aggregate_rfqs: bool,
 }
 
 impl TychoFeedConfig {
@@ -84,6 +86,7 @@ impl TychoFeedConfig {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             subscription_buffer_size: None,
+            aggregate_rfqs: false,
         }
     }
 
@@ -119,6 +122,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn subscription_buffer_size(mut self, size: usize) -> Self {
         self.subscription_buffer_size = Some(size);
+        self
+    }
+
+    pub(crate) fn aggregate_rfqs(mut self, enabled: bool) -> Self {
+        self.aggregate_rfqs = enabled;
         self
     }
 }

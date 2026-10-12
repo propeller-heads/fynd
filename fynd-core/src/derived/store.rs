@@ -15,7 +15,10 @@ use super::{
         TokenGasPrices, TokenPricesWithDeps,
     },
 };
-use crate::{derived::SharedDerivedDataRef, types::ComponentId};
+use crate::{
+    derived::{computations::drop_unlisted_directions, SharedDerivedDataRef},
+    types::{ComponentId, ComponentTopology},
+};
 
 /// A computed value paired with the block it was computed for.
 #[derive(Debug)]
@@ -451,6 +454,16 @@ impl DerivedData {
             .retain(|(component_id, _, _), _| !removed.contains(component_id));
     }
 
+    /// Drops the spot price and component depth failures of a swap direction an added component
+    /// no longer offers.
+    pub(crate) fn drop_failures_of_unlisted_directions(
+        &mut self,
+        added: &FxHashMap<ComponentId, ComponentTopology>,
+    ) {
+        drop_unlisted_directions(&mut self.spot_prices_failed, added);
+        drop_unlisted_directions(&mut self.component_depths_failed, added);
+    }
+
     /// Clears all stored data, including all failure maps.
     pub fn clear_all(&mut self) {
         self.slots.clear();
@@ -466,7 +479,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::{algorithm::test_utils::addr, derived::types::SpotPrices};
+    use crate::{
+        algorithm::test_utils::{addr, topology_with_directions},
+        derived::types::SpotPrices,
+    };
 
     fn failed(key: &str, error: FailedItemError) -> FailedItem {
         FailedItem { key: key.to_string(), error }
@@ -712,6 +728,31 @@ mod tests {
         assert!(store
             .component_depth_failure(&key("kept"))
             .is_some());
+    }
+
+    #[test]
+    fn test_drop_failures_of_unlisted_directions() {
+        let failure = |token_in: u8, token_out: u8| {
+            let key = format!("venue/{}/{}", addr(token_in), addr(token_out));
+            failed(&key, FailedItemError::MissingSimulationState)
+        };
+        let mut store = DerivedData::new();
+        store.set_spot_prices(Default::default(), vec![failure(1, 2), failure(2, 1)], 1, true);
+        store.set_component_depths(Default::default(), vec![failure(1, 2), failure(2, 1)], 1, true);
+        let (a, b) = (addr(0x01), addr(0x02));
+        let added = FxHashMap::from_iter([(
+            "venue".to_string(),
+            topology_with_directions(&[&a, &b], &[(&a, &b)]),
+        )]);
+
+        store.drop_failures_of_unlisted_directions(&added);
+
+        let (listed, dropped) = (pair_key("venue", 0x01, 0x02), pair_key("venue", 0x02, 0x01));
+        assert!(store
+            .spot_price_failure(&listed)
+            .is_some());
+        assert_eq!(store.spot_price_failure(&dropped), None);
+        assert_eq!(store.component_depth_failure(&dropped), None);
     }
 
     #[test]

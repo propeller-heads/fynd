@@ -8,6 +8,7 @@
 use std::{collections::HashSet, pin::Pin, time::Instant};
 
 use metrics::{gauge, histogram};
+use rustc_hash::FxHashMap;
 use tokio::{
     sync::{broadcast, oneshot},
     task::JoinHandle,
@@ -37,7 +38,7 @@ use crate::{
         },
         DataFeedError, TychoFeedConfig,
     },
-    types::BlockInfo,
+    types::{BlockInfo, ComponentId, ComponentTopology},
 };
 
 /// The Tycho indexer that keeps market data synchronized.
@@ -261,9 +262,7 @@ impl TychoFeed {
                 RFQStreamBuilder::new()
                     .set_tokens(all_tokens)
                     .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
+                &self.config,
                 rfq_tokens,
             )?;
 
@@ -503,9 +502,7 @@ impl TychoFeed {
                 RFQStreamBuilder::new()
                     .set_tokens(all_tokens)
                     .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
+                &self.config,
                 rfq_tokens,
             )?;
             let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);
@@ -592,11 +589,17 @@ impl TychoFeed {
             ..
         } = msg;
 
-        let updated_components_ids: HashSet<_> = updated_or_new_states
+        // Tycho re-sends an aggregated RFQ venue as a new pair on every poll. It stays here, as a
+        // state update, unless the upsert finds it new or reshaped.
+        let mut updated_components_ids: HashSet<ComponentId> = updated_or_new_states
             .keys()
-            .filter(|id| !added_components.contains_key(id.as_str())) // TODO: Should we still emit as updated if the component is new?
             .cloned()
             .collect();
+        updated_components_ids.extend(
+            added_components
+                .values()
+                .map(|component| component.id.to_string()),
+        );
 
         let maybe_new_tokens = added_components
             .values()
@@ -630,9 +633,10 @@ impl TychoFeed {
         let update_start = Instant::now();
         let mut latest_component_count = 0;
         let mut token_count = 0;
+        let mut added_topology: FxHashMap<ComponentId, ComponentTopology> = FxHashMap::default();
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
-                market_data.upsert_components(
+                let upserted = market_data.upsert_components(
                     added_components
                         .clone()
                         .into_values()
@@ -668,6 +672,15 @@ impl TychoFeed {
                     market_data.update_last_updated(block_info);
                 }
 
+                added_topology = upserted
+                    .new
+                    .into_iter()
+                    .chain(upserted.reshaped)
+                    .filter_map(|id| {
+                        let topology = market_data.topology_of(&id)?;
+                        Some((id, topology))
+                    })
+                    .collect();
                 latest_component_count = market_data.component_count();
                 token_count = market_data.token_count();
             })
@@ -685,25 +698,15 @@ impl TychoFeed {
             gauge!("market_last_update_timestamp_seconds").set(block_timestamp as f64);
         }
 
+        updated_components_ids.retain(|id| !added_topology.contains_key(id));
+
         // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
+        if !added_topology.is_empty() ||
             !removed_components.is_empty() ||
             !updated_components_ids.is_empty()
         {
             let market_update_event = MarketEvent::MarketUpdated {
-                added_components: added_components
-                    .into_iter()
-                    .map(|(id, component)| {
-                        (
-                            id,
-                            component
-                                .tokens
-                                .into_iter()
-                                .map(|token| token.address)
-                                .collect(),
-                        )
-                    })
-                    .collect(),
+                added_components: added_topology,
                 removed_components: removed_components.into_keys().collect(),
                 updated_components: updated_components_ids
                     .into_iter()
@@ -724,9 +727,9 @@ mod tests {
     use std::{collections::HashMap, env};
 
     use num_bigint::BigUint;
-    use rustc_hash::FxHashMap;
     use tycho_simulation::{
         protocol::models::{ProtocolComponent, Update},
+        rfq::protocols::component::{encode_swap_directions, SWAP_DIRECTIONS_ATTRIBUTE},
         tycho_common::{
             models::{token::Token, Chain},
             Bytes,
@@ -1008,7 +1011,7 @@ mod tests {
             MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     component_id.to_string(),
-                    vec![token1.address, token2.address]
+                    vec![token1.address, token2.address].into()
                 )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
@@ -1116,7 +1119,7 @@ mod tests {
             MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     component_id.to_string(),
-                    vec![token1.address, token2.address]
+                    vec![token1.address, token2.address].into()
                 )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
@@ -1230,7 +1233,7 @@ mod tests {
             MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     component_id.to_string(),
-                    vec![token1.address, token2.address]
+                    vec![token1.address, token2.address].into()
                 )]),
                 removed_components: Vec::new(),
                 updated_components: vec![],
@@ -1244,6 +1247,68 @@ mod tests {
                 updated_components: vec![component_id.to_string()],
             }
         );
+    }
+
+    const VENUE: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// Sends a venue that lists `directions`, given as indexes into `tokens`, the way tycho
+    /// re-sends an aggregated RFQ venue.
+    async fn send_venue(feed: &TychoFeed, tokens: &[Token], directions: &[(usize, usize)]) {
+        let directions: std::collections::BTreeSet<_> = directions
+            .iter()
+            .map(|&(token_in, token_out)| {
+                (tokens[token_in].address.clone(), tokens[token_out].address.clone())
+            })
+            .collect();
+        let mut venue = create_test_component(VENUE, tokens.to_vec());
+        venue
+            .static_attributes
+            .insert(SWAP_DIRECTIONS_ATTRIBUTE.to_string(), encode_swap_directions(&directions));
+        let states = HashMap::from([(
+            VENUE.to_string(),
+            Box::new(FeedMockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+        )]);
+        let update = Update::new(12345, states, HashMap::from([(VENUE.to_string(), venue)]));
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to handle message");
+    }
+
+    /// A re-sent venue with the same swap directions is a state update. With other swap
+    /// directions it is added again.
+    #[tokio::test]
+    async fn test_handle_message_resent_component() {
+        let feed = TychoFeed::new(create_test_config(), new_shared_market_data());
+        let mut event_rx = feed.subscribe();
+        let tokens = [
+            create_test_token("0x1111111111111111111111111111111111111111", "TKN1"),
+            create_test_token("0x2222222222222222222222222222222222222222", "TKN2"),
+        ];
+
+        send_venue(&feed, &tokens, &[(0, 1)]).await;
+        send_venue(&feed, &tokens, &[(0, 1)]).await;
+        send_venue(&feed, &tokens, &[(0, 1), (1, 0)]).await;
+
+        let MarketEvent::MarketUpdated { added_components, .. } = event_rx.try_recv().unwrap();
+        assert_eq!(
+            added_components[VENUE]
+                .swap_directions
+                .len(),
+            1
+        );
+        let MarketEvent::MarketUpdated { added_components, updated_components, .. } =
+            event_rx.try_recv().unwrap();
+        assert!(added_components.is_empty());
+        assert_eq!(updated_components, vec![VENUE.to_string()]);
+        let MarketEvent::MarketUpdated { added_components, updated_components, .. } =
+            event_rx.try_recv().unwrap();
+        assert_eq!(
+            added_components[VENUE]
+                .swap_directions
+                .len(),
+            2
+        );
+        assert!(updated_components.is_empty());
     }
 
     #[tokio::test]
@@ -1330,7 +1395,7 @@ mod tests {
             MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     old_component_id.to_string(),
-                    vec![old_token1.address.clone(), old_token2.address.clone()]
+                    vec![old_token1.address.clone(), old_token2.address.clone()].into()
                 )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
@@ -1343,7 +1408,7 @@ mod tests {
             MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     new_component_id.to_string(),
-                    vec![new_token1.address, new_token2.address]
+                    vec![new_token1.address, new_token2.address].into()
                 )]),
                 removed_components: vec![old_component_id.to_string()],
                 updated_components: Vec::new(),

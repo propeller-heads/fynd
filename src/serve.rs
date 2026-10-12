@@ -365,6 +365,7 @@ async fn setup_solver(
 
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
+    builder = builder.aggregate_rfqs(args.aggregate_rfqs);
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }

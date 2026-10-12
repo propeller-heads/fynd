@@ -7,11 +7,11 @@
 //! `exclude_protocols` list (via `is_excluded_protocol`).
 
 use rustc_hash::FxHashMap;
-use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Address};
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
     feed::{events::MarketEvent, market_data::MarketState},
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology},
 };
 
 /// Whether `component` belongs to a protocol system in `exclude_protocols`.
@@ -43,9 +43,9 @@ pub(crate) fn protocol_matches(entry: &str, system: &str) -> bool {
 /// which ids exist, and a filter cannot classify what it cannot read.
 pub(crate) fn remove_components(
     market: &MarketState,
-    topology: FxHashMap<ComponentId, Vec<Address>>,
+    topology: FxHashMap<ComponentId, ComponentTopology>,
     drop: &dyn Fn(&ProtocolComponent) -> bool,
-) -> FxHashMap<ComponentId, Vec<Address>> {
+) -> FxHashMap<ComponentId, ComponentTopology> {
     topology
         .into_iter()
         .filter(|(id, _)| {
@@ -164,7 +164,11 @@ mod tests {
         ]);
         let ids = || vec!["pub-1".to_string(), "excl-1".to_string(), "pamm-1".to_string()];
         let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter(ids().into_iter().map(|id| (id, vec![]))),
+            added_components: FxHashMap::from_iter(
+                ids()
+                    .into_iter()
+                    .map(|id| (id, ComponentTopology::default())),
+            ),
             removed_components: ids(),
             updated_components: ids(),
         };

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 pub use petgraph::graph::EdgeIndex;
 use petgraph::{graph::NodeIndex, stable_graph};
 use rustc_hash::{FxHashMap, FxHashSet};
-use tracing::{debug, trace};
+use tracing::debug;
 use tycho_simulation::tycho_common::models::Address;
 
 use super::GraphManager;
@@ -22,7 +22,7 @@ use crate::{
         market_data::MarketDataView,
     },
     graph::GraphError,
-    types::ComponentId,
+    types::{ComponentId, ComponentTopology, SwapDirection},
 };
 
 /// Data stored on each edge of the graph.
@@ -77,8 +77,9 @@ pub struct PetgraphStableDiGraphManager<D: Clone> {
     // edges. Using StableDiGraph ensures edge indices remain valid after removals, making
     // edge_map viable.
     graph: StableDiGraph<D>,
-    // Map from ComponentId to edge indices for fast removal and weight updates.
-    edge_map: FxHashMap<ComponentId, Vec<EdgeIndex>>,
+    // Map from ComponentId to the edge of each of its swap directions. A component is tracked
+    // when it has an entry here, even if it has no edge.
+    edge_map: FxHashMap<ComponentId, FxHashMap<SwapDirection, EdgeIndex>>,
     // Map from token address to node index for fast node lookups.
     node_map: FxHashMap<Address, NodeIndex>,
 }
@@ -116,44 +117,65 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         }
     }
 
-    /// Helper function to add an edge to the graph.
-    ///
-    /// # Arguments
-    ///
-    /// * `from_idx` - The index of the from node.
-    /// * `to_idx` - The index of the to node.
-    /// * `component_id` - The ID of the component represented by this edge.
-    fn add_edge(&mut self, from_idx: NodeIndex, to_idx: NodeIndex, component_id: &ComponentId) {
-        let edge_idx = self
-            .graph
-            .add_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
+    /// Makes the edges of a component match `swap_directions`, one edge per direction. An edge
+    /// of a direction that stays keeps its weight.
+    fn sync_component_edges(
+        &mut self,
+        component_id: &ComponentId,
+        swap_directions: &[SwapDirection],
+    ) {
+        let wanted: FxHashSet<&SwapDirection> = swap_directions.iter().collect();
+        let mut edges = self
+            .edge_map
+            .remove(component_id)
+            .unwrap_or_default();
+
+        let mut dropped = 0usize;
+        edges.retain(|direction, edge_idx| {
+            let keep = wanted.contains(direction);
+            if !keep {
+                self.graph.remove_edge(*edge_idx);
+                dropped += 1;
+            }
+            keep
+        });
+
+        let mut added = 0usize;
+        for direction in swap_directions {
+            if edges.contains_key(direction) {
+                continue;
+            }
+            let (token_in, token_out) = direction;
+            let from_idx = self.get_or_create_node(token_in);
+            let to_idx = self.get_or_create_node(token_out);
+            let edge_idx =
+                self.graph
+                    .add_edge(from_idx, to_idx, EdgeData::new(component_id.clone()));
+            edges.insert(direction.clone(), edge_idx);
+            added += 1;
+        }
         self.edge_map
-            .entry(component_id.clone())
-            .or_default()
-            .push(edge_idx);
+            .insert(component_id.clone(), edges);
+
+        if dropped > 0 && added > 0 {
+            debug!(component_id = %component_id, dropped, added, "swap directions changed");
+        }
     }
 
-    /// Helper function to add edges for all token pairs in a component.
-    /// Takes a slice of node indices corresponding to the tokens.
-    fn add_component_edges(&mut self, component_id: &ComponentId, node_indices: &[NodeIndex]) {
-        // Create bidirectional edges for each token pair
-        node_indices
-            .iter()
-            .enumerate()
-            .flat_map(|(i, &from_idx)| {
-                node_indices
-                    .iter()
-                    .skip(i + 1)
-                    .map(move |&to_idx| (from_idx, to_idx))
-            })
-            .for_each(|(from_idx, to_idx)| {
-                // Create bidirectional edges A -> B and B -> A
-                self.add_edge(from_idx, to_idx, component_id);
-                self.add_edge(to_idx, from_idx, component_id);
-            });
+    /// Removes the edges of a component and stops tracking it. Returns whether it was tracked.
+    fn remove_component_edges(&mut self, component_id: &ComponentId) -> bool {
+        let Some(edges) = self.edge_map.remove(component_id) else {
+            return false;
+        };
+        for edge_idx in edges.into_values() {
+            self.graph.remove_edge(edge_idx);
+        }
+        true
     }
 
     /// Adds components to the graph.
+    ///
+    /// A tracked component loses the edges of dropped swap directions and gains the new ones.
     ///
     /// # Errors
     ///
@@ -161,40 +183,28 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
     /// tokens). All components not included in the error were successfully added.
     ///
     /// Arguments:
-    /// - components: A map of component IDs to their tokens.
+    /// - components: A map of component IDs to their tokens and swap directions.
     fn add_components(
         &mut self,
-        components: &FxHashMap<ComponentId, Vec<Address>>,
+        components: &FxHashMap<ComponentId, ComponentTopology>,
     ) -> Result<(), GraphError> {
         let mut invalid_components = Vec::new();
-        let mut skipped_duplicates = 0usize;
 
         // Sort components for deterministic node/edge insertion order.
         let mut sorted_components: Vec<_> = components.iter().collect();
         sorted_components.sort_by_key(|(id, _)| *id);
 
-        for (comp_id, tokens) in sorted_components {
-            if self.edge_map.contains_key(comp_id) {
-                trace!(component_id = %comp_id, "skipping already-tracked component");
-                skipped_duplicates += 1;
-                continue;
-            }
-
-            if tokens.len() < 2 {
+        for (comp_id, topology) in sorted_components {
+            if topology.tokens.len() < 2 {
                 invalid_components.push(comp_id.clone());
                 continue;
             }
-            let mut sorted_tokens: Vec<&Address> = tokens.iter().collect();
+            let mut sorted_tokens: Vec<&Address> = topology.tokens.iter().collect();
             sorted_tokens.sort();
-            let node_indices: Vec<NodeIndex> = sorted_tokens
-                .iter()
-                .map(|token| self.get_or_create_node(token))
-                .collect();
-            self.add_component_edges(comp_id, &node_indices);
-        }
-
-        if skipped_duplicates > 0 {
-            debug!(skipped_duplicates, "skipped duplicate components during add");
+            for token in sorted_tokens {
+                self.get_or_create_node(token);
+            }
+            self.sync_component_edges(comp_id, &topology.swap_directions);
         }
 
         // Return error if any components had too few tokens (less than 2)
@@ -218,13 +228,7 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         let mut missing_components = Vec::new();
 
         for comp_id in components {
-            // Use the edge_map for O(1) lookup instead of iterating all edges
-            if let Some(edge_indices) = self.edge_map.remove(comp_id) {
-                for edge_idx in edge_indices {
-                    self.graph.remove_edge(edge_idx);
-                }
-            } else {
-                // Component not found in edge_map
+            if !self.remove_component_edges(comp_id) {
                 missing_components.push(comp_id.clone());
             }
         }
@@ -264,13 +268,13 @@ impl<D: Clone> PetgraphStableDiGraphManager<D> {
         let to_idx = self.find_node(token_out)?;
 
         // Get all edges for this component
-        let edge_indices = self
+        let edges = self
             .edge_map
             .get(component_id)
             .ok_or_else(|| GraphError::ComponentsNotFound(vec![component_id.clone()]))?;
 
         let mut updated = false;
-        for &edge_idx in edge_indices {
+        for &edge_idx in edges.values() {
             // Skip current edge if not found in graph, continue checking next edge
             let (edge_from, edge_to) = match self.graph.edge_endpoints(edge_idx) {
                 Some(endpoints) => endpoints,
@@ -395,7 +399,7 @@ impl<D: Clone> Default for PetgraphStableDiGraphManager<D> {
 }
 
 impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDiGraphManager<D> {
-    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, Vec<Address>>) {
+    fn initialize_graph(&mut self, component_topology: &FxHashMap<ComponentId, ComponentTopology>) {
         // Clear existing graph and component map
         self.graph = StableDiGraph::default();
         self.edge_map.clear();
@@ -407,7 +411,7 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
         // graph structure each run.
         let mut unique_tokens: Vec<Address> = component_topology
             .values()
-            .flat_map(|v| v.iter())
+            .flat_map(|topology| topology.tokens.iter())
             .cloned()
             .collect::<FxHashSet<_>>()
             .into_iter()
@@ -419,18 +423,10 @@ impl<D: Clone + Send + Sync> GraphManager<StableDiGraph<D>> for PetgraphStableDi
             self.node_map.insert(token, node_idx);
         }
 
-        // Sort components for deterministic edge insertion order.
-        let mut sorted_components: Vec<_> = component_topology.iter().collect();
-        sorted_components.sort_by_key(|(id, _)| *id);
-
-        for (comp_id, tokens) in sorted_components {
-            let mut sorted_tokens: Vec<&Address> = tokens.iter().collect();
-            sorted_tokens.sort();
-            let node_indices: Vec<NodeIndex> = sorted_tokens
-                .iter()
-                .map(|token| self.node_map[*token])
-                .collect();
-            self.add_component_edges(comp_id, &node_indices);
+        // The same path an incremental update takes. A component with fewer than two tokens forms
+        // no edge; there is no caller to report that to at startup, so it is logged.
+        if let Err(e) = self.add_components(component_topology) {
+            debug!(error = %e, "components skipped while building the graph");
         }
     }
 
@@ -502,10 +498,10 @@ mod tests {
         // Component 1: A-B-C (3-token component, fully connected)
         topology.insert(
             "component1".to_string(),
-            vec![token_a.clone(), token_b.clone(), token_c.clone()],
+            vec![token_a.clone(), token_b.clone(), token_c.clone()].into(),
         );
         // Component 2: C-D (2-token component, overlapping with component 1)
-        topology.insert("component2".to_string(), vec![token_c.clone(), token_d.clone()]);
+        topology.insert("component2".to_string(), vec![token_c.clone(), token_d.clone()].into());
 
         manager.initialize_graph(&topology);
 
@@ -592,9 +588,9 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Multiple components connecting the same token pair
-        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("component3".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        topology.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        topology.insert("component3".to_string(), vec![token_a.clone(), token_b.clone()].into());
 
         manager.initialize_graph(&topology);
 
@@ -632,7 +628,7 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add first component with token A and B
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
         manager
             .add_components(&components)
             .unwrap();
@@ -642,7 +638,7 @@ mod tests {
 
         // Add second component with overlapping token A
         components.clear();
-        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()].into());
         manager
             .add_components(&components)
             .unwrap();
@@ -659,9 +655,9 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Mix valid and invalid components
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("component2".to_string(), vec![]);
-        components.insert("component3".to_string(), vec![]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        components.insert("component2".to_string(), vec![].into());
+        components.insert("component3".to_string(), vec![].into());
         let result = manager.add_components(&components);
 
         assert!(result.is_err());
@@ -687,8 +683,8 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add components first
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()].into());
         manager
             .add_components(&components)
             .unwrap();
@@ -732,8 +728,8 @@ mod tests {
         let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
 
         // Initialize with component1 connecting A-B, and component2 connecting B-C
-        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("component2".to_string(), vec![token_b.clone(), token_c.clone()]);
+        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        topology.insert("component2".to_string(), vec![token_b.clone(), token_c.clone()].into());
         manager.initialize_graph(&topology);
 
         // Test 1: Component not found
@@ -791,7 +787,10 @@ mod tests {
 
         // Create an event with both add and remove operations that will fail
         let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([("component1".to_string(), vec![])]),
+            added_components: FxHashMap::from_iter([(
+                "component1".to_string(),
+                ComponentTopology::default(),
+            )]),
             removed_components: vec!["component2".to_string()],
             updated_components: vec![],
         };
@@ -823,7 +822,7 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
         let mut components = FxHashMap::default();
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
 
         manager
             .add_components(&components)

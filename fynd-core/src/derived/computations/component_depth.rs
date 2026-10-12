@@ -12,17 +12,13 @@
 //! Ensure `SpotPriceComputation` runs before this computation.
 
 use async_trait::async_trait;
-use itertools::Itertools;
 use num_bigint::BigUint;
 use num_traits::{Float, One};
 use rustc_hash::FxHashSet;
 use tracing::{debug, instrument, warn, Span};
 use tycho_simulation::{
     evm::query_pool_swap::query_pool_swap,
-    tycho_common::{
-        models::{token::Token, Address},
-        simulation::errors::SimulationError,
-    },
+    tycho_common::{models::token::Token, simulation::errors::SimulationError},
     tycho_core::simulation::protocol_sim::{
         Price, ProtocolSim, QueryPoolSwapParams, SwapConstraint,
     },
@@ -35,14 +31,14 @@ use crate::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
             FailedItem, FailedItemError,
         },
-        computations::spot_price::SpotPriceComputation,
+        computations::{drop_unlisted_directions, spot_price::SpotPriceComputation},
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::{ComponentDepthKey, ComponentDepths, SpotPrices},
     },
     feed::market_data::{MarketData, MarketState},
-    types::ComponentId,
+    types::{ComponentId, SwapDirection},
 };
 
 /// Converts `price`, in whole tokens of `token_out` per whole token of `token_in`, to the exact
@@ -136,14 +132,14 @@ impl DerivedComputation for ComponentDepthComputation {
         for component_id in &changed.removed {
             component_depths.retain(|key, _| &key.0 != component_id);
         }
+        drop_unlisted_directions(&mut component_depths, &changed.added);
         let (snapshot, components_to_compute) = snapshot_changed_components(market, changed).await;
         let topology = snapshot.component_topology();
 
         let mut succeeded = 0usize;
         let mut failed_items: Vec<FailedItem> = Vec::new();
         for component_id in &components_to_compute {
-            // Get token addresses: changed.added for new components, topology for existing
-            let Some(token_addresses) = changed
+            let Some(component_topology) = changed
                 .added
                 .get(component_id)
                 .or_else(|| topology.get(component_id))
@@ -152,7 +148,7 @@ impl DerivedComputation for ComponentDepthComputation {
             };
             let pair_depths = self.compute_component_depths(
                 component_id,
-                token_addresses,
+                &component_topology.swap_directions,
                 &snapshot,
                 &spot_prices,
             );
@@ -186,7 +182,7 @@ impl DerivedComputation for ComponentDepthComputation {
     }
 }
 
-/// The depth of one directed pair of a component, or why it has none.
+/// The depth of one swap direction of a component, or why it has none.
 type PairDepth = (ComponentDepthKey, Result<BigUint, FailedItemError>);
 
 /// Reads the stored spot prices, and the stored depths to start from. A full recompute starts
@@ -301,50 +297,43 @@ fn describe_failed_query(
 }
 
 impl ComponentDepthComputation {
-    /// Computes the depth of every directed pair of `component_id`'s tokens. Every pair fails
-    /// when the component misses its simulation state or the metadata of a token.
+    /// Computes the depth of every swap direction of `component_id`. Missing simulation state
+    /// fails every direction. Missing token metadata fails each direction that uses that token.
     fn compute_component_depths(
         &self,
         component_id: &ComponentId,
-        token_addresses: &[Address],
+        directions: &[SwapDirection],
         snapshot: &MarketState,
         spot_prices: &SpotPrices,
     ) -> Vec<PairDepth> {
-        let fail_every_pair = |error: FailedItemError| -> Vec<PairDepth> {
-            token_addresses
-                .iter()
-                .permutations(2)
-                .map(|pair| {
-                    let key = (component_id.clone(), pair[0].clone(), pair[1].clone());
-                    (key, Err(error.clone()))
-                })
-                .collect()
-        };
         let Some(sim_state) = snapshot.get_simulation_state(component_id) else {
             warn!(component_id, "missing simulation state, skipping component");
-            return fail_every_pair(FailedItemError::MissingSimulationState);
+            return directions
+                .iter()
+                .map(|(token_in, token_out)| {
+                    let key = (component_id.clone(), token_in.clone(), token_out.clone());
+                    (key, Err(FailedItemError::MissingSimulationState))
+                })
+                .collect();
         };
         let tokens = snapshot.token_registry_ref();
-        let component_tokens: Option<Vec<&Token>> = token_addresses
-            .iter()
-            .map(|address| {
-                tokens
-                    .get(address)
-                    .map(|token| &**token)
-            })
-            .collect();
-        let Some(component_tokens) = component_tokens else {
-            warn!(component_id, "missing token metadata, skipping component");
-            return fail_every_pair(FailedItemError::MissingTokenMetadata);
-        };
 
-        component_tokens
+        directions
             .iter()
-            .permutations(2)
-            .map(|pair| {
-                let (token_in, token_out) = (*pair[0], *pair[1]);
+            .map(|(token_in_address, token_out_address)| {
                 let key =
-                    (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+                    (component_id.clone(), token_in_address.clone(), token_out_address.clone());
+                let (Some(token_in), Some(token_out)) =
+                    (tokens.get(token_in_address), tokens.get(token_out_address))
+                else {
+                    warn!(
+                        component_id,
+                        %token_in_address,
+                        %token_out_address,
+                        "missing token metadata, skipping swap direction"
+                    );
+                    return (key, Err(FailedItemError::MissingTokenMetadata));
+                };
                 let depth =
                     self.compute_pair_depth(sim_state, &key, token_in, token_out, spot_prices);
                 (key, depth)
@@ -527,7 +516,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -603,7 +592,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![weth.address.clone(), usdc.address.clone()],
+                vec![weth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -656,7 +645,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -716,8 +705,8 @@ mod tests {
             .set_spot_prices(partial_spot, vec![], 0, true);
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([
-                ("eth_usdc".to_string(), vec![eth.address.clone(), usdc.address.clone()]),
-                ("eth_dai".to_string(), vec![eth.address.clone(), dai.address.clone()]),
+                ("eth_usdc".to_string(), vec![eth.address.clone(), usdc.address.clone()].into()),
+                ("eth_dai".to_string(), vec![eth.address.clone(), dai.address.clone()].into()),
             ]),
             removed: vec![],
             updated: vec![],
@@ -765,7 +754,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "phantom_component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -817,7 +806,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![token_in.address.clone(), token_out.address.clone()],
+                vec![token_in.address.clone(), token_out.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
