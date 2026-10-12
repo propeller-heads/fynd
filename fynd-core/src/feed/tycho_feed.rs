@@ -261,9 +261,7 @@ impl TychoFeed {
                 RFQStreamBuilder::new()
                     .set_tokens(all_tokens)
                     .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
+                &self.config,
                 rfq_tokens,
             )?;
 
@@ -503,9 +501,7 @@ impl TychoFeed {
                 RFQStreamBuilder::new()
                     .set_tokens(all_tokens)
                     .await,
-                self.config.chain,
-                self.config.min_tvl,
-                &self.config.protocols,
+                &self.config,
                 rfq_tokens,
             )?;
             let (rfq_tx, rfq_rx) = tokio::sync::mpsc::channel(64);

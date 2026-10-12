@@ -501,6 +501,7 @@ pub struct FyndBuilder {
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
     tycho_subscription_buffer_size: Option<usize>,
+    aggregate_rfqs: bool,
     pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
@@ -544,6 +545,7 @@ impl FyndBuilder {
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
             tycho_subscription_buffer_size: None,
+            aggregate_rfqs: false,
             pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
@@ -634,6 +636,13 @@ impl FyndBuilder {
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
         self.tycho_subscription_buffer_size = Some(size);
+        self
+    }
+
+    /// Streams each Bebop and Hashflow venue as one component instead of one per token pair
+    /// (default: `false`). Metric always streams per pair.
+    pub fn aggregate_rfqs(mut self, enabled: bool) -> Self {
+        self.aggregate_rfqs = enabled;
         self
     }
 
@@ -908,7 +917,8 @@ impl FyndBuilder {
         .min_token_quality(self.min_token_quality)
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(self.blocklisted_components)
-        .partial_blocks(self.partial_blocks);
+        .partial_blocks(self.partial_blocks)
+        .aggregate_rfqs(self.aggregate_rfqs);
 
         let tycho_feed_config = match self.tycho_subscription_buffer_size {
             Some(size) => tycho_feed_config.subscription_buffer_size(size),
