@@ -528,6 +528,15 @@ fn register_exchange(
     Registration::Registered(registered)
 }
 
+/// Whether `protocol_system` names an RFQ venue, direct (`rfq:bebop`) or through its fallback
+/// router (`fallback:rfq:bebop`).
+pub(crate) fn is_rfq_system(protocol_system: &str) -> bool {
+    protocol_system
+        .strip_prefix(FALLBACK_PREFIX)
+        .unwrap_or(protocol_system)
+        .starts_with(RFQ_PREFIX)
+}
+
 pub(crate) fn register_rfq(
     mut rfq_stream_builder: RFQStreamBuilder,
     chain: Chain,
