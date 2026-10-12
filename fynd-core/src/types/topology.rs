@@ -64,3 +64,42 @@ pub(crate) fn swap_directions(component: &ProtocolComponent) -> Arc<[SwapDirecti
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algorithm::test_utils::{addr, component, component_with_directions, token};
+
+    #[test]
+    fn test_swap_directions_reads_the_attribute() {
+        let (a, b, c) = (token(0x01, "A"), token(0x02, "B"), token(0x03, "C"));
+        let component = component_with_directions("venue", &[a.clone(), b.clone(), c], &[(&a, &b)]);
+
+        assert_eq!(swap_directions(&component).to_vec(), vec![(addr(0x01), addr(0x02))]);
+    }
+
+    #[test]
+    fn test_swap_directions_without_attribute_is_every_pair() {
+        let component = component("pool", &[token(0x01, "A"), token(0x02, "B")]);
+
+        assert_eq!(
+            swap_directions(&component).to_vec(),
+            vec![(addr(0x01), addr(0x02)), (addr(0x02), addr(0x01))]
+        );
+    }
+
+    #[test]
+    fn test_swap_directions_keeps_known_tokens_only() {
+        let (a, b, c) = (token(0x01, "A"), token(0x02, "B"), token(0x03, "C"));
+        let mut component = component_with_directions(
+            "venue",
+            &[a.clone(), b.clone(), c.clone()],
+            &[(&a, &b), (&b, &c)],
+        );
+        component
+            .tokens
+            .retain(|token| token != &c.address);
+
+        assert_eq!(swap_directions(&component).to_vec(), vec![(addr(0x01), addr(0x02))]);
+    }
+}
