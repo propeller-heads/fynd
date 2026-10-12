@@ -9,7 +9,8 @@
 //! amount. A reverse sell swaps that amount back along the buy route. Both include fees and
 //! slippage. Gas-aware scoring is off because it reads the prices this computation produces.
 //! Pricing leaves out pAMMs: a pAMM's quote ladder can pay almost nothing back at the probe size
-//! for a block, and its spot prices do not show it.
+//! for a block, and its spot prices do not show it. Pricing also leaves out RFQ venues, so a
+//! token that only an RFQ venue reaches gets no price.
 //!
 //! The price is the arithmetic mean of the buy and sell rates, kept as an exact fraction.
 //! Both rates are in token units per gas token unit: the bought amount divided by `probe_amount`
@@ -121,6 +122,7 @@
 //! The gas token gets a price of one and no dependencies.
 
 use std::{
+    borrow::Cow,
     ops::RangeInclusive,
     sync::{Arc, LazyLock, Mutex, MutexGuard},
     time::{Duration, Instant},
@@ -133,7 +135,7 @@ use petgraph::graph::NodeIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn, Span};
 use tycho_simulation::{
-    tycho_common::models::{token::Token, Address},
+    tycho_common::models::{protocol::ProtocolComponent, token::Token, Address},
     tycho_core::simulation::protocol_sim::{Price, ProtocolSim},
 };
 
@@ -154,10 +156,18 @@ use crate::{
         types::{TokenGasPrices, TokenPriceEntry, TokenPricesWithDeps},
     },
     fallback::is_pamm,
-    feed::{component_filter::remove_components, market_data::MarketData},
+    feed::{
+        component_filter::remove_components, market_data::MarketData,
+        protocol_registry::is_rfq_system,
+    },
     graph::{GraphManager, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, OrderSide, RouteExclusions},
 };
+
+/// Whether pricing leaves `component` out of its graph.
+fn is_left_out_of_pricing(component: &ProtocolComponent) -> bool {
+    is_pamm(component) || is_rfq_system(&component.protocol_system)
+}
 
 /// The range of `spot(a→b) * spot(b→a)` for a pool whose two spot prices agree. A pool with no
 /// fee gives 1, and a fee moves the product away from 1 by about twice the fee. Token pricing
@@ -1339,8 +1349,11 @@ impl TokenGasPriceComputation {
                 .last_updated()
                 .map(|b| b.number())
                 .unwrap_or(0);
-            let topology =
-                remove_components(guard.base_market_state(), guard.component_topology(), &is_pamm);
+            let topology = remove_components(
+                guard.base_market_state(),
+                guard.component_topology(),
+                &is_left_out_of_pricing,
+            );
             (topology, block)
         };
 
@@ -1461,6 +1474,32 @@ impl TokenGasPriceComputation {
             .filter(|token| *token != &self.gas_token)
             .cloned()
             .collect()
+    }
+
+    /// `changed` without the added components that pricing leaves out. Their tokens are no
+    /// arrivals, as no pass can price a token that only they reach.
+    async fn without_left_out_arrivals<'a>(
+        &self,
+        market: &MarketData,
+        changed: &'a ChangedComponents,
+    ) -> Cow<'a, ChangedComponents> {
+        if changed.added.is_empty() {
+            return Cow::Borrowed(changed);
+        }
+        let guard = market.read().await;
+        let left_out = |id: &ComponentId| {
+            guard
+                .get_component(id)
+                .is_some_and(is_left_out_of_pricing)
+        };
+        if !changed.added.keys().any(left_out) {
+            return Cow::Borrowed(changed);
+        }
+        let mut priced = changed.clone();
+        priced
+            .added
+            .retain(|id, _| !left_out(id));
+        Cow::Owned(priced)
     }
 
     /// Offers the pass the tokens a change could have moved, ranked so the cap cuts the least
@@ -1715,6 +1754,10 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        let changed = self
+            .without_left_out_arrivals(market, changed)
+            .await;
+        let changed = &*changed;
         let block = market
             .read()
             .await
