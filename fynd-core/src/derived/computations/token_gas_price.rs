@@ -3146,6 +3146,49 @@ mod tests {
         assert_eq!(deps, &FxHashSet::from_iter(["plain".to_string()]));
     }
 
+    /// X trades only on an RFQ venue, which pricing leaves out, so X gets no price. The venue
+    /// in `added` is no arrival either.
+    #[tokio::test]
+    async fn test_rfq_venue_left_out() {
+        let (eth, aaa, x) = (token(0, "ETH"), token(1, "AAA"), token(2, "X"));
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0)),
+            ("rfq_x", &eth, &x, MockProtocolSim::new(5.0)),
+        ]);
+        market
+            .write()
+            .await
+            .upsert_components([component_with_protocol(
+                "rfq_x",
+                "rfq:bebop",
+                &[eth.clone(), x.clone()],
+            )]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        let seeded = computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        assert!(!seeded.data.contains_key(&x.address));
+        TokenGasPriceComputation::persist(&mut *store.write().await, seeded, 1, true);
+        let added = FxHashMap::from_iter([(
+            "rfq_x".to_string(),
+            vec![eth.address.clone(), x.address.clone()],
+        )]);
+
+        computation
+            .compute(&market, &store, &ChangedComponents { added, ..ChangedComponents::default() })
+            .await
+            .expect("pricing must not fail");
+
+        assert!(computation
+            .lock_pass_history()
+            .pending_arrivals
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn test_deps_rival_route() {
         // USDC prices via the direct pool, bought and sold back through it. The worse
