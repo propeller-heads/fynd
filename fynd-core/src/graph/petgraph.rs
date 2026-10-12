@@ -504,10 +504,10 @@ mod tests {
         // Component 1: A-B-C (3-token component, fully connected)
         topology.insert(
             "component1".to_string(),
-            vec![token_a.clone(), token_b.clone(), token_c.clone()],
+            vec![token_a.clone(), token_b.clone(), token_c.clone()].into(),
         );
         // Component 2: C-D (2-token component, overlapping with component 1)
-        topology.insert("component2".to_string(), vec![token_c.clone(), token_d.clone()]);
+        topology.insert("component2".to_string(), vec![token_c.clone(), token_d.clone()].into());
 
         manager.initialize_graph(&topology);
 
@@ -594,9 +594,9 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Multiple components connecting the same token pair
-        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("component3".to_string(), vec![token_a.clone(), token_b.clone()]);
+        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        topology.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        topology.insert("component3".to_string(), vec![token_a.clone(), token_b.clone()].into());
 
         manager.initialize_graph(&topology);
 
@@ -634,7 +634,7 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add first component with token A and B
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
         manager
             .add_components(&components)
             .unwrap();
@@ -644,7 +644,7 @@ mod tests {
 
         // Add second component with overlapping token A
         components.clear();
-        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()].into());
         manager
             .add_components(&components)
             .unwrap();
@@ -661,9 +661,9 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Mix valid and invalid components
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("component2".to_string(), vec![]);
-        components.insert("component3".to_string(), vec![]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        components.insert("component2".to_string(), vec![].into());
+        components.insert("component3".to_string(), vec![].into());
         let result = manager.add_components(&components);
 
         assert!(result.is_err());
@@ -689,8 +689,8 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
 
         // Add components first
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        components.insert("component2".to_string(), vec![token_a.clone(), token_b.clone()].into());
         manager
             .add_components(&components)
             .unwrap();
@@ -734,8 +734,8 @@ mod tests {
         let token_c = addr("0x6B175474E89094C44Da98b954EedeAC495271d0F"); // DAI
 
         // Initialize with component1 connecting A-B, and component2 connecting B-C
-        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
-        topology.insert("component2".to_string(), vec![token_b.clone(), token_c.clone()]);
+        topology.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
+        topology.insert("component2".to_string(), vec![token_b.clone(), token_c.clone()].into());
         manager.initialize_graph(&topology);
 
         // Test 1: Component not found
@@ -793,7 +793,10 @@ mod tests {
 
         // Create an event with both add and remove operations that will fail
         let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([("component1".to_string(), vec![])]),
+            added_components: FxHashMap::from_iter([(
+                "component1".to_string(),
+                ComponentTopology::default(),
+            )]),
             removed_components: vec!["component2".to_string()],
             updated_components: vec![],
         };
@@ -825,7 +828,7 @@ mod tests {
         let token_b = addr("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
         let mut components = FxHashMap::default();
-        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()]);
+        components.insert("component1".to_string(), vec![token_a.clone(), token_b.clone()].into());
 
         manager
             .add_components(&components)

@@ -189,11 +189,12 @@ mod tests {
     }
 
     /// Topology + registry for three tokens: A and B share two components, C sits in one.
-    fn test_market() -> (FxHashMap<ComponentId, Vec<Address>>, FxHashMap<Address, Arc<Token>>) {
+    fn test_market() -> (FxHashMap<ComponentId, ComponentTopology>, FxHashMap<Address, Arc<Token>>)
+    {
         let topology = FxHashMap::from_iter([
-            ("c1".to_string(), vec![addr(0x0a), addr(0x0b)]),
-            ("c2".to_string(), vec![addr(0x0a), addr(0x0b)]),
-            ("c3".to_string(), vec![addr(0x0a), addr(0x0c)]),
+            ("c1".to_string(), vec![addr(0x0a), addr(0x0b)].into()),
+            ("c2".to_string(), vec![addr(0x0a), addr(0x0b)].into()),
+            ("c3".to_string(), vec![addr(0x0a), addr(0x0c)].into()),
         ]);
         let registry =
             [test_token(0x0a, "AAA", 18), test_token(0x0b, "BBB", 6), test_token(0x0c, "CCC", 8)]

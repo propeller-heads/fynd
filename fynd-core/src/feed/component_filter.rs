@@ -164,7 +164,11 @@ mod tests {
         ]);
         let ids = || vec!["pub-1".to_string(), "excl-1".to_string(), "pamm-1".to_string()];
         let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter(ids().into_iter().map(|id| (id, vec![]))),
+            added_components: FxHashMap::from_iter(
+                ids()
+                    .into_iter()
+                    .map(|id| (id, ComponentTopology::default())),
+            ),
             removed_components: ids(),
             updated_components: ids(),
         };

@@ -527,7 +527,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -603,7 +603,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![weth.address.clone(), usdc.address.clone()],
+                vec![weth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -656,7 +656,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -716,8 +716,8 @@ mod tests {
             .set_spot_prices(partial_spot, vec![], 0, true);
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([
-                ("eth_usdc".to_string(), vec![eth.address.clone(), usdc.address.clone()]),
-                ("eth_dai".to_string(), vec![eth.address.clone(), dai.address.clone()]),
+                ("eth_usdc".to_string(), vec![eth.address.clone(), usdc.address.clone()].into()),
+                ("eth_dai".to_string(), vec![eth.address.clone(), dai.address.clone()].into()),
             ]),
             removed: vec![],
             updated: vec![],
@@ -765,7 +765,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "phantom_component".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],
@@ -817,7 +817,7 @@ mod tests {
         let changed = ChangedComponents {
             added: FxHashMap::from_iter([(
                 "component".to_string(),
-                vec![token_in.address.clone(), token_out.address.clone()],
+                vec![token_in.address.clone(), token_out.address.clone()].into(),
             )]),
             removed: vec![],
             updated: vec![],

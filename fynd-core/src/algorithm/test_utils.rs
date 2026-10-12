@@ -690,9 +690,9 @@ pub mod fixtures {
         let (a, b, c, d) = addrs();
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("bc".into(), vec![b.clone(), c.clone()]);
-        t.insert("cd".into(), vec![c, d]);
+        t.insert("ab".into(), vec![a.clone(), b.clone()].into());
+        t.insert("bc".into(), vec![b.clone(), c.clone()].into());
+        t.insert("cd".into(), vec![c, d].into());
         m.initialize_graph(&t);
         m
     }
@@ -703,11 +703,11 @@ pub mod fixtures {
         let (a, b, c, _) = addrs();
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
-        t.insert("ab1".into(), vec![a.clone(), b.clone()]);
-        t.insert("ab2".into(), vec![a.clone(), b.clone()]);
-        t.insert("ab3".into(), vec![a, b.clone()]);
-        t.insert("bc1".into(), vec![b.clone(), c.clone()]);
-        t.insert("bc2".into(), vec![b, c]);
+        t.insert("ab1".into(), vec![a.clone(), b.clone()].into());
+        t.insert("ab2".into(), vec![a.clone(), b.clone()].into());
+        t.insert("ab3".into(), vec![a, b.clone()].into());
+        t.insert("bc1".into(), vec![b.clone(), c.clone()].into());
+        t.insert("bc2".into(), vec![b, c].into());
         m.initialize_graph(&t);
         m
     }
@@ -718,10 +718,10 @@ pub mod fixtures {
         let (a, b, c, d) = addrs();
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("ac".into(), vec![a, c.clone()]);
-        t.insert("bd".into(), vec![b, d.clone()]);
-        t.insert("cd".into(), vec![c, d]);
+        t.insert("ab".into(), vec![a.clone(), b.clone()].into());
+        t.insert("ac".into(), vec![a, c.clone()].into());
+        t.insert("bd".into(), vec![b, d.clone()].into());
+        t.insert("cd".into(), vec![c, d].into());
         m.initialize_graph(&t);
         m
     }

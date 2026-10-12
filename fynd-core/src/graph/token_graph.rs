@@ -856,7 +856,7 @@ mod tests {
         let mut manager = TopologyGraphManager::<()>::new();
         manager.initialize_graph(&FxHashMap::from_iter([(
             "first".to_string(),
-            vec![a.clone(), b.clone()],
+            vec![a.clone(), b.clone()].into(),
         )]));
 
         let (from, to) = (
@@ -879,7 +879,10 @@ mod tests {
         );
 
         let added = |id: &str| MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(id.to_string(), vec![a.clone(), b.clone()])]),
+            added_components: FxHashMap::from_iter([(
+                id.to_string(),
+                vec![a.clone(), b.clone()].into(),
+            )]),
             removed_components: vec![],
             updated_components: vec![],
         };
@@ -949,7 +952,7 @@ mod tests {
             .handle_event(&MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     "fourth".to_string(),
-                    vec![c.clone(), d.clone()],
+                    vec![c.clone(), d.clone()].into(),
                 )]),
                 removed_components: vec![],
                 updated_components: vec![],
@@ -1180,8 +1183,8 @@ mod tests {
         manager.initialize_graph(&FxHashMap::default());
 
         let result = manager.add_components(&FxHashMap::from_iter([
-            ("solo".to_string(), vec![a.clone()]),
-            ("pair".to_string(), vec![a.clone(), b.clone()]),
+            ("solo".to_string(), vec![a.clone()].into()),
+            ("pair".to_string(), vec![a.clone(), b.clone()].into()),
         ]));
 
         match result {
@@ -1200,7 +1203,7 @@ mod tests {
         let mut manager = TopologyGraphManager::<()>::new();
         manager.initialize_graph(&FxHashMap::from_iter([(
             "pair".to_string(),
-            vec![a.clone(), b.clone()],
+            vec![a.clone(), b.clone()].into(),
         )]));
 
         let result = manager.remove_components(&["pair".to_string(), "ghost".to_string()]);
@@ -1378,7 +1381,7 @@ mod tests {
             ("sy1", &s, &y),
             ("st1", &s, &t),
         ] {
-            topology.insert(id.to_string(), vec![from.clone(), to.clone()]);
+            topology.insert(id.to_string(), vec![from.clone(), to.clone()].into());
         }
 
         let mut manager = TopologyGraphManager::<DepthAndPrice>::new();
@@ -1446,12 +1449,12 @@ mod tests {
         let e = addr(0x0E);
         let mut m = TopologyGraphManager::<DepthAndPrice>::new();
         let mut t = FxHashMap::default();
-        t.insert("ae".into(), vec![a.clone(), e.clone()]);
-        t.insert("ab".into(), vec![a.clone(), b.clone()]);
-        t.insert("be".into(), vec![b, e.clone()]);
-        t.insert("ac".into(), vec![a.clone(), c.clone()]);
-        t.insert("cd".into(), vec![c, d.clone()]);
-        t.insert("de".into(), vec![d, e.clone()]);
+        t.insert("ae".into(), vec![a.clone(), e.clone()].into());
+        t.insert("ab".into(), vec![a.clone(), b.clone()].into());
+        t.insert("be".into(), vec![b, e.clone()].into());
+        t.insert("ac".into(), vec![a.clone(), c.clone()].into());
+        t.insert("cd".into(), vec![c, d.clone()].into());
+        t.insert("de".into(), vec![d, e.clone()].into());
         m.initialize_graph(&t);
         let g = m.graph();
 

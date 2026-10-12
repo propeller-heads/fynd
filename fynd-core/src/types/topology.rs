@@ -21,6 +21,15 @@ pub struct ComponentTopology {
     pub swap_directions: Arc<[SwapDirection]>,
 }
 
+/// A component with no `swap_directions` attribute: every direction between its tokens.
+#[cfg(any(test, feature = "test-utils"))]
+impl From<Vec<Address>> for ComponentTopology {
+    fn from(tokens: Vec<Address>) -> Self {
+        let swap_directions = every_swap_direction(&tokens);
+        Self { tokens, swap_directions }
+    }
+}
+
 /// The swap directions of a component without the attribute, in sorted order. Sorted tokens give
 /// the same order in every process.
 fn every_swap_direction(tokens: &[Address]) -> Arc<[SwapDirection]> {

@@ -721,7 +721,7 @@ mod tests {
         let e1 = MarketEvent::MarketUpdated {
             added_components: FxHashMap::from_iter([(
                 "eth_usdc".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed_components: vec![],
             updated_components: vec![],
@@ -751,7 +751,7 @@ mod tests {
         let add = MarketEvent::MarketUpdated {
             added_components: FxHashMap::from_iter([(
                 "eth_usdc".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed_components: vec![],
             updated_components: vec![],
@@ -790,7 +790,7 @@ mod tests {
             tx.send(MarketEvent::MarketUpdated {
                 added_components: FxHashMap::from_iter([(
                     "eth_usdc".to_string(),
-                    vec![eth.address.clone(), usdc.address.clone()],
+                    vec![eth.address.clone(), usdc.address.clone()].into(),
                 )]),
                 removed_components: vec![],
                 updated_components: vec![],
@@ -944,7 +944,7 @@ mod tests {
         let event = MarketEvent::MarketUpdated {
             added_components: FxHashMap::from_iter([(
                 "eth_usdc".to_string(),
-                vec![eth.address.clone(), usdc.address.clone()],
+                vec![eth.address.clone(), usdc.address.clone()].into(),
             )]),
             removed_components: vec![],
             updated_components: vec![],

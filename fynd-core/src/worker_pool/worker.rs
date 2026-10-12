@@ -996,7 +996,8 @@ mod tests {
         fallback::{manager::PammState, FALLBACK_PREFIX},
         graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
         types::{
-            ComponentId, OrderSide, Route, RouteExclusionFilter, RouteRejection, RouteResult, Swap,
+            ComponentId, ComponentTopology, OrderSide, Route, RouteExclusionFilter, RouteRejection,
+            RouteResult, Swap,
         },
         AlgorithmError,
     };
@@ -1822,7 +1823,10 @@ mod tests {
     /// A `MarketUpdated` event that adds one component, by id.
     fn added_component_event(component_id: &str) -> MarketEvent {
         MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(component_id.to_string(), Vec::new())]),
+            added_components: FxHashMap::from_iter([(
+                component_id.to_string(),
+                ComponentTopology::default(),
+            )]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
         }
@@ -1982,8 +1986,8 @@ mod tests {
         add_fallback_pool(&market);
         let event = MarketEvent::MarketUpdated {
             added_components: FxHashMap::from_iter([
-                (PAMM.to_string(), Vec::new()),
-                (FALLBACK_POOL.to_string(), Vec::new()),
+                (PAMM.to_string(), ComponentTopology::default()),
+                (FALLBACK_POOL.to_string(), ComponentTopology::default()),
             ]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),

@@ -487,7 +487,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::algorithm::test_utils::{self as util, addr};
+    use crate::{
+        algorithm::test_utils::{self as util, addr},
+        types::ComponentTopology,
+    };
 
     /// A pAMM quoting 2x against fallback pools quoting 1x and 1.5x, so the result is visibly the
     /// fallback and the better fallback is visibly chosen.
@@ -771,7 +774,10 @@ mod tests {
             .expect("uncontended");
         let mut index = FallbackPoolIndex::build(&view);
         let event = MarketEvent::MarketUpdated {
-            added_components: FxHashMap::from_iter([(BETTER_POOL.to_string(), Vec::new())]),
+            added_components: FxHashMap::from_iter([(
+                BETTER_POOL.to_string(),
+                ComponentTopology::default(),
+            )]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
         };
@@ -848,7 +854,10 @@ mod tests {
         index.apply_event(
             &view,
             &MarketEvent::MarketUpdated {
-                added_components: FxHashMap::from_iter([(BETTER_POOL.to_string(), Vec::new())]),
+                added_components: FxHashMap::from_iter([(
+                    BETTER_POOL.to_string(),
+                    ComponentTopology::default(),
+                )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
             },
