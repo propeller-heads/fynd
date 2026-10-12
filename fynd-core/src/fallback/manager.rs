@@ -147,13 +147,20 @@ impl PammManager {
             if !is_pamm(component) || caller_drops(component) {
                 return true;
             }
+            let prior = states.get(component_id).copied();
             if must_withhold_pamm(market, component, fallback_pools) {
-                states.insert(component_id.clone(), PammState::Withheld);
-                count("withheld");
+                // The graph still holds an admitted pAMM that turned unbacked, so the eviction
+                // below removes it and records the new state.
+                if prior != Some(PammState::Admitted) {
+                    states.insert(component_id.clone(), PammState::Withheld);
+                    count("withheld");
+                }
                 return false;
             }
             states.insert(component_id.clone(), PammState::Admitted);
-            count("admitted");
+            if prior != Some(PammState::Admitted) {
+                count("admitted");
+            }
             true
         });
 
