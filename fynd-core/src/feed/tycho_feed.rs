@@ -589,11 +589,17 @@ impl TychoFeed {
             ..
         } = msg;
 
-        let updated_components_ids: HashSet<_> = updated_or_new_states
+        // Tycho re-sends an aggregated RFQ venue as a new pair on every poll. It stays here, as a
+        // state update, unless the upsert finds it new or reshaped.
+        let mut updated_components_ids: HashSet<ComponentId> = updated_or_new_states
             .keys()
-            .filter(|id| !added_components.contains_key(id.as_str())) // TODO: Should we still emit as updated if the component is new?
             .cloned()
             .collect();
+        updated_components_ids.extend(
+            added_components
+                .values()
+                .map(|component| component.id.to_string()),
+        );
 
         let maybe_new_tokens = added_components
             .values()
@@ -628,13 +634,9 @@ impl TychoFeed {
         let mut latest_component_count = 0;
         let mut token_count = 0;
         let mut added_topology: FxHashMap<ComponentId, ComponentTopology> = FxHashMap::default();
-        let added_ids: Vec<ComponentId> = added_components
-            .values()
-            .map(|component| component.id.to_string())
-            .collect();
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
-                market_data.upsert_components(
+                let upserted = market_data.upsert_components(
                     added_components
                         .clone()
                         .into_values()
@@ -670,9 +672,14 @@ impl TychoFeed {
                     market_data.update_last_updated(block_info);
                 }
 
-                added_topology = added_ids
-                    .iter()
-                    .filter_map(|id| Some((id.clone(), market_data.topology_of(id)?)))
+                added_topology = upserted
+                    .new
+                    .into_iter()
+                    .chain(upserted.reshaped)
+                    .filter_map(|id| {
+                        let topology = market_data.topology_of(&id)?;
+                        Some((id, topology))
+                    })
                     .collect();
                 latest_component_count = market_data.component_count();
                 token_count = market_data.token_count();
@@ -691,8 +698,10 @@ impl TychoFeed {
             gauge!("market_last_update_timestamp_seconds").set(block_timestamp as f64);
         }
 
+        updated_components_ids.retain(|id| !added_topology.contains_key(id));
+
         // Only broadcast event if there are actual changes
-        if !added_components.is_empty() ||
+        if !added_topology.is_empty() ||
             !removed_components.is_empty() ||
             !updated_components_ids.is_empty()
         {

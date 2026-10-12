@@ -206,6 +206,10 @@ attribute when present, otherwise every direction between its tokens. A directio
 loses its edge. Spot prices and depths exist for those directions only, and a dropped direction
 loses its entries and failures.
 
+`MarketState::upsert_components` compares the directions on every call. A re-sent component with the
+same directions reaches `MarketEvent` as `updated_components`, like a state update. A new component,
+or one with other directions, reaches `added_components`.
+
 ## Exclusive Liquidity (restricted)
 
 A limited, opt-in service for specific deployments — **not** part of the normal routing path. With no

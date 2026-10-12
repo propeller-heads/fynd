@@ -18,11 +18,12 @@ use crate::{
 pub enum MarketEvent {
     /// Market was updated.
     MarketUpdated {
-        /// Components added in this update, keyed by component ID.
+        /// Components new in this update, or tracked with other swap directions, keyed by ID.
+        /// A tracked component with the same swap directions is in `updated_components`.
         added_components: FxHashMap<ComponentId, ComponentTopology>,
         /// Component IDs that were removed.
         removed_components: Vec<ComponentId>,
-        /// Component IDs whose state changed.
+        /// Tracked components whose state changed, with the same swap directions as before.
         updated_components: Vec<ComponentId>,
     },
 }

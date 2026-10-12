@@ -27,11 +27,12 @@ use crate::types::{ComponentId, ComponentTopology};
 /// for components that actually changed.
 #[derive(Debug, Clone, Default)]
 pub struct ChangedComponents {
-    /// Added components with their tokens and swap directions.
+    /// Components new in this update, or tracked with other swap directions, with their tokens
+    /// and swap directions.
     pub added: FxHashMap<ComponentId, ComponentTopology>,
     /// Components that were removed.
     pub removed: Vec<ComponentId>,
-    /// Components whose state was updated (but not added/removed).
+    /// Tracked components whose state was updated, with the same swap directions as before.
     pub updated: Vec<ComponentId>,
     /// If true, this represents a full recompute (startup/lag recovery).
     pub is_full_recompute: bool,
