@@ -196,11 +196,14 @@ impl DerivedComputation for SpotPriceComputation {
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use rustc_hash::FxHashMap;
     use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component, setup_market_weighted, token, MockProtocolSim},
+        algorithm::test_utils::{
+            component, component_with_directions, setup_market_weighted, token, MockProtocolSim,
+        },
         derived::store::DerivedData,
         feed::market_data::MarketData,
     };
@@ -268,6 +271,46 @@ mod tests {
                 .any(|item| item.key == key_eth_dai || item.key == key_dai_eth),
             "component2 pair keys should appear in failed_items"
         );
+    }
+
+    /// A venue of three tokens lists one direction, ETH to USDC. It arrives again after it
+    /// dropped the reverse direction, whose price the store still holds.
+    #[tokio::test]
+    async fn test_compute_listed_directions() {
+        let (eth, usdc, dai) = (token(0x01, "ETH"), token(0x02, "USDC"), token(0x03, "DAI"));
+        let (market, _) =
+            setup_market_weighted(vec![("venue", &eth, &usdc, MockProtocolSim::new(2000.0))]);
+        {
+            let mut guard = market.write().await;
+            guard.upsert_tokens([dai.clone()]);
+            guard.upsert_components([component_with_directions(
+                "venue",
+                &[eth.clone(), usdc.clone(), dai],
+                &[(&eth, &usdc)],
+            )]);
+        }
+        let dropped = ("venue".to_string(), usdc.address.clone(), eth.address.clone());
+        let derived = DerivedData::new_shared();
+        derived.write().await.set_spot_prices(
+            SpotPrices::from_iter([(dropped, 0.0005)]),
+            vec![],
+            0,
+            true,
+        );
+        let topology = market.read().await.component_topology()["venue"].clone();
+        let changed = ChangedComponents {
+            added: FxHashMap::from_iter([("venue".to_string(), topology)]),
+            ..Default::default()
+        };
+
+        let output = SpotPriceComputation::new()
+            .compute(&market, &derived, &changed)
+            .await
+            .unwrap();
+
+        let listed = ("venue".to_string(), eth.address.clone(), usdc.address.clone());
+        assert_eq!(output.data.keys().collect::<Vec<_>>(), vec![&listed]);
+        assert!(!output.has_failures());
     }
 
     /// MockProtocolSim spot_price behavior:
