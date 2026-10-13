@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fynd_core::{
     derived::{ComponentDepths, TokenGasPrices},
-    types::ComponentId,
+    types::{ComponentId, GasTokenConfig},
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -77,9 +77,9 @@ pub(crate) struct TokensCache {
 
 /// Approximates the gas-token units obtained per one raw unit of the priced token.
 ///
-/// [`TokenGasPrices`] stores `numerator / denominator` as *token raw units per gas-token raw
-/// unit*, so converting a raw token amount to gas-token units multiplies by the inverse,
-/// `denominator / numerator` — the same direction as
+/// `price` is *token raw units per routable gas-token raw unit* (a [`TokenGasPrices`] entry
+/// after [`GasTokenConfig::to_routable_units`]), so converting a raw token amount to gas-token
+/// units multiplies by the inverse, `denominator / numerator` — the same direction as
 /// `fynd_core::algorithm::most_liquid`.
 ///
 /// Returns `None` unless the factor is finite and strictly positive, which also rejects a
@@ -97,14 +97,16 @@ fn gas_units_per_token_unit(price: &Price) -> Option<f64> {
 ///
 /// A token is included when it appears in at least one component's token list and has
 /// metadata in the token registry. `liquidity` is the sum over all directional depths
-/// where the token is the input, each converted to raw gas-token units by dividing by the
-/// token's gas price (token raw units per gas-token raw unit); tokens without a computed
-/// gas price get `None` and sort after priced ones.
+/// where the token is the input, each converted to routable gas-token raw units by dividing by
+/// the token's gas price, itself converted by `gas_token` from token raw units per native raw
+/// unit to token raw units per routable raw unit; tokens without a computed gas price get
+/// `None` and sort after priced ones.
 pub fn build_token_entries(
     topology: &FxHashMap<ComponentId, Vec<Address>>,
     token_registry: &FxHashMap<Address, Arc<Token>>,
     depths: Option<&ComponentDepths>,
     token_prices: Option<&TokenGasPrices>,
+    gas_token: &GasTokenConfig,
 ) -> Vec<GraphTokenEntry> {
     use num_traits::ToPrimitive;
 
@@ -124,7 +126,10 @@ pub fn build_token_entries(
                 continue;
             }
             let Some(price) = prices.get(token_in) else { continue };
-            let Some(gas_per_token_unit) = gas_units_per_token_unit(price) else { continue };
+            let routable_price = gas_token.to_routable_units(price);
+            let Some(gas_per_token_unit) = gas_units_per_token_unit(&routable_price) else {
+                continue;
+            };
             let Some(depth) = depth.to_f64() else { continue };
             let gas_units = depth * gas_per_token_unit;
             if gas_units.is_finite() {
@@ -172,6 +177,10 @@ mod tests {
 
     use super::*;
 
+    fn ethereum_gas_token() -> GasTokenConfig {
+        fynd_core::types::gas_token_config(&Chain::Ethereum).unwrap()
+    }
+
     fn addr(byte: u8) -> Address {
         Address::from([byte; 20])
     }
@@ -207,7 +216,7 @@ mod tests {
     fn test_build_token_entries_counts_components_without_derived_data() {
         let (topology, registry) = test_market();
 
-        let entries = build_token_entries(&topology, &registry, None, None);
+        let entries = build_token_entries(&topology, &registry, None, None, &ethereum_gas_token());
 
         assert_eq!(entries.len(), 3);
         // No liquidity anywhere: sorted by component count, then address.
@@ -236,7 +245,13 @@ mod tests {
         .into_iter()
         .collect();
 
-        let entries = build_token_entries(&topology, &registry, Some(&depths), Some(&prices));
+        let entries = build_token_entries(
+            &topology,
+            &registry,
+            Some(&depths),
+            Some(&prices),
+            &ethereum_gas_token(),
+        );
 
         let entry_a = entries
             .iter()
@@ -284,7 +299,13 @@ mod tests {
         .into_iter()
         .collect();
 
-        let entries = build_token_entries(&topology, &registry, Some(&depths), Some(&prices));
+        let entries = build_token_entries(
+            &topology,
+            &registry,
+            Some(&depths),
+            Some(&prices),
+            &ethereum_gas_token(),
+        );
 
         let liquidity_a = entries
             .iter()
@@ -312,7 +333,7 @@ mod tests {
         let (topology, mut registry) = test_market();
         registry.remove(&addr(0x0c));
 
-        let entries = build_token_entries(&topology, &registry, None, None);
+        let entries = build_token_entries(&topology, &registry, None, None, &ethereum_gas_token());
 
         assert_eq!(entries.len(), 2);
         assert!(entries
@@ -332,7 +353,13 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        let entries = build_token_entries(&topology, &registry, Some(&depths), Some(&prices));
+        let entries = build_token_entries(
+            &topology,
+            &registry,
+            Some(&depths),
+            Some(&prices),
+            &ethereum_gas_token(),
+        );
 
         assert_eq!(entries.len(), 3);
         assert!(entries
@@ -343,6 +370,13 @@ mod tests {
     #[test]
     fn test_build_token_entries_empty_topology() {
         let (_, registry) = test_market();
-        assert!(build_token_entries(&FxHashMap::default(), &registry, None, None).is_empty());
+        assert!(build_token_entries(
+            &FxHashMap::default(),
+            &registry,
+            None,
+            None,
+            &ethereum_gas_token()
+        )
+        .is_empty());
     }
 }
