@@ -1,6 +1,7 @@
 //! Data types for derived computations.
 
 use num_bigint::BigUint;
+use num_traits::Zero;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
@@ -42,38 +43,25 @@ pub type ComponentDepths = FxHashMap<ComponentDepthKey, BigUint>;
 /// Key for token price lookups: token address.
 pub type TokenGasPriceKey = Address;
 
-/// Token prices map: token address → its mid-price relative to the gas token, the mean of
-/// its buy and sell rates — a token's exit cost is already reflected in its price.
+/// Token prices map: token address → its mid-price, the mean of its buy and sell rates — a
+/// token's exit cost is already reflected in its price.
+///
+/// A price is in token raw units per *native* gas raw unit, the unit `gas * gas_price` counts,
+/// not per raw unit of the routable gas token it was measured against. The two differ on a
+/// shared-balance chain such as Arc (18 native decimals against 6); see
+/// [`GasTokenConfig`](crate::types::constants::GasTokenConfig).
 pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 
-/// Converts an internal native-gas-denominated price back to routable gas-token units.
+/// Converts `gas` units at `gas_price_wei` into raw units of a token using its derived price.
 ///
-/// Internal quote accounting uses token raw units per native gas raw unit. Public consumers use
-/// token raw units per routable gas-token raw unit, so this divides by the exact
-/// routable-per-native conversion. Returns `None` for a zero numerator or denominator.
-pub fn price_in_routable_units(price: &Price, native_to_routable_unit: &Price) -> Option<Price> {
-    if price.numerator == BigUint::from(0u8) ||
-        price.denominator == BigUint::from(0u8) ||
-        native_to_routable_unit.numerator == BigUint::from(0u8) ||
-        native_to_routable_unit.denominator == BigUint::from(0u8)
-    {
-        return None;
-    }
-    if native_to_routable_unit.numerator == native_to_routable_unit.denominator {
-        return Some(price.clone());
-    }
-    Some(Price {
-        numerator: &price.numerator * &native_to_routable_unit.denominator,
-        denominator: &price.denominator * &native_to_routable_unit.numerator,
-    })
-}
-
-/// Converts a native gas cost into raw units of a token using a derived token price.
-///
-/// Prices are exact fractions in token raw units per native gas raw unit. Division rounds up so a
-/// fractional output-token atom never understates gas cost.
-pub(crate) fn gas_cost_in_token(gas_cost: &BigUint, price: &Price) -> Option<BigUint> {
-    mul_div_ceil(gas_cost, &price.numerator, &price.denominator)
+/// Division rounds up so a fractional raw unit never understates the gas cost. Returns `None`
+/// for a zero price denominator, which every caller treats as an unpriced token.
+pub(crate) fn gas_cost_in_token(
+    gas: &BigUint,
+    gas_price_wei: &BigUint,
+    price: &Price,
+) -> Option<BigUint> {
+    mul_div_ceil(&(gas * gas_price_wei), &price.numerator, &price.denominator)
 }
 
 /// Multiplies two unsigned integers, divides by `denominator`, and rounds any remainder up.
@@ -85,7 +73,7 @@ pub(crate) fn mul_div_ceil(
     multiplier: &BigUint,
     denominator: &BigUint,
 ) -> Option<BigUint> {
-    if denominator == &BigUint::from(0u8) {
+    if denominator.is_zero() {
         return None;
     }
     let scaled = value * multiplier;
@@ -95,7 +83,8 @@ pub(crate) fn mul_div_ceil(
 /// Token price with the components that must re-price it when they change.
 #[derive(Debug, Clone)]
 pub struct TokenPriceEntry {
-    /// The computed mid-price relative to gas token.
+    /// The computed mid-price, in token raw units per native gas raw unit (see
+    /// [`TokenGasPrices`]).
     pub price: Price,
     /// The components of the routes that priced the token.
     ///
@@ -112,31 +101,39 @@ pub type TokenPricesWithDeps = FxHashMap<TokenGasPriceKey, TokenPriceEntry>;
 mod tests {
     use super::*;
 
-    #[test]
-    fn mul_div_ceil_preserves_fractional_refined_gas_cost() {
-        assert_eq!(
-            mul_div_ceil(&BigUint::from(1u8), &BigUint::from(11u8), &BigUint::from(10u8),),
-            Some(BigUint::from(2u8))
-        );
+    fn tiny_price() -> Price {
+        Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) }
     }
 
     #[test]
-    fn gas_cost_conversion_rounds_up_fractional_output_atoms() {
-        let price =
-            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) };
+    fn test_mul_div_ceil() {
+        let ceil = |value: u8, multiplier: u8, denominator: u8| {
+            mul_div_ceil(&value.into(), &multiplier.into(), &denominator.into())
+        };
 
-        assert_eq!(gas_cost_in_token(&BigUint::from(1u8), &price), Some(BigUint::from(1u8)));
+        assert_eq!(ceil(1, 11, 10), Some(BigUint::from(2u8)));
+        assert_eq!(ceil(2, 10, 5), Some(BigUint::from(4u8)));
+        assert_eq!(ceil(0, 10, 3), Some(BigUint::ZERO));
+        assert_eq!(ceil(1, 1, 0), None);
+    }
+
+    #[test]
+    fn test_gas_cost_in_token_fractional_raw_unit() {
+        let price = tiny_price();
+        let one = BigUint::from(1u8);
+
+        assert_eq!(gas_cost_in_token(&one, &one, &price), Some(BigUint::from(1u8)));
         assert_eq!(
-            gas_cost_in_token(&BigUint::from(10u64).pow(12), &price),
+            gas_cost_in_token(&BigUint::from(10u64).pow(6), &BigUint::from(10u64).pow(6), &price),
             Some(BigUint::from(1u8))
         );
-        assert_eq!(gas_cost_in_token(&BigUint::from(0u8), &price), Some(BigUint::from(0u8)));
+        assert_eq!(gas_cost_in_token(&BigUint::ZERO, &one, &price), Some(BigUint::ZERO));
     }
 
     #[test]
-    fn gas_cost_conversion_rejects_zero_denominator() {
-        let price = Price { numerator: BigUint::from(1u8), denominator: BigUint::from(0u8) };
+    fn test_gas_cost_in_token_zero_denominator() {
+        let price = Price { numerator: BigUint::from(1u8), denominator: BigUint::ZERO };
 
-        assert_eq!(gas_cost_in_token(&BigUint::from(1u8), &price), None);
+        assert_eq!(gas_cost_in_token(&BigUint::from(1u8), &BigUint::from(1u8), &price), None);
     }
 }

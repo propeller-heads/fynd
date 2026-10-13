@@ -480,8 +480,8 @@ impl FyndRPCBuilder {
                 .with_gas_price_stale_threshold(self.gas_price_stale_threshold);
 
         #[cfg(feature = "experimental")]
-        let gas_token =
-            fynd_core::types::native_token(&chain).context("gas token not configured for chain")?;
+        let gas_token = fynd_core::types::gas_token_config(&chain)
+            .context("gas token not configured for chain")?;
 
         let (
             router,

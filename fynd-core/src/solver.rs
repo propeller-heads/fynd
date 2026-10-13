@@ -407,7 +407,9 @@ pub enum SolverBuildError {
     /// A worker pool listed `exclusive_swap_replacer` before another post-processor.
     #[error(transparent)]
     PostProcessorOrder(#[from] PostProcessorOrderError),
-    /// No native gas token is defined for the requested chain.
+    /// The requested chain has no routable gas token: its native asset has no wrapper or
+    /// shared-balance ERC-20 to price gas against (Starknet), or the custom chain is not
+    /// registered.
     #[error("gas token not configured for chain")]
     GasToken,
     /// [`FyndBuilder::build`] was called without configuring any worker pools.
@@ -2058,5 +2060,92 @@ mod tests {
             "expected the error to name the pool and the unregistered post-processor 'rfq', \
              got: {error}"
         );
+    }
+
+    /// Arc's native gas asset sits at the zero address, with 18 decimals; its routable ERC-20 at
+    /// `0x3600…` has 6. Tycho streams no wrapper component for a shared-balance chain and nothing
+    /// here aliases the zero address to the routable token, so an order for it finds no route,
+    /// rather than a quote that mixes the two decimal scales. The routable token's own quote
+    /// charges gas at the native scale.
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_arc_native_address_quote() {
+        use std::collections::HashMap;
+
+        use num_bigint::BigUint;
+        use tycho_simulation::{
+            protocol::models::{ProtocolComponent, Update},
+            tycho_client::feed::{BlockHeader, SynchronizerState},
+            tycho_common::{models::token::Token, simulation::protocol_sim::ProtocolSim},
+        };
+
+        use crate::{
+            algorithm::test_utils::{token, MockProtocolSim},
+            types::{constants::gas_token, Order, OrderSide, QuoteOptions, QuoteStatus},
+        };
+
+        let usdc = Token {
+            address: gas_token(&Chain::Arc).unwrap(),
+            decimals: 6,
+            chain: Chain::Arc,
+            ..token(0x01, "USDC")
+        };
+        let other = Token { chain: Chain::Arc, ..token(0x02, "X") };
+        let component_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let component = ProtocolComponent::new(
+            Bytes::from(component_id.as_str()),
+            "uniswap_v2".to_string(),
+            "uniswap_v2_pool".to_string(),
+            Chain::Arc,
+            vec![usdc.clone(), other.clone()],
+            vec![],
+            HashMap::new(),
+            Bytes::default(),
+            chrono::NaiveDateTime::default(),
+        );
+        let state: Box<dyn ProtocolSim> = Box::new(MockProtocolSim::new(2.0).with_gas(50_000));
+        let update = Update::new(
+            1,
+            HashMap::from([(component_id.clone(), state)]),
+            HashMap::from([(component_id, component)]),
+        )
+        .set_sync_states(HashMap::from([(
+            "uniswap_v2".to_string(),
+            SynchronizerState::Ready(BlockHeader { number: 1, ..Default::default() }),
+        )]));
+        let pools = HashMap::from([("most_liquid".to_string(), PoolConfig::new("most_liquid"))]);
+        let solver =
+            Solver::from_recording(Chain::Arc, vec![update], pools, Some(BigUint::from(1u8)))
+                .await
+                .expect("an Arc market should build");
+        solver
+            .wait_until_ready(Duration::from_secs(30))
+            .await
+            .expect("solver should become ready");
+        let quote_one = |token_in: &Address, amount: u64| {
+            let order = Order::new(
+                token_in.clone(),
+                other.address.clone(),
+                BigUint::from(amount),
+                OrderSide::Sell,
+                Address::zero(20),
+            );
+            solver.quote(QuoteRequest::new(vec![order], QuoteOptions::default()))
+        };
+
+        let native = quote_one(&Address::zero(20), 1_000_000)
+            .await
+            .unwrap();
+        let routable = quote_one(&usdc.address, 1_000_000)
+            .await
+            .unwrap();
+
+        assert_eq!(native.orders()[0].status(), QuoteStatus::NoRouteFound);
+        let routable = &routable.orders()[0];
+        assert_eq!(routable.status(), QuoteStatus::Success);
+        // One USDC buys 0.5 X (5 * 10^17 raw units), so X is priced at 0.5 raw units per native
+        // raw unit, and 50_000 gas at 1 wei costs 25_000. Unscaled, it would cost 2.5 * 10^16.
+        assert_eq!(routable.amount_out(), &BigUint::from(500_000_000_000_000_000u64));
+        assert_eq!(routable.amount_out() - routable.amount_out_net_gas(), BigUint::from(25_000u32));
     }
 }

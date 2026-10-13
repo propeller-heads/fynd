@@ -73,4 +73,4 @@ pub use manager::{
     ChangedComponents, ComputationManager, ComputationManagerConfig, SharedDerivedDataRef,
 };
 pub use store::{ComputationStatus, DerivedData};
-pub use types::{price_in_routable_units, ComponentDepths, TokenGasPrices};
+pub use types::{ComponentDepths, TokenGasPrices};

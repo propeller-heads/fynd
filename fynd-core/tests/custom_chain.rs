@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use fynd_core::types::{native_token, parse_chain};
+use fynd_core::types::{gas_token, parse_chain};
 use tycho_simulation::tycho_common::models::{
     chain_config::{init_chain_registry, ChainConfigRegistry},
     Address,
@@ -31,11 +31,11 @@ fn resolves_and_reads_native_for_custom_chain() {
 
     // built-in still works
     let eth = parse_chain("Ethereum").unwrap();
-    assert!(native_token(&eth).is_ok());
+    assert!(gas_token(&eth).is_ok());
 
     // custom resolves and exposes its wrapped-native
     let tempo = parse_chain("tempo").expect("custom chain must resolve");
-    let wnative = native_token(&tempo).expect("custom wrapped-native must resolve");
+    let wnative = gas_token(&tempo).expect("custom wrapped-native must resolve");
     assert_eq!(wnative, Address::from_str("0x4200000000000000000000000000000000000006").unwrap());
 
     // unknown still rejected
@@ -44,5 +44,5 @@ fn resolves_and_reads_native_for_custom_chain() {
     // Starknet's wrapped-native is a placeholder zero address; fail fast rather than
     // returning it as a usable gas token.
     let starknet = parse_chain("starknet").unwrap();
-    assert!(native_token(&starknet).is_err());
+    assert!(gas_token(&starknet).is_err());
 }

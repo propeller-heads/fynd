@@ -125,11 +125,13 @@ pub struct DataStatus {
 /// Top-level response for GET /v1/prices.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PricesResponse {
-    /// Per-token mid prices relative to the native gas token, sorted by token address.
+    /// Per-token mid prices relative to the routable gas token (`gas_token`), sorted by token
+    /// address.
     ///
     /// A token the gas token cannot reach, or that cannot be sold back, is absent.
     pub prices: Vec<TokenPriceEntry>,
-    /// The gas token address (e.g. WETH).
+    /// The routable gas token the prices are relative to: the native asset's wrapper (e.g.
+    /// WETH), or on a chain whose native balance is also an ERC-20 (Arc's USDC), that ERC-20.
     #[schema(value_type = String, example = "0x0000000000000000000000000000000000000000")]
     pub gas_token: Address,
     /// Source and computation freshness metadata for the returned data.
