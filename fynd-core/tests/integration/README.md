@@ -38,6 +38,16 @@ nothing and reports zero tests.
 Same recording + same code = same derived data. A mismatch means code changed how
 derived data is computed. Re-record if the change is intentional.
 
+**Count mismatch after a dependency bump** (`component count mismatch`, or a count in
+`tests/token_graph.rs`):
+The counts depend on the code that decodes the recording. A tycho-simulation bump can decode more
+or fewer pools from the same recording. Run `scripts/fixture-counts.sh` on `main` and on your
+branch. The report shows each pinned count (expected -> actual) and the component count of each
+protocol system. Put the per-protocol difference in the pull request, so a reviewer can see which
+protocol changed, then update the values marked `!!`. The report changes no files. The ignored
+`regenerate_expected_outputs` test rewrites all of `expected_outputs.json`, including every quote
+baseline; use it only when you accept the quote changes too.
+
 **Timing violations**:
 Timing depends on hardware. The threshold derives from `worker_pools.toml` max timeout.
 CI runners may be slower — timing tests use a 3x multiplier.
