@@ -120,7 +120,19 @@ async fn report_fixture_counts() {
     let token_graph = "tests/token_graph.rs";
     row(token_graph, "TOKENS", token_graph_const("TOKENS"), graph.node_count());
     row(token_graph, "EDGES", token_graph_const("EDGES"), graph.edge_count());
-    row(token_graph, "COMPONENTS", token_graph_const("COMPONENTS"), topology.len());
+    // Counted as the test counts it: distinct components across the graph's edges.
+    let components_on_edges: HashSet<&ComponentId> = graph
+        .edge_indices()
+        .flat_map(|edge| {
+            graph
+                .edge_weight(edge)
+                .expect("edge has a weight")
+                .pools()
+                .iter()
+                .map(|pool| &pool.component_id)
+        })
+        .collect();
+    row(token_graph, "COMPONENTS", token_graph_const("COMPONENTS"), components_on_edges.len());
     let node = |hex: &str| {
         graph
             .get_token_ix(&Address::from_str(hex).expect("token address is valid hex"))
@@ -151,9 +163,13 @@ fn token_graph_const(name: &str) -> usize {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/token_graph.rs");
     let source = std::fs::read_to_string(path).expect("tests/token_graph.rs reads");
     let prefix = format!("const {name}: usize = ");
-    source
+    let value = source
         .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .and_then(|rest| rest.trim_end_matches(';').parse().ok())
-        .unwrap_or_else(|| panic!("tests/token_graph.rs has no `{prefix}<number>;`"))
+        .find_map(|line| line.trim().strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("tests/token_graph.rs has no `{prefix}<number>;`"));
+    value
+        .trim_end_matches(';')
+        .replace('_', "")
+        .parse()
+        .unwrap_or_else(|_| panic!("tests/token_graph.rs: `{prefix}{value}` is not a plain number"))
 }

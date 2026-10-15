@@ -41,7 +41,7 @@ Run formatting first because it modifies source files that all subsequent checks
 nightly pinned in `.github/workflows/ci.yaml`; a newer nightly can format differently from CI.
 
 ```bash
-NIGHTLY="$(grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' .github/workflows/ci.yaml | head -n 1)"
+NIGHTLY="$(sed -nE 's/^[[:space:]]*toolchain:[[:space:]]*(nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]*$/\1/p' .github/workflows/ci.yaml | head -n 1)"
 cargo +"$NIGHTLY" fmt --all
 ```
 
