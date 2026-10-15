@@ -1,17 +1,20 @@
 name: Publish cache
 
-# Keeps a warm build cache for the crates.io publish job in release.yaml.
+# Keeps a warm build cache for the verify-crates job in release.yaml.
 #
 # release.yaml runs on a new tag. A tag run can read only its own caches and the caches of main,
 # so it cannot use the cache of an earlier release, and every publish verified the crates from a
 # cold start: about 18 minutes, 12 of them for the `fynd` crate. This workflow runs the same
-# command as the publish job (`scripts/publish-crates.sh`, here with --dry-run) on main and saves
-# its build cache under the same key.
+# command as verify-crates (`scripts/publish-crates.sh --dry-run`) on main and saves its build
+# cache under the same key prefix.
 #
-# The key must match the publish job: same runner, same actions, same toolchain, same CARGO_* and
-# RUST* variables. rust-cache sets workspace versions to 0.0.0 in the key, so a release that only
-# bumps versions finds this cache.
+# The exact key does not match on a release: rust-cache hashes [workspace.package] version and the
+# versions in [workspace.dependencies], and a release changes them. verify-crates restores the
+# newest cache with the same prefix instead, which has every dependency already compiled, so only
+# the workspace crates compile again. The prefix needs the same runner, actions, toolchain, and
+# CARGO_* / RUST* variables as verify-crates.
 #
+# This cache never reaches the job that has the registry token: publish-crates runs without it.
 # The dry run uploads nothing and uses no secrets.
 
 on:
@@ -58,5 +61,5 @@ jobs:
           shared-key: publish-verify
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Verify the crates as the publish job does
+      - name: Verify the crates as verify-crates does
         run: scripts/publish-crates.sh --dry-run
