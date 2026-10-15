@@ -1,5 +1,5 @@
-//! Prints every count pinned against the market recording fixture, and the component count of
-//! each protocol system.
+//! Prints every count pinned against the market recording fixture (in `expected_outputs.json` and
+//! `tests/token_graph.rs`), and the component count of each protocol system.
 //!
 //! The counts depend on the code that decodes the recording, not only on the recording. A
 //! tycho-simulation bump that decodes more or fewer pools changes them, and then
@@ -9,7 +9,10 @@
 //! The per-protocol table shows which protocol changed. Put that table in the pull request,
 //! then update the values the report marks as changed.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    str::FromStr,
+};
 
 use fynd_core::{
     graph::{GraphManager, TopologyGraphManager},
@@ -118,7 +121,30 @@ async fn report_fixture_counts() {
     row(token_graph, "TOKENS", token_graph_const("TOKENS"), graph.node_count());
     row(token_graph, "EDGES", token_graph_const("EDGES"), graph.edge_count());
     row(token_graph, "COMPONENTS", token_graph_const("COMPONENTS"), topology.len());
+    let node = |hex: &str| {
+        graph
+            .get_token_ix(&Address::from_str(hex).expect("token address is valid hex"))
+            .expect("token is in the graph")
+    };
+    let pools = |a: &str, b: &str| {
+        graph
+            .pools_between(node(a), node(b))
+            .len()
+    };
+    row(token_graph, "USDC_USDT_POOLS", token_graph_const("USDC_USDT_POOLS"), pools(USDC, USDT));
+    row(token_graph, "USDC_WETH_POOLS", token_graph_const("USDC_WETH_POOLS"), pools(USDC, WETH));
+    row(token_graph, "WETH_USDT_POOLS", token_graph_const("WETH_USDT_POOLS"), pools(WETH, USDT));
+    row(
+        token_graph,
+        "WETH_NEIGHBOURS",
+        token_graph_const("WETH_NEIGHBOURS"),
+        graph.neighbors(node(WETH)).count(),
+    );
 }
+
+const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+const USDT: &str = "0xdac17f958d2ee523a2206206994597c13d831ec7";
 
 /// Reads `const <name>: usize = <value>;` from `tests/token_graph.rs`.
 fn token_graph_const(name: &str) -> usize {

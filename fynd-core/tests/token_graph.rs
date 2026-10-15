@@ -23,6 +23,12 @@ const TOKENS: usize = 2003;
 const EDGES: usize = 4998;
 /// Components in the snapshot, spread across those edges.
 const COMPONENTS: usize = 2946;
+/// Pools on the busiest pairs, each held by a single edge.
+const USDC_USDT_POOLS: usize = 13;
+const USDC_WETH_POOLS: usize = 11;
+const WETH_USDT_POOLS: usize = 9;
+/// Distinct tokens WETH trades against.
+const WETH_NEIGHBOURS: usize = 1424;
 
 const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
 const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
@@ -134,23 +140,23 @@ fn test_busy_pairs_hold_every_pool_that_trades_them() {
         graph
             .pools_between(node(USDC), node(USDT))
             .len(),
-        13
+        USDC_USDT_POOLS
     );
     assert_eq!(
         graph
             .pools_between(node(USDC), node(WETH))
             .len(),
-        11
+        USDC_WETH_POOLS
     );
     assert_eq!(
         graph
             .pools_between(node(WETH), node(USDT))
             .len(),
-        9
+        WETH_USDT_POOLS
     );
 
     // And WETH reaches its neighbours once each, not once per pool.
-    assert_eq!(graph.neighbors(node(WETH)).count(), 1424);
+    assert_eq!(graph.neighbors(node(WETH)).count(), WETH_NEIGHBOURS);
 }
 
 #[test]
