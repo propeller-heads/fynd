@@ -11,59 +11,67 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish-crates:
-    name: Publish Crates
+  # Publishing is split in two jobs so the registry token never shares a job with the build cache.
+  #
+  # verify-crates restores the cache that publish-cache.yaml saves on main and runs the full
+  # `cargo publish --dry-run`: it packages and compiles every crate, which runs their build scripts
+  # and proc-macros, and those can come from the cache. This job has no secrets.
+  #
+  # publish-crates has the token and no cache. It uploads with --no-verify: cargo packages the
+  # sources of the checked-out tag and compiles nothing, so no cached or downloaded build code runs
+  # while the token is in the environment. verify-crates already compiled the same commit.
+  verify-crates:
+    name: Verify Crates
     # Pre-releases build a Docker image only; registry publishing happens on
     # full releases.
     if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Setup toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
 
+      # A release runs on a new tag, and a tag run can read only its own caches and those of main,
+      # so without this cache every release verifies from a cold start (about 18 minutes). Nothing
+      # is saved here: a cache saved on a tag is not visible to the next release.
       - name: Setup Rust Cache
         uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
         with:
-          cache-on-failure: true
+          shared-key: publish-verify
+          save-if: false
 
-      # Publishes in dependency order, skipping versions already on crates.io so a
-      # partially failed release run can be recovered by re-running the job. A single
-      # retry (with an index re-check) covers crates.io index propagation lag between
-      # consecutive publishes.
+      - name: Verify crates
+        run: scripts/publish-crates.sh --dry-run
+
+  publish-crates:
+    name: Publish Crates
+    needs: verify-crates
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      # No rust-cache in this job (see the comment above verify-crates).
       - name: Publish crates
-        run: |
-          set -euo pipefail
-          version="$(cargo metadata --format-version 1 --no-deps \
-            | jq -r '.packages[] | select(.name == "fynd") | .version')"
-          published() {
-            curl -sf "https://crates.io/api/v1/crates/$1/${version}" \
-              -H "User-Agent: fynd-ci (github.com/propeller-heads/fynd)" >/dev/null
-          }
-          # Dependency order: every crate is published before anything that depends on it,
-          # because cargo resolves a dependency against the registry when it packages.
-          # fynd-test-fixtures precedes fynd-bench-harness, which depends on it; both follow
-          # fynd-core. fynd-tools-common follows fynd-client.
-          for crate in fynd-core fynd-rpc-types fynd-client fynd-rpc \
-                       fynd-test-fixtures fynd-tools-common fynd-bench-harness fynd; do
-            if published "${crate}"; then
-              echo "${crate} ${version} already on crates.io, skipping"
-              continue
-            fi
-            if cargo publish --locked --package "${crate}"; then
-              continue
-            fi
-            echo "publish of ${crate} failed, re-checking index and retrying in 30s"
-            sleep 30
-            if ! published "${crate}"; then
-              cargo publish --locked --package "${crate}"
-            fi
-          done
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_REGISTRY_TOKEN }}
+        run: scripts/publish-crates.sh --no-verify
 
   publish-npm:
     name: Publish TypeScript packages to npm
