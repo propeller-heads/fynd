@@ -9,7 +9,7 @@ user-invocable: true
 Run the same checks that GitHub Actions CI runs, locally, to catch failures before they hit the
 remote pipeline. The canonical checks live in `.github/workflows/ci.yaml`.
 
-This is the wide, slow check. For a routine commit or push, run `cargo +nightly fmt --all` and the
+This is the wide, slow check. For a routine commit or push, run `cargo +<pinned> fmt --all` and the
 tests covering the change instead (see `.claude/knowledge/version_control.md`).
 
 ## Context
@@ -37,10 +37,12 @@ If no files match any pattern (e.g. only docs changed), report "No CI-relevant c
 
 ### Phase 1: Format (sequential, Rust only)
 
-Run formatting first because it modifies source files that all subsequent checks depend on.
+Run formatting first because it modifies source files that all subsequent checks depend on. Use the
+nightly pinned in `.github/workflows/ci.yaml`; a newer nightly can format differently from CI.
 
 ```bash
-cargo +nightly fmt --all
+NIGHTLY="$(sed -nE 's/^[[:space:]]*toolchain:[[:space:]]*(nightly-[0-9]{4}-[0-9]{2}-[0-9]{2})[[:space:]]*$/\1/p' .github/workflows/ci.yaml | head -n 1)"
+cargo +"$NIGHTLY" fmt --all
 ```
 
 Check `git diff --stat -- '*.rs'` and report whether any files were reformatted.
@@ -50,7 +52,7 @@ Check `git diff --stat -- '*.rs'` and report whether any files were reformatted.
 Run clippy next. If clippy fails, tests won't compile either, so there's no point running them.
 
 ```bash
-cargo +nightly clippy --workspace --all-targets --all-features
+cargo +"$NIGHTLY" clippy --workspace --all-targets --all-features
 ```
 
 Report pass/fail. If there are warnings or errors, list them.

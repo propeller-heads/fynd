@@ -139,8 +139,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 - `cargo nextest run --workspace --all-targets --all-features` — full test suite
 - `cargo nextest run -p fynd-core --features test-utils --test integration` — replayed-market integration tests against recorded fixtures (`fynd-core/tests/fixtures/`, Git LFS). See `fynd-core/tests/integration/README.md`; regenerate baselines with the ignored `regenerate_expected_outputs` test, record fresh markets with `tools/record-market`
-- `cargo +nightly clippy --workspace --all-targets --all-features` — lint
-- `cargo +nightly fmt --all --check` — format check
+- `cargo +<pinned> clippy --workspace --all-targets --all-features` — lint (`<pinned>` = the nightly in `.github/workflows/ci.yaml`; `./check.sh` reads it)
+- `cargo +<pinned> fmt --all --check` — format check
+- `scripts/fixture-counts.sh` — prints the counts pinned against the integration fixture, and the component count of each protocol system (use after a tycho bump)
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client` — doc build (broken links, missing docs)
 - OpenAPI drift: `cargo run -- openapi | jq 'del(.info.version)'` vs `clients/openapi.json`
 - TypeScript: `pnpm --dir clients/typescript install && pnpm --dir clients/typescript --filter @kayibal/fynd-client run test`

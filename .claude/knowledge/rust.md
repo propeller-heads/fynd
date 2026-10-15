@@ -12,9 +12,10 @@ cargo clippy --all-features
 
 After a task is done, run `./check.sh` (the same script runs as a precommit hook).
 
-`check.sh` runs, in order:
-1. `cargo +nightly fmt -- --check`
-2. `cargo +nightly clippy --locked --all --all-features --all-targets -- -D warnings`
+`check.sh` runs, in order, with the nightly pinned in `.github/workflows/ci.yaml` (`<pinned>` below):
+0. A check that no Git LFS fixture is still a pointer (run `git lfs pull` if it is)
+1. `cargo +<pinned> fmt -- --check`
+2. `cargo +<pinned> clippy --locked --all --all-features --all-targets -- -D warnings`
 3. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client`
 4. `cargo nextest run --workspace --locked --all-targets --all-features --bin fynd`
 
@@ -53,6 +54,6 @@ refactor the code instead. Comments explain WHY, not WHAT. Wrap comment lines at
 - **Concise test names.** Name tests after what is being tested, not the expected outcome. `test_find_route_options_default`
   not `test_find_route_options_default_is_no_overrides`. Prepend all test names with 'test_'.
 
-After every task is done, run `cargo +nightly fmt --all` and the tests that cover what you changed (e.g.
+After every task is done, run `cargo +<pinned> fmt --all` (the nightly pinned in `.github/workflows/ci.yaml`; a newer nightly can format differently from CI) and the tests that cover what you changed (e.g.
 `cargo nextest run -p fynd-core`). Save the full `run-ci` skill for when you open a PR or change something
 workspace-wide. Then check whether docs need updating with the sync-docs skill.

@@ -5,7 +5,7 @@
 ### Before committing or pushing
 
 1. Re-read your changes for unnecessary complexity and unclear naming
-2. Format: `cargo +nightly fmt --all`
+2. Format: `cargo +<pinned> fmt --all`, with the nightly pinned in `.github/workflows/ci.yaml` (a newer nightly can format differently from CI)
 3. Run only the tests that cover what you changed, e.g. `cargo nextest run -p fynd-core` or
    `cargo nextest run -E 'test(route_validation)'`. Do not run the whole workspace.
 4. Run the `sync-docs` skill if you changed behaviour that the docs describe.
