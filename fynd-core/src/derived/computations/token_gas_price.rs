@@ -2400,6 +2400,43 @@ mod tests {
         );
     }
 
+    /// A block inside the interval with no stored prices runs a pass, having nothing to serve.
+    #[tokio::test]
+    async fn test_a_pass_inside_the_interval_with_nothing_stored() {
+        use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+
+        let eth = token(0, "ETH");
+        let aaa = token(1, "AAA");
+        let (market, _) =
+            setup_market_weighted(vec![("eth_aaa", &eth, &aaa, MockProtocolSim::new(2000.0))]);
+        let computation =
+            TokenGasPriceComputation::new(eth.address.clone(), 1, BigUint::from(PROBE_AMOUNT))
+                .with_min_pass_interval(Duration::from_secs(3600));
+        let store = DerivedData::new_shared();
+        computation
+            .compute(&market, &store, &ChangedComponents::default())
+            .await
+            .expect("pricing must not fail");
+        market.write().await.update_states([(
+            "eth_aaa".to_string(),
+            Box::new(MockProtocolSim::new(4000.0)) as Box<dyn ProtocolSim>,
+        )]);
+        let changed = ChangedComponents {
+            updated: vec!["eth_aaa".to_string()],
+            ..ChangedComponents::default()
+        };
+
+        let output = computation
+            .compute(&market, &store, &changed)
+            .await
+            .expect("pricing must not fail");
+
+        assert!(
+            (ratio(&output.data[&aaa.address]) - 4000.0).abs() < 1e-6,
+            "with nothing stored, the block inside the interval prices the moved market"
+        );
+    }
+
     /// An arriving component runs a pass however recently the last one ran, because the tokens
     /// it brings cannot be quoted until they have a price.
     #[tokio::test]

@@ -263,6 +263,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_compute_from_stored_prices() {
+        let eth = token(0x01, "ETH");
+        let usdc = token(0x02, "USDC");
+        let kept = ("kept".to_string(), eth.address.clone(), usdc.address.clone());
+        let gone = ("gone".to_string(), eth.address.clone(), usdc.address.clone());
+        let derived = DerivedData::new_shared();
+        derived
+            .try_write()
+            .unwrap()
+            .set_spot_prices(
+                SpotPrices::from_iter([(kept.clone(), 42.0), (gone.clone(), 7.0)]),
+                vec![],
+                1,
+            );
+        let changed = ChangedComponents { removed: vec!["gone".to_string()], ..Default::default() };
+
+        let output = SpotPriceComputation::new()
+            .compute(&MarketData::new_shared(), &derived, &changed)
+            .await
+            .unwrap();
+
+        assert_eq!(output.data, SpotPrices::from_iter([(kept, 42.0)]));
+    }
+
     /// MockProtocolSim spot_price behavior:
     /// - When base < quote: returns spot_price
     /// - When base > quote: returns 1/spot_price

@@ -461,6 +461,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compute_from_stored_depths() {
+        let eth = token(0, "ETH");
+        let usdc = token(1, "USDC");
+        let kept: ComponentDepthKey = ("kept".into(), eth.address.clone(), usdc.address.clone());
+        let gone: ComponentDepthKey = ("gone".into(), eth.address.clone(), usdc.address.clone());
+        let derived = DerivedData::new_shared();
+        {
+            let mut store = derived.try_write().unwrap();
+            store.set_spot_prices(SpotPrices::default(), vec![], 1);
+            store.set_component_depths(
+                ComponentDepths::from_iter([
+                    (kept.clone(), BigUint::from(42u32)),
+                    (gone.clone(), BigUint::from(7u32)),
+                ]),
+                vec![],
+                1,
+            );
+        }
+        let changed = ChangedComponents { removed: vec!["gone".to_string()], ..Default::default() };
+
+        let output = ComponentDepthComputation::default()
+            .compute(&MarketData::new_shared(), &derived, &changed)
+            .await
+            .unwrap();
+
+        assert_eq!(output.data, ComponentDepths::from_iter([(kept, BigUint::from(42u32))]));
+    }
+
+    #[tokio::test]
     async fn test_compute_missing_spot_prices_returns_error() {
         let eth = token(0, "ETH");
         let usdc = token(1, "USDC");
