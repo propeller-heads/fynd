@@ -97,12 +97,7 @@ impl PriceGuard {
         let mut passing = Vec::new();
         let mut best_rejected = None;
         for candidate in candidates {
-            let passes = self
-                .validated_token_pair(&candidate)
-                .is_some_and(|(token_in, token_out)| {
-                    self.check_price(&candidate, &token_in, &token_out, config)
-                });
-            if passes {
+            if self.passes(&candidate, config) {
                 passing.push(candidate);
             } else {
                 best_rejected.get_or_insert(candidate);
@@ -117,6 +112,35 @@ impl PriceGuard {
         let mut order_quote = best_rejected.ok_or(PriceGuardError::EmptyQuoteCandidates)?;
         order_quote.set_status(QuoteStatus::PriceCheckFailed);
         Ok(vec![order_quote])
+    }
+
+    /// Whether `quote`'s amount out is within `config`'s tolerance of at least one provider's
+    /// price, or no provider can price it and `config` lets such quotes through.
+    fn passes(&self, quote: &OrderQuote, config: &PriceGuardConfig) -> bool {
+        self.validated_token_pair(quote)
+            .is_some_and(|(token_in, token_out)| {
+                self.check_price(
+                    &token_in,
+                    &token_out,
+                    quote.amount_in(),
+                    quote.amount_out(),
+                    config,
+                )
+            })
+    }
+
+    /// Whether swapping `amount_in` of `token_in` for `amount_out` of `token_out` is within
+    /// `config`'s tolerance of at least one provider's price, or no provider can price the pair
+    /// and `config` lets such swaps through.
+    pub(crate) fn swap_passes(
+        &self,
+        token_in: &Address,
+        token_out: &Address,
+        amount_in: &BigUint,
+        amount_out: &BigUint,
+        config: &PriceGuardConfig,
+    ) -> bool {
+        self.check_price(token_in, token_out, amount_in, amount_out, config)
     }
 
     /// Checks that a successful quote has a route with input/output tokens.
@@ -137,14 +161,15 @@ impl PriceGuard {
     /// Queries all providers and returns `true` if at least one validates.
     fn check_price(
         &self,
-        quote: &OrderQuote,
         token_in: &Address,
         token_out: &Address,
+        amount_in: &BigUint,
+        amount_out: &BigUint,
         config: &PriceGuardConfig,
     ) -> bool {
         let results = self
             .registry
-            .get_all_expected_out(token_in, token_out, quote.amount_in());
+            .get_all_expected_out(token_in, token_out, amount_in);
 
         let mut price_out_of_tolerance = false;
         let mut has_provider_error = false;
@@ -152,7 +177,7 @@ impl PriceGuard {
         for result in &results {
             match result {
                 Ok(price) => {
-                    if self.price_within_tolerance(quote, price, config) {
+                    if Self::price_within_tolerance(amount_out, price, config) {
                         return true
                     }
                     price_out_of_tolerance = true;
@@ -176,10 +201,9 @@ impl PriceGuard {
         }
     }
 
-    /// Returns `true` if the quote's output is within the BPS tolerance of the external price.
+    /// Returns `true` if `fynd_amount_out` is within the BPS tolerance of the external price.
     fn price_within_tolerance(
-        &self,
-        quote: &OrderQuote,
+        fynd_amount_out: &BigUint,
         provider_price: &ExternalPrice,
         config: &PriceGuardConfig,
     ) -> bool {
@@ -191,7 +215,6 @@ impl PriceGuard {
         }
 
         let provider_amount_out = provider_price.expected_amount_out();
-        let fynd_amount_out = quote.amount_out();
 
         let (diff, tolerance) = if fynd_amount_out >= provider_amount_out {
             (fynd_amount_out - provider_amount_out, config.upper_tolerance_bps())
