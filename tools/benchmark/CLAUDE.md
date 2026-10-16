@@ -31,10 +31,11 @@ Run `--help` on any subcommand for detailed options.
    ```bash
    set -a && source .env && set +a
    RUST_LOG=info ./target/release/fynd serve \
-     -w worker_pools_pfw3.toml \
+     -w worker_pools.toml \
      --protocols all_onchain,rfq:bebop,rfq:hashflow \
      > /tmp/fynd_solver.log 2>&1 &
    ```
+   Pass `-w` the worker pools config under test (the repo's `worker_pools.toml` is the default).
    Wait until `/v1/health` returns `healthy: true` (~5–10 min for derived data).
 
 3. **Download the full trade dataset** (once):

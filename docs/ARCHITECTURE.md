@@ -23,7 +23,7 @@ This modular architecture allows users to:
 * **Concurrency Model**: Hybrid async/threaded -- I/O on tokio, route finding on dedicated OS threads
 * **Data Sharing**: `Arc<RwLock<>>` with write-preferring lock for MarketState (single writer, many readers)
 * **Path-Finding**: Pluggable `Algorithm` trait with associated graph types, allowing each algorithm to use its preferred graph representation
-* **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementation uses `petgraph::StableDiGraph`
+* **Graph Management**: `GraphManager` trait with incremental updates from market events; built-in implementations are `PetgraphStableDiGraphManager` (`petgraph::StableDiGraph`) and `TopologyGraphManager`
 * **Multi-Solver Competition**: Multiple worker pools with different configurations compete per request; WorkerPoolRouter selects the best result
 * **Output Format**: Structured `Quote` objects (routes, amounts, gas estimates) with optional encoded transaction
 * **Derived Data Pipeline**: Pre-computed spot prices, component depths, and token gas prices fed to algorithms via a separate computation framework
@@ -49,7 +49,7 @@ This modular architecture allows users to:
 │                            WorkerPoolRouter                                 │
 │           Orchestrates multiple solver pools, selects best solution         │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  • Fan-out: Send each order to ALL solver pools in parallel           │  │
+│  │  • Fan-out: Send each order to its allocated solver pools in parallel │  │
 │  │  • Timeout: Configurable deadline per request                         │  │
 │  │  • Early return: Optional min_responses for fast path                 │  │
 │  │  • Selection: Choose best solution by amount_out_net_gas              │  │
@@ -143,6 +143,8 @@ Actix Web HTTP handlers. Validates requests, delegates to WorkerPoolRouter, retu
 * `POST /v1/quote` -- Submit quote requests
 * `GET /v1/health` -- Health check (data freshness, derived data readiness, gas-price staleness, solver pool count)
 * `GET /v1/info` -- Instance info (chain ID, router address, Permit2 address)
+* `GET /v1/prices`, `GET /v1/tokens` -- Derived prices and graph tokens (only with the `fynd-rpc/experimental` feature)
+* `/docs/` -- Swagger UI for the self-hosted API; `/docs/hosted/` for the hosted gateway, served only when `FYND_HOSTED_SWAGGER_URL` is set
 * `GET /metrics` -- Prometheus metrics (separate server, port 9898 by default)
 
 ***
@@ -157,9 +159,10 @@ Orchestrates quote requests across multiple worker pools:
 2. Fans out each order to its allocated worker pools in parallel
 3. Manages per-request timeouts with optional early return
 4. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
-5. Selects the best solution by refined `amount_out_net_gas`
-6. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided)
-7. Reports failures with error types and metrics
+5. Drops candidates whose pAMM fallback cannot clear `min_amount_out`, then selects the best solution by refined `amount_out_net_gas`
+6. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided). When the best candidate fails to encode, the next candidate without an RFQ leg is tried, within the encoding retry budget
+7. Optionally simulates the encoded quotes (`--enable-simulation`, requested per quote with `EncodingOptions.simulate`)
+8. Reports failures with error types and metrics
 
 ***
 
@@ -226,6 +229,7 @@ Graph management infrastructure:
 
 * `GraphManager` trait: initialize + incremental updates from events
 * `PetgraphStableDiGraphManager`: Implementation using `petgraph::StableDiGraph`
+* `TopologyGraphManager`: Manages a `TopologyGraph` (`token_graph.rs`), used by `MostLiquidAlgorithm` and `WaterFillAlgorithm`
 * `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (component depths)
 * `Path` type: Sequence of edges for route representation
 
@@ -260,7 +264,7 @@ Pre-computes analytics from raw market data:
   has fallen by the configured marginal price drop
 * `TokenGasPriceComputation`: Token prices relative to gas token
 
-Computations run in dependency order. Workers use `ReadinessTracker` to wait for required data before solving.
+Computations run in dependency order. The token-price pass is bounded by `pricing_max_hops`, `pricing_max_tokens_per_pass` and a minimum pass interval. A caller can add its own `DerivedComputation` with `FyndBuilder::with_computation`; it runs after the built-ins. Workers use `ReadinessTracker` to wait for required data before solving.
 
 ***
 
@@ -268,7 +272,7 @@ Computations run in dependency order. Workers use `ReadinessTracker` to wait for
 
 **Crate:** `fynd-core` **Location:** `fynd-core/src/feed/gas.rs`
 
-Background worker that fetches gas prices from the RPC node. Signaled by TychoFeed after each block update.
+Background worker that fetches gas prices from the RPC node on its own timer (`--gas-refresh-interval-secs`), independent of TychoFeed.
 
 ***
 
@@ -308,10 +312,13 @@ WorkerPoolRouter (allocate pools, then fan out)
     ├──► Pool C Queue ──► Worker ──► Algorithm ──► Timeout
     │
     ▼
-WorkerPoolRouter (select best by amount_out_net_gas)
+WorkerPoolRouter (drop pAMM-fallback candidates below min_amount_out, select best by amount_out_net_gas)
     │
     ▼ (optional)
-Encoder (encode solution into on-chain transaction)
+Encoder (encode solution into on-chain transaction; on failure, retry next non-RFQ candidate)
+    │
+    ▼ (optional)
+QuoteSimulator (simulate the encoded quote)
     │
     ▼
 JSON Response to Client
@@ -329,7 +336,6 @@ TychoFeed
     │       ├──► Worker 1 GraphManager (update graph)
     │       ├──► Worker 2 GraphManager (update graph)
     │       └──► Worker N GraphManager (update graph)
-    └──► Trigger Gas Price Fetcher
     └──► ComputationManager
             ├──► SpotPriceComputation
             ├──► TokenGasPriceComputation

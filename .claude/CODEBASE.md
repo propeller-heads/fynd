@@ -1,4 +1,4 @@
-<!-- docs-synced-at: 1eb0edeaf9e75c454440b66e37f95fb42156dd51 -->
+<!-- docs-synced-at: 411f9358e9dc7255facf322ffe80bd1994e52266 -->
 # Fynd Codebase Guide
 
 High-performance DeFi route-finding engine built on Tycho. Finds optimal swap routes across
@@ -24,7 +24,7 @@ Key properties:
 
 | Crate | Location | Description |
 |---|---|---|
-| `fynd` | root (`src/`) | CLI binary and library crate: parses args, sets up observability, runs `FyndRPCBuilder`. `lib.rs` re-exports `fynd_core` and `fynd_rpc` as a single dependency |
+| `fynd` | root (`src/`) | CLI binary and library crate: parses args, sets up observability, runs `FyndRPCBuilder`. `lib.rs` re-exports `fynd_core` and `fynd_rpc` as a single dependency. The default `jemalloc` feature sets jemalloc as the global allocator, and `jemalloc_stats.rs` exports allocator gauges every 60 s |
 | [`fynd-core`](../fynd-core/CLAUDE.md) | `fynd-core/` | Pure solving logic: algorithms, worker pools, graph, feed, derived data, encoding. No HTTP deps |
 | [`fynd-rpc`](../fynd-rpc/CLAUDE.md) | `fynd-rpc/` | HTTP RPC server builder (Actix Web): API handlers, middleware, `FyndRPCBuilder` |
 | [`fynd-rpc-types`](../fynd-rpc-types/CLAUDE.md) | `fynd-rpc-types/` | Shared DTO types for the RPC API (request/response wire format) |
@@ -33,7 +33,7 @@ Key properties:
 
 ### [Clients](../clients/CLAUDE.md)
 
-Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `cargo run -- openapi`).
+Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `cargo run --features fynd-rpc/experimental -- openapi`, or `./scripts/update-openapi.sh`).
 
 | Client | Location | Package |
 |---|---|---|
@@ -46,7 +46,6 @@ Both clients wrap the same OpenAPI spec (`clients/openapi.json`, generated via `
 |---|---|---|
 | `fynd-benchmark` | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | `fynd-swap-cli` | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
-| `hindsight` | `tools/hindsight/` | Decode solver swaps from on-chain data; live-monitor re-solve quality |
 | `record-market` | `tools/record-market/` | Record live Tycho market state and generate expected outputs for the integration tests |
 | `fynd-gas-audit` | `tools/fynd-gas-audit/` | Compare quote-time gas estimates against `eth_estimateGas` |
 | `fynd-tools-common` | `tools/common/` | Shared library for the tool crates: aggregator quote model, on-chain swap simulation, BPS math |
@@ -57,7 +56,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 ### Core Components
 
-1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`, `GET /v1/info`
+1. **RouterApi** (`fynd-rpc/src/api/`) — Actix Web HTTP handlers: `POST /v1/quote`, `GET /v1/health`, `GET /v1/info`, plus `GET /v1/prices` and `GET /v1/tokens` with the `fynd-rpc/experimental` feature. Swagger UI at `/docs/`
 2. **WorkerPoolRouter** (`fynd-core/src/worker_pool_router/`) — Allocates the pools that serve each order, fans out to those, selects best by `amount_out_net_gas`
 3. **WorkerPool** (`fynd-core/src/worker_pool/`) — N `SolverWorker` instances on dedicated OS threads per pool
 4. **Algorithm trait** (`fynd-core/src/algorithm/`) — Pluggable route-finding; built-in:
@@ -69,7 +68,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component (pool) depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
-9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` implementation
+9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` and `TopologyGraphManager` implementations
 10. **Simulation** (`fynd-core/src/simulation/`) — trace-guided ERC-20 storage-layout discovery, `eth_simulateV1` quote simulation, and revert decoding. Enabled per deployment with `--enable-simulation`
 
 ### Data Flow
@@ -112,11 +111,17 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `WORKER_POOLS_CONFIG` | Worker pools config file (default: `worker_pools.toml`) |
 | `BLOCKLIST_CONFIG` | Blocklist config file |
 | `EXCLUSIVE_SWAP_CONTROLLER_KEY` | Restricted exclusive-liquidity deployments only — see [Exclusive liquidity](#exclusive-liquidity-restricted). Unset in ordinary deployments |
-| `EXCLUSIVE_SWAP_OUTPUT_CAP_BPS` | Restricted exclusive-liquidity deployments only. How far above a quoted output an exclusive-swap payload stays spendable, in basis points (default `100`). Raising it reverts fewer takers whose pool moved in their favour and leaves a copycat proportionally more room; values above `10000` are rejected with a warning and the default used |
+| `EXCLUSIVE_SWAP_OUTPUT_CAP_BPS` | Restricted exclusive-liquidity deployments only. How far above a quoted output an exclusive-swap payload stays spendable, in basis points (default `5000`). Raising it reverts fewer takers whose pool moved in their favour and leaves a copycat proportionally more room; values above `10000` are rejected with a warning and the default used |
 | `CALLDATA_WATERMARK` | Watermark bytes appended to every encoded transaction's calldata (also `--calldata-watermark`). Ignored by the EVM; attributes router calls to this deployment. When unset, `serve` stamps `fynd/<version>` plus a truncated SHA-256 of `TYCHO_API_KEY` when that is set (`default_calldata_watermark` in `src/serve.rs`) |
 | `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY` | Private key for disable-slippage-taking encoding: signs zero-fee `ClientFeeParams` naming its own address as the router fee client when a request carries the proxy-injected `x-disable-slippage-taking: true` header. The FeeCalculator's positive-slippage exemption for that address does the actual disabling. Two consequences, both covered in `fynd-core/src/encoding/disable_slippage_taking.rs`: the signer's address replaces every other fee-client attribution for that request (including the `tx.origin` fallback the order sender stands in for), so the request is charged this key's fee rates, not the caller's; and the signed params carry a deadline, so such a quote expires ~120s after encoding where an unsigned one never did. Unset by default (such requests then fail) |
+| `EXCLUSIVE_ROUTE_USER_SHARE_BPS` | Restricted exclusive-liquidity deployments only. Share of an exclusive route's improvement over the public reference handed to the user, in bps of that improvement (default `1000`) |
+| `TYCHO_SUBSCRIPTION_BUFFER_SIZE` | Delta messages buffered per Tycho subscription (also `--tycho-subscription-buffer-size`). Unset keeps Tycho's default |
+| `PRICING_MAX_HOPS`, `PRICING_MAX_TOKENS_PER_PASS`, `PRICING_MIN_PASS_INTERVAL_MS` | Bounds on the token-pricing pass (also `--pricing-*` flags): how far from the gas token it reaches, how many tokens one pass attempts, and the minimum interval between passes. Unset keeps the built-in defaults |
+| `TOKEN_PRICE_JUMP_WARN_BPS` | Price move within one pricing pass that logs a warning (default `1000`) |
+| `TYCHO_CHAINS_CONFIG` | Path to a custom-chains `chains.yaml`, needed for a chain Tycho does not know as a built-in |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
-| `METRICS_PORT` | Prometheus metrics server port (default: `9898`, requires `metrics` feature) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | When set, traces are exported over OTLP to this endpoint |
+| `METRICS_PORT` / `METRICS_HOST` | Prometheus metrics server port (default: `9898`) and bind address (default: all interfaces); require the `metrics` feature |
 | `FYND_HOSTED_SWAGGER_URL` | Server URL advertised by the hosted OpenAPI spec. When unset, the hosted Swagger UI (`/docs/hosted/`) is not served — only the self-hosted `/docs/` |
 | `FYND_COLLECTOR_URL` | Root URL of the collector every answered quote's record is posted to (also `--collector-url`), in batches on `<url>/v1/records`. When unset, no record queue and no sending task are built and the pod records nothing |
 
@@ -124,7 +129,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
+| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--simulate-on-quote-block` (simulate on the quote's block instead of the latest), `--encoding-retry-budget-ms` (default `5`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
 | `openapi` | Print the OpenAPI spec JSON to stdout |
 | `derive-connector-tokens` | Derive and print connector token lists for configured protocols |
 
@@ -137,12 +142,13 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 ## Testing
 
-- `cargo nextest run --workspace --all-targets --all-features` — full test suite
+- `cargo nextest run --workspace --all-targets --all-features -E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'` — full test suite (CI excludes the bench-harness binaries)
 - `cargo nextest run -p fynd-core --features test-utils --test integration` — replayed-market integration tests against recorded fixtures (`fynd-core/tests/fixtures/`, Git LFS). See `fynd-core/tests/integration/README.md`; regenerate baselines with the ignored `regenerate_expected_outputs` test, record fresh markets with `tools/record-market`
 - `cargo +nightly clippy --workspace --all-targets --all-features` — lint
 - `cargo +nightly fmt --all --check` — format check
-- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client` — doc build (broken links, missing docs)
-- OpenAPI drift: `cargo run -- openapi | jq 'del(.info.version)'` vs `clients/openapi.json`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client --package fynd-bench-harness --package fynd-test-fixtures --package fynd-tools-common` — doc build (broken links, missing docs)
+- OpenAPI drift: `cargo run --locked --features fynd-rpc/experimental -- openapi | jq 'del(.info.version)'` vs `clients/openapi.json`; CI also regenerates `clients/typescript/client/src/schema.d.ts` with `openapi-typescript` and checks it for drift
+- `cargo audit` — dependency advisories (CI `security_audit` job)
 - TypeScript: `pnpm --dir clients/typescript install && pnpm --dir clients/typescript --filter @kayibal/fynd-client run test`
 
 ## Exclusive Liquidity (restricted)

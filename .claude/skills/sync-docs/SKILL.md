@@ -62,7 +62,7 @@ This repo's documentation lives in three places:
 | `fynd-rpc/CLAUDE.md` | HTTP RPC server: API handlers, builder, config, protocol fetching |
 | `fynd-rpc-types/CLAUDE.md` | Shared DTO types for the RPC API |
 | `clients/CLAUDE.md` | Hub doc: Rust client (`clients/rust/`) + TypeScript client (`clients/typescript/`) |
-| `tools/CLAUDE.md` | Hub doc: fynd-benchmark + fynd-swap-cli |
+| `tools/CLAUDE.md` | Hub doc: fynd-benchmark, fynd-swap-cli, record-market, fynd-gas-audit, fynd-tools-common |
 | `tools/benchmark/CLAUDE.md` | Benchmark tooling detail: load test, compare, scale |
 
 ### 3. Architecture docs

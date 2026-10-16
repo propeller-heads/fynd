@@ -20,25 +20,28 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 - `Order` — token_in, token_out, amount, side (Sell only), sender, optional receiver
 - `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options, route_filter
 - `RouteFilter` — exclude_pools, exclude_protocols, exclude_tokens: the liquidity a request
-  excludes from every route
-- `EncodingOptions` — slippage, transfer_type, permit, permit2_signature, client_fee_params, price_guard (optional `PriceGuardConfig`)
+  excludes from every route. Built with `with_excluded_pools` / `with_excluded_protocols` /
+  `with_excluded_tokens`, read with `excluded_pools` / `excluded_protocols` / `excluded_tokens`
+- `EncodingOptions` — slippage, transfer_type, permit, permit2_signature, client_fee_params, price_guard (optional `PriceGuardConfig`), simulate (ask for `simulation_result` on each quote)
 - `UserTransferType` — TransferFrom (default) / TransferFromPermit2 / UseVaultsFunds
-- `ClientFeeParams` — bps, receiver, max_subsidy, signature (client fee on swap output)
-- `PriceGuardConfig` — external price validation config (provider registry, deviation thresholds)
+- `ClientFeeParams` — bps, receiver, max_contribution, deadline, signature (client fee on swap output)
+- `PriceGuardConfig` — per-request price guard overrides, all optional: lower_tolerance_bps, upper_tolerance_bps, fail_on_provider_error, fail_on_token_price_not_found, enabled
 - `PermitSingle`, `PermitDetails` — Permit2 authorization data
 
 ## Response Types
 
 - `Quote` — orders (Vec<OrderQuote>), total_gas_estimate, solve_time_ms
-- `OrderQuote` — order_id, status, route, amount_in/out, gas_estimate, price_impact_bps, amount_out_net_gas, block, gas_price, transaction, fee_breakdown, algorithm
-- `FeeBreakdown` — router_fee, client_fee, max_slippage, min_amount_received (all absolute token-out amounts, populated when encoding_options is set)
-- `QuoteStatus` — Success, NoRouteFound, InsufficientLiquidity, Timeout, NotReady, PriceCheckFailed
+- `OrderQuote` — order_id, status, route, amount_in/out, gas_estimate, price_impact_bps, amount_out_net_gas, block, gas_price, transaction, fee_breakdown, simulation_result, algorithm
+- `FeeBreakdown` — router_fee, client_fee, max_slippage, min_amount_received (all absolute token-out amounts, populated when encoding_options is set), swaps_hash
+- `QuoteStatus` — Success, NoRouteFound, InsufficientLiquidity, Timeout, NotReady, PriceCheckFailed, EncodingFailed
+- `SimulationResult` — tagged by `status`: `success` (amount_out, gas_used) or `failure` (reason)
 - `Route` — Vec<Swap>
 - `Swap` — component_id, protocol, token_in/out, amount_in/out, gas_estimate, split
 - `BlockInfo` — number, hash, timestamp
-- `Transaction` — to, value, data (hex-encoded calldata)
-- `HealthStatus` — market_last_updated, derived_data_ready, num_components, num_solver_pools
-- `InstanceInfo` — static metadata returned by `GET /v1/info` (version, chain, spender address)
+- `Transaction` — to, value, data (hex-encoded calldata), client_fee_signature_offset (where in `data` the client overwrites the placeholder client fee signature)
+- `HealthStatus` — healthy, last_update_ms, num_solver_pools, derived_data_ready, gas_price_age_ms
+- `InstanceInfo` — static metadata returned by `GET /v1/info` (chain_id, router_address, permit2_address, version)
+- `ErrorResponse` — error body returned with non-2xx statuses
 
 ## OpenAPI Codegen
 
