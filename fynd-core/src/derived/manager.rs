@@ -1354,6 +1354,57 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_spot_price_failure_cascade() {
+        // A startup block whose only component has no sim state prices nothing. Spot prices and
+        // the pool depths that read them still complete, each reporting the failed pairs; token
+        // prices read no derived data.
+        let market = market_with_component_no_sim_state();
+        let topology = market.read().await.component_topology();
+        let (manager, _event_rx) =
+            ComputationManager::new(ComputationManagerConfig::new(), market).unwrap();
+        let mut event_rx = manager.event_sender().subscribe();
+
+        manager
+            .compute_all(&ChangedComponents { added: topology, ..Default::default() })
+            .await;
+        let events = drain_events(&mut event_rx);
+
+        assert_eq!(
+            event_summary(&events),
+            vec![
+                ("new_block", ""),
+                ("complete", "spot_prices"),
+                ("complete", "token_prices"),
+                ("complete", "pool_depths"),
+            ]
+        );
+        for id in ["spot_prices", "pool_depths"] {
+            let failed = events
+                .iter()
+                .find_map(|event| match event {
+                    DerivedDataEvent::ComputationComplete {
+                        computation_id, failed_items, ..
+                    } if *computation_id == id => Some(failed_items.len()),
+                    _ => None,
+                });
+            assert_eq!(failed, Some(2), "{id} should report both directed pairs as failed");
+        }
+    }
+
+    /// Creates a market with a component in topology but without simulation state.
+    fn market_with_component_no_sim_state() -> MarketData {
+        let eth = token(1, "ETH");
+        let usdc = token(2, "USDC");
+        let component = component("component", &[eth.clone(), usdc.clone()]);
+
+        let mut market = MarketState::new();
+        market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
+        market.upsert_components(std::iter::once(component));
+        market.upsert_tokens([eth, usdc]);
+        MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
+    }
+
     /// Creates a market with two components: one with sim state (component succeeds) and one
     /// without (component fails). Used to trigger partial spot price failure.
     fn market_with_mixed_sim_states() -> MarketData {
