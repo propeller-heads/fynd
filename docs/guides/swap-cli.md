@@ -50,7 +50,7 @@ docker compose -f docker-compose.swap.yml down
 **Prerequisites:** A running Fynd server — start `fynd serve` first. See the [quickstart](../get-started/quickstart/ "mention") if you haven't.
 
 ```bash
-cargo install --path tools/fynd-swap-cli
+cargo install --locked --path tools/fynd-swap-cli
 ```
 
 {% endtab %}

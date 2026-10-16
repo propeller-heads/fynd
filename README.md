@@ -27,7 +27,7 @@ Fynd is provided under the [Fynd License 1.0](LICENSE.md). Use, modification, di
 ## Quickstart
 
 ```bash
-cargo install fynd
+cargo install fynd --locked
 export TYCHO_API_KEY=your-api-key
 export RUST_LOG=fynd=info
 fynd serve
@@ -73,11 +73,11 @@ The `fynd` binary exposes the following Cargo features:
 
 ```bash
 # Default build (metrics on)
-cargo install fynd
+cargo install fynd --locked
 cargo build --release
 
 # Build without the metrics exporter (smaller binary, no /metrics endpoint)
-cargo install fynd --no-default-features
+cargo install fynd --locked --no-default-features
 cargo build --release --no-default-features
 ```
 
