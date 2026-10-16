@@ -1,4 +1,21 @@
 
+## [0.113.0](https://github.com/propeller-heads/fynd/compare/0.112.4...0.113.0) (2026-10-16)
+
+### Features
+
+* label simulation metrics with their purpose ([19e8333](https://github.com/propeller-heads/fynd/commit/19e83335e9098aef9c144e6719655a72d5654af2))
+* let the server simulate a quote on the block it was priced on ([508c10b](https://github.com/propeller-heads/fynd/commit/508c10bdb77b5565c63452ba15fa56ab13a027c7))
+* let a caller run its own derived computation ([9cc22b3](https://github.com/propeller-heads/fynd/commit/9cc22b3c58933a11825bf39e6fe09e439254a6eb))
+* keep the event logs and the reverts of a simulated quote ([92caf26](https://github.com/propeller-heads/fynd/commit/92caf2608a05f287da4807c1df8de3a181f73900))
+* let a caller replace the slippage of encoding options ([7e293a6](https://github.com/propeller-heads/fynd/commit/7e293a69323c39de9506ce354cb1b667c9d7ea20))
+* let a caller set quote amounts and retract a quote ([1b30adc](https://github.com/propeller-heads/fynd/commit/1b30adc1787e302b793f6169d0fa59f9bc25ad5b))
+
+### Bug Fixes
+
+* wait for a node that does not have the quote's block yet ([46382e7](https://github.com/propeller-heads/fynd/commit/46382e7547a590634f7e6a759351a4f00da1e26d))
+* find the balance slot of reflection tokens ([2d01f58](https://github.com/propeller-heads/fynd/commit/2d01f586f5085854dfc7051a046bc1a9d77ebb7b))
+
+
 ## [0.112.4](https://github.com/propeller-heads/fynd/compare/0.112.3...0.112.4) (2026-10-15)
 
 ### Features
