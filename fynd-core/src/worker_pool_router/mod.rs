@@ -450,44 +450,61 @@ fn has_rfq_leg(quote: &OrderQuote) -> bool {
     })
 }
 
-/// Drops each candidate with an RFQ leg whose amount out sits more than 100 bps above the
-/// external price, whatever the request's own price guard settings.
+/// Drops each quote with an RFQ leg whose amount out sits more than 100 bps above the external
+/// price for that leg's own pair, whatever the request's price guard settings.
 ///
 /// An RFQ leg is priced from the maker's indicative levels, which can sit far from what the maker
-/// signs: a route through two makers whose levels cross quotes an output neither will fill. The
-/// check reads cached external prices, so it adds no round trip. A candidate below the external
-/// price, or one no provider prices, is kept. When every candidate of an order is dropped, the
-/// best one is returned with status `PriceCheckFailed`.
-fn drop_rfq_price_outliers(
+/// signs: a route through two makers whose levels cross quotes an output neither will fill.
+/// Checking each leg rather than the route's end-to-end pair names the maker that is off and covers
+/// routes whose end tokens no provider prices. The check reads cached external prices, so it adds
+/// no round trip. It runs before ranking, so a dropped quote is neither a fallback candidate nor
+/// the public reference an exclusive candidate is measured against. A leg below the external price,
+/// or one whose pair no provider prices, passes.
+fn drop_quotes_with_rfq_legs_above_external_price(
     guard: &PriceGuard,
-    ranked_per_order: Vec<Vec<OrderQuote>>,
-) -> Vec<Vec<OrderQuote>> {
+    order_responses: &mut [OrderResponses],
+) {
     let config = PriceGuardConfig::default()
         .with_enabled(true)
         .with_upper_tolerance_bps(100)
         .with_lower_tolerance_bps(10_000);
-    let mut kept_per_order = Vec::with_capacity(ranked_per_order.len());
-    for candidates in ranked_per_order {
-        let mut kept = Vec::with_capacity(candidates.len());
-        let mut best_dropped = None;
-        for candidate in candidates {
-            let is_outlier = candidate.status() == QuoteStatus::Success &&
-                has_rfq_leg(&candidate) &&
-                !guard.passes(&candidate, &config);
-            if is_outlier {
-                counter!("rfq_price_outliers_total").increment(1);
-                best_dropped.get_or_insert(candidate);
-            } else {
-                kept.push(candidate);
+    for responses in order_responses {
+        for WorkerPoolQuote { worker_pool, quote, .. } in &mut responses.quotes {
+            if quote.status() != QuoteStatus::Success {
+                continue;
             }
+            let Some(rejected_leg) = quote.route().and_then(|route| {
+                route.swaps().iter().find(|swap| {
+                    is_rfq_protocol(swap.protocol()) &&
+                        !guard.swap_passes(
+                            swap.token_in(),
+                            swap.token_out(),
+                            swap.amount_in(),
+                            swap.amount_out(),
+                            &config,
+                        )
+                })
+            }) else {
+                continue;
+            };
+            let protocol = rejected_leg.protocol().to_string();
+            debug!(
+                order_id = %quote.order_id(),
+                worker_pool = worker_pool.as_str(),
+                protocol,
+                token_in = %rejected_leg.token_in(),
+                token_out = %rejected_leg.token_out(),
+                amount_in = %rejected_leg.amount_in(),
+                amount_out = %rejected_leg.amount_out(),
+                "dropping quote: an RFQ leg pays too far above the external price"
+            );
+            counter!("rfq_legs_above_external_price_total", "protocol" => protocol).increment(1);
+            quote.set_status(QuoteStatus::NoRouteFound);
+            let cause =
+                SolveError::route_rejected(quote.order_id(), RouteRejection::RfqAboveExternalPrice);
+            quote.set_no_route_cause(Some(cause));
         }
-        if let (true, Some(mut best)) = (kept.is_empty(), best_dropped) {
-            best.set_status(QuoteStatus::PriceCheckFailed);
-            kept.push(best);
-        }
-        kept_per_order.push(kept);
     }
-    kept_per_order
 }
 
 /// Counts `encoding_failures_total` once per order that is returned without a transaction.
@@ -637,6 +654,10 @@ impl WorkerPoolRouter {
 
         // Refine gas estimates for all candidates using estimate_gas_usage before ranking,
         // so ranking uses accurate gas costs rather than naive route.total_gas().
+        if let Some(guard) = &self.price_guard {
+            drop_quotes_with_rfq_legs_above_external_price(guard, &mut order_responses);
+        }
+
         if let Some(encoding_options) = request.options().encoding_options() {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
             drop_pamm_quotes_below_min_amount_out(
@@ -683,11 +704,6 @@ impl WorkerPoolRouter {
         {
             record_quote_comparison(order, responses, request.options());
         }
-
-        let ranked_quotes = match &self.price_guard {
-            Some(guard) => drop_rfq_price_outliers(guard, ranked_quotes),
-            None => ranked_quotes,
-        };
 
         // Validate against external prices when the client explicitly enables it.
         let price_guard_config = request
@@ -2589,104 +2605,182 @@ mod tests {
         assert!(!has_rfq_leg(make_single_quote(900).order()));
     }
 
-    /// Prices every pair at `expected_out`, or at nothing when it is `None`.
-    struct FixedPriceProvider {
-        expected_out: Option<u64>,
+    /// Prices each `(token_in, token_out)` pair in `expected_out` at a fixed amount out, and no
+    /// other pair.
+    struct PairPriceProvider {
+        expected_out: FxHashMap<(Address, Address), u64>,
     }
 
-    impl PriceProvider for FixedPriceProvider {
+    impl PriceProvider for PairPriceProvider {
         fn start(&mut self, _market_data: MarketData) -> tokio::task::JoinHandle<()> {
             tokio::spawn(std::future::ready(()))
         }
 
         fn get_expected_out(
             &self,
-            _token_in: &Address,
-            _token_out: &Address,
+            token_in: &Address,
+            token_out: &Address,
             _amount_in: &BigUint,
         ) -> Result<ExternalPrice, PriceProviderError> {
-            match self.expected_out {
+            match self
+                .expected_out
+                .get(&(token_in.clone(), token_out.clone()))
+            {
                 Some(amount) => {
-                    Ok(ExternalPrice::new(BigUint::from(amount), "fixed".to_string(), 1000))
+                    Ok(ExternalPrice::new(BigUint::from(*amount), "fixed".to_string(), 1000))
                 }
                 None => Err(PriceProviderError::PriceNotFound {
-                    token_in: "0x01".to_string(),
-                    token_out: "0x02".to_string(),
+                    token_in: token_in.to_string(),
+                    token_out: token_out.to_string(),
                 }),
             }
         }
     }
 
-    fn guard_pricing_at(expected_out: Option<u64>) -> PriceGuard {
+    fn guard_pricing(pairs: &[(u8, u8, u64)]) -> PriceGuard {
+        let expected_out = pairs
+            .iter()
+            .map(|(token_in, token_out, amount)| {
+                ((make_address(*token_in), make_address(*token_out)), *amount)
+            })
+            .collect();
         let registry =
-            PriceProviderRegistry::new().register(Box::new(FixedPriceProvider { expected_out }));
+            PriceProviderRegistry::new().register(Box::new(PairPriceProvider { expected_out }));
         PriceGuard::new(registry, vec![])
     }
 
-    fn protocols_of(candidates: &[OrderQuote]) -> Vec<&str> {
-        candidates
-            .iter()
-            .map(|quote| quote.route().expect("route").swaps()[0].protocol())
-            .collect()
+    fn responses_of(quotes: Vec<OrderQuote>) -> Vec<OrderResponses> {
+        vec![OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: quotes
+                .into_iter()
+                .map(|quote| WorkerPoolQuote {
+                    worker_pool: "pool".to_string(),
+                    quote,
+                    solve_time_ms: 5,
+                })
+                .collect(),
+            failed_solvers: vec![],
+        }]
+    }
+
+    fn is_rejected_for_rfq_price(quote: &OrderQuote) -> bool {
+        let Some(SolveError::RouteRejected { reason, .. }) = quote.no_route_cause() else {
+            return false;
+        };
+        quote.status() == QuoteStatus::NoRouteFound &&
+            *reason == RouteRejection::RfqAboveExternalPrice
+    }
+
+    /// Token 0x01 to 0x03 on `uniswap_v2` (1000 in, 990 out), then 0x03 to 0x02 on
+    /// `second_protocol` (990 in, 980 out).
+    fn make_two_hop_quote(second_protocol: &str) -> OrderQuote {
+        let make_token = |addr: Address| Token {
+            address: addr,
+            symbol: "T".to_string(),
+            decimals: 18,
+            tax: Default::default(),
+            gas: vec![],
+            chain: SimChain::Ethereum,
+            quality: 100,
+        };
+        let hops =
+            [(0x01, 0x03, "uniswap_v2", 1000u64, 990u64), (0x03, 0x02, second_protocol, 990, 980)];
+        let mut tokens = FxHashMap::default();
+        let mut swaps = Vec::new();
+        for (index, (token_in, token_out, protocol, amount_in, amount_out)) in
+            hops.into_iter().enumerate()
+        {
+            let token_in_meta = make_token(make_address(token_in));
+            let token_out_meta = make_token(make_address(token_out));
+            swaps.push(Swap::new(
+                format!("pool-{index}"),
+                protocol.to_string(),
+                make_address(token_in),
+                make_address(token_out),
+                BigUint::from(amount_in),
+                BigUint::from(amount_out),
+                BigUint::from(50_000u64),
+                component_with_protocol(
+                    &format!("0x000000000000000000000000000000000000000{}", index + 1),
+                    protocol,
+                    &[token_in_meta.clone(), token_out_meta.clone()],
+                ),
+                Box::new(MockProtocolSim::default()),
+            ));
+            tokens.insert(make_address(token_in), token_in_meta);
+            tokens.insert(make_address(token_out), token_out_meta);
+        }
+        OrderQuote::new(
+            "test-order".to_string(),
+            QuoteStatus::Success,
+            BigUint::from(1000u64),
+            BigUint::from(980u64),
+            BigUint::from(100_000u64),
+            BigUint::from(900u64),
+            BlockInfo::new(1, "0x123".to_string(), 1000),
+            "test".to_string(),
+            Bytes::from(make_address(0xAA).as_ref()),
+            Bytes::from(make_address(0xAA).as_ref()),
+            "1".to_string(),
+        )
+        .with_route(Route::new(swaps, tokens).expect("non-empty route"))
     }
 
     #[test]
-    fn test_drop_rfq_price_outliers() {
-        // Every fixture quotes 990 out: 102 bps above 980.
-        let ranked = vec![vec![
+    fn test_drop_quotes_with_rfq_legs_above_external_price() {
+        // Every single-hop fixture swaps 1000 of 0x01 for 990 of 0x02: 102 bps above 980.
+        let guard = guard_pricing(&[(0x01, 0x02, 980)]);
+        let mut responses = responses_of(vec![
             make_single_quote_on("fallback:rfq:hashflow", 900)
                 .order()
                 .clone(),
             make_single_quote_on("uniswap_v2", 800)
                 .order()
                 .clone(),
-        ]];
+        ]);
 
-        let kept = drop_rfq_price_outliers(&guard_pricing_at(Some(980)), ranked);
+        drop_quotes_with_rfq_legs_above_external_price(&guard, &mut responses);
 
-        assert_eq!(protocols_of(&kept[0]), vec!["uniswap_v2"]);
-        assert_eq!(kept[0][0].status(), QuoteStatus::Success);
+        assert!(is_rejected_for_rfq_price(&responses[0].quotes[0].quote));
+        assert_eq!(responses[0].quotes[1].quote.status(), QuoteStatus::Success);
     }
 
     #[test]
-    fn test_drop_rfq_price_outliers_within_tolerance() {
+    fn test_drop_quotes_with_rfq_legs_above_external_price_checks_each_leg() {
+        // End to end, 980 of 0x02 for 1000 of 0x01 matches the external price; the RFQ leg alone,
+        // 980 of 0x02 for 990 of 0x03, is 208 bps above it.
+        let guard = guard_pricing(&[(0x01, 0x02, 980), (0x03, 0x02, 960)]);
+        let mut responses = responses_of(vec![make_two_hop_quote("rfq:bebop")]);
+
+        drop_quotes_with_rfq_legs_above_external_price(&guard, &mut responses);
+
+        assert!(is_rejected_for_rfq_price(&responses[0].quotes[0].quote));
+    }
+
+    #[test]
+    fn test_drop_quotes_with_rfq_legs_above_external_price_within_tolerance() {
         // 990 out is 50 bps above 985.
-        let ranked = vec![vec![make_single_quote_on("rfq:bebop", 900)
+        let guard = guard_pricing(&[(0x01, 0x02, 985)]);
+        let mut responses = responses_of(vec![make_single_quote_on("rfq:bebop", 900)
             .order()
-            .clone()]];
+            .clone()]);
 
-        let kept = drop_rfq_price_outliers(&guard_pricing_at(Some(985)), ranked);
+        drop_quotes_with_rfq_legs_above_external_price(&guard, &mut responses);
 
-        assert_eq!(protocols_of(&kept[0]), vec!["rfq:bebop"]);
-        assert_eq!(kept[0][0].status(), QuoteStatus::Success);
+        assert_eq!(responses[0].quotes[0].quote.status(), QuoteStatus::Success);
     }
 
     #[test]
-    fn test_drop_rfq_price_outliers_all_dropped() {
-        let ranked = vec![vec![
-            make_single_quote_on("rfq:bebop", 900)
-                .order()
-                .clone(),
-            make_single_quote_on("fallback:rfq:hashflow", 800)
-                .order()
-                .clone(),
-        ]];
-
-        let kept = drop_rfq_price_outliers(&guard_pricing_at(Some(980)), ranked);
-
-        assert_eq!(protocols_of(&kept[0]), vec!["rfq:bebop"]);
-        assert_eq!(kept[0][0].status(), QuoteStatus::PriceCheckFailed);
-    }
-
-    #[test]
-    fn test_drop_rfq_price_outliers_unpriced_pair() {
-        let ranked = vec![vec![make_single_quote_on("rfq:bebop", 900)
+    fn test_drop_quotes_with_rfq_legs_above_external_price_unpriced_pair() {
+        let guard = guard_pricing(&[]);
+        let mut responses = responses_of(vec![make_single_quote_on("rfq:bebop", 900)
             .order()
-            .clone()]];
+            .clone()]);
 
-        let kept = drop_rfq_price_outliers(&guard_pricing_at(None), ranked);
+        drop_quotes_with_rfq_legs_above_external_price(&guard, &mut responses);
 
-        assert_eq!(kept[0][0].status(), QuoteStatus::Success);
+        assert_eq!(responses[0].quotes[0].quote.status(), QuoteStatus::Success);
     }
 
     /// Four candidates fail to encode, but only one order comes back without a transaction.

@@ -86,7 +86,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 2. `WorkerPoolRouter` allocates the worker pools serving each order (an exclusive-access pool only for a request granted access via the `x-exclusive-access` header) and fans out to them in parallel
 3. Each pool's `TaskQueue` dispatches to a `SolverWorker` on a dedicated OS thread
 4. Worker resolves request exclusions with `MarketState::resolve_route_filter`, then calls `Algorithm::find_best_route` with a `SolveRequest` carrying its local graph, shared market/derived data, and resolved pools/tokens. It rejects returned routes that violate the request filter, including excluded pAMM fallback pools
-5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending; when the server has a price guard it drops RFQ-leg candidates more than 100 bps above the external price, and if the request enables the price guard it validates in rank order
+5. `WorkerPoolRouter` collects results, ranks candidates by `amount_out_net_gas` descending (when the server has a price guard, it first drops candidates with an RFQ leg more than 100 bps above the external price for that leg's pair); if the request enables the price guard it validates in rank order
 6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata, one quote at a time: a
    quote that fails to encode gets `QuoteStatus::EncodingFailed` and no transaction, and the other
    quotes keep theirs. Callers read the status of each quote, as they do for `NoRouteFound`

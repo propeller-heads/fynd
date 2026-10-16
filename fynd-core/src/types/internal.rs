@@ -111,6 +111,9 @@ pub enum RouteRejection {
     /// The route has a `fallback:` leg whose fallback fill pays less than the user's
     /// `min_amount_out`, so the router would revert if the maker quote did not land.
     FallbackBelowMinAmountOut,
+    /// The route has an RFQ leg whose amount out sits further above the external price for its
+    /// pair than the server allows, so the maker is unlikely to sign it.
+    RfqAboveExternalPrice,
 }
 
 impl std::fmt::Display for RouteRejection {
@@ -127,6 +130,9 @@ impl std::fmt::Display for RouteRejection {
             }
             Self::FallbackBelowMinAmountOut => {
                 write!(f, "pAMM route dropped: the fallback pays less than min_amount_out")
+            }
+            Self::RfqAboveExternalPrice => {
+                write!(f, "RFQ route dropped: a leg pays too far above the external price")
             }
         }
     }
