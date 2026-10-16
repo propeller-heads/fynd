@@ -27,7 +27,8 @@ use crate::types::ComponentId;
 /// for components that actually changed.
 #[derive(Debug, Clone, Default)]
 pub struct ChangedComponents {
-    /// Newly added components with their token addresses.
+    /// Newly added components with their token addresses. At startup this carries every
+    /// component in the market.
     pub added: FxHashMap<ComponentId, Vec<Address>>,
     /// Components that were removed.
     pub removed: Vec<ComponentId>,

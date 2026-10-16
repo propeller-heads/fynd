@@ -272,7 +272,8 @@ pub trait DerivedComputation: Send + Sync + 'static {
     /// # Incremental Computation
     ///
     /// Implementations should use `changed` to only recompute data affected by the changes:
-    /// - `changed.added` - New components to compute
+    /// - `changed.added` - New components to compute. At startup this carries every component in
+    ///   the market.
     /// - `changed.removed` - Components to remove from results
     /// - `changed.updated` - Components whose state changed
     ///
