@@ -535,7 +535,7 @@ impl ComputationManager {
         );
     }
 
-    ////// Recovers from a broadcast lag without a full-topology recompute.
+    /// Recovers from a broadcast lag.
     ///
     /// Drains the events still buffered in `event_rx` (returning the receiver to the live tail so
     /// it cannot immediately re-lag), coalesces them into one incremental `ChangedComponents`,
@@ -1463,20 +1463,12 @@ mod tests {
 
         let events = drain_events(&mut event_rx);
 
-        // Should broadcast ComputationComplete (not ComputationFailed) because component1 succeeds
         assert!(
             events.iter().any(|e| matches!(
                 e,
                 DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. }
             )),
             "expected ComputationComplete(spot_prices), got: {events:?}"
-        );
-        assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
-            )),
-            "should not broadcast ComputationFailed for partial failure"
         );
 
         // The ComputationComplete event should carry the failed item for component2

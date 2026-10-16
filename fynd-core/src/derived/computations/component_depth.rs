@@ -200,8 +200,8 @@ async fn read_stored_data(
     Ok((spot_prices, component_depths))
 }
 
-/// Returns the components whose depths need computing, and a market snapshot of them taken under
-/// a brief lock: the added and updated ones.
+/// Returns the added and updated components, whose depths need computing, and a market snapshot
+/// of them taken under a brief lock.
 async fn snapshot_changed_components(
     market: &MarketData,
     changed: &ChangedComponents,

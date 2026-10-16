@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn test_incremental_run_preserves_failures_for_unattempted_items() {
+    fn test_set_spot_prices_unattempted_failure() {
         let key_a = pair_key("component_a", 0x01, 0x02);
         let key_a_str = format!("component_a/{}/{}", addr(0x01), addr(0x02));
         let key_b = pair_key("component_b", 0x03, 0x04);
@@ -760,7 +760,7 @@ mod tests {
             Some((10, &FailedItemError::MissingTokenMetadata))
         );
 
-        // Incremental run at block 11: only component_b is attempted and succeeds
+        // Block 11: only component_b is attempted and succeeds
         let mut prices = SpotPrices::default();
         prices.insert(key_b.clone(), 1.0);
         store.set_spot_prices(prices, vec![], 11);
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn test_incremental_run_updates_block_on_repeated_failure() {
+    fn test_set_spot_prices_repeated_failure() {
         let key = pair_key("component_a", 0x01, 0x02);
         let key_str = format!("component_a/{}/{}", addr(0x01), addr(0x02));
 
@@ -791,7 +791,7 @@ mod tests {
             Some((10, &FailedItemError::MissingSimulationState))
         );
 
-        // Incremental run at block 11: component_a fails again with a new error
+        // Block 11: component_a fails again with a new error
         store.set_spot_prices(
             Default::default(),
             vec![failed(&key_str, FailedItemError::MissingTokenMetadata)],

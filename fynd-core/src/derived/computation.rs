@@ -223,7 +223,7 @@ impl<T> ComputationOutput<T> {
 ///         store: &SharedDerivedDataRef,
 ///         changed: &ChangedComponents,
 ///     ) -> Result<Self::Output, ComputationError> {
-///         // Only process the components that changed this block.
+///         // Recompute the added and updated components; drop the removed ones.
 ///     }
 /// }
 /// ```

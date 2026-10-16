@@ -58,7 +58,7 @@ impl DerivedComputation for SpotPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        // Start from the stored prices; only the changed components are recomputed below.
+        // Start from the stored prices and recompute only the changed components.
         let stored = store
             .read()
             .await
@@ -242,7 +242,7 @@ mod tests {
         let output = SpotPriceComputation::new()
             .compute(&market, &derived, &changed)
             .await
-            .expect("component1 succeeds, so the computation as a whole does not fail");
+            .expect("a partial failure still returns Ok");
 
         assert!(output.has_failures(), "component2 missing sim state should produce a failed item");
 

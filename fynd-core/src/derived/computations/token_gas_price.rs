@@ -1713,8 +1713,7 @@ impl DerivedComputation for TokenGasPriceComputation {
             .await
             .last_updated()
             .map_or(0, |block| block.number());
-        // A component arriving earns a pass inside the interval, but only for the tokens it
-        // carries.
+        // An added component earns a pass inside the interval for its own tokens only.
         let scope = match self.start_pass(block, !changed.added.is_empty()) {
             PassSlot::Due => PassScope::Whole,
             PassSlot::ArrivalsOnly => PassScope::ArrivalsOnly,

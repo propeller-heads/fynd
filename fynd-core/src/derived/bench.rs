@@ -1,11 +1,12 @@
 //! Times each derived computation on a replayed market, so their speed can be measured and changed
 //! without a live Tycho stream.
 //!
-//! [`time_derived_computations`] replays the first update, which is the market snapshot, and runs
-//! every computation on the whole topology it carries. Then it replays each later update and runs
-//! the computations incrementally on the components that update changed. The market and the store
-//! carry over between blocks, as they do under `ComputationManager`. Computations run one at a
-//! time, pool depths after the spot prices they read, so each time is for that computation alone.
+//! [`time_derived_computations`] replays the first update, the market snapshot, and runs every
+//! computation with every snapshot component marked as added. Then it replays each later update
+//! and runs the computations incrementally on the components that update changed. The market and
+//! the store carry over between blocks, as they do under `ComputationManager`. Computations run one
+//! at a time, pool depths after the spot prices they read, so each time is for that computation
+//! alone.
 
 use std::{
     collections::BTreeMap,
