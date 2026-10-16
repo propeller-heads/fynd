@@ -97,12 +97,7 @@ impl PriceGuard {
         let mut passing = Vec::new();
         let mut best_rejected = None;
         for candidate in candidates {
-            let passes = self
-                .validated_token_pair(&candidate)
-                .is_some_and(|(token_in, token_out)| {
-                    self.check_price(&candidate, &token_in, &token_out, config)
-                });
-            if passes {
+            if self.passes(&candidate, config) {
                 passing.push(candidate);
             } else {
                 best_rejected.get_or_insert(candidate);
@@ -117,6 +112,15 @@ impl PriceGuard {
         let mut order_quote = best_rejected.ok_or(PriceGuardError::EmptyQuoteCandidates)?;
         order_quote.set_status(QuoteStatus::PriceCheckFailed);
         Ok(vec![order_quote])
+    }
+
+    /// Whether `quote`'s amount out is within `config`'s tolerance of at least one provider's
+    /// price, or no provider can price it and `config` lets such quotes through.
+    pub(crate) fn passes(&self, quote: &OrderQuote, config: &PriceGuardConfig) -> bool {
+        self.validated_token_pair(quote)
+            .is_some_and(|(token_in, token_out)| {
+                self.check_price(quote, &token_in, &token_out, config)
+            })
     }
 
     /// Checks that a successful quote has a route with input/output tokens.

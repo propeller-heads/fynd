@@ -28,9 +28,19 @@ fynd --enable-price-guard
 ```
 
 When enabled, price providers (Hyperliquid, Binance) are started in the background so their
-caches stay warm. Validation only runs for requests where the client sets `enabled: true` in
+caches stay warm. Full validation only runs for requests where the client sets `enabled: true` in
 `encoding_options.price_guard`. When disabled, no providers are started and requests that set
 `enabled: true` return an error.
+
+### RFQ routes
+
+When the server runs with `--enable-price-guard`, every quote request, with or without encoding
+options, drops each candidate route that has an RFQ leg and quotes more than 100 bps above the
+external price. RFQ legs are priced from the makers' indicative levels, which can sit far from what
+the makers sign. The check reads cached prices, so it adds no round trip to the maker. Candidates
+below the external price, and pairs no provider prices, are kept. If every candidate of an order is
+dropped, the order returns with status `price_check_failed`. The per-request settings do not change
+this check.
 
 ### Per-request
 
@@ -168,8 +178,8 @@ for a specific request:
 
 ### Disabling per-request
 
-To disable the price guard on a server that has it enabled, send `enabled: false` in
-`encoding_options.price_guard`:
+To disable the per-request price guard on a server that has it enabled, send `enabled: false` in
+`encoding_options.price_guard`. The [RFQ route check](#rfq-routes) still runs:
 
 ```json
 "encoding_options": {

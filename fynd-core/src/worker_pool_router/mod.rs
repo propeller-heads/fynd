@@ -52,7 +52,7 @@ use crate::{
     bps,
     encoding::encoder::Encoder,
     feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
-    price_guard::guard::PriceGuard,
+    price_guard::{config::PriceGuardConfig, guard::PriceGuard},
     simulation::simulator::{QuoteSimulator, SimulationPurpose},
     types::RouteRejection,
     worker_pool::task_queue::TaskQueueHandle,
@@ -450,6 +450,46 @@ fn has_rfq_leg(quote: &OrderQuote) -> bool {
     })
 }
 
+/// Drops each candidate with an RFQ leg whose amount out sits more than 100 bps above the
+/// external price, whatever the request's own price guard settings.
+///
+/// An RFQ leg is priced from the maker's indicative levels, which can sit far from what the maker
+/// signs: a route through two makers whose levels cross quotes an output neither will fill. The
+/// check reads cached external prices, so it adds no round trip. A candidate below the external
+/// price, or one no provider prices, is kept. When every candidate of an order is dropped, the
+/// best one is returned with status `PriceCheckFailed`.
+fn drop_rfq_price_outliers(
+    guard: &PriceGuard,
+    ranked_per_order: Vec<Vec<OrderQuote>>,
+) -> Vec<Vec<OrderQuote>> {
+    let config = PriceGuardConfig::default()
+        .with_enabled(true)
+        .with_upper_tolerance_bps(100)
+        .with_lower_tolerance_bps(10_000);
+    let mut kept_per_order = Vec::with_capacity(ranked_per_order.len());
+    for candidates in ranked_per_order {
+        let mut kept = Vec::with_capacity(candidates.len());
+        let mut best_dropped = None;
+        for candidate in candidates {
+            let is_outlier = candidate.status() == QuoteStatus::Success &&
+                has_rfq_leg(&candidate) &&
+                !guard.passes(&candidate, &config);
+            if is_outlier {
+                counter!("rfq_price_outliers_total").increment(1);
+                best_dropped.get_or_insert(candidate);
+            } else {
+                kept.push(candidate);
+            }
+        }
+        if let (true, Some(mut best)) = (kept.is_empty(), best_dropped) {
+            best.set_status(QuoteStatus::PriceCheckFailed);
+            kept.push(best);
+        }
+        kept_per_order.push(kept);
+    }
+    kept_per_order
+}
+
 /// Counts `encoding_failures_total` once per order that is returned without a transaction.
 ///
 /// `retry_budget_spent` is `true` for the orders in `cut_off_orders`, which still had untried
@@ -643,6 +683,11 @@ impl WorkerPoolRouter {
         {
             record_quote_comparison(order, responses, request.options());
         }
+
+        let ranked_quotes = match &self.price_guard {
+            Some(guard) => drop_rfq_price_outliers(guard, ranked_quotes),
+            None => ranked_quotes,
+        };
 
         // Validate against external prices when the client explicitly enables it.
         let price_guard_config = request
@@ -1718,7 +1763,11 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
-        feed::exclusivity::mark_exclusive,
+        feed::{exclusivity::mark_exclusive, market_data::MarketData},
+        price_guard::{
+            provider::{ExternalPrice, PriceProvider, PriceProviderError},
+            provider_registry::PriceProviderRegistry,
+        },
         solver::defaults,
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
@@ -2538,6 +2587,106 @@ mod tests {
         assert!(has_rfq_leg(make_single_quote_on("fallback:rfq:bebop", 900).order()));
         assert!(!has_rfq_leg(make_single_quote_on("fallback:fermiswap", 900).order()));
         assert!(!has_rfq_leg(make_single_quote(900).order()));
+    }
+
+    /// Prices every pair at `expected_out`, or at nothing when it is `None`.
+    struct FixedPriceProvider {
+        expected_out: Option<u64>,
+    }
+
+    impl PriceProvider for FixedPriceProvider {
+        fn start(&mut self, _market_data: MarketData) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(std::future::ready(()))
+        }
+
+        fn get_expected_out(
+            &self,
+            _token_in: &Address,
+            _token_out: &Address,
+            _amount_in: &BigUint,
+        ) -> Result<ExternalPrice, PriceProviderError> {
+            match self.expected_out {
+                Some(amount) => {
+                    Ok(ExternalPrice::new(BigUint::from(amount), "fixed".to_string(), 1000))
+                }
+                None => Err(PriceProviderError::PriceNotFound {
+                    token_in: "0x01".to_string(),
+                    token_out: "0x02".to_string(),
+                }),
+            }
+        }
+    }
+
+    fn guard_pricing_at(expected_out: Option<u64>) -> PriceGuard {
+        let registry =
+            PriceProviderRegistry::new().register(Box::new(FixedPriceProvider { expected_out }));
+        PriceGuard::new(registry, vec![])
+    }
+
+    fn protocols_of(candidates: &[OrderQuote]) -> Vec<&str> {
+        candidates
+            .iter()
+            .map(|quote| quote.route().expect("route").swaps()[0].protocol())
+            .collect()
+    }
+
+    #[test]
+    fn test_drop_rfq_price_outliers() {
+        // Every fixture quotes 990 out: 102 bps above 980.
+        let ranked = vec![vec![
+            make_single_quote_on("fallback:rfq:hashflow", 900)
+                .order()
+                .clone(),
+            make_single_quote_on("uniswap_v2", 800)
+                .order()
+                .clone(),
+        ]];
+
+        let kept = drop_rfq_price_outliers(&guard_pricing_at(Some(980)), ranked);
+
+        assert_eq!(protocols_of(&kept[0]), vec!["uniswap_v2"]);
+        assert_eq!(kept[0][0].status(), QuoteStatus::Success);
+    }
+
+    #[test]
+    fn test_drop_rfq_price_outliers_within_tolerance() {
+        // 990 out is 50 bps above 985.
+        let ranked = vec![vec![make_single_quote_on("rfq:bebop", 900)
+            .order()
+            .clone()]];
+
+        let kept = drop_rfq_price_outliers(&guard_pricing_at(Some(985)), ranked);
+
+        assert_eq!(protocols_of(&kept[0]), vec!["rfq:bebop"]);
+        assert_eq!(kept[0][0].status(), QuoteStatus::Success);
+    }
+
+    #[test]
+    fn test_drop_rfq_price_outliers_all_dropped() {
+        let ranked = vec![vec![
+            make_single_quote_on("rfq:bebop", 900)
+                .order()
+                .clone(),
+            make_single_quote_on("fallback:rfq:hashflow", 800)
+                .order()
+                .clone(),
+        ]];
+
+        let kept = drop_rfq_price_outliers(&guard_pricing_at(Some(980)), ranked);
+
+        assert_eq!(protocols_of(&kept[0]), vec!["rfq:bebop"]);
+        assert_eq!(kept[0][0].status(), QuoteStatus::PriceCheckFailed);
+    }
+
+    #[test]
+    fn test_drop_rfq_price_outliers_unpriced_pair() {
+        let ranked = vec![vec![make_single_quote_on("rfq:bebop", 900)
+            .order()
+            .clone()]];
+
+        let kept = drop_rfq_price_outliers(&guard_pricing_at(None), ranked);
+
+        assert_eq!(kept[0][0].status(), QuoteStatus::Success);
     }
 
     /// Four candidates fail to encode, but only one order comes back without a transaction.
