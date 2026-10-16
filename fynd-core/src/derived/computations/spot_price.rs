@@ -59,12 +59,13 @@ impl DerivedComputation for SpotPriceComputation {
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         // Start from the stored prices; only the changed components are recomputed below.
-        let mut spot_prices = store
+        let stored = store
             .read()
             .await
             .spot_prices()
-            .cloned()
-            .unwrap_or_default();
+            .cloned();
+        let first_run = stored.is_none();
+        let mut spot_prices = stored.unwrap_or_default();
         // Remove spot prices for removed components.
         for component_id in &changed.removed {
             spot_prices.retain(|key, _| &key.0 != component_id);
@@ -164,6 +165,16 @@ impl DerivedComputation for SpotPriceComputation {
             "spot price computation complete"
         );
         Span::current().record("updated_spot_prices", spot_prices.len());
+
+        // A first run that prices nothing still completes, so readiness can follow with no
+        // spot prices at all.
+        if first_run && succeeded == 0 && !components_to_compute.is_empty() {
+            warn!(
+                attempted = components_to_compute.len(),
+                failed = failed_items.len(),
+                "first spot price run priced no component"
+            );
+        }
 
         Ok(ComputationOutput::with_failures(spot_prices, failed_items))
     }
