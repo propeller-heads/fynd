@@ -38,7 +38,7 @@ To interact with live quotes directly in your terminal, go to [swap CLI](../../g
 {% tabs %}
 {% tab title="cargo install" %}
 ```bash
-cargo install fynd
+cargo install fynd --locked
 export TYCHO_API_KEY=your-api-key
 export RUST_LOG=fynd=info
 fynd serve
