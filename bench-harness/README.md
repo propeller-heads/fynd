@@ -330,8 +330,8 @@ a slow order, then `--order <id>` to profile just that one.
 ```
 
 Replays a recording from `tools/record-market` and prints the time and output size of the spot
-price, token price and pool depth computations: a full recompute on the snapshot, then one
-incremental run for each later block. It runs under samply unless you pass `--no-record`. At the
+price, token price and pool depth computations: one run with every snapshot component marked as
+added, then one incremental run for each later block. It runs under samply unless you pass `--no-record`. At the
 end it prints a summary: the time of each computation on the first block, and the count, mean and
 total of its times on the later blocks.
 

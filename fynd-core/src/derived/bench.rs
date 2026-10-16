@@ -1,11 +1,12 @@
 //! Times each derived computation on a replayed market, so their speed can be measured and changed
 //! without a live Tycho stream.
 //!
-//! [`time_derived_computations`] replays the first update, which is the market snapshot, and runs
-//! every computation as a full recompute. Then it replays each later update and runs the
-//! computations incrementally on the components that update changed. The market and the store
-//! carry over between blocks, as they do under `ComputationManager`. Computations run one at a
-//! time, pool depths after the spot prices they read, so each time is for that computation alone.
+//! [`time_derived_computations`] replays the first update, the market snapshot, and runs every
+//! computation with every snapshot component marked as added. Then it replays each later update
+//! and runs the computations incrementally on the components that update changed. The market and
+//! the store carry over between blocks, as they do under `ComputationManager`. Computations run one
+//! at a time, pool depths after the spot prices they read, so each time is for that computation
+//! alone.
 
 use std::{
     collections::BTreeMap,
@@ -194,7 +195,7 @@ async fn time_computation<C: DerivedComputation>(
     let elapsed = start.elapsed();
     let items = output_len(&output.data);
     let failed = output.failed_items.len();
-    C::persist(&mut *run.store.write().await, output, block, run.changed.is_full_recompute);
+    C::persist(&mut *run.store.write().await, output, block);
     println!(
         "block {block} {:<17} {:>10.1} ms  items={items} failed={failed}",
         C::ID,
@@ -215,6 +216,16 @@ fn drain_events(events: &mut broadcast::Receiver<MarketEvent>) -> Vec<MarketEven
             }
             Err(TryRecvError::Closed) => panic!("the feed closed its event channel"),
         }
+    }
+}
+
+fn changed_components(event: MarketEvent) -> ChangedComponents {
+    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
+        event;
+    ChangedComponents {
+        added: added_components,
+        removed: removed_components,
+        updated: updated_components,
     }
 }
 
@@ -271,21 +282,18 @@ pub async fn time_derived_computations(
         .await
         .expect("the snapshot replays");
     set_gas_price(&market, settings.gas_price_wei.clone()).await;
-    drain_events(&mut events);
-    let components = market
-        .read()
-        .await
-        .component_topology()
-        .len();
+    let [snapshot_event] = <[MarketEvent; 1]>::try_from(drain_events(&mut events))
+        .expect("the snapshot broadcasts exactly one market event");
+    let snapshot_changes = changed_components(snapshot_event);
     println!(
-        "replayed the snapshot in {:.1} s: {components} components",
-        start.elapsed().as_secs_f64()
+        "replayed the snapshot in {:.1} s: {} components",
+        start.elapsed().as_secs_f64(),
+        snapshot_changes.added.len()
     );
 
-    let full_recompute = ChangedComponents { is_full_recompute: true, ..Default::default() };
     let block = read_current_block(&market).await;
     let times = computations
-        .run_block(&BlockRun { market: &market, store: &store, changed: &full_recompute, block })
+        .run_block(&BlockRun { market: &market, store: &store, changed: &snapshot_changes, block })
         .await;
     report.times.first_block = times.into_iter().collect();
     report.values.after_first_block = read_derived_values(&store).await;
@@ -295,17 +303,7 @@ pub async fn time_derived_computations(
             .await
             .expect("the update replays");
         for event in drain_events(&mut events) {
-            let MarketEvent::MarketUpdated {
-                added_components,
-                removed_components,
-                updated_components,
-            } = event;
-            let changed = ChangedComponents {
-                added: added_components,
-                removed: removed_components,
-                updated: updated_components,
-                is_full_recompute: false,
-            };
+            let changed = changed_components(event);
             if changed.added.is_empty() && changed.removed.is_empty() && changed.updated.is_empty()
             {
                 continue;

@@ -27,14 +27,13 @@ use crate::types::ComponentId;
 /// for components that actually changed.
 #[derive(Debug, Clone, Default)]
 pub struct ChangedComponents {
-    /// Newly added components with their token addresses.
+    /// Newly added components with their token addresses. At startup this carries every
+    /// component in the market.
     pub added: FxHashMap<ComponentId, Vec<Address>>,
     /// Components that were removed.
     pub removed: Vec<ComponentId>,
     /// Components whose state was updated (but not added/removed).
     pub updated: Vec<ComponentId>,
-    /// If true, this represents a full recompute (startup/lag recovery).
-    pub is_full_recompute: bool,
 }
 
 impl ChangedComponents {
@@ -53,9 +52,7 @@ impl ChangedComponents {
 /// then removed within the batch nets to removed; an add supersedes a prior
 /// update; a remove supersedes a prior add/update.
 ///
-/// Returns `None` when the batch carries no net changes. The result always has
-/// `is_full_recompute: false` — this is the bounded lag-recovery path, never a
-/// whole-topology recompute.
+/// Returns `None` when the batch carries no net changes.
 fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
     let mut added: FxHashMap<ComponentId, Vec<Address>> = FxHashMap::default();
     let mut removed: FxHashSet<ComponentId> = FxHashSet::default();
@@ -94,7 +91,6 @@ fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
         added,
         removed: removed.into_iter().collect(),
         updated: updated.into_iter().collect(),
-        is_full_recompute: false,
     })
 }
 
@@ -552,7 +548,7 @@ impl ComputationManager {
         );
     }
 
-    ////// Recovers from a broadcast lag without a full-topology recompute.
+    /// Recovers from a broadcast lag.
     ///
     /// Drains the events still buffered in `event_rx` (returning the receiver to the live tail so
     /// it cannot immediately re-lag), coalesces them into one incremental `ChangedComponents`,
@@ -676,7 +672,6 @@ impl MarketEventHandler for ComputationManager {
                     added: added_components.clone(),
                     removed: removed_components.clone(),
                     updated: updated_components.clone(),
-                    is_full_recompute: false,
                 };
                 self.compute_all(&changed).await;
             }
@@ -745,7 +740,6 @@ mod tests {
             updated_components: vec!["eth_usdc".to_string(), "dai_usdc".to_string()],
         };
         let c = coalesce_market_events(&[e1, e2]).expect("net changes present");
-        assert!(!c.is_full_recompute);
         // eth_usdc was added, so it stays in `added` (not double-counted in `updated`)
         assert!(c.added.contains_key("eth_usdc"));
         assert!(!c
@@ -1063,7 +1057,7 @@ mod tests {
             .unwrap();
 
         manager
-            .compute_all(&ChangedComponents { is_full_recompute: true, ..Default::default() })
+            .compute_all(&ChangedComponents::default())
             .await;
 
         let store = manager.store();
@@ -1146,11 +1140,11 @@ mod tests {
             .collect()
     }
 
-    /// Subscribes, runs one full-recompute pass, and returns the events it emitted.
-    async fn run_full_recompute(manager: &ComputationManager) -> Vec<DerivedDataEvent> {
+    /// Subscribes, runs one computation pass, and returns the events it emitted.
+    async fn run_computations(manager: &ComputationManager) -> Vec<DerivedDataEvent> {
         let mut event_rx = manager.event_sender().subscribe();
         manager
-            .compute_all(&ChangedComponents { is_full_recompute: true, ..Default::default() })
+            .compute_all(&ChangedComponents::default())
             .await;
         drain_events(&mut event_rx)
     }
@@ -1277,7 +1271,7 @@ mod tests {
         manager.register(RootOk).unwrap();
         manager.register(DepOnRoot).unwrap();
 
-        let events = run_full_recompute(&manager).await;
+        let events = run_computations(&manager).await;
 
         assert_eq!(
             event_summary(&events),
@@ -1294,7 +1288,7 @@ mod tests {
             .register(SecondDepOnRoot)
             .unwrap();
 
-        let events = run_full_recompute(&manager).await;
+        let events = run_computations(&manager).await;
 
         // root runs in stage 0; dep then dep2 share stage 1 in registration order.
         assert_eq!(
@@ -1314,7 +1308,7 @@ mod tests {
         manager.register(RootErr).unwrap();
         manager.register(DepOnBoom).unwrap();
 
-        let events = run_full_recompute(&manager).await;
+        let events = run_computations(&manager).await;
 
         // boom fails in stage 0; its dependent is skipped and reported failed.
         assert_eq!(
@@ -1330,7 +1324,7 @@ mod tests {
             .register(GhostDependent)
             .unwrap();
 
-        let events = run_full_recompute(&manager).await;
+        let events = run_computations(&manager).await;
 
         // "ghost" is never registered, so its fresh dependent never runs.
         assert_eq!(event_summary(&events), vec![("new_block", ""), ("failed", "needs_ghost")]);
@@ -1344,7 +1338,7 @@ mod tests {
             .unwrap();
         manager.register(DepOnPartial).unwrap();
 
-        let events = run_full_recompute(&manager).await;
+        let events = run_computations(&manager).await;
 
         // A partial success (Ok with failed_items) still counts as succeeded, so the fresh
         // dependent runs -- the compatibility invariant with the old hardcoded flow.
@@ -1361,7 +1355,7 @@ mod tests {
         manager.register(DepOnBoom).unwrap();
         manager.register(ThirdOnBoom).unwrap();
 
-        let events = run_full_recompute(&manager).await;
+        let events = run_computations(&manager).await;
 
         // boom fails; dep_boom is skipped; third (needs dep_boom) is skipped transitively.
         assert_eq!(
@@ -1387,7 +1381,7 @@ mod tests {
             .unwrap();
 
         // Block 1: producer succeeds and its value is stored.
-        let first = run_full_recompute(&manager).await;
+        let first = run_computations(&manager).await;
         assert_eq!(
             event_summary(&first),
             vec![("new_block", ""), ("complete", "flaky"), ("complete", "stale_dep")]
@@ -1396,7 +1390,7 @@ mod tests {
         // Block 2: producer fails, but its prior-block value remains, so the stale
         // dependent still runs.
         succeed.store(false, Ordering::SeqCst);
-        let second = run_full_recompute(&manager).await;
+        let second = run_computations(&manager).await;
         assert_eq!(
             event_summary(&second),
             vec![("new_block", ""), ("failed", "flaky"), ("complete", "stale_dep")]
@@ -1405,32 +1399,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_spot_price_failure_cascade() {
-        // Real fynd flow: a full recompute with no sim state makes spot prices fail outright.
-        // Pool depths depend on them and fail with them. Token prices read no derived data,
-        // so they still complete.
-        let (manager, _event_rx) = ComputationManager::new(
-            ComputationManagerConfig::new(),
-            market_with_component_no_sim_state(),
-        )
-        .unwrap();
+        // A startup block whose only component has no sim state prices nothing. Spot prices and
+        // the pool depths that read them still complete, each reporting the failed pairs; token
+        // prices read no derived data.
+        let market = market_with_component_no_sim_state();
+        let topology = market.read().await.component_topology();
+        let (manager, _event_rx) =
+            ComputationManager::new(ComputationManagerConfig::new(), market).unwrap();
+        let mut event_rx = manager.event_sender().subscribe();
 
-        let events = run_full_recompute(&manager).await;
+        manager
+            .compute_all(&ChangedComponents { added: topology, ..Default::default() })
+            .await;
+        let events = drain_events(&mut event_rx);
 
         assert_eq!(
             event_summary(&events),
             vec![
                 ("new_block", ""),
-                ("failed", "spot_prices"),
+                ("complete", "spot_prices"),
                 ("complete", "token_prices"),
-                ("failed", "pool_depths"),
+                ("complete", "pool_depths"),
             ]
         );
+        for id in ["spot_prices", "pool_depths"] {
+            let failed = events
+                .iter()
+                .find_map(|event| match event {
+                    DerivedDataEvent::ComputationComplete {
+                        computation_id, failed_items, ..
+                    } if *computation_id == id => Some(failed_items.len()),
+                    _ => None,
+                });
+            assert_eq!(failed, Some(2), "{id} should report both directed pairs as failed");
+        }
     }
 
-    /// Creates a market with a component in topology but WITHOUT simulation state.
-    ///
-    /// Used to trigger `TotalFailure` in spot_price computation (full recompute with
-    /// all components missing sim_state → succeeded == 0 → failure).
+    /// Creates a market with a component in topology but without simulation state.
     fn market_with_component_no_sim_state() -> MarketData {
         let eth = token(1, "ETH");
         let usdc = token(2, "USDC");
@@ -1439,7 +1444,6 @@ mod tests {
         let mut market = MarketState::new();
         market.update_last_updated(BlockInfo::new(10, "0xhash".into(), 0));
         market.upsert_components(std::iter::once(component));
-        // Note: no update_states() — simulation state is intentionally absent
         market.upsert_tokens([eth, usdc]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }
@@ -1462,27 +1466,6 @@ mod tests {
             .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
         market.upsert_tokens([eth, usdc, dai]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
-    }
-
-    #[tokio::test]
-    async fn test_spot_price_failure_broadcasts_computation_failed() {
-        let market = market_with_component_no_sim_state();
-        let config = ComputationManagerConfig::new();
-        let (manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
-
-        // Full recompute with components that have no sim_state → TotalFailure
-        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
-        manager.compute_all(&changed).await;
-
-        let events = drain_events(&mut event_rx);
-
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
-            )),
-            "expected ComputationFailed(spot_prices) in events: {events:?}"
-        );
     }
 
     #[tokio::test]
@@ -1514,25 +1497,20 @@ mod tests {
         let config = ComputationManagerConfig::new();
         let (manager, mut event_rx) = ComputationManager::new(config, market).unwrap();
 
-        let changed = ChangedComponents { is_full_recompute: true, ..Default::default() };
+        let changed = ChangedComponents {
+            updated: vec!["eth_usdc".to_string(), "eth_dai".to_string()],
+            ..Default::default()
+        };
         manager.compute_all(&changed).await;
 
         let events = drain_events(&mut event_rx);
 
-        // Should broadcast ComputationComplete (not ComputationFailed) because component1 succeeds
         assert!(
             events.iter().any(|e| matches!(
                 e,
                 DerivedDataEvent::ComputationComplete { computation_id: "spot_prices", .. }
             )),
             "expected ComputationComplete(spot_prices), got: {events:?}"
-        );
-        assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                DerivedDataEvent::ComputationFailed { computation_id: "spot_prices", .. }
-            )),
-            "should not broadcast ComputationFailed for partial failure"
         );
 
         // The ComputationComplete event should carry the failed item for component2
@@ -1630,10 +1608,7 @@ mod tests {
                     .register(CounterComputation)
                     .unwrap();
                 manager
-                    .compute_all(&ChangedComponents {
-                        is_full_recompute: true,
-                        ..Default::default()
-                    })
+                    .compute_all(&ChangedComponents::default())
                     .await;
             })
         });
@@ -1704,10 +1679,7 @@ mod tests {
                     .register(FailingComputation)
                     .unwrap();
                 manager
-                    .compute_all(&ChangedComponents {
-                        is_full_recompute: true,
-                        ..Default::default()
-                    })
+                    .compute_all(&ChangedComponents::default())
                     .await;
             })
         });
