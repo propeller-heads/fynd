@@ -72,7 +72,6 @@ impl DerivedComputation for SpotPriceComputation {
         }
 
         let market_guard = market.read().await;
-        let topology = market_guard.component_topology();
         let tokens = market_guard.token_registry_ref();
 
         // Determine which components need (re)computation.
@@ -87,11 +86,15 @@ impl DerivedComputation for SpotPriceComputation {
         let mut failed_items: Vec<FailedItem> = Vec::new();
 
         for component_id in &components_to_compute {
-            // Get token addresses: changed.added for new components, topology for existing.
+            // Get token addresses: changed.added for new components, the market for existing.
             let token_addresses = changed
                 .added
                 .get(component_id)
-                .or_else(|| topology.get(component_id));
+                .or_else(|| {
+                    market_guard
+                        .get_component(component_id)
+                        .map(|component| &component.tokens)
+                });
 
             let Some(token_addresses) = token_addresses else {
                 continue;
