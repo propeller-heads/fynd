@@ -218,6 +218,16 @@ fn drain_events(events: &mut broadcast::Receiver<MarketEvent>) -> Vec<MarketEven
     }
 }
 
+fn changed_components(event: MarketEvent) -> ChangedComponents {
+    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
+        event;
+    ChangedComponents {
+        added: added_components,
+        removed: removed_components,
+        updated: updated_components,
+    }
+}
+
 async fn set_gas_price(market: &MarketData, gas_price_wei: Option<BigUint>) {
     let gas_price = gas_price_wei.unwrap_or_else(|| BigUint::from(DEFAULT_GAS_PRICE_WEI));
     let block_number = read_current_block(market).await;
@@ -271,24 +281,18 @@ pub async fn time_derived_computations(
         .await
         .expect("the snapshot replays");
     set_gas_price(&market, settings.gas_price_wei.clone()).await;
-    drain_events(&mut events);
-    let topology = market
-        .read()
-        .await
-        .component_topology()
-        .clone();
+    let [snapshot_event] = <[MarketEvent; 1]>::try_from(drain_events(&mut events))
+        .expect("the snapshot broadcasts exactly one market event");
+    let snapshot_changed = changed_components(snapshot_event);
     println!(
         "replayed the snapshot in {:.1} s: {} components",
         start.elapsed().as_secs_f64(),
-        topology.len()
+        snapshot_changed.added.len()
     );
 
-    // The snapshot is the seeding block: every component it carries arrives at once, which is
-    // what the manager sends at startup.
-    let seeding = ChangedComponents { added: topology, ..Default::default() };
     let block = read_current_block(&market).await;
     let times = computations
-        .run_block(&BlockRun { market: &market, store: &store, changed: &seeding, block })
+        .run_block(&BlockRun { market: &market, store: &store, changed: &snapshot_changed, block })
         .await;
     report.times.first_block = times.into_iter().collect();
     report.values.after_first_block = read_derived_values(&store).await;
@@ -298,16 +302,7 @@ pub async fn time_derived_computations(
             .await
             .expect("the update replays");
         for event in drain_events(&mut events) {
-            let MarketEvent::MarketUpdated {
-                added_components,
-                removed_components,
-                updated_components,
-            } = event;
-            let changed = ChangedComponents {
-                added: added_components,
-                removed: removed_components,
-                updated: updated_components,
-            };
+            let changed = changed_components(event);
             if changed.added.is_empty() && changed.removed.is_empty() && changed.updated.is_empty()
             {
                 continue;
