@@ -7,6 +7,8 @@ Developer and operational tooling for the Fynd solver.
 | [fynd-benchmark](#fynd-benchmark) | `tools/benchmark/` | Load testing, solver comparison, trade dataset download |
 | [fynd-swap-cli](#fynd-swap-cli) | `tools/fynd-swap-cli/` | Quote and execute token swaps (ERC-20 or Permit2) |
 | [record-market](#record-market) | `tools/record-market/` | Record Tycho market state and expected outputs for integration tests |
+| `fynd-gas-audit` | `tools/fynd-gas-audit/` | Compare quote-time gas estimates against `eth_estimateGas` |
+| `fynd-tools-common` | `tools/common/` | Shared library for the tool crates: aggregator quote model, on-chain swap simulation, BPS math |
 
 ---
 

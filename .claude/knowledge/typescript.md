@@ -11,7 +11,7 @@ clients/typescript/
   pnpm-lock.yaml
   client/                     # @kayibal/fynd-client — typed HTTP client
     src/
-      autogen.ts              # Typed fetch client generated from OpenAPI spec
+      autogen.ts              # Hand-written thin wrapper over openapi-fetch, typed by schema.d.ts
       schema.d.ts             # Auto-generated OpenAPI types from clients/openapi.json
       client.ts               # FyndClient — main client class
       types.ts                # Public types (QuoteRequest, QuoteResponse, etc.)
@@ -63,5 +63,6 @@ TYCHO_API_KEY=<key> ./scripts/run-all-examples.sh
 - ESM only (`"type": "module"`)
 - Tooling: `oxlint` for linting, `vitest` for tests, `tsc` for type checking
 - Colocated test files (`*.test.ts` next to source)
-- `autogen.ts` and `schema.d.ts` in `client/src/` are auto-generated — do not edit manually
-- When adding/changing RPC endpoints, update: Rust types → OpenAPI spec → regenerate `autogen.ts`/`schema.d.ts` → update client mapping
+- `schema.d.ts` in `client/src/` is auto-generated — do not edit manually. `autogen.ts` is
+  hand-maintained
+- When adding/changing RPC endpoints, update: Rust types → OpenAPI spec → regenerate `schema.d.ts` (`./scripts/update-openapi.sh`) → update client mapping

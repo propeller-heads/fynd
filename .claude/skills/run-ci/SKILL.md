@@ -30,7 +30,7 @@ git diff --name-only HEAD~1..HEAD 2>/dev/null || git diff --name-only --cached
 | Changed files match | Checks to run |
 |---|---|
 | `*.rs`, `Cargo.toml`, `Cargo.lock` | Format, Clippy, Rust tests |
-| `fynd-rpc-types/**` or `clients/openapi.json` | + OpenAPI drift check |
+| `fynd-rpc-types/**`, `fynd-rpc/src/api/**` or `clients/openapi.json` | + OpenAPI drift check |
 | `clients/typescript/**` | + TypeScript checks |
 
 If no files match any pattern (e.g. only docs changed), report "No CI-relevant changes detected" and stop.
@@ -66,7 +66,8 @@ Bash tool calls in one message already execute concurrently.
 #### Rust tests (if Rust files changed)
 
 ```bash
-cargo nextest run --workspace --all-targets --all-features
+cargo nextest run --workspace --all-targets --all-features \
+  -E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'
 ```
 
 If nextest is not installed, fall back to:
@@ -79,7 +80,7 @@ Report pass/fail with test count summary (passed, failed, ignored/skipped). If a
 #### OpenAPI drift check (if RPC types or openapi.json changed)
 
 ```bash
-cargo run --locked -- openapi | jq 'del(.info.version)' > /tmp/openapi_generated.json
+cargo run --locked --features fynd-rpc/experimental -- openapi | jq 'del(.info.version)' > /tmp/openapi_generated.json
 jq 'del(.info.version)' clients/openapi.json > /tmp/openapi_committed.json
 diff /tmp/openapi_committed.json /tmp/openapi_generated.json
 ```

@@ -15,8 +15,8 @@ After a task is done, run `./check.sh` (the same script runs as a precommit hook
 `check.sh` runs, in order:
 1. `cargo +nightly fmt -- --check`
 2. `cargo +nightly clippy --locked --all --all-features --all-targets -- -D warnings`
-3. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client`
-4. `cargo nextest run --workspace --locked --all-targets --all-features --bin fynd`
+3. `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --package fynd-core --package fynd-rpc-types --package fynd-rpc --package fynd-client --package fynd-bench-harness --package fynd-test-fixtures --package fynd-tools-common`
+4. `cargo nextest run --workspace --locked --all-targets --all-features --bin fynd -E 'not binary(algorithm_bench) and not binary(profile) and not binary(derived)'`
 
 ## Coding Style
 
