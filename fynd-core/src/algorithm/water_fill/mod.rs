@@ -71,7 +71,10 @@ use crate::{
             SHARED_MAX_CANDIDATES,
         },
     },
-    derived::{computation::ComputationRequirements, types::TokenGasPrices},
+    derived::{
+        computation::ComputationRequirements,
+        types::{gas_cost_in_token, TokenGasPrices},
+    },
     feed::market_data::{MarketDataView, MarketState},
     graph::{EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph, TopologyGraphManager},
     types::{ComponentId, Order, RouteResult},
@@ -159,10 +162,7 @@ impl WaterFillAlgorithm {
         token_out: &Address,
     ) -> Option<BigUint> {
         let price = token_prices?.get(token_out)?;
-        if price.denominator.is_zero() {
-            return None;
-        }
-        Some(total_gas * gas_price_wei * &price.numerator / &price.denominator)
+        gas_cost_in_token(total_gas, gas_price_wei, price)
     }
 
     /// A path's gas converted to output-token terms as a signed amount, or zero when no gas price
@@ -1702,7 +1702,10 @@ mod tests {
     use alloy::primitives::U256;
     use num_bigint::BigUint;
     use num_traits::ToPrimitive;
-    use tycho_simulation::evm::protocol::uniswap_v2::state::UniswapV2State;
+    use tycho_simulation::{
+        evm::protocol::uniswap_v2::state::UniswapV2State,
+        tycho_core::simulation::protocol_sim::Price,
+    };
 
     use super::{super::MostLiquidAlgorithm, *};
     use crate::{
@@ -2031,6 +2034,28 @@ mod tests {
 
     fn hop(amount_out: u64, gas: u64) -> SwapResult {
         SwapResult { amount_out: BigUint::from(amount_out), gas: BigUint::from(gas) }
+    }
+
+    #[test]
+    fn test_gas_cost_in_token_fractional() {
+        let token_out = addr(0x02);
+        let prices: TokenGasPrices = [(
+            token_out.clone(),
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) },
+        )]
+        .into_iter()
+        .collect();
+
+        // 1 gas at 1 wei is 10^-12 raw units: floor charges 0, ceiling 1.
+        assert_eq!(
+            WaterFillAlgorithm::gas_cost_in_token(
+                &BigUint::from(1u8),
+                &BigUint::from(1u8),
+                Some(&prices),
+                &token_out,
+            ),
+            Some(BigUint::from(1u8)),
+        );
     }
 
     /// `Unfilled` paths rank last by output and are kept out of the net-of-gas ordering entirely,

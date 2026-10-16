@@ -35,13 +35,13 @@ use std::{
 use actix_web::{web, HttpResponse, ResponseError};
 pub use dto::HealthStatus;
 pub use error::{ApiError, RequestValidationError};
+#[cfg(feature = "experimental")]
+use fynd_core::types::GasTokenConfig;
 use fynd_core::{
     derived::SharedDerivedDataRef, feed::market_data::MarketData, types::BlockInfo,
     worker_pool_router::WorkerPoolRouter,
 };
 use handlers::configure_routes;
-#[cfg(feature = "experimental")]
-use tycho_simulation::tycho_common::models::Address;
 use tycho_simulation::tycho_common::{models::Chain, Bytes};
 use utoipa::OpenApi;
 
@@ -247,8 +247,9 @@ pub struct AppState {
     record_emitter: Option<RecordEmitter>,
     #[cfg(feature = "experimental")]
     pub(crate) derived_data: SharedDerivedDataRef,
+    /// The routable gas token prices are measured against, and its unit scale.
     #[cfg(feature = "experimental")]
-    pub(crate) gas_token: Address,
+    pub(crate) gas_token: GasTokenConfig,
     #[cfg(feature = "experimental")]
     pub(crate) market_data: MarketData,
     #[cfg(feature = "experimental")]
@@ -266,7 +267,7 @@ impl AppState {
         permit2_address: Bytes,
         record_emitter: Option<RecordEmitter>,
         #[cfg(feature = "experimental")] derived_data: SharedDerivedDataRef,
-        #[cfg(feature = "experimental")] gas_token: Address,
+        #[cfg(feature = "experimental")] gas_token: GasTokenConfig,
         #[cfg(feature = "experimental")] market_data: MarketData,
     ) -> Self {
         Self {
@@ -515,7 +516,7 @@ mod configure_app_tests {
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
-            tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
+            fynd_core::types::gas_token_config(&Chain::Ethereum).unwrap(),
             #[cfg(feature = "experimental")]
             market_data,
         )

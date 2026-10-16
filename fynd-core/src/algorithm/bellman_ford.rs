@@ -24,13 +24,14 @@
 //! snapshot amounts between rounds or use a priority-based processing order.
 
 use std::{
+    cmp::Ordering,
     collections::VecDeque,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use num_bigint::{BigInt, BigUint};
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{Float, Zero};
 use petgraph::{graph::NodeIndex, prelude::EdgeRef, stable_graph::EdgeReference};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, instrument, trace, warn};
@@ -50,7 +51,7 @@ use crate::{
     },
     derived::{
         computation::ComputationRequirements,
-        types::{SpotPrices, TokenGasPrices},
+        types::{gas_cost_in_token, SpotPrices, TokenGasPrices},
     },
     feed::market_data::{MarketData, MarketState},
     graph::{petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
@@ -592,6 +593,10 @@ impl BellmanFordAlgorithm {
         spot_product[ctx.token_in_node.index()] = 1.0;
 
         let mut input_below_hop_gas = false;
+        let token_in = ctx
+            .token_map
+            .get(&ctx.token_in_node)
+            .map(Arc::as_ref);
 
         let gas_aware = matches!(ctx.scoring, RouteScoringMode::NetOutput) &&
             ctx.gas_price_wei.is_some() &&
@@ -681,10 +686,10 @@ impl BellmanFordAlgorithm {
                     // Gas-aware comparison: compare net amounts (gross - gas cost in token terms)
                     let is_better = if gas_aware {
                         let v_price = Self::resolve_token_price(
-                            ctx.node_address.get(v),
+                            Some(token_v),
                             ctx.token_prices.as_ref(),
                             candidate_spot,
-                            ctx.node_address.get(&ctx.token_in_node),
+                            token_in,
                         );
                         let net_candidate = Self::gas_adjusted_amount(
                             &result.amount,
@@ -698,10 +703,10 @@ impl BellmanFordAlgorithm {
                         // price lookup off the hot path.
                         if !input_below_hop_gas && net_candidate <= BigInt::ZERO {
                             let u_price = Self::resolve_token_price(
-                                ctx.node_address.get(&u),
+                                Some(token_u),
                                 ctx.token_prices.as_ref(),
                                 spot_product[u_idx],
-                                ctx.node_address.get(&ctx.token_in_node),
+                                token_in,
                             );
                             if Self::gas_adjusted_amount(
                                 &amount[u_idx],
@@ -837,13 +842,10 @@ impl BellmanFordAlgorithm {
         gas_price_wei: &BigUint,
         token_price: Option<&Price>,
     ) -> BigInt {
-        match token_price {
-            Some(price) if !price.denominator.is_zero() => {
-                let gas_cost = cumul_gas * gas_price_wei * &price.numerator / &price.denominator;
-                BigInt::from(gross.clone()) - BigInt::from(gas_cost)
-            }
-            _ => BigInt::from(gross.clone()),
-        }
+        let gas_cost = token_price
+            .and_then(|price| gas_cost_in_token(cumul_gas, gas_price_wei, price))
+            .unwrap_or_default();
+        BigInt::from(gross.clone()) - BigInt::from(gas_cost)
     }
 
     /// Computes the cumulative spot price product when extending a path by one edge.
@@ -870,43 +872,61 @@ impl BellmanFordAlgorithm {
         }
     }
 
-    /// Resolves the gas-to-token conversion rate for gas cost calculation.
+    /// Resolves the gas-to-token conversion rate for gas cost calculation, in `token` raw units
+    /// per native gas raw unit (the unit of [`TokenGasPrices`]).
     ///
-    /// 1. Primary: use `token_prices[v_addr]` from derived data (direct lookup).
+    /// 1. Primary: use `token_prices[token]` from derived data (direct lookup).
     /// 2. Fallback: if `token_prices[token_in]` exists and `spot_product > 0`, estimate the rate as
-    ///    `token_prices[token_in] * spot_product` (converted to a Price).
+    ///    `token_prices[token_in] * spot_product * 10^(token.decimals - token_in.decimals)`.
+    ///    `spot_product` multiplies Tycho spot prices, which are in whole tokens per whole token;
+    ///    the power of ten turns it into raw units per raw unit.
     /// 3. Last resort: returns None (gas adjustment skipped for this comparison).
     fn resolve_token_price(
-        v_addr: Option<&Address>,
+        token: Option<&Token>,
         token_prices: Option<&TokenGasPrices>,
         spot_product: f64,
-        token_in_addr: Option<&Address>,
+        token_in: Option<&Token>,
     ) -> Option<Price> {
         let prices = token_prices?;
-        let addr = v_addr?;
+        let token = token?;
 
         // Primary: direct lookup
-        if let Some(price) = prices.get(addr) {
+        if let Some(price) = prices.get(&token.address) {
             return Some(price.clone());
         }
 
-        // Fallback: token_in price * cumulative spot product
-        if spot_product > 0.0 {
-            if let Some(in_price) = token_in_addr.and_then(|a| prices.get(a)) {
-                let in_rate_f64 = in_price.numerator.to_f64()? / in_price.denominator.to_f64()?;
-                let estimated_rate = in_rate_f64 * spot_product;
-                let denom = BigUint::from(10u64).pow(18);
-                let numer_f64 = estimated_rate * 1e18;
-                if numer_f64.is_finite() && numer_f64 > 0.0 {
-                    return Some(Price {
-                        numerator: BigUint::from(numer_f64 as u128),
-                        denominator: denom,
-                    });
-                }
-            }
+        // Fallback: token_in price * cumulative spot product, kept exact. A finite positive f64 is
+        // exactly `mantissa * 2^exponent`, so the product is an integer ratio with no rounding or
+        // saturation, and the gas cost it prices is ceiling-rounded once, at the end.
+        let token_in = token_in?;
+        let in_price = prices.get(&token_in.address)?;
+        let valid_spot = spot_product > 0.0 && spot_product.is_finite();
+        if !valid_spot || in_price.numerator.is_zero() || in_price.denominator.is_zero() {
+            return None;
         }
-
-        None
+        // ERC-20 `decimals()` returns a uint8, so a larger value is corrupt metadata. Refusing it
+        // bounds the power of ten below 10^256.
+        let decimals = u8::try_from(token.decimals).ok()?;
+        let in_decimals = u8::try_from(token_in.decimals).ok()?;
+        let (mantissa, exponent, _sign) = spot_product.integer_decode();
+        let mut numerator = &in_price.numerator * BigUint::from(mantissa);
+        let mut denominator = in_price.denominator.clone();
+        let shift = usize::from(exponent.unsigned_abs());
+        if exponent >= 0 {
+            numerator <<= shift;
+        } else {
+            denominator <<= shift;
+        }
+        match decimals.cmp(&in_decimals) {
+            Ordering::Greater => {
+                numerator *= BigUint::from(10u8).pow(u32::from(decimals - in_decimals));
+            }
+            Ordering::Less => {
+                denominator *= BigUint::from(10u8).pow(u32::from(in_decimals - decimals));
+            }
+            Ordering::Equal => {}
+        }
+        Some(Price { numerator, denominator })
     }
 
     /// Checks whether the target node or component conflicts with the existing path to `from`.
@@ -1170,8 +1190,6 @@ impl BellmanFordAlgorithm {
             return Ok(BigInt::from(amount_out.clone()));
         }
 
-        let gas_cost_wei = &total_gas * gas_price;
-
         // Find the output token's node to get its spot_product for the fallback
         let out_addr = last_swap.token_out();
         let out_node_spot = node_address
@@ -1180,23 +1198,28 @@ impl BellmanFordAlgorithm {
             .and_then(|(node, _)| spot_product.get(node.index()).copied())
             .unwrap_or(0.0);
 
+        let tokens = route.tokens();
         let output_price = Self::resolve_token_price(
-            Some(out_addr),
+            tokens.get(out_addr),
             token_prices,
             out_node_spot,
-            node_address.get(&token_in_node),
+            node_address
+                .get(&token_in_node)
+                .and_then(|address| tokens.get(address)),
         );
 
-        Ok(match output_price {
-            Some(price) if !price.denominator.is_zero() => {
-                let gas_cost = &gas_cost_wei * &price.numerator / &price.denominator;
-                BigInt::from(amount_out.clone()) - BigInt::from(gas_cost)
-            }
-            _ => {
-                debug!("no gas price for output token, returning gross amount_out");
-                BigInt::from(amount_out.clone())
-            }
-        })
+        Ok(
+            match output_price
+                .as_ref()
+                .and_then(|price| gas_cost_in_token(&total_gas, gas_price, price))
+            {
+                Some(gas_cost) => BigInt::from(amount_out.clone()) - BigInt::from(gas_cost),
+                _ => {
+                    debug!("no gas price for output token, returning gross amount_out");
+                    BigInt::from(amount_out.clone())
+                }
+            },
+        )
     }
 }
 
@@ -1247,7 +1270,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component, order, token, MockProtocolSim},
+        algorithm::test_utils::{component, order, token, token_with_decimals, MockProtocolSim},
         derived::{types::TokenGasPrices, DerivedData},
         feed::market_data::{MarketData, MarketState},
         graph::GraphManager,
@@ -1309,6 +1332,269 @@ mod tests {
         BellmanFordAlgorithm::with_config(
             AlgorithmConfig::new(1, max_hops, Duration::from_millis(timeout_ms), None).unwrap(),
         )
+    }
+
+    /// Resolves OUT's price through the fallback: IN priced at `in_price`, OUT unpriced.
+    fn fallback_price(in_price: Price, spot_product: f64) -> Option<Price> {
+        let token_in = token(0x01, "IN");
+        let token_out = token(0x02, "OUT");
+        let mut prices = TokenGasPrices::default();
+        prices.insert(token_in.address.clone(), in_price);
+        BellmanFordAlgorithm::resolve_token_price(
+            Some(&token_out),
+            Some(&prices),
+            spot_product,
+            Some(&token_in),
+        )
+    }
+
+    fn unit_price() -> Price {
+        Price { numerator: BigUint::from(1u8), denominator: BigUint::from(1u8) }
+    }
+
+    /// Solves `token_in` -> `token_out` through `pools` (id, human rate, gas) with `token_in`
+    /// priced at `in_price` and `token_out` unpriced, so every gas charge on `token_out` goes
+    /// through the spot fallback.
+    ///
+    /// The derived spot prices hold each pool's human-unit rate, as Tycho's `spot_price`
+    /// reports it. The mock simulation pays out the same human rate in raw units, scaled by the
+    /// two tokens' decimals, so its raw-unit rate differs from the spot rate whenever the
+    /// decimals do. Both tokens must sort `token_in` first for the mock's rate direction.
+    async fn solve_through_spot_fallback(
+        token_in: &Token,
+        token_out: &Token,
+        pools: &[(&str, f64, u64)],
+        in_price: Price,
+        gas_price: u64,
+        amount_in: u128,
+    ) -> RouteResult {
+        assert!(token_in.address < token_out.address);
+        let (market, manager) = setup_market_bf(
+            pools
+                .iter()
+                .map(|&(id, rate, gas)| {
+                    (id, token_in, token_out, MockProtocolSim::new(rate).with_gas(gas))
+                })
+                .collect(),
+        );
+        market
+            .try_write()
+            .unwrap()
+            .update_gas_price(BlockGasPrice {
+                block_number: 1,
+                block_hash: Default::default(),
+                block_timestamp: 0,
+                pricing: GasPrice::Legacy { gas_price: BigUint::from(gas_price) },
+            });
+        let mut derived = DerivedData::new();
+        derived.set_token_prices(
+            [(token_in.address.clone(), in_price)]
+                .into_iter()
+                .collect(),
+            vec![],
+            1,
+            true,
+        );
+        derived.set_spot_prices(
+            pools
+                .iter()
+                .map(|&(id, rate, _)| {
+                    ((id.to_string(), token_in.address.clone(), token_out.address.clone()), rate)
+                })
+                .collect(),
+            vec![],
+            1,
+            true,
+        );
+        let ord = order(token_in, token_out, amount_in, OrderSide::Sell);
+
+        bf_algorithm(1, 1000)
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &ord)
+                    .with_derived(Arc::new(RwLock::new(derived))),
+            )
+            .await
+            .expect("route should be found")
+    }
+
+    #[tokio::test]
+    async fn test_spot_fallback_net_upscaled_decimals() {
+        // Arc: USDC (6 decimals) is the routable gas token, priced 10^6 raw units per 10^18
+        // native raw units. 1 USDC buys 0.5 OUT (18 decimals), so OUT is worth 0.5 * 10^18 raw
+        // units per 10^18 native raw units: 0.5 per native raw unit. 50_000 gas at 1 native raw
+        // unit per gas costs 25_000 OUT raw units.
+        let usdc = token_with_decimals(0x01, "USDC", 6);
+        let out = token_with_decimals(0x02, "OUT", 18);
+        let arc_scale = Price {
+            numerator: BigUint::from(1_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+
+        let result = solve_through_spot_fallback(
+            &usdc,
+            &out,
+            &[("usdc_out", 0.5, 50_000)],
+            arc_scale,
+            1,
+            1_000_000,
+        )
+        .await;
+
+        assert_eq!(
+            result.route().swaps()[0].amount_out(),
+            &BigUint::from(500_000_000_000_000_000u64)
+        );
+        assert_eq!(result.net_amount_out(), &BigInt::from(499_999_999_999_975_000u64));
+    }
+
+    #[tokio::test]
+    async fn test_spot_fallback_net_downscaled_decimals() {
+        // WETH (18 decimals) priced 1 raw unit per native raw unit. 1 WETH buys 2000 USDC (6
+        // decimals), so USDC is worth 2000 * 10^6 / 10^18 = 2 * 10^-9 raw units per native raw
+        // unit. 50_000 gas at 1 native raw unit per gas costs 0.0001 USDC raw units, charged as 1.
+        let weth = token_with_decimals(0x01, "WETH", 18);
+        let usdc = token_with_decimals(0x02, "USDC", 6);
+        let one = Price { numerator: BigUint::from(1u8), denominator: BigUint::from(1u8) };
+
+        let result = solve_through_spot_fallback(
+            &weth,
+            &usdc,
+            &[("weth_usdc", 2000.0, 50_000)],
+            one,
+            1,
+            1_000_000_000_000_000_000,
+        )
+        .await;
+
+        assert_eq!(result.route().swaps()[0].amount_out(), &BigUint::from(2_000_000_000u64));
+        assert_eq!(result.net_amount_out(), &BigInt::from(1_999_999_999u64));
+    }
+
+    #[tokio::test]
+    async fn test_spot_fallback_route_choice_upscaled_decimals() {
+        // Same Arc tokens at 10^9 native raw units per gas, so OUT pays 0.5 * 10^9 raw units per
+        // gas. "rich" pays 0.01% more, 5 * 10^13 OUT raw units on 1 USDC, but takes 200_000 more
+        // gas, 10^14 OUT raw units: "lean" nets more.
+        let usdc = token_with_decimals(0x01, "USDC", 6);
+        let out = token_with_decimals(0x02, "OUT", 18);
+        let arc_scale = Price {
+            numerator: BigUint::from(1_000_000u64),
+            denominator: BigUint::from(10u8).pow(18),
+        };
+
+        let result = solve_through_spot_fallback(
+            &usdc,
+            &out,
+            &[("lean", 0.5, 50_000), ("rich", 0.50005, 250_000)],
+            arc_scale,
+            1_000_000_000,
+            1_000_000,
+        )
+        .await;
+
+        assert_eq!(result.route().swaps()[0].component_id(), "lean");
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_fractional() {
+        let in_price =
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u8).pow(18) };
+
+        let estimated = fallback_price(in_price, 1.5).expect("fallback price should resolve");
+
+        // 10^18 wei at 1.5 * 10^-18 raw units per wei costs 1.5 raw units, charged as 2.
+        assert_eq!(
+            gas_cost_in_token(&BigUint::from(10u8).pow(18), &BigUint::from(1u8), &estimated),
+            Some(BigUint::from(2u8))
+        );
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_beyond_u128() {
+        let estimated =
+            fallback_price(unit_price(), 2f64.powi(200)).expect("finite price should resolve");
+
+        assert_eq!(estimated.numerator, BigUint::from(1u8) << 200usize);
+        assert_eq!(estimated.denominator, BigUint::from(1u8));
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_fine_fraction() {
+        let estimated =
+            fallback_price(unit_price(), 2f64.powi(-65)).expect("finite price should resolve");
+
+        assert_eq!(
+            gas_cost_in_token(&(BigUint::from(1u8) << 65usize), &BigUint::from(1u8), &estimated),
+            Some(BigUint::from(1u8))
+        );
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_subnormal() {
+        let estimated = fallback_price(unit_price(), f64::from_bits(1))
+            .expect("subnormal price should resolve");
+
+        // The smallest subnormal is exactly 2^-1074.
+        assert_eq!(&estimated.numerator << 1074usize, estimated.denominator);
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_invalid_spot() {
+        for spot_product in [0.0, -1.5, f64::NAN, f64::INFINITY] {
+            assert_eq!(fallback_price(unit_price(), spot_product), None, "spot {spot_product}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_corrupt_decimals() {
+        let token_in = token(0x01, "IN");
+        let token_out = token_with_decimals(0x02, "OUT", 256);
+        let prices: TokenGasPrices = [(token_in.address.clone(), unit_price())]
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            BellmanFordAlgorithm::resolve_token_price(
+                Some(&token_out),
+                Some(&prices),
+                1.5,
+                Some(&token_in),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_token_price_direct_lookup_unequal_decimals() {
+        let token_in = token_with_decimals(0x01, "IN", 6);
+        let token_out = token_with_decimals(0x02, "OUT", 18);
+        let out_price = Price { numerator: BigUint::from(3u8), denominator: BigUint::from(7u8) };
+        let prices: TokenGasPrices = [
+            (token_in.address.clone(), unit_price()),
+            (token_out.address.clone(), out_price.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            BellmanFordAlgorithm::resolve_token_price(
+                Some(&token_out),
+                Some(&prices),
+                1.5,
+                Some(&token_in),
+            ),
+            Some(out_price)
+        );
+    }
+
+    #[test]
+    fn test_resolve_token_price_fallback_invalid_input_price() {
+        for in_price in [
+            Price { numerator: BigUint::ZERO, denominator: BigUint::from(1u8) },
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::ZERO },
+        ] {
+            assert_eq!(fallback_price(in_price, 1.5), None);
+        }
     }
 
     // ==================== Unit Tests ====================
@@ -2097,6 +2383,21 @@ mod tests {
         assert_eq!(result.route().swaps().len(), 2);
         // amount_in of second swap == amount_out of first swap
         assert_eq!(result.route().swaps()[1].amount_in(), result.route().swaps()[0].amount_out());
+    }
+
+    #[test]
+    fn test_gas_adjusted_amount_fractional_gas_cost() {
+        let price =
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) };
+
+        let net = BellmanFordAlgorithm::gas_adjusted_amount(
+            &BigUint::from(10u8),
+            &BigUint::from(1u8),
+            &BigUint::from(1u8),
+            Some(&price),
+        );
+
+        assert_eq!(net, BigInt::from(9u8));
     }
 
     #[tokio::test]

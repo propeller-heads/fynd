@@ -591,12 +591,14 @@ export interface components {
             /** @description Source and computation freshness metadata for the returned data. */
             data_status: components["schemas"]["DataStatus"];
             /**
-             * @description The gas token address (e.g. WETH).
+             * @description The routable gas token the prices are relative to: the native asset's wrapper (e.g.
+             *     WETH), or on a chain whose native balance is also an ERC-20 (Arc's USDC), that ERC-20.
              * @example 0x0000000000000000000000000000000000000000
              */
             gas_token: string;
             /**
-             * @description Per-token mid prices relative to the native gas token, sorted by token address.
+             * @description Per-token mid prices relative to the routable gas token (`gas_token`), sorted by token
+             *     address.
              *
              *     A token the gas token cannot reach, or that cannot be sold back, is absent.
              */

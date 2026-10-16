@@ -38,7 +38,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use instrumentation::record_quote_comparison;
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
-use num_traits::{CheckedSub, ToPrimitive};
+use num_traits::{CheckedSub, ToPrimitive, Zero};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -50,6 +50,7 @@ use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
     bps,
+    derived::types::mul_div_ceil,
     encoding::encoder::Encoder,
     feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
     price_guard::guard::PriceGuard,
@@ -1601,19 +1602,40 @@ fn refine_gas_estimates(
             let refined_gas = estimate_gas_usage(&solution, derive_strategy(quote));
             let naive_gas = quote.gas_estimate().clone();
             if naive_gas > BigUint::ZERO {
-                let gas_cost_in_token_out = quote.amount_out() - quote.amount_out_net_gas();
-                let new_gas_cost = &gas_cost_in_token_out * &refined_gas / &naive_gas;
-                let new_net = if new_gas_cost <= *quote.amount_out() {
-                    quote.amount_out() - &new_gas_cost
-                } else {
-                    BigUint::ZERO
-                };
+                let new_net = refined_net_amount_out(
+                    quote.amount_out(),
+                    quote.amount_out_net_gas(),
+                    &refined_gas,
+                    &naive_gas,
+                );
                 quote.set_amount_out_net_gas(new_net);
                 quote.set_gas_estimate(refined_gas);
             }
         }
     }
     Ok(())
+}
+
+/// Recomputes a quote's net output after gas refinement, scaling its gas cost by
+/// `refined_gas / naive_gas` and rounding up. A quote whose signed algorithm result was clamped to
+/// zero at the worker boundary stays at zero, and so does one whose refined gas cost exceeds its
+/// output.
+fn refined_net_amount_out(
+    amount_out: &BigUint,
+    naive_net: &BigUint,
+    refined_gas: &BigUint,
+    naive_gas: &BigUint,
+) -> BigUint {
+    if naive_net.is_zero() {
+        return BigUint::ZERO;
+    }
+    let naive_gas_cost = amount_out - naive_net;
+    let Some(refined_gas_cost) = mul_div_ceil(&naive_gas_cost, refined_gas, naive_gas) else {
+        return BigUint::ZERO;
+    };
+    amount_out
+        .checked_sub(&refined_gas_cost)
+        .unwrap_or_default()
 }
 
 /// Marks every candidate whose pAMM legs fall back below the user's `min_amount_out` as
@@ -1753,6 +1775,28 @@ mod tests {
             Bytes::default(),
             "1".to_string(),
         )
+    }
+
+    #[test]
+    fn test_refined_net_amount_out() {
+        let refine = |amount_out: u8, naive_net: u8, refined_gas: u8, naive_gas: u8| {
+            refined_net_amount_out(
+                &amount_out.into(),
+                &naive_net.into(),
+                &refined_gas.into(),
+                &naive_gas.into(),
+            )
+        };
+
+        // A naive cost of 10 scaled by 1/3 is 3.33..., charged as 4.
+        assert_eq!(refine(100, 90, 1, 3), BigUint::from(96u8));
+        // A naive cost of 10 scaled by 1/2 is exactly 5.
+        assert_eq!(refine(100, 90, 1, 2), BigUint::from(95u8));
+        // A refined cost of 200 exceeds the output.
+        assert_eq!(refine(100, 90, 20, 1), BigUint::ZERO);
+        // A quote clamped to zero is not resurrected by a lower refined estimate.
+        assert_eq!(refine(100, 0, 140, 200), BigUint::ZERO);
+        assert_eq!(refine(100, 90, 1, 0), BigUint::ZERO);
     }
 
     /// `public_only` must carry the order identity across, or the surplus path logs and ranks

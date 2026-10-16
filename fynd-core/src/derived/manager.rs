@@ -17,9 +17,12 @@ use metrics::{counter, gauge, histogram};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, trace, warn};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::tycho_common::models::{Address, Chain};
 
-use crate::types::ComponentId;
+use crate::types::{
+    constants::{gas_token_config, GasTokenConfig, UnsupportedChainError},
+    ComponentId,
+};
 
 /// Information about which components changed in a market update.
 ///
@@ -120,8 +123,8 @@ pub type SharedDerivedDataRef = Arc<RwLock<DerivedData>>;
 /// Configuration for the default computation set built by [`ComputationManager::new`].
 #[derive(Debug, Clone)]
 pub struct ComputationManagerConfig {
-    /// Gas token address (e.g., WETH) for token price computation.
-    gas_token: Address,
+    /// Routable gas token, its probe amount and its unit scale.
+    gas_token_config: GasTokenConfig,
     /// Max hop count for token gas price computation.
     max_hop: usize,
     /// The share by which a pool's net marginal price falls at its depth (0.0 < drop < 1.0).
@@ -183,15 +186,30 @@ impl ComputationManagerConfig {
         self
     }
 
-    /// Sets the gas token address.
+    /// Prices gas against `gas_token` as an 18-decimal wrapper of the native asset, replacing
+    /// any configuration set before.
+    ///
+    /// Wrong on a shared-balance chain such as Arc, whose routable gas token has other decimals
+    /// than its native asset: gas costs come out 10^12 times too high there, with no error.
+    #[deprecated(note = "use `with_chain_gas_token`, which also sets the probe and unit scale")]
     pub fn with_gas_token(mut self, gas_token: Address) -> Self {
-        self.gas_token = gas_token;
+        self.gas_token_config = GasTokenConfig::wrapper(gas_token);
         self
+    }
+
+    /// Prices gas against `chain`'s routable gas token, with its probe amount and unit scale
+    /// (see [`GasTokenConfig`]).
+    ///
+    /// # Errors
+    /// Returns [`UnsupportedChainError`] when the chain has no routable gas token.
+    pub fn with_chain_gas_token(mut self, chain: &Chain) -> Result<Self, UnsupportedChainError> {
+        self.gas_token_config = gas_token_config(chain)?;
+        Ok(self)
     }
 
     /// Returns the gas token address.
     pub fn gas_token(&self) -> &Address {
-        &self.gas_token
+        self.gas_token_config.address()
     }
 
     /// Returns the max hop count.
@@ -207,8 +225,8 @@ impl ComputationManagerConfig {
     /// Builds the token price computation this configuration describes.
     pub(crate) fn build_token_price_computation(&self) -> TokenGasPriceComputation {
         let mut token_prices = TokenGasPriceComputation::default()
-            .with_max_hops(self.max_hop)
-            .with_gas_token(self.gas_token.clone());
+            .with_gas_token_config(self.gas_token_config.clone())
+            .with_max_hops(self.max_hop);
         if let Some(pass_budget) = self.pricing_pass_budget {
             token_prices = token_prices.with_pass_budget(pass_budget);
         }
@@ -228,7 +246,7 @@ impl ComputationManagerConfig {
 impl Default for ComputationManagerConfig {
     fn default() -> Self {
         Self {
-            gas_token: Address::zero(20),
+            gas_token_config: GasTokenConfig::wrapper(Address::zero(20)),
             max_hop: crate::solver::defaults::PRICING_MAX_HOPS,
             depth_marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP,
             pricing_pass_budget: None,
@@ -684,14 +702,20 @@ mod tests {
     };
 
     use tokio::sync::broadcast;
+    use tycho_simulation::tycho_common::models::token::Token;
 
     use super::*;
     use crate::{
         algorithm::test_utils::{component, setup_market_weighted, token, MockProtocolSim},
         derived::computation::{ComputationOutput, FailedItem, FailedItemError},
         feed::market_data::{MarketData, MarketState},
-        types::BlockInfo,
+        types::{constants::gas_token, BlockInfo},
     };
+
+    /// A test token at Ethereum's gas token address, which `with_chain_gas_token` prices against.
+    fn weth() -> Token {
+        Token { address: gas_token(&Chain::Ethereum).unwrap(), ..token(1, "WETH") }
+    }
 
     /// Drains all currently-pending events from a broadcast receiver into a Vec.
     fn drain_events(rx: &mut broadcast::Receiver<DerivedDataEvent>) -> Vec<DerivedDataEvent> {
@@ -773,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn lag_recovery_recomputes_incrementally_and_drains_to_tail() {
-        let eth = token(1, "ETH");
+        let eth = weth();
         let usdc = token(2, "USDC");
         let (market, _) = setup_market_weighted(vec![(
             "eth_usdc",
@@ -781,7 +805,9 @@ mod tests {
             &usdc,
             MockProtocolSim::new(2000.0).with_gas(0),
         )]);
-        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let config = ComputationManagerConfig::new()
+            .with_chain_gas_token(&Chain::Ethereum)
+            .unwrap();
         let (manager, _out_rx) = ComputationManager::new(config, market).unwrap();
 
         // Capacity-2 input channel; send 5 without reading to force Lagged on recv.
@@ -928,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_event_runs_computations_on_market_update() {
-        let eth = token(1, "ETH");
+        let eth = weth();
         let usdc = token(2, "USDC");
 
         let (market, _) = setup_market_weighted(vec![(
@@ -938,7 +964,9 @@ mod tests {
             MockProtocolSim::new(2000.0).with_gas(0),
         )]);
 
-        let config = ComputationManagerConfig::new().with_gas_token(eth.address.clone());
+        let config = ComputationManagerConfig::new()
+            .with_chain_gas_token(&Chain::Ethereum)
+            .unwrap();
         let (mut manager, _event_rx) = ComputationManager::new(config, market).unwrap();
 
         let event = MarketEvent::MarketUpdated {

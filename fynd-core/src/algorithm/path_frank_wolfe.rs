@@ -30,7 +30,7 @@ use super::{
 };
 use crate::{
     algorithm::request::SolveRequest,
-    derived::computation::ComputationRequirements,
+    derived::{computation::ComputationRequirements, types::gas_cost_in_token},
     graph::{petgraph::StableDiGraph, PetgraphStableDiGraphManager},
     types::{quote::Order, OrderSide, Route, RouteResult},
 };
@@ -262,33 +262,34 @@ impl PathFrankWolfeAlgorithm {
             .swaps()
             .last()
             .ok_or_else(|| AlgorithmError::Other("route has no swaps".to_string()))?;
-        Ok(Self::gas_units_to_output_tokens(&route.total_gas(), last_swap.token_out(), ctx))
+        Ok(Self::gas_units_to_output_tokens_f64(&route.total_gas(), last_swap.token_out(), ctx))
     }
 
-    /// Converts a raw gas amount into output-token cost as `f64`.
-    ///
-    /// Returns `0.0` when the gas price or the output token's price is
-    /// unavailable — gas is then simply not part of the objective.
+    /// Converts a raw gas amount into an exact, ceiling-rounded output-token cost, or `None`
+    /// when the gas price or the output token's price is unavailable.
     fn gas_units_to_output_tokens(
         gas: &BigUint,
         output_token: &Address,
         ctx: &BellmanFordContext,
-    ) -> f64 {
-        let gas_price = match &ctx.gas_price_wei {
-            Some(gp) if !gp.is_zero() => gp,
-            _ => return 0.0,
-        };
-        let price = match ctx
+    ) -> Option<BigUint> {
+        let gas_price = ctx.gas_price_wei.as_ref()?;
+        let price = ctx
             .token_prices
-            .as_ref()
-            .and_then(|tp| tp.get(output_token))
-        {
-            Some(p) if !p.denominator.is_zero() => p,
-            _ => return 0.0,
-        };
-        let gas_cost_wei = gas * gas_price;
-        let gas_cost_tokens = &gas_cost_wei * &price.numerator / &price.denominator;
-        gas_cost_tokens.to_f64().unwrap_or(0.0)
+            .as_ref()?
+            .get(output_token)?;
+        gas_cost_in_token(gas, gas_price, price)
+    }
+
+    /// [`Self::gas_units_to_output_tokens`] as `f64`, for the objective. Returns `0.0` when the
+    /// cost is unavailable — gas is then simply not part of the objective.
+    fn gas_units_to_output_tokens_f64(
+        gas: &BigUint,
+        output_token: &Address,
+        ctx: &BellmanFordContext,
+    ) -> f64 {
+        Self::gas_units_to_output_tokens(gas, output_token, ctx)
+            .and_then(|cost| cost.to_f64())
+            .unwrap_or(0.0)
     }
 
     /// Converts a `Route` (from BF's initial solve) into a single `PathAllocation`.
@@ -416,7 +417,11 @@ impl PathFrankWolfeAlgorithm {
                 Ok((total_output, gas)) => {
                     let gross = total_output.to_f64().unwrap_or(0.0);
                     gross -
-                        Self::gas_units_to_output_tokens(&BigUint::from(gas), &output_token, ctx)
+                        Self::gas_units_to_output_tokens_f64(
+                            &BigUint::from(gas),
+                            &output_token,
+                            ctx,
+                        )
                 }
                 Err(_) => 0.0,
             }
@@ -621,8 +626,9 @@ impl PathFrankWolfeAlgorithm {
         let output_token = last_swap.token_out();
         let total_out = route.amount_out(output_token);
 
-        let gas_cost = Self::gas_cost_output_tokens(route, ctx)?;
-        let gas_cost_tokens = BigUint::from(gas_cost.ceil() as u128);
+        let gas_cost_tokens =
+            Self::gas_units_to_output_tokens(&route.total_gas(), output_token, ctx)
+                .unwrap_or_default();
         Ok(BigInt::from(total_out) - BigInt::from(gas_cost_tokens))
     }
 
@@ -781,6 +787,44 @@ mod tests {
         let mut derived = DerivedData::new();
         derived.set_token_prices(prices, vec![], 1, true);
         Arc::new(RwLock::new(derived))
+    }
+
+    #[tokio::test]
+    async fn test_gas_units_to_output_tokens_beyond_f64_precision() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, graph_manager) = setup_market_unweighted(vec![(
+            "P1",
+            &token_a,
+            &token_b,
+            Box::new(MockProtocolSim::new(1.0).with_gas(1)),
+        )]);
+        let exact_cost = BigUint::from((1u64 << 53) + 1);
+        let mut prices = TokenGasPrices::default();
+        // setup_market_unweighted supplies a gas price of 100 wei, so 1/100 preserves gas units.
+        prices
+            .insert(token_b.address.clone(), Price::new(BigUint::from(1u8), BigUint::from(100u8)));
+        let mut derived_data = DerivedData::new();
+        derived_data.set_token_prices(prices, vec![], 1, true);
+        let derived = Arc::new(RwLock::new(derived_data));
+        let order = order(&token_a, &token_b, 1, OrderSide::Sell);
+        let algorithm = pfw_algo(1);
+        let context = algorithm
+            .inner
+            .build_context(
+                SolveRequest::new(graph_manager.graph(), market, &order).with_derived(derived),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            PathFrankWolfeAlgorithm::gas_units_to_output_tokens(
+                &exact_cost,
+                &token_b.address,
+                &context,
+            ),
+            Some(exact_cost)
+        );
     }
 
     impl PathFrankWolfeAlgorithm {
