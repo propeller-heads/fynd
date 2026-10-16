@@ -169,8 +169,8 @@ impl DerivedComputation for SpotPriceComputation {
         );
         Span::current().record("updated_spot_prices", spot_prices.len());
 
-        // A first run that prices nothing still completes, so readiness can follow with no
-        // spot prices at all.
+        // Still returns Ok, so workers can become ready with no spot prices; this warning is the
+        // only signal.
         if first_run && succeeded == 0 && !components_to_compute.is_empty() {
             warn!(
                 attempted = components_to_compute.len(),

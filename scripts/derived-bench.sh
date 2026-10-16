@@ -2,8 +2,8 @@
 # Time the derived computations on a recorded market, under samply by default.
 #
 # Builds the `derived` bench target of bench-harness with release optimisations plus debug symbols
-# and runs it: every computation with every component of the recording's snapshot marked as added,
-# then one incremental run for each later block. Every derived computation runs.
+# and runs it: one run of every computation with every component of the recording's snapshot
+# marked as added, then one incremental run for each later block. Every derived computation runs.
 #
 # Usage:
 #   ./scripts/derived-bench.sh [options]

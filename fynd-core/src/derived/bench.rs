@@ -284,16 +284,16 @@ pub async fn time_derived_computations(
     set_gas_price(&market, settings.gas_price_wei.clone()).await;
     let [snapshot_event] = <[MarketEvent; 1]>::try_from(drain_events(&mut events))
         .expect("the snapshot broadcasts exactly one market event");
-    let snapshot_changed = changed_components(snapshot_event);
+    let snapshot_changes = changed_components(snapshot_event);
     println!(
         "replayed the snapshot in {:.1} s: {} components",
         start.elapsed().as_secs_f64(),
-        snapshot_changed.added.len()
+        snapshot_changes.added.len()
     );
 
     let block = read_current_block(&market).await;
     let times = computations
-        .run_block(&BlockRun { market: &market, store: &store, changed: &snapshot_changed, block })
+        .run_block(&BlockRun { market: &market, store: &store, changed: &snapshot_changes, block })
         .await;
     report.times.first_block = times.into_iter().collect();
     report.values.after_first_block = read_derived_values(&store).await;
