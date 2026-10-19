@@ -50,6 +50,7 @@ use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
     bps,
+    derived::{SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
     price_guard::guard::PriceGuard,
@@ -256,6 +257,8 @@ pub struct WorkerPoolRouter {
     price_guard: Option<PriceGuard>,
     /// Simulates encoded quotes when a request explicitly asks for it.
     simulator: Option<QuoteSimulator>,
+    /// On-chain token prices that RFQ legs are checked against. `None` skips the check.
+    derived_data: Option<SharedDerivedDataRef>,
 }
 
 /// Ranked, unencoded candidates for every order of a request — the output of
@@ -450,6 +453,93 @@ fn has_rfq_leg(quote: &OrderQuote) -> bool {
     })
 }
 
+/// Drops each quote with an RFQ leg whose amount out sits more than `tolerance_bps` above the
+/// on-chain price for that leg's pair.
+///
+/// An RFQ leg is priced from the maker's indicative levels, which can sit far from what the maker
+/// signs: a route through two makers whose levels cross quotes an output neither will fill. The
+/// on-chain price of a pair is the ratio of its two tokens' gas-token prices, which token pricing
+/// computes without `fallback:` components, so a maker's own levels never vouch for themselves.
+/// It runs before ranking, so a dropped quote is neither a fallback candidate nor the public
+/// reference an exclusive candidate is measured against. A leg below the on-chain price passes,
+/// and so does a leg with an unpriced token: every worker pool may return the same RFQ route, so
+/// dropping it could leave the order with no route at all.
+fn drop_quotes_with_rfq_legs_above_onchain_price(
+    token_prices: &TokenGasPrices,
+    order_responses: &mut [OrderResponses],
+    tolerance_bps: u32,
+) {
+    for responses in order_responses {
+        for WorkerPoolQuote { worker_pool, quote, .. } in &mut responses.quotes {
+            if quote.status() != QuoteStatus::Success {
+                continue;
+            }
+            let Some(route) = quote.route() else {
+                continue;
+            };
+            let mut rejected_leg = None;
+            for swap in route.swaps() {
+                if !is_rfq_protocol(swap.protocol()) {
+                    continue;
+                }
+                let outcome = match onchain_amount_out(token_prices, swap) {
+                    None => "unpriced",
+                    Some(reference) if pays_above(swap.amount_out(), &reference, tolerance_bps) => {
+                        "above_onchain_price"
+                    }
+                    Some(_) => "passed",
+                };
+                counter!(
+                    "rfq_leg_checks_total",
+                    "protocol" => swap.protocol().to_string(),
+                    "outcome" => outcome,
+                )
+                .increment(1);
+                if outcome == "above_onchain_price" {
+                    rejected_leg = Some(swap);
+                    break;
+                }
+            }
+            let Some(rejected_leg) = rejected_leg else {
+                continue;
+            };
+            debug!(
+                order_id = %quote.order_id(),
+                worker_pool = worker_pool.as_str(),
+                protocol = rejected_leg.protocol(),
+                token_in = %rejected_leg.token_in(),
+                token_out = %rejected_leg.token_out(),
+                amount_in = %rejected_leg.amount_in(),
+                amount_out = %rejected_leg.amount_out(),
+                "dropping quote: an RFQ leg pays too far above the on-chain price"
+            );
+            quote.set_status(QuoteStatus::NoRouteFound);
+        }
+    }
+}
+
+/// What `swap`'s amount in buys at the on-chain prices of its two tokens, or `None` when either
+/// token is unpriced.
+///
+/// A token price is the token's amount per unit of gas token, so the rate from `token_in` to
+/// `token_out` is the price of `token_out` divided by the price of `token_in`.
+fn onchain_amount_out(token_prices: &TokenGasPrices, swap: &Swap) -> Option<BigUint> {
+    let price_in = token_prices.get(swap.token_in())?;
+    let price_out = token_prices.get(swap.token_out())?;
+    let divisor = &price_out.denominator * &price_in.numerator;
+    if divisor == BigUint::ZERO {
+        return None;
+    }
+    let reference = swap.amount_in() * &price_out.numerator * &price_in.denominator / divisor;
+    (reference != BigUint::ZERO).then_some(reference)
+}
+
+/// Whether `amount_out` exceeds `reference` by more than `tolerance_bps`.
+fn pays_above(amount_out: &BigUint, reference: &BigUint, tolerance_bps: u32) -> bool {
+    amount_out > reference &&
+        (amount_out - reference) * BigUint::from(10_000u32) > reference * tolerance_bps
+}
+
 /// Counts `encoding_failures_total` once per order that is returned without a transaction.
 ///
 /// `retry_budget_spent` is `true` for the orders in `cut_off_orders`, which still had untried
@@ -498,7 +588,14 @@ impl WorkerPoolRouter {
         config: WorkerPoolRouterConfig,
         encoder: Encoder,
     ) -> Self {
-        Self { solver_pools, config, encoder, price_guard: None, simulator: None }
+        Self {
+            solver_pools,
+            config,
+            encoder,
+            price_guard: None,
+            simulator: None,
+            derived_data: None,
+        }
     }
 
     /// Makes price guard validation available for this router.
@@ -507,6 +604,12 @@ impl WorkerPoolRouter {
     /// requests where the client sets `enabled: true` in `PriceGuardConfig`.
     pub fn with_price_guard(mut self, price_guard: PriceGuard) -> Self {
         self.price_guard = Some(price_guard);
+        self
+    }
+
+    /// Checks each RFQ leg against the on-chain token prices in `derived_data`.
+    pub fn with_derived_data(mut self, derived_data: SharedDerivedDataRef) -> Self {
+        self.derived_data = Some(derived_data);
         self
     }
 
@@ -597,6 +700,21 @@ impl WorkerPoolRouter {
 
         // Refine gas estimates for all candidates using estimate_gas_usage before ranking,
         // so ranking uses accurate gas costs rather than naive route.total_gas().
+        let token_prices = match &self.derived_data {
+            Some(derived_data) => derived_data
+                .read()
+                .await
+                .token_prices_shared(),
+            None => None,
+        };
+        if let Some(token_prices) = token_prices {
+            drop_quotes_with_rfq_legs_above_onchain_price(
+                &token_prices,
+                &mut order_responses,
+                self.config.rfq_leg_tolerance_bps(),
+            );
+        }
+
         if let Some(encoding_options) = request.options().encoding_options() {
             refine_gas_estimates(&mut order_responses, encoding_options)?;
             drop_pamm_quotes_below_min_amount_out(

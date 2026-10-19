@@ -146,6 +146,11 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = defaults::ENCODING_RETRY_BUDGET.as_millis() as u64)]
     pub encoding_retry_budget_ms: u64,
 
+    /// Basis points an RFQ leg of a route may pay above the on-chain price for its pair before
+    /// the route is dropped
+    #[arg(long, env, default_value_t = defaults::RFQ_LEG_TOLERANCE_BPS)]
+    pub rfq_leg_tolerance_bps: u32,
+
     /// Path to worker pools TOML config file
     #[arg(short, long, env, default_value = "worker_pools.toml")]
     pub worker_pools_config: PathBuf,

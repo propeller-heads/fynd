@@ -93,6 +93,9 @@ pub mod defaults {
     /// How long encoding retries may take, counted from when the best candidates were encoded
     /// (`0` = no retries).
     pub const ENCODING_RETRY_BUDGET: Duration = Duration::from_millis(5);
+    /// How far above the on-chain price an RFQ leg may pay, in basis points, before its route is
+    /// dropped.
+    pub const RFQ_LEG_TOLERANCE_BPS: u32 = 100;
     /// Capacity of the task queue for each worker pool.
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
     /// Minimum number of hops allowed in a route.
@@ -561,6 +564,7 @@ pub struct FyndBuilder {
     router_timeout: Duration,
     router_min_responses: usize,
     encoding_retry_budget: Duration,
+    rfq_leg_tolerance_bps: u32,
     encoder: Option<Encoder>,
     calldata_watermark: Option<Vec<u8>>,
     pools: Vec<PoolEntry>,
@@ -605,6 +609,7 @@ impl FyndBuilder {
             router_timeout: DEFAULT_ROUTER_TIMEOUT,
             router_min_responses: defaults::ROUTER_MIN_RESPONSES,
             encoding_retry_budget: defaults::ENCODING_RETRY_BUDGET,
+            rfq_leg_tolerance_bps: defaults::RFQ_LEG_TOLERANCE_BPS,
             encoder: None,
             calldata_watermark: None,
             pools: Vec::new(),
@@ -740,6 +745,13 @@ impl FyndBuilder {
     /// encoded (default: 5ms). `Duration::ZERO` turns retrying off.
     pub fn encoding_retry_budget(mut self, budget: Duration) -> Self {
         self.encoding_retry_budget = budget;
+        self
+    }
+
+    /// Sets how far above the on-chain price an RFQ leg may pay, in basis points, before its route
+    /// is dropped (default: 100).
+    pub fn rfq_leg_tolerance_bps(mut self, bps: u32) -> Self {
+        self.rfq_leg_tolerance_bps = bps;
         self
     }
 
@@ -1193,8 +1205,10 @@ impl FyndBuilder {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses)
-            .with_encoding_retry_budget(self.encoding_retry_budget);
-        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+            .with_encoding_retry_budget(self.encoding_retry_budget)
+            .with_rfq_leg_tolerance_bps(self.rfq_leg_tolerance_bps);
+        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
+            .with_derived_data(Arc::clone(&derived_data));
         if let Some(simulator) = quote_simulator {
             router = router.with_simulator(simulator);
         }
@@ -1676,7 +1690,8 @@ impl Solver {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
             .with_min_responses(defaults::ROUTER_MIN_RESPONSES);
-        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
+            .with_derived_data(Arc::clone(&derived_data));
 
         // Trigger derived data computation
         let market_read = market_data.read().await;

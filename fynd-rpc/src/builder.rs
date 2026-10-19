@@ -204,6 +204,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Sets how far above the on-chain price an RFQ leg may pay, in basis points, before its route
+    /// is dropped (default: 100).
+    pub fn rfq_leg_tolerance_bps(mut self, bps: u32) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .rfq_leg_tolerance_bps(bps);
+        self
+    }
+
     /// Sets the Tycho API key.
     pub fn tycho_api_key(mut self, key: String) -> Self {
         self.fynd_builder = self.fynd_builder.tycho_api_key(key);

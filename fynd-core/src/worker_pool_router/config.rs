@@ -22,6 +22,9 @@ pub struct WorkerPoolRouterConfig {
     /// How long encoding retries may take, counted from when the best candidates were encoded.
     /// `Duration::ZERO` turns retrying off.
     encoding_retry_budget: Duration,
+    /// How far above the on-chain price an RFQ leg may pay, in basis points, before its route is
+    /// dropped.
+    rfq_leg_tolerance_bps: u32,
 }
 
 impl Default for WorkerPoolRouterConfig {
@@ -30,6 +33,7 @@ impl Default for WorkerPoolRouterConfig {
             default_timeout: Duration::from_millis(1000),
             min_responses: 1, // Return as soon as one solver responds
             encoding_retry_budget: defaults::ENCODING_RETRY_BUDGET,
+            rfq_leg_tolerance_bps: defaults::RFQ_LEG_TOLERANCE_BPS,
         }
     }
 }
@@ -50,6 +54,11 @@ impl WorkerPoolRouterConfig {
         self.encoding_retry_budget
     }
 
+    /// Returns the RFQ leg tolerance, in basis points.
+    pub fn rfq_leg_tolerance_bps(&self) -> u32 {
+        self.rfq_leg_tolerance_bps
+    }
+
     /// Creates a new config with the specified timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
@@ -65,6 +74,12 @@ impl WorkerPoolRouterConfig {
     /// Sets how long encoding retries may take.
     pub fn with_encoding_retry_budget(mut self, budget: Duration) -> Self {
         self.encoding_retry_budget = budget;
+        self
+    }
+
+    /// Sets the RFQ leg tolerance, in basis points.
+    pub fn with_rfq_leg_tolerance_bps(mut self, bps: u32) -> Self {
+        self.rfq_leg_tolerance_bps = bps;
         self
     }
 }
