@@ -119,7 +119,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `PRICING_MAX_HOPS`, `PRICING_MAX_TOKENS_PER_PASS`, `PRICING_MIN_PASS_INTERVAL_MS` | Bounds on the token-pricing pass (also `--pricing-*` flags): how far from the gas token it reaches, how many tokens one pass attempts, and the minimum interval between passes. Unset keeps the built-in defaults |
 | `TOKEN_PRICE_JUMP_WARN_BPS` | Price move within one pricing pass that logs a warning (default `1000`) |
 | `TYCHO_CHAINS_CONFIG` | Path to a custom-chains `chains.yaml`, needed for a chain Tycho does not know as a built-in |
-| `RFQ_LEG_TOLERANCE_BPS` | Basis points an RFQ leg may pay above the on-chain price of its pair before the route is dropped (also `--rfq-leg-tolerance-bps`, default `100`). Read at startup |
+| `RFQ_LEG_TOLERANCE_BPS` | Basis points an RFQ leg of an unencoded quote may pay above the on-chain price of its pair before the route is dropped (also `--rfq-leg-tolerance-bps`, default `100`). Read at startup |
 | `RUST_LOG` | Tracing filter (e.g. `info,fynd=debug`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | When set, traces are exported over OTLP to this endpoint |
 | `METRICS_PORT` / `METRICS_HOST` | Prometheus metrics server port (default: `9898`) and bind address (default: all interfaces); require the `metrics` feature |

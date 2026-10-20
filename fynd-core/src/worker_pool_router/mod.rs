@@ -257,7 +257,8 @@ pub struct WorkerPoolRouter {
     price_guard: Option<PriceGuard>,
     /// Simulates encoded quotes when a request explicitly asks for it.
     simulator: Option<QuoteSimulator>,
-    /// On-chain token prices that RFQ legs are checked against. `None` skips the check.
+    /// On-chain token prices that RFQ legs of unencoded quotes are checked against. `None` skips
+    /// the check.
     derived_data: Option<SharedDerivedDataRef>,
 }
 
@@ -456,6 +457,7 @@ fn has_rfq_leg(quote: &OrderQuote) -> bool {
 /// Drops each quote with an RFQ leg whose amount out sits more than `tolerance_bps` above the
 /// on-chain price for that leg's pair.
 ///
+/// Only unencoded quotes need this: encoding checks each RFQ leg against the maker's signed quote.
 /// An RFQ leg is priced from the maker's indicative levels, which can sit far from what the maker
 /// signs: a route through two makers whose levels cross quotes an output neither will fill. The
 /// on-chain price of a pair is the ratio of its two tokens' gas-token prices, which token pricing
@@ -607,10 +609,30 @@ impl WorkerPoolRouter {
         self
     }
 
-    /// Checks each RFQ leg against the on-chain token prices in `derived_data`.
+    /// Checks each RFQ leg of an unencoded quote against the on-chain token prices in
+    /// `derived_data`.
     pub fn with_derived_data(mut self, derived_data: SharedDerivedDataRef) -> Self {
         self.derived_data = Some(derived_data);
         self
+    }
+
+    /// Drops each quote with an RFQ leg above the on-chain price, when token prices are known.
+    async fn drop_rfq_quotes_above_onchain_price(&self, order_responses: &mut [OrderResponses]) {
+        let Some(derived_data) = &self.derived_data else {
+            return;
+        };
+        let Some(token_prices) = derived_data
+            .read()
+            .await
+            .token_prices_shared()
+        else {
+            return;
+        };
+        drop_quotes_with_rfq_legs_above_onchain_price(
+            &token_prices,
+            order_responses,
+            self.config.rfq_leg_tolerance_bps(),
+        );
     }
 
     /// Makes encoded quote simulation available for this router.
@@ -627,12 +649,12 @@ impl WorkerPoolRouter {
     /// Fans the request out to its worker pools and returns every order's ranked candidates.
     ///
     /// Performs everything [`Self::quote`] does except encoding and final assembly: allocation,
-    /// fan-out, gas refinement, pAMM floor check, ranking, exclusive-surplus overlay, comparison
-    /// logging and price-guard validation. Callers that need more than the single best route per
-    /// order — or want to encode with a different [`Encoder`] — build on this and finish with
-    /// [`encode_quotes`] and [`finalize_quote`]. With the price guard enabled, every order's list
-    /// in the returned [`RankedQuotes`] holds exactly one candidate — the guard has already picked
-    /// the winner.
+    /// fan-out, gas refinement, pAMM floor check, RFQ price check, ranking, exclusive-surplus
+    /// overlay, comparison logging and price-guard validation. Callers that need more than the
+    /// single best route per order — or want to encode with a different [`Encoder`] — build on
+    /// this and finish with [`encode_quotes`] and [`finalize_quote`]. With the price guard
+    /// enabled, every order's list in the returned [`RankedQuotes`] holds exactly one candidate
+    /// — the guard has already picked the winner.
     pub async fn solve(
         &self,
         request: &QuoteRequest,
@@ -698,30 +720,24 @@ impl WorkerPoolRouter {
 
         let mut order_responses = futures::future::join_all(order_futures).await;
 
-        // Refine gas estimates for all candidates using estimate_gas_usage before ranking,
-        // so ranking uses accurate gas costs rather than naive route.total_gas().
-        let token_prices = match &self.derived_data {
-            Some(derived_data) => derived_data
-                .read()
-                .await
-                .token_prices_shared(),
-            None => None,
-        };
-        if let Some(token_prices) = token_prices {
-            drop_quotes_with_rfq_legs_above_onchain_price(
-                &token_prices,
-                &mut order_responses,
-                self.config.rfq_leg_tolerance_bps(),
-            );
-        }
-
-        if let Some(encoding_options) = request.options().encoding_options() {
-            refine_gas_estimates(&mut order_responses, encoding_options)?;
-            drop_pamm_quotes_below_min_amount_out(
-                &self.encoder,
-                &mut order_responses,
-                encoding_options,
-            )?;
+        match request.options().encoding_options() {
+            Some(encoding_options) => {
+                // Refine gas estimates for all candidates using estimate_gas_usage before
+                // ranking, so ranking uses accurate gas costs rather than naive
+                // route.total_gas().
+                refine_gas_estimates(&mut order_responses, encoding_options)?;
+                drop_pamm_quotes_below_min_amount_out(
+                    &self.encoder,
+                    &mut order_responses,
+                    encoding_options,
+                )?;
+            }
+            // Encoding checks each RFQ leg against the maker's signed quote; an unencoded quote
+            // never reaches that check.
+            None => {
+                self.drop_rfq_quotes_above_onchain_price(&mut order_responses)
+                    .await
+            }
         }
 
         // Rank quotes for each order (sorted by refined amount_out_net_gas descending).
@@ -1829,6 +1845,7 @@ mod tests {
         tycho_common::models::Chain,
         tycho_core::{
             models::{token::Token, Address, Chain as SimChain},
+            simulation::protocol_sim::Price,
             Bytes,
         },
     };
@@ -1836,6 +1853,7 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
+        derived::DerivedData,
         feed::exclusivity::mark_exclusive,
         solver::defaults,
         tests::metrics::recorded_metrics,
@@ -2464,6 +2482,51 @@ mod tests {
         assert_eq!(staged.solve_time_ms(), 7);
         worker_a.abort();
         worker_b.abort();
+    }
+
+    /// Derived data pricing `make_single_quote_on`'s pair so 1000 in buys 900 out on-chain, which
+    /// puts its 990 out 10% above the on-chain price.
+    async fn derived_data_pricing_rfq_leg_above_onchain() -> SharedDerivedDataRef {
+        let price = |numerator: u64| Price {
+            numerator: BigUint::from(numerator),
+            denominator: BigUint::from(1u64),
+        };
+        let mut token_prices = TokenGasPrices::default();
+        token_prices.insert(make_address(0x01), price(1000));
+        token_prices.insert(make_address(0x02), price(900));
+        let derived_data = DerivedData::new_shared();
+        derived_data
+            .write()
+            .await
+            .set_token_prices(token_prices, vec![], 1);
+        derived_data
+    }
+
+    #[rstest]
+    #[case::unencoded(QuoteOptions::default(), QuoteStatus::NoRouteFound)]
+    #[case::encoded(
+        QuoteOptions::default().with_encoding_options(EncodingOptions::new(0.01)),
+        QuoteStatus::Success
+    )]
+    #[tokio::test]
+    async fn test_solve_rfq_leg_above_onchain_price(
+        #[case] options: QuoteOptions,
+        #[case] expected: QuoteStatus,
+    ) {
+        let (pool, worker) =
+            create_mock_worker_pool("pool_a", Ok(make_single_quote_on("rfq:bebop", 900)), 0);
+        let worker_router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder())
+                .with_derived_data(derived_data_pricing_rfq_leg_above_onchain().await);
+        let request = QuoteRequest::new(vec![make_order()], options);
+
+        let ranked = worker_router
+            .solve(&request, ExclusiveAccess::Denied)
+            .await
+            .expect("solve");
+
+        assert_eq!(ranked.per_order()[0][0].status(), expected);
+        worker.abort();
     }
 
     #[rstest]

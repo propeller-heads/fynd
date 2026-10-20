@@ -204,8 +204,8 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Sets how far above the on-chain price an RFQ leg may pay, in basis points, before its route
-    /// is dropped (default: 100).
+    /// Sets how far above the on-chain price an RFQ leg of an unencoded quote may pay, in basis
+    /// points, before its route is dropped (default: 100).
     pub fn rfq_leg_tolerance_bps(mut self, bps: u32) -> Self {
         self.fynd_builder = self
             .fynd_builder

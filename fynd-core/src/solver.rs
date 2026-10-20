@@ -93,8 +93,8 @@ pub mod defaults {
     /// How long encoding retries may take, counted from when the best candidates were encoded
     /// (`0` = no retries).
     pub const ENCODING_RETRY_BUDGET: Duration = Duration::from_millis(5);
-    /// How far above the on-chain price an RFQ leg may pay, in basis points, before its route is
-    /// dropped.
+    /// How far above the on-chain price an RFQ leg of an unencoded quote may pay, in basis points,
+    /// before its route is dropped.
     pub const RFQ_LEG_TOLERANCE_BPS: u32 = 100;
     /// Capacity of the task queue for each worker pool.
     pub const POOL_TASK_QUEUE_CAPACITY: usize = 1000;
@@ -748,8 +748,8 @@ impl FyndBuilder {
         self
     }
 
-    /// Sets how far above the on-chain price an RFQ leg may pay, in basis points, before its route
-    /// is dropped (default: 100).
+    /// Sets how far above the on-chain price an RFQ leg of an unencoded quote may pay, in basis
+    /// points, before its route is dropped (default: 100).
     pub fn rfq_leg_tolerance_bps(mut self, bps: u32) -> Self {
         self.rfq_leg_tolerance_bps = bps;
         self

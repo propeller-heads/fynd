@@ -22,8 +22,8 @@ pub struct WorkerPoolRouterConfig {
     /// How long encoding retries may take, counted from when the best candidates were encoded.
     /// `Duration::ZERO` turns retrying off.
     encoding_retry_budget: Duration,
-    /// How far above the on-chain price an RFQ leg may pay, in basis points, before its route is
-    /// dropped.
+    /// How far above the on-chain price an RFQ leg of an unencoded quote may pay, in basis points,
+    /// before its route is dropped.
     rfq_leg_tolerance_bps: u32,
 }
 
