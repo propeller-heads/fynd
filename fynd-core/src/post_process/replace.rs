@@ -402,7 +402,7 @@ pub(super) fn build_targets(swaps: &[Swap]) -> Vec<Target> {
 
 /// One target for each pair of cut tokens with more than one swap in the segment between them.
 /// The pair of the order's input and output token covers the whole route.
-pub(super) fn build_segment_targets(swaps: &[Swap]) -> Vec<Target> {
+fn build_segment_targets(swaps: &[Swap]) -> Vec<Target> {
     let cuts = find_cut_tokens(swaps);
     let forward: Vec<FxHashSet<Address>> = cuts
         .iter()
@@ -438,7 +438,7 @@ pub(super) fn build_segment_targets(swaps: &[Swap]) -> Vec<Target> {
 
 /// The tokens that every path from the first input token to the last output token passes
 /// through, in route order. The input and output token come first and last.
-pub(super) fn find_cut_tokens(swaps: &[Swap]) -> Vec<Address> {
+fn find_cut_tokens(swaps: &[Swap]) -> Vec<Address> {
     let (Some(first), Some(last)) = (swaps.first(), swaps.last()) else {
         return Vec::new();
     };
@@ -496,4 +496,76 @@ fn find_reachable(swaps: &[Swap], start: &Address, direction: Direction) -> FxHa
         }
     }
     reached
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use tycho_simulation::tycho_common::models::token::Token;
+
+    use super::*;
+    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
+
+    fn swap(id: &str, pair: (&Token, &Token), amounts: (u64, u64), split: f64, price: f64) -> Swap {
+        Swap::new(
+            id.to_string(),
+            "uniswap_v2".to_string(),
+            pair.0.address.clone(),
+            pair.1.address.clone(),
+            BigUint::from(amounts.0),
+            BigUint::from(amounts.1),
+            BigUint::from(10u64),
+            component(id, &[pair.0.clone(), pair.1.clone()]),
+            Box::new(MockProtocolSim::new(price).with_gas(10)),
+        )
+        .with_split(split)
+    }
+
+    fn legs(spec: &[(char, char)]) -> Vec<Swap> {
+        let mut swaps = Vec::new();
+        for (position, (from, to)) in spec.iter().enumerate() {
+            swaps.push(swap(
+                &format!("s{position}"),
+                (&letter(*from), &letter(*to)),
+                (1, 1),
+                0.0,
+                1.0,
+            ));
+        }
+        swaps
+    }
+
+    fn letter(letter: char) -> Token {
+        token(letter as u8 - b'A' + 0x0A, &letter.to_string())
+    }
+
+    #[rstest]
+    #[case::sequential(&[('A', 'B'), ('B', 'C'), ('C', 'D')], "ABCD", &[&[0, 1][..], &[0, 1, 2], &[1, 2]])]
+    #[case::split_and_merge(
+        &[('A', 'B'), ('A', 'C'), ('B', 'D'), ('C', 'D')],
+        "AD",
+        &[&[0, 1, 2, 3][..]]
+    )]
+    #[case::split_before_hop(&[('A', 'B'), ('A', 'B'), ('B', 'C')], "ABC", &[&[0, 1][..], &[0, 1, 2]])]
+    fn test_cut_tokens_and_segments(
+        #[case] spec: &[(char, char)],
+        #[case] expected_cuts: &str,
+        #[case] expected_replaced: &[&[usize]],
+    ) {
+        let swaps = legs(spec);
+
+        let cuts = find_cut_tokens(&swaps);
+        let targets = build_segment_targets(&swaps);
+
+        let expected: Vec<Address> = expected_cuts
+            .chars()
+            .map(|c| letter(c).address)
+            .collect();
+        assert_eq!(cuts, expected);
+        let replaced: Vec<&[usize]> = targets
+            .iter()
+            .map(|target| target.replaced.as_slice())
+            .collect();
+        assert_eq!(replaced, expected_replaced);
+    }
 }

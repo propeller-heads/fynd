@@ -149,7 +149,6 @@ mod tests {
             MockProtocolSim,
         },
         derived::DerivedData,
-        post_process::replace::{build_segment_targets, find_cut_tokens},
         types::{Order, OrderSide, Route, RouteExclusions},
     };
 
@@ -793,53 +792,5 @@ mod tests {
                 .await;
 
         assert!(out.is_none());
-    }
-
-    fn legs(spec: &[(char, char)]) -> Vec<Swap> {
-        let mut swaps = Vec::new();
-        for (position, (from, to)) in spec.iter().enumerate() {
-            swaps.push(swap(
-                &format!("s{position}"),
-                (&letter(*from), &letter(*to)),
-                (1, 1),
-                0.0,
-                1.0,
-            ));
-        }
-        swaps
-    }
-
-    fn letter(letter: char) -> Token {
-        token(letter as u8 - b'A' + 0x0A, &letter.to_string())
-    }
-
-    #[rstest]
-    #[case::sequential(&[('A', 'B'), ('B', 'C'), ('C', 'D')], "ABCD", &[&[0, 1][..], &[0, 1, 2], &[1, 2]])]
-    #[case::split_and_merge(
-        &[('A', 'B'), ('A', 'C'), ('B', 'D'), ('C', 'D')],
-        "AD",
-        &[&[0, 1, 2, 3][..]]
-    )]
-    #[case::split_before_hop(&[('A', 'B'), ('A', 'B'), ('B', 'C')], "ABC", &[&[0, 1][..], &[0, 1, 2]])]
-    fn test_cut_tokens_and_segments(
-        #[case] spec: &[(char, char)],
-        #[case] expected_cuts: &str,
-        #[case] expected_replaced: &[&[usize]],
-    ) {
-        let swaps = legs(spec);
-
-        let cuts = find_cut_tokens(&swaps);
-        let targets = build_segment_targets(&swaps);
-
-        let expected: Vec<Address> = expected_cuts
-            .chars()
-            .map(|c| letter(c).address)
-            .collect();
-        assert_eq!(cuts, expected);
-        let replaced: Vec<&[usize]> = targets
-            .iter()
-            .map(|target| target.replaced.as_slice())
-            .collect();
-        assert_eq!(replaced, expected_replaced);
     }
 }
