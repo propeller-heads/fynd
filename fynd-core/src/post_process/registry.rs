@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::post_process::{rfq::RfqSwapReplacer, RoutePostProcessor};
+use crate::post_process::{
+    exclusive::ExclusiveSwapReplacer, rfq::RfqSwapReplacer, RoutePostProcessor,
+};
 
 /// Builds one post-processor. Called once per worker.
 type Factory = Arc<dyn Fn() -> Box<dyn RoutePostProcessor> + Send + Sync>;
@@ -12,8 +14,10 @@ type BuiltInFactory = fn() -> Box<dyn RoutePostProcessor>;
 
 /// The post-processors that ship with fynd-core, each with its name and its factory. A registry
 /// never holds them: `resolve` finds them.
-const BUILT_INS: &[(&str, BuiltInFactory)] =
-    &[(RfqSwapReplacer::NAME, || Box::<RfqSwapReplacer>::default())];
+const BUILT_INS: &[(&str, BuiltInFactory)] = &[
+    (RfqSwapReplacer::NAME, || Box::<RfqSwapReplacer>::default()),
+    (ExclusiveSwapReplacer::NAME, || Box::<ExclusiveSwapReplacer>::default()),
+];
 
 /// The factory of the built-in post-processor `name`, if there is one.
 fn find_built_in(name: &str) -> Option<Factory> {

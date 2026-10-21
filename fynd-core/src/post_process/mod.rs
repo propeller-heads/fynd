@@ -6,8 +6,8 @@
 //! algorithm's route first, then runs the post-processors, then checks the processed route. The
 //! router ranks the quote after that.
 //!
-//! `rfq_swap_replacer` is built in: a pool config lists it with no registration. A registry adds
-//! only custom names.
+//! `rfq_swap_replacer` and `exclusive_swap_replacer` are built in: a pool config lists them with
+//! no registration. A registry adds only custom names.
 //!
 //! ```ignore
 //! // In the deployment's binary:
