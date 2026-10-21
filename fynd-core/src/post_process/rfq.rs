@@ -12,7 +12,7 @@ use crate::{
         protocol_registry::{is_rfq_protocol, strip_fallback_prefix},
     },
     post_process::{
-        replace::{RfqIndex, Search, Snapshot, Target},
+        replace::{ComponentIndex, Search, Snapshot, Target},
         PostProcessRequest, RoutePostProcessor,
     },
     types::{RouteResult, Swap},
@@ -29,7 +29,7 @@ use crate::{
 #[derive(Default)]
 pub(crate) struct RfqSwapReplacer {
     market: Option<MarketData>,
-    index: RfqIndex,
+    index: ComponentIndex,
 }
 
 impl RfqSwapReplacer {
@@ -68,7 +68,7 @@ impl MarketEventHandler for RfqSwapReplacer {
 #[async_trait]
 impl RoutePostProcessor for RfqSwapReplacer {
     async fn initialize(&mut self, market: &MarketData) {
-        let mut index = RfqIndex::default();
+        let mut index = ComponentIndex::default();
         {
             let view = market.read().await;
             let state = view.base_market_state();
