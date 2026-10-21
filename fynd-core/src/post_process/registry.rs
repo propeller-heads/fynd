@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "worker pool 'main' lists unknown post-processor 'missing'. Available: alpha, \
-             rfq_swap_replacer, zeta"
+             exclusive_swap_replacer, rfq_swap_replacer, zeta"
         );
     }
 
@@ -304,15 +304,17 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .ends_with("Available: rfq_swap_replacer"),
+                .ends_with("Available: exclusive_swap_replacer, rfq_swap_replacer"),
             "expected the message to list the built-in, got: {error}"
         );
     }
 
-    #[test]
-    fn test_resolve_built_in_with_empty_registry() {
+    #[rstest::rstest]
+    #[case::rfq(RfqSwapReplacer::NAME)]
+    #[case::exclusive(ExclusiveSwapReplacer::NAME)]
+    fn test_resolve_built_in_with_empty_registry(#[case] name: &str) {
         let factories = PostProcessorRegistry::new()
-            .resolve("pool", &[RfqSwapReplacer::NAME.to_string()])
+            .resolve("pool", &[name.to_string()])
             .expect("the name is built in");
 
         let names: Vec<String> = factories
@@ -320,18 +322,17 @@ mod tests {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(names, [RfqSwapReplacer::NAME]);
+        assert_eq!(names, [name]);
     }
 
-    #[test]
-    fn test_registry_refuses_built_in_name() {
+    #[rstest::rstest]
+    #[case::rfq(RfqSwapReplacer::NAME)]
+    #[case::exclusive(ExclusiveSwapReplacer::NAME)]
+    fn test_registry_refuses_built_in_name(#[case] name: &str) {
         let error = PostProcessorRegistry::new()
-            .with_post_processor(RfqSwapReplacer::NAME, || Noop)
+            .with_post_processor(name, || Noop)
             .expect_err("a built-in uses the name");
 
-        assert_eq!(
-            error,
-            PostProcessorAlreadyRegistered { name: RfqSwapReplacer::NAME.to_string() }
-        );
+        assert_eq!(error, PostProcessorAlreadyRegistered { name: name.to_string() });
     }
 }
