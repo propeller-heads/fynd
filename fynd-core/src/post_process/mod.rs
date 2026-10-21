@@ -23,6 +23,7 @@
 
 mod pipeline;
 pub mod registry;
+mod replace;
 mod rfq;
 #[cfg(test)]
 pub(crate) mod test_utils;
