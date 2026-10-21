@@ -111,58 +111,23 @@ impl ReplacementRule for RfqRule {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use num_bigint::{BigInt, BigUint};
     use rstest::rstest;
     use rustc_hash::FxHashMap;
-    use tycho_simulation::tycho_common::{
-        models::{protocol::ProtocolComponent, token::Token, Address},
-        simulation::protocol_sim::ProtocolSim,
-    };
+    use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, token::Token};
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{
-            component, component_with_protocol, order, setup_market_weighted, token,
-            MockProtocolSim,
-        },
+        algorithm::test_utils::{component, MockProtocolSim},
         derived::DerivedData,
-        types::{Order, OrderSide, Route, RouteExclusions},
+        post_process::test_utils::{
+            add_component, added, component_ids, far_deadline, market, replaced, replaced_ids,
+            result, run, sell_order, sequential_route, swap, tokens,
+        },
+        types::{Route, RouteExclusions},
     };
-
-    fn far_deadline() -> Instant {
-        Instant::now() + Duration::from_secs(60)
-    }
-
-    fn tokens() -> (Token, Token, Token) {
-        (token(0x0A, "A"), token(0x0B, "B"), token(0x0C, "C"))
-    }
-
-    fn market() -> MarketData {
-        setup_market_weighted(Vec::new()).0
-    }
-
-    async fn add_component(
-        market: &MarketData,
-        id: &str,
-        protocol: &str,
-        component_tokens: &[&Token],
-        sim: MockProtocolSim,
-    ) {
-        let component_tokens: Vec<Token> = component_tokens
-            .iter()
-            .map(|token| (*token).clone())
-            .collect();
-        let mut state = market.write().await;
-        state.upsert_components(std::iter::once(component_with_protocol(
-            id,
-            protocol,
-            &component_tokens,
-        )));
-        state.update_states([(id.to_string(), Box::new(sim) as Box<dyn ProtocolSim>)]);
-        state.upsert_tokens(component_tokens);
-    }
 
     async fn add_rfq(
         market: &MarketData,
@@ -177,87 +142,6 @@ mod tests {
         let mut replacer = RfqSwapReplacer::default();
         replacer.initialize(market).await;
         replacer
-    }
-
-    /// A swap as returned by the algorithm, with gas priced at one output-token unit per gas unit.
-    fn swap(id: &str, pair: (&Token, &Token), amounts: (u64, u64), split: f64, price: f64) -> Swap {
-        Swap::new(
-            id.to_string(),
-            "uniswap_v2".to_string(),
-            pair.0.address.clone(),
-            pair.1.address.clone(),
-            BigUint::from(amounts.0),
-            BigUint::from(amounts.1),
-            BigUint::from(10u64),
-            component(id, &[pair.0.clone(), pair.1.clone()]),
-            Box::new(MockProtocolSim::new(price).with_gas(10)),
-        )
-        .with_split(split)
-    }
-
-    fn result(swaps: Vec<Swap>, all_tokens: &[&Token]) -> RouteResult {
-        let gas: u64 = swaps.len() as u64 * 10;
-        let output = swaps
-            .last()
-            .expect("the test route has swaps")
-            .token_out()
-            .clone();
-        let route = Route::new(
-            swaps,
-            all_tokens
-                .iter()
-                .map(|token| (token.address.clone(), (*token).clone())),
-        )
-        .expect("the test swaps form a route");
-        let amount_out = BigInt::from(route.amount_out(&output));
-        RouteResult::new(route, amount_out - gas, BigUint::from(1u64))
-    }
-
-    fn sequential_route() -> RouteResult {
-        let (a, b, c) = tokens();
-        result(
-            vec![
-                swap("ab", (&a, &b), (1000, 2000), 0.0, 2.0),
-                swap("bc", (&b, &c), (2000, 4000), 0.0, 2.0),
-            ],
-            &[&a, &b, &c],
-        )
-    }
-
-    fn sell_order(from: &Token, to: &Token) -> Order {
-        order(from, to, 1000, OrderSide::Sell)
-    }
-
-    async fn run(
-        replacer: &RfqSwapReplacer,
-        market: &MarketData,
-        order: &Order,
-        exclusions: &RouteExclusions,
-        route: RouteResult,
-    ) -> Option<RouteResult> {
-        let derived = DerivedData::new_shared();
-        let request = PostProcessRequest::new(order, market, &derived, exclusions, far_deadline());
-        replacer.process(&request, &route).await
-    }
-
-    fn replaced(out: Option<RouteResult>) -> RouteResult {
-        out.expect("the replacer replaces the route")
-    }
-
-    /// The component ids of the replacement, or none when the replacer keeps the route.
-    fn replaced_ids(out: &Option<RouteResult>) -> Vec<&str> {
-        out.as_ref()
-            .map(component_ids)
-            .unwrap_or_default()
-    }
-
-    fn component_ids(result: &RouteResult) -> Vec<&str> {
-        result
-            .route()
-            .swaps()
-            .iter()
-            .map(Swap::component_id)
-            .collect()
     }
 
     #[tokio::test]
@@ -403,22 +287,6 @@ mod tests {
             run(&replacer, &market, &sell_order(&a, &c), &exclusions, sequential_route()).await;
 
         assert!(out.is_none());
-    }
-
-    fn added(id: &str, pair: &[&Token]) -> MarketEvent {
-        MarketEvent::MarketUpdated {
-            added_components: [(
-                id.to_string(),
-                pair.iter()
-                    .map(|token| token.address.clone())
-                    .collect::<Vec<_>>()
-                    .into(),
-            )]
-            .into_iter()
-            .collect(),
-            removed_components: Vec::new(),
-            updated_components: Vec::new(),
-        }
     }
 
     #[tokio::test]

@@ -641,25 +641,10 @@ fn find_reachable(swaps: &[Swap], start: &Address, direction: Direction) -> FxHa
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use tycho_simulation::tycho_common::models::token::Token;
+    use tycho_simulation::tycho_common::models::{token::Token, Address};
 
     use super::*;
-    use crate::algorithm::test_utils::{component, token, MockProtocolSim};
-
-    fn swap(id: &str, pair: (&Token, &Token), amounts: (u64, u64), split: f64, price: f64) -> Swap {
-        Swap::new(
-            id.to_string(),
-            "uniswap_v2".to_string(),
-            pair.0.address.clone(),
-            pair.1.address.clone(),
-            BigUint::from(amounts.0),
-            BigUint::from(amounts.1),
-            BigUint::from(10u64),
-            component(id, &[pair.0.clone(), pair.1.clone()]),
-            Box::new(MockProtocolSim::new(price).with_gas(10)),
-        )
-        .with_split(split)
-    }
+    use crate::{algorithm::test_utils::token, post_process::test_utils::swap};
 
     fn legs(spec: &[(char, char)]) -> Vec<Swap> {
         let mut swaps = Vec::new();
