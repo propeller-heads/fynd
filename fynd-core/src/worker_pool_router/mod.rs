@@ -51,13 +51,14 @@ use tycho_simulation::tycho_common::Bytes;
 use crate::{
     bps,
     encoding::encoder::Encoder,
+    exclusive_route::{exclusive_route_shape, leg_route_output, ExclusiveRouteShape},
     feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
     price_guard::guard::PriceGuard,
     simulation::simulator::{QuoteSimulator, SimulationPurpose},
     types::RouteRejection,
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
-    QuoteStatus, SolveError, SolveParams, SurplusInfo, Swap,
+    QuoteStatus, SolveError, SolveParams, SurplusInfo,
 };
 
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
@@ -1455,15 +1456,9 @@ fn pin_commitment(exclusive_candidate: &OrderQuote, committed_amount_out: BigUin
     surplus_quote.with_surplus(surplus_info)
 }
 
-/// Returns `true` only for routes carrying exactly one exclusive leg whose output reaches the
-/// route's output token. The leg can sit at any hop, on any branch of a split route.
-///
-/// Returns `false` for routes with no exclusive leg, more than one exclusive leg, no route at all,
-/// a leg whose output no swap carries to the route's output token, or swaps after the leg that
-/// loop back to a token already on their path.
-///
-/// The single-leg constraint keeps per-leg surplus attribution unambiguous: multiple exclusive
-/// legs make the per-component attribution non-unique.
+/// Whether the route of `quote` is [`ExclusiveRouteShape::Valid`]. Counts the two rejections that
+/// have a metric: `exclusive_route_multiple_legs_total` and
+/// `exclusive_route_does_not_reach_output_total`.
 fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
     let Some(route) = quote.route() else {
         return false;
@@ -1471,96 +1466,18 @@ fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
     let Some(output_token) = route.output_token() else {
         return false;
     };
-
-    let swaps = route.swaps();
-    let mut exclusive_legs = swaps
-        .iter()
-        .filter(|swap| is_exclusive(swap.protocol_component()));
-    let Some(leg) = exclusive_legs.next() else {
-        return false;
-    };
-    if exclusive_legs.next().is_some() {
-        counter!("exclusive_route_multiple_legs_total").increment(1);
-        return false;
-    }
-
-    let reaches_output = leg_route_output(swaps, leg, &output_token)
-        .is_some_and(|(numerator, _)| numerator > BigUint::ZERO);
-    if !reaches_output {
-        counter!("exclusive_route_does_not_reach_output_total").increment(1);
-    }
-    reaches_output
-}
-
-/// Returns the route output that `leg`'s output produces, as the fraction
-/// `(numerator, denominator)`.
-///
-/// A leg that outputs `output_token` produces its own output. Otherwise the leg gets the share of
-/// its token's route output that its output makes up of all that the later swaps take of the
-/// token. This is the average price of the pools after the leg. Returns `None` when the swaps after
-/// the leg loop back to a token already on their path.
-fn leg_route_output(
-    swaps: &[Swap],
-    leg: &Swap,
-    output_token: &Bytes,
-) -> Option<(BigUint, BigUint)> {
-    if leg.token_out() == output_token {
-        return Some((leg.amount_out().clone(), BigUint::from(1u8)));
-    }
-    let consumed = consumed_amount(swaps, leg.token_out());
-    if consumed == BigUint::ZERO {
-        return Some((BigUint::ZERO, BigUint::from(1u8)));
-    }
-    let (numerator, denominator) =
-        token_route_output(swaps, leg.token_out(), output_token, &mut Vec::new())?;
-    Some((leg.amount_out() * numerator, denominator * consumed))
-}
-
-/// Returns the route output that the swaps taking `token` produce from it, as the fraction
-/// `(numerator, denominator)`, or `None` if they loop back to a token in `path`.
-fn token_route_output(
-    swaps: &[Swap],
-    token: &Bytes,
-    output_token: &Bytes,
-    path: &mut Vec<Bytes>,
-) -> Option<(BigUint, BigUint)> {
-    if path.contains(token) {
-        return None;
-    }
-    path.push(token.clone());
-
-    let mut numerator = BigUint::ZERO;
-    let mut denominator = BigUint::from(1u8);
-    for swap in swaps
-        .iter()
-        .filter(|swap| swap.token_in() == token)
-    {
-        let (swap_numerator, swap_denominator) = if swap.token_out() == output_token {
-            (swap.amount_out().clone(), BigUint::from(1u8))
-        } else {
-            let consumed = consumed_amount(swaps, swap.token_out());
-            let (next_numerator, next_denominator) =
-                token_route_output(swaps, swap.token_out(), output_token, path)?;
-            (swap.amount_out() * next_numerator, next_denominator * consumed)
-        };
-        if swap_numerator == BigUint::ZERO {
-            continue;
+    match exclusive_route_shape(route.swaps(), &output_token) {
+        ExclusiveRouteShape::Valid => true,
+        ExclusiveRouteShape::NoExclusiveLeg => false,
+        ExclusiveRouteShape::MultipleLegs => {
+            counter!("exclusive_route_multiple_legs_total").increment(1);
+            false
         }
-        numerator = numerator * &swap_denominator + swap_numerator * &denominator;
-        denominator *= swap_denominator;
+        ExclusiveRouteShape::DoesNotReachOutput => {
+            counter!("exclusive_route_does_not_reach_output_total").increment(1);
+            false
+        }
     }
-
-    path.pop();
-    Some((numerator, denominator))
-}
-
-/// Returns how much of `token` the route's swaps take in.
-fn consumed_amount(swaps: &[Swap], token: &Bytes) -> BigUint {
-    swaps
-        .iter()
-        .filter(|swap| swap.token_in() == token)
-        .map(|swap| swap.amount_in())
-        .sum()
 }
 
 /// Shared-graph facts beat path-specific reasons (most specific first: amount-too-small and a
