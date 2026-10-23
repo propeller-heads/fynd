@@ -186,37 +186,50 @@ fn user_margin(improvement: &BigUint, user_share_bps: u32) -> BigUint {
     (improvement * BigUint::from(user_share_bps) + (&denominator - 1u32)) / denominator
 }
 
-/// Returns the amount to commit against a successful public quote:
+/// What a route pays: the amount out, and the amount out net of gas.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RouteOutput<'a> {
+    pub(crate) amount_out: &'a BigUint,
+    pub(crate) amount_out_net_gas: &'a BigUint,
+}
+
+impl<'a> RouteOutput<'a> {
+    pub(crate) fn of(quote: &'a OrderQuote) -> Self {
+        Self { amount_out: quote.amount_out(), amount_out_net_gas: quote.amount_out_net_gas() }
+    }
+}
+
+/// Returns the amount to commit against a successful public route:
 /// `max(public_amount_out, required_net + gas)`.
 ///
-/// Returns `None` if the candidate fails a gate. The candidate must match the public output net of
+/// Returns `None` if the exclusive route fails a gate. It must match the public output net of
 /// gas, and it must produce at least the public output. `combine_with_surplus` gives the reason for
 /// each bound.
 pub(crate) fn matched_commitment(
-    public_reference: &OrderQuote,
-    exclusive_candidate: &OrderQuote,
+    public_reference: RouteOutput<'_>,
+    exclusive_candidate: RouteOutput<'_>,
     user_share_bps: u32,
 ) -> Option<BigUint> {
     // The candidate route must match the public reference net-of-gas; anything it produces on
     // top is the improvement, of which the user keeps a share (the margin).
-    let public_net_amount_out = public_reference.amount_out_net_gas();
-    if exclusive_candidate.amount_out_net_gas() < public_net_amount_out {
+    let public_net_amount_out = public_reference.amount_out_net_gas;
+    if exclusive_candidate.amount_out_net_gas < public_net_amount_out {
         return None;
     }
-    let improvement = exclusive_candidate.amount_out_net_gas() - public_net_amount_out;
+    let improvement = exclusive_candidate.amount_out_net_gas - public_net_amount_out;
     let required_net_amount_out = public_net_amount_out + user_margin(&improvement, user_share_bps);
 
     // Exact-in assumption: everything below compares and commits output amounts. For exact-out
     // orders this comparison would have to run on amount_in instead (see function docs).
     // We promise the user at least the public route's output. A private route that produces
     // less can't keep that promise, so we skip it — even when its gas savings make it better net.
-    let public_amount_out = public_reference.amount_out();
-    if exclusive_candidate.amount_out() < public_amount_out {
+    let public_amount_out = public_reference.amount_out;
+    if exclusive_candidate.amount_out < public_amount_out {
         return None;
     }
 
     // Gas the user pays to execute the exclusive route, in output-token terms.
-    let gas_cost = exclusive_candidate.amount_out() - exclusive_candidate.amount_out_net_gas();
+    let gas_cost = exclusive_candidate.amount_out - exclusive_candidate.amount_out_net_gas;
     Some((required_net_amount_out + gas_cost).max(public_amount_out.clone()))
 }
 

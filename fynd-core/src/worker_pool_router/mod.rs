@@ -50,7 +50,7 @@ use crate::{
     encoding::encoder::Encoder,
     exclusive_route::{
         exclusive_route_shape, leg_route_output, matched_commitment, pin_commitment,
-        record_gas_token_amount, to_gas_token_amount, ExclusiveRouteShape,
+        record_gas_token_amount, to_gas_token_amount, ExclusiveRouteShape, RouteOutput,
         USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
     },
     feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
@@ -1121,9 +1121,11 @@ fn combine_with_surplus(
         .filter(|q| q.status() == QuoteStatus::Success);
 
     let commitment = match public_reference {
-        Some(public_reference) => {
-            matched_commitment(public_reference, exclusive_candidate, user_share_bps)
-        }
+        Some(public_reference) => matched_commitment(
+            RouteOutput::of(public_reference),
+            RouteOutput::of(exclusive_candidate),
+            user_share_bps,
+        ),
         None => default_fee_commitment(exclusive_candidate),
     };
     let Some(committed_amount_out) = commitment else {
