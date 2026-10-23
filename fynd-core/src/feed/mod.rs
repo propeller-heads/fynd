@@ -87,6 +87,9 @@ pub(crate) struct TychoFeedConfig {
     /// unset, Fynd connects to those venues directly. Derived data is sourced from it by the
     /// computation manager, not by the feed.
     pub(crate) nexus_url: Option<String>,
+    /// Whether the pAMM price level stream also reads Titan's quote stream, to attach the account
+    /// state Titan priced each pAMM state on. Default `true`.
+    pub(crate) pamm_simulation_overrides: bool,
 }
 
 impl TychoFeedConfig {
@@ -116,6 +119,7 @@ impl TychoFeedConfig {
             aggregate_rfqs: false,
             external_liquidity: Vec::new(),
             nexus_url: None,
+            pamm_simulation_overrides: true,
         }
     }
 
@@ -146,6 +150,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    pub(crate) fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.pamm_simulation_overrides = enabled;
         self
     }
 

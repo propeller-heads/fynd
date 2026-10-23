@@ -2,6 +2,8 @@
 
 /// Shared quote/simulation comparison helpers with no RPC dependency.
 pub(crate) mod deviation;
+/// The account state Titan priced a pAMM swap on, converted and merged across a route.
+pub(crate) mod pamm_overrides;
 /// Decoding of the revert a simulated router call produces.
 mod revert;
 /// Simulation of encoded Tycho router quotes.

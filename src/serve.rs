@@ -382,6 +382,7 @@ async fn setup_solver(
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
     builder = builder.aggregate_rfqs(args.aggregate_rfqs);
+    builder = builder.pamm_simulation_overrides(!args.disable_pamm_simulation_overrides);
     if let Some(url) = &args.nexus_url {
         builder = builder.nexus_url(url.clone());
     }
