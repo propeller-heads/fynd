@@ -1802,12 +1802,58 @@ pub struct RouteResult {
     net_amount_out: BigInt,
     /// Effective gas price (in wei) at the time the route was computed.
     gas_price: BigUint,
+    /// The amount the route commits to pay, when it has an exclusive leg that no router
+    /// comparison priced.
+    commitment: Option<Commitment>,
+}
+
+/// The amount an exclusive route commits to pay the user, and the amount of the route it was
+/// measured against.
+///
+/// The worker pins the committed amount on the exclusive legs of the route it quotes. The
+/// exclusive components capture what the route pays above it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commitment {
+    committed_amount_out: BigUint,
+    reference_amount_out: BigUint,
+}
+
+impl Commitment {
+    /// The route `amount_out` that the user gets.
+    #[must_use]
+    pub fn committed_amount_out(&self) -> &BigUint {
+        &self.committed_amount_out
+    }
+
+    /// The `amount_out` of the route that the committed amount improves on.
+    #[must_use]
+    pub fn reference_amount_out(&self) -> &BigUint {
+        &self.reference_amount_out
+    }
 }
 
 impl RouteResult {
     /// Creates a new route result.
     pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
-        Self { route, net_amount_out, gas_price }
+        Self { route, net_amount_out, gas_price, commitment: None }
+    }
+
+    /// Commits the route to pay `committed_amount_out`, measured against a route that paid
+    /// `reference_amount_out`.
+    #[must_use]
+    pub fn with_commitment(
+        mut self,
+        committed_amount_out: BigUint,
+        reference_amount_out: BigUint,
+    ) -> Self {
+        self.commitment = Some(Commitment { committed_amount_out, reference_amount_out });
+        self
+    }
+
+    /// The commitment of the route, if it has one.
+    #[must_use]
+    pub fn commitment(&self) -> Option<&Commitment> {
+        self.commitment.as_ref()
     }
 
     /// The route this result carries.
