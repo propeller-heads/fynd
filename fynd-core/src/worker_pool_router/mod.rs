@@ -494,8 +494,9 @@ impl WorkerPoolRouter {
             return Err(SolveError::Internal("no solver pools configured".to_string()));
         }
 
-        let mut params =
-            SolveParams::default().with_route_filter(request.options().route_filter().clone());
+        let mut params = SolveParams::default()
+            .with_route_filter(request.options().route_filter().clone())
+            .with_exclusive_access(access);
         if let Some(label) = request.options().state_label().cloned() {
             params = params.with_state_label(label);
         }

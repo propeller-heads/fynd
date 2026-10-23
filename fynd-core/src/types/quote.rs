@@ -41,6 +41,7 @@ use crate::{
     },
     feed::market_data::StateLabel,
     price_guard::config::PriceGuardConfig,
+    worker_pool_router::ExclusiveAccess,
     AlgorithmError,
 };
 
@@ -353,6 +354,9 @@ pub struct SolveParams {
     /// Liquidity the request will not route through. Resolved against the market by the worker,
     /// which is where the protocol systems it names become pools.
     route_filter: RouteExclusionFilter,
+    /// Whether the caller may use exclusive liquidity. Public-only pools hand it to their
+    /// post-processors.
+    exclusive_access: ExclusiveAccess,
     /// Per-request resolved exclusions shared by all cloned solve tasks.
     #[doc(hidden)]
     exclusion_cache: SharedExclusionCache,
@@ -363,6 +367,7 @@ impl Clone for SolveParams {
         Self {
             state_label: self.state_label.clone(),
             route_filter: self.route_filter.clone(),
+            exclusive_access: self.exclusive_access,
             exclusion_cache: self.exclusion_cache.clone(),
         }
     }
@@ -374,6 +379,7 @@ impl std::fmt::Debug for SolveParams {
             .debug_struct("SolveParams")
             .field("state_label", &self.state_label)
             .field("route_filter", &self.route_filter)
+            .field("exclusive_access", &self.exclusive_access)
             .finish()
     }
 }
@@ -383,6 +389,7 @@ impl Default for SolveParams {
         Self {
             state_label: None,
             route_filter: RouteExclusionFilter::default(),
+            exclusive_access: ExclusiveAccess::default(),
             exclusion_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -402,6 +409,12 @@ impl SolveParams {
         self
     }
 
+    /// Sets whether the caller may use exclusive liquidity. [`ExclusiveAccess::Denied`] unless set.
+    pub fn with_exclusive_access(mut self, access: ExclusiveAccess) -> Self {
+        self.exclusive_access = access;
+        self
+    }
+
     /// Returns the overlay label, if one was set.
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.state_label.as_ref()
@@ -410,6 +423,11 @@ impl SolveParams {
     /// Returns what the request excludes from a route. Empty unless one was set.
     pub fn route_filter(&self) -> &RouteExclusionFilter {
         &self.route_filter
+    }
+
+    /// Returns whether the caller may use exclusive liquidity.
+    pub fn exclusive_access(&self) -> ExclusiveAccess {
+        self.exclusive_access
     }
 
     pub(crate) fn cached_exclusions(&self) -> &SharedExclusionCache {
