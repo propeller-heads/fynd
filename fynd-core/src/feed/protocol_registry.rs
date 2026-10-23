@@ -1308,7 +1308,6 @@ mod tests {
     #[case::native_via_fallback_router(Chain::Ethereum, "fallback:rfq:native")]
     #[case::liquorice_off_ethereum(Chain::Base, "rfq:liquorice")]
     #[case::liquorice_via_fallback_router(Chain::Ethereum, "fallback:rfq:liquorice")]
-    #[case::metric_via_fallback_router_on_arbitrum(Chain::Arbitrum, "fallback:rfq:metric")]
     fn test_open_book_without_executor(#[case] chain: Chain, #[case] entry: &str) {
         let Err(err) = open_book_stream(chain, &[entry]) else {
             panic!("expected {entry} to be rejected on {chain}");

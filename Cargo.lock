@@ -7963,9 +7963,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.472.1"
+version = "0.482.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2697227eb72a6a100b684f732ee1e765ea0e6678f3b509e8f482cb9eac3e2e1"
+checksum = "d34f16ad1c43c105b1bb2a1b231a03c0bf45ae5c8e6f112b9ad80c43f6d07331"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7994,9 +7994,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.472.1"
+version = "0.482.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5611beb1bf07aa36b83459ef28a8437260fbd888fe3982417c6b86f05bacb059"
+checksum = "9b4bcf49a58c2e679d25602a411ba469d82b3dc40757f7111f296b3b71281796"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8023,9 +8023,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.472.1"
+version = "0.482.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eb37d4b70b7389de934597d57e8e61be4f42cf486f5ebc8ea93b43e290484af"
+checksum = "791c76085fb30a7e307c52540b54dfc05aff2139d4916e9a13446053b83d857e"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8045,9 +8045,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.472.1"
+version = "0.482.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbfe1ba1067e5ab27316451deb7bf898c5177417d09265a1fc412b8f9c9c55c3"
+checksum = "8510b27c464dca0f7958e6cc5e3182eba10f9ec642975bf6d709f94867532e51"
 dependencies = [
  "alloy",
  "chrono",
@@ -8069,9 +8069,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.472.1"
+version = "0.482.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a1ef299654a1bb656937688df345b818e14ad8ba5316c9757e494b0754f8d9a"
+checksum = "12604e6f9542cc08109db6d3251fc652e6a3dc6d573a8ba8a82d2dd3ca11cf35"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8106,6 +8106,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "strum",
  "strum_macros",
  "thiserror 1.0.69",
  "tokio",
