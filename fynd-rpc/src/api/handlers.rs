@@ -18,7 +18,6 @@ use crate::api::prices::{
 #[cfg(feature = "experimental")]
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
-    disable_slippage_taking,
     error::{ErrorResponse, RequestValidationError},
     exclusive_access, jit_router,
     middleware::ClientInfo,
@@ -83,10 +82,6 @@ pub async fn quote(
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
     let core_request = validate_quote_request(request.into_inner())?;
-    let core_request = disable_slippage_taking::apply(
-        core_request,
-        disable_slippage_taking::from_headers(http_request.headers()),
-    );
     let core_request =
         jit_router::apply(core_request, jit_router::from_headers(http_request.headers()));
     let request_record = RequestRecord::capture(&core_request, access);

@@ -21,7 +21,10 @@
 //! Requires the Ekubo `user_data` support added in `tycho-execution` 0.338.0 (the workspace pins
 //! `>= 0.338.0`). All byte layouts and the EIP-712 digest are mirrored from the Ekubo contracts.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    sync::atomic::{AtomicU32, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use alloy::{
     primitives::{keccak256, Address, B256, U256},
@@ -32,11 +35,11 @@ use num_traits::ToPrimitive;
 use tracing::warn;
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
-use crate::{
-    bps,
-    encoding::{now_unix_secs, DEFAULT_DEADLINE_WINDOW_SECS},
-    SolveError, Swap,
-};
+use crate::{bps, SolveError, Swap};
+
+/// Validity window of the exclusive-swap signature, in seconds. Well under the Ekubo extension's
+/// 30-day cap.
+const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
 
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
 pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
@@ -279,6 +282,23 @@ impl ExclusiveSwapSigner {
         user_data.extend_from_slice(&signature.as_bytes());
         Ok(Bytes::from(user_data))
     }
+}
+
+/// Current Unix time in seconds, for the deadline the exclusive-swap signature carries.
+///
+/// # Errors
+/// Errors when the system clock reads before the Unix epoch. A fallback timestamp would be signed
+/// into a payload the router rejects on every submission, so the encode fails instead.
+fn now_unix_secs() -> Result<u64, SolveError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|_| {
+            SolveError::FailedEncoding(
+                "system clock is before the Unix epoch, cannot compute a signing deadline"
+                    .to_string(),
+            )
+        })
 }
 
 /// Packs a `SignedSwapMeta` word: `[255..224]` deadline(u32), `[223..192]` fee(u32, 0.32 fixed
