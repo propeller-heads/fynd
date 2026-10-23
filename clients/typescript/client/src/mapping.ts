@@ -1,6 +1,7 @@
 import type { components } from "./autogen.js";
 import { FyndError } from "./error.js";
 import type {
+    AccountOverride,
     Address,
     BlockInfo,
     ClientFeeParams,
@@ -15,6 +16,7 @@ import type {
     QuoteParams,
     Route,
     RouteFilter,
+    SimulationOverrides,
     SimulationResult,
     Swap,
     Transaction,
@@ -36,6 +38,7 @@ type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
 type WireSimulationResult = components["schemas"]["SimulationResult"];
+type WireSimulationOverrides = components["schemas"]["SimulationOverrides"];
 type WireRouteFilter = components["schemas"]["RouteFilter"];
 
 
@@ -133,6 +136,9 @@ function fromWireRoute(wire: WireRoute): Route {
 }
 
 function fromWireSwap(wire: WireSwap): Swap {
+    const simulationOverrides = wire.simulation_overrides != null
+        ? fromWireSimulationOverrides(wire.simulation_overrides)
+        : undefined;
     return {
         componentId: wire.component_id,
         protocol: wire.protocol,
@@ -141,7 +147,39 @@ function fromWireSwap(wire: WireSwap): Swap {
         amountIn: BigInt(wire.amount_in),
         amountOut: BigInt(wire.amount_out),
         gasEstimate: BigInt(wire.gas_estimate),
+        ...(simulationOverrides !== undefined ? {simulationOverrides} : {}),
     };
+}
+
+/**
+ * Converts a swap's simulation overrides into viem's state override shape. The overrides only serve
+ * a simulation, so a malformed set yields `undefined` and never fails the quote.
+ */
+function fromWireSimulationOverrides(
+    wire: WireSimulationOverrides,
+): SimulationOverrides | undefined {
+    try {
+        const accounts: AccountOverride[] = Object.entries(wire.accounts).map(
+            ([address, account]) => {
+                const stateDiff = Object.entries(account.stateDiff ?? {}).map(
+                    ([slot, value]) => ({slot: slot as Hex, value: value as Hex}),
+                );
+                return {
+                    address: address as Address,
+                    ...(account.balance != null ? {balance: BigInt(account.balance)} : {}),
+                    ...(account.nonce != null ? {nonce: Number(BigInt(account.nonce))} : {}),
+                    ...(stateDiff.length > 0 ? {stateDiff} : {}),
+                };
+            },
+        );
+        return {
+            ...(wire.block_number != null ? {blockNumber: wire.block_number} : {}),
+            ...(wire.block_timestamp != null ? {blockTimestamp: wire.block_timestamp} : {}),
+            accounts,
+        };
+    } catch {
+        return undefined;
+    }
 }
 
 function fromWireBlockInfo(wire: WireBlockInfo): BlockInfo {

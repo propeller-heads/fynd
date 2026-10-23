@@ -3,6 +3,7 @@ import { toWireRequest, fromWireQuote, fromWireHealth } from './mapping.js';
 import { FyndError } from './error.js';
 import type { Address, Hex, QuoteParams } from './types.js';
 import type { components } from './autogen.js';
+import type { StateOverride } from 'viem';
 
 type WireSolution = components["schemas"]["Quote"];
 
@@ -314,6 +315,81 @@ describe('fromWireQuote', () => {
     expect(swap?.amountIn).toBe(1000n);
     expect(swap?.amountOut).toBe(3500n);
     expect(swap?.gasEstimate).toBe(80000n);
+  });
+
+  it('maps a swap\'s simulation overrides into viem\'s state override shape', () => {
+    const account = '0x4848484848484848484848484848484848484848';
+    const slot = `0x${'00'.repeat(32)}`;
+    const value = `0x${'04'.repeat(32)}`;
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          route: {
+            swaps: [
+              {
+                component_id: '0xpamm',
+                protocol:     'fallback:fermiswap',
+                token_in:     TOKEN_IN,
+                token_out:    TOKEN_OUT,
+                amount_in:    '1000',
+                amount_out:   '3500',
+                gas_estimate: '80000',
+                simulation_overrides: {
+                  block_number:    26201954,
+                  block_timestamp: 1792115924,
+                  accounts: {
+                    [account]: { balance: '0x1b6008ea9711c3f3', nonce: '0xe40', stateDiff: { [slot]: value } },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const overrides = fromWireQuote(wire, TOKEN_OUT, SENDER).route?.swaps[0]?.simulationOverrides;
+
+    expect(overrides?.blockNumber).toBe(26201954);
+    expect(overrides?.blockTimestamp).toBe(1792115924);
+    expect(overrides?.accounts).toEqual([
+      { address: account, balance: 0x1b6008ea9711c3f3n, nonce: 0xe40, stateDiff: [{ slot, value }] },
+    ]);
+    // Compiles only while the accounts stay assignable to viem's `stateOverride`.
+    const stateOverride: StateOverride = overrides?.accounts ?? [];
+    expect(stateOverride).toHaveLength(1);
+  });
+
+  it('drops malformed simulation overrides and keeps the swap', () => {
+    const wire: WireSolution = {
+      ...baseWireSolution,
+      orders: [
+        {
+          ...baseWireSolution.orders[0]!,
+          route: {
+            swaps: [
+              {
+                component_id: '0xpamm',
+                protocol:     'fallback:fermiswap',
+                token_in:     TOKEN_IN,
+                token_out:    TOKEN_OUT,
+                amount_in:    '1000',
+                amount_out:   '3500',
+                gas_estimate: '80000',
+                simulation_overrides: { accounts: { '0x48': { balance: 'not hex' } } },
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    const swap = fromWireQuote(wire, TOKEN_OUT, SENDER).route?.swaps[0];
+
+    expect(swap?.componentId).toBe('0xpamm');
+    expect(swap?.simulationOverrides).toBeUndefined();
   });
 
   it('maps component_id to componentId', () => {
