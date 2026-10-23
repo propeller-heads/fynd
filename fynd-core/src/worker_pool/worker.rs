@@ -35,7 +35,7 @@ use crate::{
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     post_process::{PostProcessRequest, PostProcessors, ProcessedRoute, RoutePostProcessor},
     types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions, RouteResult},
-    worker_pool_router::LiquidityScope,
+    worker_pool_router::{ExclusiveAccess, LiquidityScope},
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
 
@@ -494,8 +494,9 @@ where
     /// the post-processors.
     ///
     /// The graph drops what the pool rule and `algorithm_exclude_protocols` drop. The
-    /// post-processors drop what the pool rule drops, so they still learn of a component only the
-    /// algorithm leaves out.
+    /// post-processors drop only the protocols the pool excludes, so they still learn of a
+    /// component only the algorithm leaves out, and of the exclusive components a public-only
+    /// pool leaves out.
     pub async fn process_event(&mut self, event: MarketEvent) {
         let market_data = self.market_data.clone();
         let mut post_processor_event = None;
@@ -510,22 +511,32 @@ where
                 post_processors,
                 ..
             } = self;
-            let pool_drops = |component: &ProtocolComponent| {
-                should_drop_component(*liquidity_scope, exclude_protocols, component)
+            // Post-processors learn of exclusive components even on a public-only pool: whether a
+            // request may use them depends on the caller, and the request rule decides.
+            let post_processor_drops = |component: &ProtocolComponent| {
+                should_drop_component(
+                    LiquidityScope::IncludeExclusive,
+                    exclude_protocols,
+                    component,
+                )
             };
             let graph_drops = |component: &ProtocolComponent| {
                 should_drop_component(*liquidity_scope, algorithm_exclusions, component)
             };
             let mut event = event;
             pamm_admission.apply_pamm_admission(&market, &graph_drops, &mut event);
-            if post_processors.is_empty() || algorithm_exclude_protocols.is_empty() {
-                // One event serves both: the graph rule is the pool rule, or nobody else reads it.
+            if post_processors.is_empty() ||
+                (*liquidity_scope == LiquidityScope::IncludeExclusive &&
+                    algorithm_exclude_protocols.is_empty())
+            {
+                // One event serves both: the graph rule is the post-processor rule, or nobody
+                // else reads it.
                 filter_event(market.base_market_state(), event, &graph_drops)
             } else {
-                // The graph rule drops everything the pool rule drops, so it can filter the
-                // post-processors' event instead of the original.
+                // The graph rule drops everything the post-processor rule drops, so it can
+                // filter the post-processors' event instead of the original.
                 let for_post_processors =
-                    filter_event(market.base_market_state(), event, &pool_drops);
+                    filter_event(market.base_market_state(), event, &post_processor_drops);
                 let for_graph = filter_event(
                     market.base_market_state(),
                     for_post_processors.clone(),
@@ -566,13 +577,10 @@ where
         order: &Order,
         route: &Route,
         net_amount_out: &BigInt,
+        scope: LiquidityScope,
     ) -> Result<(), String> {
         for swap in route.swaps() {
-            if should_drop_component(
-                self.liquidity_scope,
-                &self.exclude_protocols,
-                swap.protocol_component(),
-            ) {
+            if should_drop_component(scope, &self.exclude_protocols, swap.protocol_component()) {
                 return Err(format!(
                     "route uses component {} that this pool leaves out of its graph",
                     swap.component_id()
@@ -638,6 +646,16 @@ where
         }
     }
 
+    /// The access the post-processors get: [`ExclusiveAccess::Granted`] when the caller has
+    /// exclusive access and the pool leaves exclusive liquidity out of its graph. A pool that
+    /// includes exclusive liquidity already routes through it.
+    fn post_process_exclusive_access(&self, params: &SolveParams) -> ExclusiveAccess {
+        match self.liquidity_scope {
+            LiquidityScope::PublicOnly => params.exclusive_access(),
+            LiquidityScope::IncludeExclusive => ExclusiveAccess::Denied,
+        }
+    }
+
     /// Runs the post-processors on the algorithm's route, which the worker already checked.
     /// Returns the route to quote and the names of the post-processors that made it. The names are
     /// empty when no post-processor replaced the route. A processed route gets its fallback
@@ -655,8 +673,13 @@ where
         if self.post_processors.is_empty() {
             return (result, Vec::new());
         }
+        let exclusive_access = self.post_process_exclusive_access(params);
+        let scope = match exclusive_access {
+            ExclusiveAccess::Granted => LiquidityScope::IncludeExclusive,
+            ExclusiveAccess::Denied => self.liquidity_scope,
+        };
         let drops_component = |component: &ProtocolComponent| {
-            should_drop_component(self.liquidity_scope, &self.exclude_protocols, component)
+            should_drop_component(scope, &self.exclude_protocols, component)
         };
         let request = PostProcessRequest::new(
             order,
@@ -668,7 +691,8 @@ where
                 .unwrap_or(deadline),
         )
         .with_label(params.state_label())
-        .with_pool_drops(&drops_component);
+        .with_pool_drops(&drops_component)
+        .with_exclusive_access(exclusive_access);
         let Some(processed) = self
             .post_processors
             .run(&request, &result)
@@ -684,6 +708,7 @@ where
                         order,
                         processed_route.route(),
                         processed_route.net_amount_out(),
+                        scope,
                     )
                 });
         if checked.is_ok() {

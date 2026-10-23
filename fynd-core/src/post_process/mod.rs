@@ -51,8 +51,9 @@ use crate::{
 ///
 /// A worker owns its instances and calls them from one task, so an instance may keep state. It
 /// receives the market events the worker's graph manager receives through [`MarketEventHandler`].
-/// Events for components the pool drops (exclusive components in a `public_only` pool, excluded
-/// protocols) never arrive, but `initialize` sees the whole market.
+/// Events for components of an excluded protocol never arrive, but `initialize` sees the whole
+/// market. Events for exclusive components arrive on a `public_only` pool too, because whether a
+/// request may use them depends on the caller: see [`PostProcessRequest::exclusive_access`].
 ///
 /// The worker checks the route a processor returns. When the route is invalid, uses a pool the
 /// request excluded, or uses a component the pool drops, the worker logs a warning and quotes the
