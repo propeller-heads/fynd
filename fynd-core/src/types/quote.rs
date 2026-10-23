@@ -41,6 +41,7 @@ use crate::{
     },
     feed::market_data::StateLabel,
     price_guard::config::PriceGuardConfig,
+    simulation::pamm_overrides::{SimulationOverrides, SwapOverrides},
     AlgorithmError,
 };
 
@@ -2484,6 +2485,20 @@ impl Swap {
     /// `None` for every non-pAMM swap, and for a pAMM swap before the worker has selected one.
     pub fn fallback(&self) -> Option<&FallbackLeg> {
         self.fallback.as_ref()
+    }
+
+    /// Returns the account state Titan priced this swap's venue on, when this is a pAMM swap
+    /// whose state carries it.
+    ///
+    /// `None` for every other swap, for a pAMM swap whose state carries none, and for overrides
+    /// that do not convert to alloy's types. Quoting never reads them.
+    pub fn simulation_overrides(&self) -> Option<SimulationOverrides> {
+        match SwapOverrides::of(self) {
+            SwapOverrides::Attached(overrides) => Some(overrides),
+            SwapOverrides::NotPamm |
+            SwapOverrides::Missing |
+            SwapOverrides::ConversionFailed(_) => None,
+        }
     }
 }
 

@@ -75,6 +75,9 @@ pub(crate) struct TychoFeedConfig {
     pub(crate) max_sync_lag: Duration,
     /// Stream each Bebop and Hashflow venue as one component instead of one per token pair.
     pub(crate) aggregate_rfqs: bool,
+    /// Whether the pAMM price level stream also reads Titan's quote stream, to attach the account
+    /// state Titan priced each pAMM state on. Default `true`.
+    pub(crate) pamm_simulation_overrides: bool,
 }
 
 impl TychoFeedConfig {
@@ -102,6 +105,7 @@ impl TychoFeedConfig {
             subscription_buffer_size: None,
             max_sync_lag: crate::solver::defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
+            pamm_simulation_overrides: true,
         }
     }
 
@@ -132,6 +136,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    pub(crate) fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.pamm_simulation_overrides = enabled;
         self
     }
 

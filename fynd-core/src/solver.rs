@@ -556,6 +556,7 @@ pub struct FyndBuilder {
     reconnect_delay: Duration,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
+    pamm_simulation_overrides: bool,
     tycho_subscription_buffer_size: Option<usize>,
     max_sync_lag: Duration,
     aggregate_rfqs: bool,
@@ -605,6 +606,7 @@ impl FyndBuilder {
             reconnect_delay: defaults::RECONNECT_DELAY,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            pamm_simulation_overrides: true,
             tycho_subscription_buffer_size: None,
             max_sync_lag: defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
@@ -694,6 +696,17 @@ impl FyndBuilder {
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    /// Whether the pAMM price level stream also reads Titan's quote stream (default: `true`).
+    ///
+    /// The quote stream is a second websocket that carries the account state Titan priced each
+    /// pAMM state on. Each pAMM swap then carries those simulation overrides, and simulation runs
+    /// its route on them. Quoting never reads them, so turning them off only drops the websocket,
+    /// its buffer and the overrides. Has no effect without a `pricelevelstream:` protocol.
+    pub fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.pamm_simulation_overrides = enabled;
         self
     }
 
@@ -1035,6 +1048,7 @@ impl FyndBuilder {
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(self.blocklisted_components)
         .partial_blocks(self.partial_blocks)
+        .pamm_simulation_overrides(self.pamm_simulation_overrides)
         .max_sync_lag(self.max_sync_lag)
         .aggregate_rfqs(self.aggregate_rfqs);
 

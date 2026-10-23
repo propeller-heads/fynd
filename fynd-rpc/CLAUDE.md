@@ -67,7 +67,8 @@ annotations live in one place.
 - `price_guard_enabled(bool)` (delegates to `FyndBuilder`; default `false`)
 - Pass-throughs to the matching `FyndBuilder` methods, among them the extension points
   `with_algorithms`, `with_post_processors` and `with_computation`, plus `simulation_enabled`,
-  `simulation_block`, `encoding_retry_budget`, `calldata_watermark` and the `set_pricing_*` knobs
+  `simulation_block`, `pamm_simulation_overrides`, `encoding_retry_budget`, `calldata_watermark` and
+  the `set_pricing_*` knobs
 - `configure_routes(f)` registers a caller's routes inside the `/v1` scope ahead of the defaults, so
   a binary embedding `fynd-rpc` (e.g. the hosted service) can shadow one endpoint and keep the rest
 - `collector_url(Option<String>)` (`--collector-url` / `FYND_COLLECTOR_URL`): the collector's root
