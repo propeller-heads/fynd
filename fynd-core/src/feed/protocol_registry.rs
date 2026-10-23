@@ -43,7 +43,7 @@ use tycho_simulation::{
 };
 
 use super::DataFeedError;
-use crate::fallback::FALLBACK_PREFIX;
+use crate::{fallback::FALLBACK_PREFIX, simulation::pamm_overrides};
 
 /// Opts a protocol into streaming its exclusive pools, e.g. `exclusive:ekubo_v3`.
 ///
@@ -544,6 +544,11 @@ fn register_exchange(
 /// `vm:fermiswap`), in which case both price the same maker inventory. Streaming both
 /// double-counts that liquidity, so drop the Tycho one from `--protocols` instead.
 ///
+/// With `simulation_overrides`, the stream also reads Titan's quote stream, a second websocket,
+/// and attaches to each state the account state Titan priced it on. Quoting never reads it.
+/// Opening the stream registers the overrides metrics at zero, on or off: with them off, every
+/// pAMM swap counts as missing its overrides.
+///
 /// # Errors
 ///
 /// Returns [`DataFeedError::Config`] if the chain is not [`PRICE_LEVEL_STREAM_CHAIN`], or if an
@@ -552,6 +557,7 @@ pub(crate) fn open_price_level_stream(
     chain: Chain,
     protocols: &[String],
     tokens: &HashMap<Bytes, Token>,
+    simulation_overrides: bool,
 ) -> Result<Option<impl Stream<Item = Update> + Send>, DataFeedError> {
     let venues: Vec<&str> = protocols
         .iter()
@@ -569,6 +575,9 @@ pub(crate) fn open_price_level_stream(
 
     let served = default_served_pamms();
     let mut builder = PriceLevelStreamBuilder::new().with_tokens(tokens.clone());
+    if !simulation_overrides {
+        builder = builder.without_simulation_overrides();
+    }
     for venue in venues {
         let Some(config) = served
             .iter()
@@ -586,6 +595,7 @@ pub(crate) fn open_price_level_stream(
         info!("Adding {PRICE_LEVEL_STREAM_PREFIX}{venue} price level venue...");
         builder = builder.add_pamm(config.clone());
     }
+    pamm_overrides::register_metrics();
     Ok(Some(builder.build()))
 }
 
@@ -754,7 +764,7 @@ pub fn open_price_level_stream_for_live_capture(
     protocols: &[String],
     tokens: &HashMap<Bytes, Token>,
 ) -> Result<Option<impl Stream<Item = Update> + Send>, String> {
-    open_price_level_stream(chain, protocols, tokens).map_err(|e| e.to_string())
+    open_price_level_stream(chain, protocols, tokens, true).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -980,6 +990,7 @@ mod tests {
                 .map(|entry| (*entry).to_string())
                 .collect::<Vec<_>>(),
             &HashMap::new(),
+            true,
         )
     }
 

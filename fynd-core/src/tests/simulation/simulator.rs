@@ -18,6 +18,7 @@ use crate::{
     algorithm::test_utils::{component, token, MockProtocolSim},
     simulation::{
         deviation::fixtures::quote_with_fees,
+        pamm_overrides::fixtures as pamm_fixtures,
         token_layout::{KeyOrder, MappingPosition, TokenLayout, PROBE_SENTINEL},
     },
     tests::metrics::recorded_metrics,
@@ -81,6 +82,8 @@ async fn test_simulated_call_returns_its_logs_undecoded() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Latest,
+            quoted_block_number: None,
+            quoted_block_timestamp: None,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -153,18 +156,27 @@ const ENCODED_QUOTE_ROUTER: Address = Address::repeat_byte(0x02);
 
 /// An encoded quote selling the mocked simulator's native token.
 fn encoded_quote() -> OrderQuote {
+    encoded_quote_on("uniswap_v2", Box::new(MockProtocolSim::new(1.0)))
+}
+
+/// An encoded quote selling the mocked simulator's native token through one swap on `protocol`,
+/// priced on `state`.
+fn encoded_quote_on(
+    protocol: &str,
+    state: Box<dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim>,
+) -> OrderQuote {
     let token_in = token(MOCKED_NATIVE_TOKEN_BYTE, "NATIVE");
     let token_out = token(0x0B, "OUT");
     let swap = Swap::new(
         "pool".to_string(),
-        "uniswap_v2".to_string(),
+        protocol.to_string(),
         token_in.address.clone(),
         token_out.address.clone(),
         BigUint::from(1_000_u64),
         BigUint::from(990_u64),
         BigUint::from(50_000_u64),
         component("pool", &[token_in.clone(), token_out.clone()]),
-        Box::new(MockProtocolSim::new(1.0)),
+        state,
     );
     let route = Route::new(
         vec![swap],
@@ -301,7 +313,7 @@ fn test_envelope_prices_a_quote_that_carries_no_gas_price() {
 
 #[test]
 fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
-    let overrides = block_overrides();
+    let overrides = block_overrides(None, None);
     assert_eq!(overrides.coinbase, Some(SIMULATION_COINBASE));
     assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
     assert_ne!(overrides.random, Some(B256::ZERO));
@@ -313,7 +325,7 @@ fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
 /// makes the node refuse the call outright once a block lands mid-quote.
 #[test]
 fn test_executed_in_pins_the_block_without_touching_the_rest() {
-    let base = block_overrides();
+    let base = block_overrides(None, None);
     let pinned = executed_in(base.clone(), 25_903_761, 1_788_531_000);
 
     assert_eq!(pinned.number, Some(U256::from(25_903_761_u64)));
@@ -327,7 +339,7 @@ fn test_executed_in_pins_the_block_without_touching_the_rest() {
 /// sit above the head.
 #[test]
 fn test_block_overrides_leave_the_block_for_the_node_to_number() {
-    let overrides = block_overrides();
+    let overrides = block_overrides(None, None);
 
     assert_eq!(overrides.number, None);
     assert_eq!(overrides.time, None);
@@ -433,6 +445,8 @@ fn call_on_block(number: u64) -> SimulatedCall<'static> {
         value: U256::ZERO,
         data: &[0x12],
         block: BlockNumberOrTag::Number(number),
+        quoted_block_number: None,
+        quoted_block_timestamp: None,
     }
 }
 
@@ -612,6 +626,8 @@ async fn test_simulation_runs_on_the_block_it_is_given() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Number(1_234),
+            quoted_block_number: None,
+            quoted_block_timestamp: None,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -640,6 +656,8 @@ async fn test_simulate_call_against_mocked_provider() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Latest,
+            quoted_block_number: None,
+            quoted_block_timestamp: None,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -663,6 +681,8 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
             value: U256::ZERO,
             data: &[],
             block: BlockNumberOrTag::Latest,
+            quoted_block_number: None,
+            quoted_block_timestamp: None,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -692,6 +712,8 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
             value: U256::ZERO,
             data: &[],
             block: BlockNumberOrTag::Latest,
+            quoted_block_number: None,
+            quoted_block_timestamp: None,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -835,6 +857,8 @@ async fn simulate_reverting_call(asserter: Asserter) -> SimulationAttempt {
                 value: U256::ZERO,
                 data: &[0x12],
                 block: BlockNumberOrTag::Latest,
+                quoted_block_number: None,
+                quoted_block_timestamp: None,
             },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
@@ -906,6 +930,8 @@ async fn test_reverted_simulation_carries_a_replay_pinned_to_its_block() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Latest,
+            quoted_block_number: None,
+            quoted_block_timestamp: None,
         },
         native_balance_override(sender),
         test_envelope(),
@@ -970,6 +996,8 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
                 value: U256::ZERO,
                 data: &[0x12],
                 block: BlockNumberOrTag::Latest,
+                quoted_block_number: None,
+                quoted_block_timestamp: None,
             },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
@@ -1133,6 +1161,8 @@ async fn test_live_accept_any_erc1271_signature_code() {
                 value,
                 data: &data,
                 block: BlockNumberOrTag::Latest,
+                quoted_block_number: None,
+                quoted_block_timestamp: None,
             },
             overrides.clone(),
             test_envelope(),
@@ -1216,6 +1246,8 @@ async fn test_live_simulate_and_trace() {
                 value: U256::ZERO,
                 data: &data,
                 block: BlockNumberOrTag::Latest,
+                quoted_block_number: None,
+                quoted_block_timestamp: None,
             },
             native_balance_override(sender),
             test_envelope(),
@@ -1235,4 +1267,215 @@ async fn test_live_simulate_and_trace() {
             "{name}: the node refused the block the simulation asked for"
         );
     }
+}
+
+/// The block the pAMM fixtures quote for.
+const QUOTED_BLOCK: u64 = 26_201_954;
+
+/// An encoded quote through a pAMM swap whose state carries `overrides`, when given.
+fn pamm_quote(
+    overrides: Option<tycho_simulation::price_level_stream::overrides::PammSimulationOverrides>,
+) -> OrderQuote {
+    encoded_quote_on("fallback:fermiswap", Box::new(pamm_fixtures::pamm_state(overrides)))
+}
+
+/// Answers every `eth_simulateV1` with a successful call that returns 990.
+async fn simulation_server() -> wiremock::MockServer {
+    let server = wiremock::MockServer::start().await;
+    let response = serde_json::to_value(simulated_response(
+        U256::from(990_u64)
+            .to_be_bytes::<32>()
+            .to_vec(),
+        true,
+        87_654,
+    ))
+    .unwrap();
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(move |request: &wiremock::Request| {
+            let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .map(|body| body["id"].clone())
+                .unwrap_or_default();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": response}))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The one `eth_simulateV1` request `server` received.
+async fn sent_simulation(server: &wiremock::MockServer) -> serde_json::Value {
+    let requests = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    let [request] = requests.as_slice() else {
+        panic!("expected one request, got {}", requests.len());
+    };
+    serde_json::from_slice(&request.body).expect("a JSON-RPC request")
+}
+
+/// The overrides `request` sends for the account whose address repeats `byte`.
+fn account_in(request: &serde_json::Value, byte: u8) -> Option<&serde_json::Value> {
+    let address = format!("{:#x}", Address::repeat_byte(byte));
+    request["params"][0]["blockStateCalls"][0]["stateOverrides"]
+        .as_object()?
+        .iter()
+        .find(|(key, _)| key.to_lowercase() == address)
+        .map(|(_, account)| account)
+}
+
+#[test]
+fn test_block_overrides_set_the_quoted_block() {
+    let overrides = block_overrides(Some(QUOTED_BLOCK), Some(1_792_115_924));
+
+    assert_eq!(overrides.number, Some(U256::from(QUOTED_BLOCK)));
+    assert_eq!(overrides.time, Some(1_792_115_924));
+    assert_eq!(overrides.coinbase, Some(SIMULATION_COINBASE));
+    assert_eq!(overrides.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
+    assert!(overrides.random.is_some());
+}
+
+/// A route whose pAMM swap carries overrides runs on the quoted block's parent, as the quoted
+/// block, with the venue's state next to the sender's funding, whichever block the simulator is
+/// set to.
+#[rstest::rstest]
+#[case::latest(SimulationBlock::Latest)]
+#[case::quote(SimulationBlock::Quote)]
+#[tokio::test]
+async fn test_simulate_attempt_pamm_route_runs_as_the_quoted_block(#[case] block: SimulationBlock) {
+    let server = simulation_server().await;
+    let quote = pamm_quote(Some(pamm_fixtures::overrides(
+        Some(QUOTED_BLOCK),
+        [(0xa1, pamm_fixtures::storage(&[(0, 7)]))],
+    )));
+
+    let attempt = http_simulator(&server, Duration::from_secs(12), TEST_TIMEOUT)
+        .with_block(block)
+        .simulate_attempt(&quote, None, SimulationPurpose::QUOTE)
+        .await;
+
+    assert!(matches!(attempt, SimulationAttempt::Success { .. }));
+    let request = sent_simulation(&server).await;
+    assert_eq!(request["params"][1], format!("{:#x}", QUOTED_BLOCK - 1));
+    let environment = &request["params"][0]["blockStateCalls"][0]["blockOverrides"];
+    assert_eq!(environment["number"], format!("{:#x}", QUOTED_BLOCK));
+    assert_eq!(environment["time"], format!("{:#x}", pamm_fixtures::timestamp_of(QUOTED_BLOCK)));
+    assert_eq!(
+        environment["coinbase"]
+            .as_str()
+            .map(str::to_lowercase),
+        Some(format!("{SIMULATION_COINBASE:#x}"))
+    );
+    let venue = account_in(&request, 0xa1).expect("the venue's account is overridden");
+    assert_eq!(
+        venue["stateDiff"][format!("{:#x}", B256::ZERO)],
+        format!("{:#x}", B256::from(U256::from(7)))
+    );
+    assert!(venue.get("state").is_none(), "never a full state replacement");
+    let sender = account_in(&request, quote_sender_byte()).expect("the sender is funded");
+    assert!(sender.get("balance").is_some());
+}
+
+/// A route whose pAMM swap carries no overrides runs exactly as any other route.
+#[tokio::test]
+async fn test_simulate_attempt_pamm_route_without_overrides() {
+    let server = simulation_server().await;
+
+    let attempt = http_simulator(&server, Duration::from_secs(12), TEST_TIMEOUT)
+        .simulate_attempt(&pamm_quote(None), None, SimulationPurpose::QUOTE)
+        .await;
+
+    assert!(matches!(attempt, SimulationAttempt::Success { .. }));
+    let request = sent_simulation(&server).await;
+    assert_eq!(request["params"][1], "latest");
+    let environment = &request["params"][0]["blockStateCalls"][0]["blockOverrides"];
+    assert!(environment.get("number").is_none());
+    assert!(environment.get("time").is_none());
+}
+
+/// A route whose pAMM overrides name no block runs on the usual block, with the venue's state.
+#[tokio::test]
+async fn test_simulate_attempt_pamm_overrides_without_a_block() {
+    let server = simulation_server().await;
+    let quote = pamm_quote(Some(pamm_fixtures::overrides(
+        None,
+        [(0xa1, pamm_fixtures::storage(&[(0, 7)]))],
+    )));
+
+    let attempt = http_simulator(&server, Duration::from_secs(12), TEST_TIMEOUT)
+        .simulate_attempt(&quote, None, SimulationPurpose::QUOTE)
+        .await;
+
+    assert!(matches!(attempt, SimulationAttempt::Success { .. }));
+    let request = sent_simulation(&server).await;
+    assert_eq!(request["params"][1], "latest");
+    assert!(request["params"][0]["blockStateCalls"][0]["blockOverrides"]
+        .get("number")
+        .is_none());
+    assert!(account_in(&request, 0xa1).is_some());
+}
+
+/// The byte the fixture quote's sender address repeats.
+fn quote_sender_byte() -> u8 {
+    let sender = encoded_quote().sender().clone();
+    assert!(
+        sender
+            .iter()
+            .all(|byte| *byte == sender[0]),
+        "the fixture sender repeats one byte"
+    );
+    sender[0]
+}
+
+#[rstest::rstest]
+#[case::with_overrides(true, "overrides=applied")]
+#[case::without_overrides(false, "overrides=none")]
+fn test_record_pamm_outcome(#[case] applied: bool, #[case] label: &str) {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+
+    metrics::with_local_recorder(&recorder, || {
+        record_pamm_outcome(
+            &quote_with_fees(1_000_000),
+            &SimulationAttempt::Success {
+                amount_out: BigUint::from(999_000u64),
+                gas_used: 120_000,
+                logs: Vec::new(),
+            },
+            "success",
+            PammSimulation { applied, funding_collisions: 2 },
+            SimulationPurpose::QUOTE,
+        );
+    });
+
+    let recorded = recorded_metrics(&snapshotter);
+    let find = |name: &str| {
+        recorded
+            .iter()
+            .find(|(recorded_name, ..)| recorded_name == name)
+            .unwrap_or_else(|| panic!("{name} is recorded"))
+    };
+    let simulations = find(pamm_overrides::SIMULATIONS_TOTAL);
+    assert!(
+        simulations
+            .1
+            .contains(&label.to_string()),
+        "{:?}",
+        simulations.1
+    );
+    assert!(
+        simulations
+            .1
+            .contains(&"outcome=success".to_string()),
+        "{:?}",
+        simulations.1
+    );
+    assert!(find(pamm_overrides::SIMULATION_DEVIATION_BPS)
+        .1
+        .contains(&label.to_string()));
+    assert_eq!(
+        find(pamm_overrides::FUNDING_COLLISIONS_TOTAL).2,
+        metrics_util::debugging::DebugValue::Counter(2)
+    );
 }

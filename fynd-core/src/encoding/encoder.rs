@@ -1268,6 +1268,7 @@ mod tests {
             router_fees::RouterFees,
             DEFAULT_DEADLINE_WINDOW_SECS,
         },
+        simulation::pamm_overrides::fixtures as pamm_fixtures,
         BlockInfo, OrderQuote, QuoteStatus,
     };
 
@@ -2110,6 +2111,13 @@ mod tests {
     /// fallback pool as `price_through_fallbacks` leaves it: a `FallbackLeg` on the swap and a
     /// `fallback_amount_out` on the route that clears the 1% floor the tests encode at.
     fn quote_with_fallback_leg() -> OrderQuote {
+        quote_with_fallback_leg_on(Box::new(MockProtocolSim::default()))
+    }
+
+    /// [`quote_with_fallback_leg`] with its pAMM leg priced on `state`.
+    fn quote_with_fallback_leg_on(
+        state: Box<dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim>,
+    ) -> OrderQuote {
         let (token_in, token_out) = (make_address(0x01), make_address(0x02));
         let (tin, tout) = (make_token(token_in.clone()), make_token(token_out.clone()));
         let mut pamm = component_with_protocol(
@@ -2131,7 +2139,7 @@ mod tests {
             BigUint::from(990u64),
             BigUint::from(50_000u64),
             pamm,
-            Box::new(MockProtocolSim::default()),
+            state,
         );
         swap.set_fallback(crate::types::FallbackLeg::new(
             pool,
@@ -2177,6 +2185,50 @@ mod tests {
                 .any(|window| window == fallback_swap_data),
             "calldata does not carry the fallback swap data: 0x{}",
             alloy::hex::encode(calldata)
+        );
+    }
+
+    /// A pAMM leg encodes to the same calldata whether its state carries simulation overrides,
+    /// none, or overrides that do not convert: encoding never reads them.
+    #[rstest]
+    #[case::without_overrides(None)]
+    #[case::with_overrides(Some(pamm_fixtures::overrides(
+        Some(26_201_954),
+        [(0xa1, pamm_fixtures::storage(&[(0, 1)]))],
+    )))]
+    #[case::unconvertible_overrides(Some({
+        let mut overrides = pamm_fixtures::overrides(Some(26_201_954), []);
+        overrides
+            .accounts
+            .insert(Bytes::from(vec![0xa1; 19]), pamm_fixtures::storage(&[(0, 1)]));
+        overrides
+    }))]
+    #[tokio::test]
+    async fn test_encode_pamm_leg_whatever_its_overrides(
+        #[case] overrides: Option<
+            tycho_simulation::price_level_stream::overrides::PammSimulationOverrides,
+        >,
+    ) {
+        let encoder = real_encoder();
+        let state = Box::new(pamm_fixtures::pamm_state(overrides));
+
+        let result = encoder
+            .encode(vec![quote_with_fallback_leg_on(state)], EncodingOptions::new(0.01))
+            .await
+            .expect("encode");
+        let reference = encoder
+            .encode(vec![quote_with_fallback_leg()], EncodingOptions::new(0.01))
+            .await
+            .expect("encode");
+
+        assert_eq!(result[0].status(), QuoteStatus::Success, "{:?}", result[0]);
+        assert_eq!(
+            result[0]
+                .transaction()
+                .map(|transaction| transaction.data()),
+            reference[0]
+                .transaction()
+                .map(|transaction| transaction.data()),
         );
     }
 
