@@ -959,6 +959,33 @@ mod tests {
         assert_eq!(&meta.as_slice()[16..32], &LOCKER.as_slice()[4..20]);
     }
 
+    /// The deadline is the signing time plus the window: meta bits [255..224], so the first four
+    /// meta bytes after the fee(8) prefix.
+    #[test]
+    fn test_payload_deadline_window() {
+        let signer = ExclusiveSwapSigner::new(
+            CONTROLLER_KEY.parse().unwrap(),
+            1,
+            0,
+            DEFAULT_DEADLINE_WINDOW_SECS,
+            LOCKER,
+        );
+        let window = u64::from(DEFAULT_DEADLINE_WINDOW_SECS);
+
+        let before = now_unix_secs().unwrap();
+        let user_data = signer
+            .build_user_data(&signed_swap(Some(990_000)), 0.03)
+            .unwrap();
+        let after = now_unix_secs().unwrap();
+
+        let deadline = u64::from(u32::from_be_bytes(
+            user_data.as_ref()[8..12]
+                .try_into()
+                .unwrap(),
+        ));
+        assert!((before + window..=after + window).contains(&deadline), "deadline {deadline}");
+    }
+
     #[test]
     fn test_nonce_avoids_reserved_sentinel() {
         // The extension never consumes `u64::MAX` — a payload carrying it stays replayable until
