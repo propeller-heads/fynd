@@ -23,6 +23,7 @@ use crate::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
+    exclusive_route::{pin_route_commitment, routes_through_exclusive},
     fallback::{has_fallback_leg, manager::PammManager, price_through_fallbacks},
     feed::{
         component_filter::{
@@ -569,16 +570,16 @@ where
     }
 
     /// Checks what the algorithm's own route cannot break but a post-processor can: the pool's
-    /// component rules, and `net_amount_out` against the route's amount out for a sell order.
-    /// The router subtracts the two as unsigned numbers, so a net above the amount out would
-    /// underflow there.
+    /// component rules, the commitment, and `net_amount_out` against the route's amount out for a
+    /// sell order. The router subtracts the two as unsigned numbers, so a net above the amount out
+    /// would underflow there.
     fn check_processed_route(
         &self,
         order: &Order,
-        route: &Route,
-        net_amount_out: &BigInt,
+        processed: &RouteResult,
         scope: LiquidityScope,
     ) -> Result<(), String> {
+        let route = processed.route();
         for swap in route.swaps() {
             if should_drop_component(scope, &self.exclude_protocols, swap.protocol_component()) {
                 return Err(format!(
@@ -587,6 +588,7 @@ where
                 ));
             }
         }
+        self.check_commitment(order, processed)?;
         if !order.is_sell() {
             return Ok(());
         }
@@ -594,9 +596,40 @@ where
             return Ok(());
         };
         let amount_out = BigInt::from(route.amount_out(&output_token));
+        let net_amount_out = processed.net_amount_out();
         if *net_amount_out > amount_out {
             return Err(format!(
                 "net amount out {net_amount_out} is above the route amount out {amount_out}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks that the commitment of a processed route can be pinned: a sell order, an exclusive
+    /// leg to pin it on, and no more than the route pays. A public-only pool also needs it on every
+    /// route with an exclusive leg, because the encoder signs only a leg with a committed amount.
+    fn check_commitment(&self, order: &Order, processed: &RouteResult) -> Result<(), String> {
+        let route = processed.route();
+        let has_exclusive_leg = routes_through_exclusive(route.swaps());
+        let Some(commitment) = processed.commitment() else {
+            if has_exclusive_leg && self.liquidity_scope == LiquidityScope::PublicOnly {
+                return Err("route has an exclusive leg but no commitment".to_string());
+            }
+            return Ok(());
+        };
+        if !order.is_sell() {
+            return Err("commitment on an order that is not a sell order".to_string());
+        }
+        if !has_exclusive_leg {
+            return Err("commitment on a route with no exclusive leg".to_string());
+        }
+        let amount_out = route
+            .output_token()
+            .map(|token| route.amount_out(&token));
+        if amount_out.is_none_or(|amount_out| *commitment.committed_amount_out() > amount_out) {
+            return Err(format!(
+                "commitment {} is above the route amount out",
+                commitment.committed_amount_out()
             ));
         }
         Ok(())
@@ -703,14 +736,7 @@ where
         let ProcessedRoute { route: mut processed_route, post_processed_by } = processed;
         let mut checked =
             check_route(processed_route.route(), order, params.route_filter(), exclusions)
-                .and_then(|()| {
-                    self.check_processed_route(
-                        order,
-                        processed_route.route(),
-                        processed_route.net_amount_out(),
-                        scope,
-                    )
-                });
+                .and_then(|()| self.check_processed_route(order, &processed_route, scope));
         if checked.is_ok() {
             checked = self
                 .price_fallback_legs(order, params, processed_route.route_mut())
@@ -841,6 +867,7 @@ where
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
+                let commitment = result.commitment().cloned();
                 let mut route = result.into_route();
 
                 // The worker priced a processed route in `post_process`.
@@ -923,6 +950,9 @@ where
                 .with_route(route)
                 .with_gas_price(gas_price);
                 quote.set_post_processed_by(post_processed_by);
+                if let Some(commitment) = &commitment {
+                    quote = pin_route_commitment(&quote, commitment);
+                }
                 if let Some(bps) = price_impact_bps {
                     quote = quote.with_price_impact_bps(bps);
                 }

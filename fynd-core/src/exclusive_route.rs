@@ -12,7 +12,7 @@ use tycho_simulation::tycho_common::models::Address;
 use crate::{
     bps,
     feed::exclusivity::is_exclusive,
-    types::{OrderQuote, SurplusInfo, Swap},
+    types::{Commitment, OrderQuote, SurplusInfo, Swap},
 };
 
 /// How the exclusive legs of a route fit the rules for an exclusive route.
@@ -37,6 +37,11 @@ pub(crate) enum ExclusiveRouteShape {
 /// Whether `swap` goes through an exclusive component.
 pub(crate) fn is_exclusive_leg(swap: &Swap) -> bool {
     is_exclusive(swap.protocol_component())
+}
+
+/// Whether any swap of `swaps` goes through an exclusive component.
+pub(crate) fn routes_through_exclusive(swaps: &[Swap]) -> bool {
+    swaps.iter().any(is_exclusive_leg)
 }
 
 /// Returns the shape of the exclusive legs of `swaps`, without incrementing metrics.
@@ -311,6 +316,22 @@ pub(crate) fn pin_commitment(
 
     let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out);
     surplus_quote.with_surplus(surplus_info)
+}
+
+/// Pins the commitment of a post-processed route on `quote`, and records how much the user gains
+/// over the route the post-processor started from. See [`pin_commitment`].
+pub(crate) fn pin_route_commitment(quote: &OrderQuote, commitment: &Commitment) -> OrderQuote {
+    let user_savings = commitment
+        .committed_amount_out()
+        .checked_sub(commitment.reference_amount_out())
+        .unwrap_or_default();
+    record_gas_token_amount("exclusive_user_savings_amount", quote, &user_savings);
+    pin_commitment(
+        quote,
+        commitment
+            .committed_amount_out()
+            .clone(),
+    )
 }
 
 /// Restates an output-token `amount` of `quote` in wei.
