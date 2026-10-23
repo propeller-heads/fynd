@@ -1,4 +1,5 @@
 export type {
+  AccountOverride,
   Address,
   ApprovalParams,
   BackendKind,
@@ -18,6 +19,7 @@ export type {
   QuoteParams,
   Route,
   RouteFilter,
+  SimulationOverrides,
   SimulationResult,
   SolutionStatus,
   Swap,
