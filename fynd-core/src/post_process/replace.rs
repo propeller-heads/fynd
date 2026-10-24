@@ -416,13 +416,17 @@ pub(super) struct Search<'a, R> {
 
 impl<'a, R: ReplacementRule> Search<'a, R> {
     /// Prepares a search of `original` on `snapshot`. `None` when the route cannot be searched:
-    /// the route has no swaps, it starts and ends on one token, or it uses no gas.
+    /// the snapshot has no legs, the route has no swaps, it starts and ends on one token, or it
+    /// uses no gas.
     pub(super) fn new(
         snapshot: Snapshot,
         request: &PostProcessRequest<'_>,
         original: &'a RouteResult,
         rule: R,
     ) -> Option<Self> {
+        if snapshot.legs.is_empty() {
+            return None;
+        }
         let route = original.route();
         let (input_token, output_token) = (route.input_token()?, route.output_token()?);
         if input_token == output_token {
