@@ -63,7 +63,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
    `MostLiquidAlgorithm`, `BellmanFordAlgorithm`, `PathFrankWolfeAlgorithm`, and
    `WaterFillAlgorithm`
    **Post-processors** (`fynd-core/src/post_process/`) — `RoutePostProcessor`s a pool runs on the
-   algorithm's route after the worker validates it; a processed route that fails the checks falls back to the algorithm's route. `rfq_swap_replacer` is built in
+   algorithm's route after the worker validates it; a processed route that fails the checks falls back to the algorithm's route. `rfq_swap_replacer` and `exclusive_swap_replacer` are built in; the second adds an exclusive leg to a `public_only` pool's route for a request with exclusive access and commits the route to a price, so the order is solved once
 5. **MarketState** (`fynd-core/src/feed/market_data.rs`) — `Arc<RwLock<>>` of all component/token/gas state; accessed via `MarketData` handle
 6. **TychoFeed** (`fynd-core/src/feed/tycho_feed.rs`) — Background task: Tycho WebSocket → MarketState → broadcast events
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component (pool) depths, token gas prices
@@ -115,7 +115,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `CALLDATA_WATERMARK` | Watermark bytes appended to every encoded transaction's calldata (also `--calldata-watermark`). Ignored by the EVM; attributes router calls to this deployment. When unset, `serve` stamps `fynd/<version>` plus a truncated SHA-256 of `TYCHO_API_KEY` when that is set (`default_calldata_watermark` in `src/serve.rs`) |
 | `JIT_ROUTER_ADDRESS` | Address of the chain's `FyndJITRouter` (also `--jit-router-address`). A quote request carrying the proxy-injected `x-jit-router: true` header is encoded to be sent there instead of to the Tycho router, with the same calldata (`Encoder::with_jit_router` stores it; `attach_transaction` sets it as `transaction.to`). Vault-funded swaps keep going to the router. `GET /v1/info` reports it as `jit_router_address`, and as `to_address` on a request carrying that header. Unset by default (such requests then fail to encode) |
 | `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY` | Private key for disable-slippage-taking encoding: signs zero-fee `ClientFeeParams` naming its own address as the router fee client when a request carries the proxy-injected `x-disable-slippage-taking: true` header. The FeeCalculator's positive-slippage exemption for that address does the actual disabling. Two consequences, both covered in `fynd-core/src/encoding/disable_slippage_taking.rs`: the signer's address replaces every other fee-client attribution for that request (including the `tx.origin` fallback the order sender stands in for), so the request is charged this key's fee rates, not the caller's; and the signed params carry a deadline, so such a quote expires ~120s after encoding where an unsigned one never did. Unset by default (such requests then fail) |
-| `EXCLUSIVE_ROUTE_USER_SHARE_BPS` | Restricted exclusive-liquidity deployments only. Share of an exclusive route's improvement over the public reference handed to the user, in bps of that improvement (default `1000`) |
+| `EXCLUSIVE_ROUTE_USER_SHARE_BPS` | Restricted exclusive-liquidity deployments only. Share of an exclusive route's improvement over the public reference handed to the user (router and `exclusive_swap_replacer`), in bps of that improvement (default `1000`) |
 | `TYCHO_SUBSCRIPTION_BUFFER_SIZE` | Delta messages buffered per Tycho subscription (also `--tycho-subscription-buffer-size`). Unset keeps Tycho's default |
 | `MAX_SYNC_LAG_SECS` | Seconds of block time a protocol Tycho reports `Delayed` may lag the newest block any protocol reported `Ready` before its pools are excluded from routing (also `--max-sync-lag-secs`, default `15`). A `Stale` protocol is excluded until it catches up and an `Ended` one stays excluded; see `MarketState::update_sync_status` |
 | `PRICING_MAX_HOPS`, `PRICING_MAX_TOKENS_PER_PASS`, `PRICING_MIN_PASS_INTERVAL_MS` | Bounds on the token-pricing pass (also `--pricing-*` flags): how far from the gas token it reaches, how many tokens one pass attempts, and the minimum interval between passes. Unset keeps the built-in defaults |
@@ -169,6 +169,12 @@ Worker pools are partitioned by `LiquidityScope` (`fynd-core/src/worker_pool_rou
   component's Tycho data — not a per-deployment predicate. Its candidates may beat the public
   reference; the difference is **surplus**, tracked in `SurplusInfo` / `OrderQuote::surplus_amount()`
   and never serialized on the wire
+
+A `PublicOnly` pool can also add an exclusive leg itself: its `exclusive_swap_replacer`
+post-processor replaces a swap of the public route with an exclusive component for a request with
+exclusive access (`SolveParams::exclusive_access`, `PostProcessRequest::exclusive_access`). The
+replacer commits the route (`RouteResult::commitment`) against the route it received, and the
+worker pins the quote, so the order is solved once and the router ranks the quote as a public one.
 
 Exclusive components only reach `MarketState` if the protocol's stream filter admits them. That is
 opt-in per protocol via the `exclusive:` prefix on a `--protocols` entry (e.g.
