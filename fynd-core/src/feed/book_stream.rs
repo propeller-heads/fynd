@@ -532,7 +532,6 @@ fn optional_address_env(var: &str) -> Result<Option<Bytes>, DataFeedError> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use tycho_simulation::tycho_common::models::Chain;
 
     use super::*;
@@ -541,7 +540,11 @@ mod tests {
     const VENUE: &str = "rfq:bebop";
 
     fn book_stream() -> BookStream {
-        BookStream { feeds: BookFeedStreams::new(), served: HashMap::new() }
+        BookStream {
+            feeds: BookFeedStreams::new(),
+            external: SnapshotFeedStreams::new(),
+            served: HashMap::new(),
+        }
     }
 
     fn token(address: &str) -> Token {
@@ -549,14 +552,18 @@ mod tests {
         Token::new(&address, "TKN", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
     }
 
-    /// A snapshot holding one book per id, all on the same pair.
-    fn book_snapshot(ids: &[&str]) -> BookSnapshot<ReceivedAt> {
-        let books = ids
+    fn book_snapshot(ids: &[&str]) -> LiquiditySnapshot {
+        book_snapshot_in(VENUE, ids)
+    }
+
+    /// A snapshot holding one book per id, all on the same pair, in the `protocol_system`.
+    fn book_snapshot_in(protocol_system: &str, ids: &[&str]) -> LiquiditySnapshot {
+        let components = ids
             .iter()
             .map(|id| {
                 let component = ProtocolComponent::new(
                     Bytes::from(*id),
-                    VENUE.to_string(),
+                    protocol_system.to_string(),
                     "book".to_string(),
                     Chain::Ethereum,
                     vec![token("0x01"), token("0x02")],
@@ -565,15 +572,10 @@ mod tests {
                     Bytes::default(),
                     Default::default(),
                 );
-                let book = tycho_simulation::book::Book {
-                    component,
-                    state: Arc::new(MockProtocolSim::new(1.0)),
-                    updated_at: None,
-                };
-                ((*id).to_string(), book)
+                LiquidityComponent { component, state: Arc::new(MockProtocolSim::new(1.0)) }
             })
             .collect();
-        BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(books) }
+        LiquiditySnapshot::new(components)
     }
 
     #[test]
@@ -642,6 +644,164 @@ mod tests {
 
         assert_eq!(update.added.len(), 1);
         assert!(update.removed.is_empty());
+    }
+
+    /// Publishes one snapshot and keeps the feed open without further updates, like a live venue
+    /// holding its last snapshot.
+    struct SingleSnapshotFeed(LiquiditySnapshot);
+
+    impl SnapshotFeed for SingleSnapshotFeed {
+        type Snapshot = LiquiditySnapshot;
+        type Error = FeedError;
+
+        fn run(
+            self,
+            publisher: tycho_simulation::snapshot_feed::Publisher<Self::Snapshot>,
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let snapshots = futures::stream::iter([Ok(self.0)]).chain(futures::stream::pending());
+            publisher.publishing(None, snapshots)
+        }
+    }
+
+    /// A feed named `protocol_system` that publishes one book per id, in that protocol system.
+    fn external_liquidity(
+        protocol_system: &str,
+        ids: &'static [&'static str],
+    ) -> ExternalLiquidity {
+        let system = protocol_system.to_string();
+        ExternalLiquidity::new(
+            protocol_system.to_string(),
+            move |_config: ExternalLiquidityConfig| {
+                Ok(SingleSnapshotFeed(book_snapshot_in(&system, ids)))
+            },
+        )
+    }
+
+    fn open_external_liquidity(
+        chain: Chain,
+        protocols: &[&str],
+        external_liquidity: Vec<ExternalLiquidity>,
+    ) -> Result<Option<BookStream>, DataFeedError> {
+        let protocols = protocols
+            .iter()
+            .map(|protocol| (*protocol).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0)
+                .external_liquidity(external_liquidity);
+        BookStream::open(&config, HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_alone() {
+        let mut books = open_external_liquidity(
+            Chain::Base,
+            &[],
+            vec![external_liquidity("fallback:manta", &["0x01", "0x02"])],
+        )
+        .expect("external liquidity needs no --protocols venue")
+        .expect("external liquidity opens the book stream");
+
+        let update = books.next().await.unwrap();
+
+        assert_eq!(update.protocol_system, "fallback:manta");
+        let mut added: Vec<_> = update
+            .added
+            .iter()
+            .map(|component| (component.id.to_string(), component.protocol_system.clone()))
+            .collect();
+        added.sort();
+        let manta = |id: &str| (id.to_string(), "fallback:manta".to_string());
+        assert_eq!(added, [manta("0x01"), manta("0x02")]);
+        let mut state_ids: Vec<_> = update.states.keys().cloned().collect();
+        state_ids.sort();
+        assert_eq!(state_ids, ["0x01", "0x02"]);
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_on_chain_without_stablecoins() {
+        open_external_liquidity(
+            Chain::Unichain,
+            &[],
+            vec![external_liquidity("fallback:manta", &["0x01"])],
+        )
+        .expect("external liquidity prices its own books");
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_config() {
+        let received = Arc::new(std::sync::Mutex::new(None));
+        let captured = Arc::clone(&received);
+        let feed = ExternalLiquidity::new(
+            "fallback:manta".to_string(),
+            move |config: ExternalLiquidityConfig| {
+                *captured.lock().unwrap() = Some(config);
+                Ok(SingleSnapshotFeed(book_snapshot_in("fallback:manta", &["0x01"])))
+            },
+        );
+        let tokens = HashMap::from([(Bytes::from("0x01"), token("0x01"))]);
+        let config = TychoFeedConfig::new(
+            "localhost:0".to_string(),
+            Chain::Base,
+            None,
+            false,
+            Vec::new(),
+            2.5,
+        )
+        .external_liquidity(vec![feed]);
+
+        BookStream::open(&config, tokens).unwrap();
+
+        let received = received.lock().unwrap();
+        let received = received
+            .as_ref()
+            .expect("the factory builds the feed on open");
+        assert_eq!(received.chain, Chain::Base);
+        assert_eq!(received.min_tvl_usd, 2.5);
+        assert_eq!(
+            received
+                .tokens
+                .keys()
+                .collect::<Vec<_>>(),
+            [&Bytes::from("0x01")]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_config_errors() {
+        let failing_build = ExternalLiquidity::new(
+            "fallback:manta".to_string(),
+            |_config: ExternalLiquidityConfig| {
+                Err::<SingleSnapshotFeed, _>(FeedError::InvalidInput("no RPC URL".to_string()))
+            },
+        );
+        let cases = [
+            ("build error", vec![], vec![failing_build], "no RPC URL"),
+            (
+                "shared name",
+                vec![],
+                vec![
+                    external_liquidity("fallback:manta", &["0x01"]),
+                    external_liquidity("fallback:manta", &["0x02"]),
+                ],
+                "added twice",
+            ),
+            (
+                "name of a --protocols venue",
+                vec!["rfq:bebop"],
+                vec![external_liquidity("rfq:bebop", &["0x01"])],
+                "--protocols",
+            ),
+        ];
+
+        for (scenario, protocols, feeds, expected) in cases {
+            let Err(DataFeedError::Config(message)) =
+                open_external_liquidity(Chain::Base, &protocols, feeds)
+            else {
+                panic!("{scenario}: the stream must not open");
+            };
+            assert!(message.contains(expected), "{scenario}: {message}");
+        }
     }
 
     #[test]
