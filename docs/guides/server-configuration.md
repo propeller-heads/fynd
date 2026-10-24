@@ -203,7 +203,7 @@ All pools solve every incoming order in parallel. Fynd picks the best result acr
 | `max_routes`          | _(no limit)_    | Maximum number of candidate routes to evaluate per order               |
 | `connector_tokens`    | _(no restriction)_ | Allowlist of `"0x..."`-prefixed token addresses permitted as intermediate hops. Source and destination are always allowed regardless. Absent = all tokens reachable. |
 | `algorithm_exclude_protocols` | _(no restriction)_ | Protocol systems the pool's algorithm never routes through. Its post-processors still see them. An entry names a protocol system exactly (`"rfq:bebop"`), or a whole family when it ends with `:` (`"rfq:"`). `exclude_protocols`, with the same entries, hides protocols from the whole pool. Without `post_processors` this key does the same as `exclude_protocols` |
-| `post_processors`     | _(none)_        | Names of post-processors, in order, that every worker in the pool runs on the route its algorithm returned, after the worker validates that route. `rfq_swap_replacer` is built into fynd-core; a binary that embeds Fynd registers more names through `PostProcessorRegistry`, and a custom name may not equal a built-in name. If a processed route fails the checks, the worker logs a warning and quotes the algorithm's route. A name that is not registered stops the server from starting |
+| `post_processors`     | _(none)_        | Names of post-processors, in order, that every worker in the pool runs on the route its algorithm returned, after the worker validates that route. `rfq_swap_replacer` and `exclusive_swap_replacer` are built into fynd-core; a binary that embeds Fynd registers more names through `PostProcessorRegistry`, and a custom name may not equal a built-in name. If a processed route fails the checks, the worker logs a warning and quotes the algorithm's route. A name that is not registered stops the server from starting |
 
 ### Post-processors
 
@@ -222,6 +222,16 @@ post_processors = ["rfq_swap_replacer"]
 algorithm                   = "most_liquid"
 algorithm_exclude_protocols = ["rfq:bebop"]
 post_processors             = ["rfq_swap_replacer"]
+```
+
+`exclusive_swap_replacer` replaces one swap, or a run of swaps between two tokens that every path passes through, with one swap through an exclusive component when that raises the net amount out. It works on a worker pool with `liquidity_scope = "public_only"` (the default), for a request with exclusive access: the algorithm solves the order on public liquidity, and the replacer adds an exclusive leg to that route, so the order is solved once. Without exclusive access, or on a pool with `liquidity_scope = "include_exclusive"`, which already routes through exclusive liquidity, it keeps the route. An exclusive component fills partially, so the replacer can replace a swap at any position. It adds at most one exclusive leg, and it keeps a route that already has one. When the replacement is one swap, the replacer also tries to split it: the exclusive component takes a part of the swap and the original pool takes the rest. This helps when the exclusive component has limited depth.
+
+The replacer sets the committed amount out of the exclusive leg itself, with the rule the router applies to an exclusive route, using the route it received as the public reference. The user gets `user_share` of the improvement on top of the received route (`EXCLUSIVE_ROUTE_USER_SHARE_BPS`, 10% by default), and never less than the received route paid; the exclusive component keeps the rest. A replacement that pays less than the received route is dropped. The worker pins the commitment on the quote, and the router ranks the quote like any public quote. List `exclusive_swap_replacer` last, after `rfq_swap_replacer`: a post-processor that changes the route afterwards drops the commitment, and the worker then quotes the algorithm's route. The server enforces the order: a pool that lists `exclusive_swap_replacer` before another post-processor, or twice, stops the server from starting.
+
+```toml
+[pools.most_liquid_exclusive]
+algorithm       = "most_liquid"
+post_processors = ["exclusive_swap_replacer"]
 ```
 
 ### Connector tokens

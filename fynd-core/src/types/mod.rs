@@ -27,11 +27,11 @@ pub use internal::{RouteRejection, SolveError, SolveResult, SolveTask, TaskId};
 pub use primitives::*;
 // Re-export public quote types
 pub use quote::{
-    BlockInfo, ClientFeeParams, EncodingOptions, EncodingOptionsError, EventLog, FallbackLeg,
-    FeeBreakdown, Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails, PermitSingle,
-    Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter, RouteExclusions,
-    RouteResult, RouteValidationError, SimulationResult, SingleOrderQuote, SolveParams,
-    SurplusInfo, Swap, Transaction, UserTransferType,
+    BlockInfo, ClientFeeParams, Commitment, EncodingOptions, EncodingOptionsError, EventLog,
+    FallbackLeg, FeeBreakdown, Order, OrderQuote, OrderSide, OrderValidationError, PermitDetails,
+    PermitSingle, Quote, QuoteOptions, QuoteRequest, QuoteStatus, Route, RouteExclusionFilter,
+    RouteExclusions, RouteResult, RouteValidationError, SimulationResult, SingleOrderQuote,
+    SolveParams, SurplusInfo, Swap, Transaction, UserTransferType,
 };
 pub(crate) use topology::swap_directions;
 pub use topology::{ComponentTopology, SwapDirection};

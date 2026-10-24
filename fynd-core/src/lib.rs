@@ -30,6 +30,8 @@ mod bps;
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
+/// The rules for a route with an exclusive leg.
+mod exclusive_route;
 /// Picks the pool each pAMM leg falls back to and computes what the route delivers through those
 /// pools, so a quote whose fallback pays less than `min_amount_out` can be dropped.
 pub mod fallback;
@@ -71,8 +73,8 @@ pub use derived::computation::ComputationRequirements;
 pub use encoding::hooks::{CalldataHook, SolutionHook};
 pub use feed::{events::MarketEvent, market_data::StateLabel};
 pub use post_process::{
-    PostProcessRequest, PostProcessorAlreadyRegistered, PostProcessorRegistry, RoutePostProcessor,
-    UnknownPostProcessorError,
+    PostProcessRequest, PostProcessorAlreadyRegistered, PostProcessorOrderError,
+    PostProcessorRegistry, RoutePostProcessor, UnknownPostProcessorError,
 };
 pub use price_guard::{
     config::PriceGuardConfig,

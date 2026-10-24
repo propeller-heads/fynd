@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use crate::post_process::{rfq::RfqSwapReplacer, RoutePostProcessor};
+use crate::post_process::{
+    exclusive::ExclusiveSwapReplacer, rfq::RfqSwapReplacer, RoutePostProcessor,
+};
 
 /// Builds one post-processor. Called once per worker.
 type Factory = Arc<dyn Fn() -> Box<dyn RoutePostProcessor> + Send + Sync>;
@@ -12,8 +14,10 @@ type BuiltInFactory = fn() -> Box<dyn RoutePostProcessor>;
 
 /// The post-processors that ship with fynd-core, each with its name and its factory. A registry
 /// never holds them: `resolve` finds them.
-const BUILT_INS: &[(&str, BuiltInFactory)] =
-    &[(RfqSwapReplacer::NAME, || Box::<RfqSwapReplacer>::default())];
+const BUILT_INS: &[(&str, BuiltInFactory)] = &[
+    (RfqSwapReplacer::NAME, || Box::<RfqSwapReplacer>::default()),
+    (ExclusiveSwapReplacer::NAME, || Box::<ExclusiveSwapReplacer>::default()),
+];
 
 /// The factory of the built-in post-processor `name`, if there is one.
 fn find_built_in(name: &str) -> Option<Factory> {
@@ -54,6 +58,56 @@ impl UnknownPostProcessorError {
     pub fn worker_pool(&self) -> &str {
         &self.worker_pool
     }
+}
+
+/// A pool configuration listed `exclusive_swap_replacer` before another post-processor.
+///
+/// The replacer commits the route to a price. A post-processor that runs after it builds a new
+/// route without the commitment, and the worker then rejects the processed route.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "worker pool '{worker_pool}' lists post-processor '{post_processor_name}' before \
+     '{followed_by}'. List {post_processor_name} last"
+)]
+pub struct PostProcessorOrderError {
+    worker_pool: String,
+    post_processor_name: String,
+    followed_by: String,
+}
+
+impl PostProcessorOrderError {
+    /// The post-processor that must come last.
+    pub fn post_processor_name(&self) -> &str {
+        &self.post_processor_name
+    }
+
+    /// The worker pool that listed the names.
+    pub fn worker_pool(&self) -> &str {
+        &self.worker_pool
+    }
+}
+
+/// Checks that `names`, the post-processors `worker_pool` lists, put `exclusive_swap_replacer`
+/// last.
+///
+/// # Errors
+///
+/// [`PostProcessorOrderError`] when any name follows `exclusive_swap_replacer`, which includes
+/// listing it twice.
+pub(crate) fn check_post_processor_order(
+    worker_pool: &str,
+    names: &[String],
+) -> Result<(), PostProcessorOrderError> {
+    for (name, followed_by) in names.iter().zip(names.iter().skip(1)) {
+        if name == ExclusiveSwapReplacer::NAME {
+            return Err(PostProcessorOrderError {
+                worker_pool: worker_pool.to_string(),
+                post_processor_name: name.clone(),
+                followed_by: followed_by.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The factories behind the post-processor names of one pool, in config order.
@@ -287,7 +341,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "worker pool 'main' lists unknown post-processor 'missing'. Available: alpha, \
-             rfq_swap_replacer, zeta"
+             exclusive_swap_replacer, rfq_swap_replacer, zeta"
         );
     }
 
@@ -300,15 +354,17 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .ends_with("Available: rfq_swap_replacer"),
+                .ends_with("Available: exclusive_swap_replacer, rfq_swap_replacer"),
             "expected the message to list the built-in, got: {error}"
         );
     }
 
-    #[test]
-    fn test_resolve_built_in_with_empty_registry() {
+    #[rstest::rstest]
+    #[case::rfq(RfqSwapReplacer::NAME)]
+    #[case::exclusive(ExclusiveSwapReplacer::NAME)]
+    fn test_resolve_built_in_with_empty_registry(#[case] name: &str) {
         let factories = PostProcessorRegistry::new()
-            .resolve("pool", &[RfqSwapReplacer::NAME.to_string()])
+            .resolve("pool", &[name.to_string()])
             .expect("the name is built in");
 
         let names: Vec<String> = factories
@@ -316,18 +372,42 @@ mod tests {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(names, [RfqSwapReplacer::NAME]);
+        assert_eq!(names, [name]);
     }
 
-    #[test]
-    fn test_registry_refuses_built_in_name() {
+    #[rstest::rstest]
+    #[case::rfq(RfqSwapReplacer::NAME)]
+    #[case::exclusive(ExclusiveSwapReplacer::NAME)]
+    fn test_registry_refuses_built_in_name(#[case] name: &str) {
         let error = PostProcessorRegistry::new()
-            .with_post_processor(RfqSwapReplacer::NAME, || Noop)
+            .with_post_processor(name, || Noop)
             .expect_err("a built-in uses the name");
 
-        assert_eq!(
-            error,
-            PostProcessorAlreadyRegistered { name: RfqSwapReplacer::NAME.to_string() }
-        );
+        assert_eq!(error, PostProcessorAlreadyRegistered { name: name.to_string() });
+    }
+
+    #[rstest::rstest]
+    #[case::last(&["rfq_swap_replacer", "exclusive_swap_replacer"], None)]
+    #[case::alone(&["exclusive_swap_replacer"], None)]
+    #[case::absent(&["rfq_swap_replacer", "custom"], None)]
+    #[case::not_last(&["exclusive_swap_replacer", "rfq_swap_replacer"], Some("rfq_swap_replacer"))]
+    #[case::listed_twice(
+        &["exclusive_swap_replacer", "exclusive_swap_replacer"],
+        Some("exclusive_swap_replacer")
+    )]
+    fn test_check_post_processor_order(#[case] names: &[&str], #[case] followed_by: Option<&str>) {
+        let names: Vec<String> = names
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        let result = check_post_processor_order("main", &names);
+
+        let expected = followed_by.map(|followed_by| PostProcessorOrderError {
+            worker_pool: "main".to_string(),
+            post_processor_name: ExclusiveSwapReplacer::NAME.to_string(),
+            followed_by: followed_by.to_string(),
+        });
+        assert_eq!(result.err(), expected);
     }
 }

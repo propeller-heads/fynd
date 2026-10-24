@@ -23,6 +23,7 @@ use crate::{
         computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
+    exclusive_route::{pin_route_commitment, routes_through_exclusive},
     fallback::{has_fallback_leg, manager::PammManager, price_through_fallbacks},
     feed::{
         component_filter::{
@@ -35,7 +36,7 @@ use crate::{
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     post_process::{PostProcessRequest, PostProcessors, ProcessedRoute, RoutePostProcessor},
     types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions, RouteResult},
-    worker_pool_router::LiquidityScope,
+    worker_pool_router::{ExclusiveAccess, LiquidityScope},
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
 
@@ -494,8 +495,9 @@ where
     /// the post-processors.
     ///
     /// The graph drops what the pool rule and `algorithm_exclude_protocols` drop. The
-    /// post-processors drop what the pool rule drops, so they still learn of a component only the
-    /// algorithm leaves out.
+    /// post-processors drop only the protocols the pool excludes, so they still learn of a
+    /// component only the algorithm leaves out, and of the exclusive components a public-only
+    /// pool leaves out.
     pub async fn process_event(&mut self, event: MarketEvent) {
         let market_data = self.market_data.clone();
         let mut post_processor_event = None;
@@ -510,22 +512,32 @@ where
                 post_processors,
                 ..
             } = self;
-            let pool_drops = |component: &ProtocolComponent| {
-                should_drop_component(*liquidity_scope, exclude_protocols, component)
+            // Post-processors learn of exclusive components even on a public-only pool: whether a
+            // request may use them depends on the caller, and the request rule decides.
+            let post_processor_drops = |component: &ProtocolComponent| {
+                should_drop_component(
+                    LiquidityScope::IncludeExclusive,
+                    exclude_protocols,
+                    component,
+                )
             };
             let graph_drops = |component: &ProtocolComponent| {
                 should_drop_component(*liquidity_scope, algorithm_exclusions, component)
             };
             let mut event = event;
             pamm_admission.apply_pamm_admission(&market, &graph_drops, &mut event);
-            if post_processors.is_empty() || algorithm_exclude_protocols.is_empty() {
-                // One event serves both: the graph rule is the pool rule, or nobody else reads it.
+            if post_processors.is_empty() ||
+                (*liquidity_scope == LiquidityScope::IncludeExclusive &&
+                    algorithm_exclude_protocols.is_empty())
+            {
+                // One event serves both: the graph rule is the post-processor rule, or nobody
+                // else reads it.
                 filter_event(market.base_market_state(), event, &graph_drops)
             } else {
-                // The graph rule drops everything the pool rule drops, so it can filter the
-                // post-processors' event instead of the original.
+                // The graph rule drops everything the post-processor rule drops, so it can
+                // filter the post-processors' event instead of the original.
                 let for_post_processors =
-                    filter_event(market.base_market_state(), event, &pool_drops);
+                    filter_event(market.base_market_state(), event, &post_processor_drops);
                 let for_graph = filter_event(
                     market.base_market_state(),
                     for_post_processors.clone(),
@@ -558,27 +570,25 @@ where
     }
 
     /// Checks what the algorithm's own route cannot break but a post-processor can: the pool's
-    /// component rules, and `net_amount_out` against the route's amount out for a sell order.
-    /// The router subtracts the two as unsigned numbers, so a net above the amount out would
-    /// underflow there.
+    /// component rules, the commitment, and `net_amount_out` against the route's amount out for a
+    /// sell order. The router subtracts the two as unsigned numbers, so a net above the amount out
+    /// would underflow there.
     fn check_processed_route(
         &self,
         order: &Order,
-        route: &Route,
-        net_amount_out: &BigInt,
+        processed: &RouteResult,
+        scope: LiquidityScope,
     ) -> Result<(), String> {
+        let route = processed.route();
         for swap in route.swaps() {
-            if should_drop_component(
-                self.liquidity_scope,
-                &self.exclude_protocols,
-                swap.protocol_component(),
-            ) {
+            if should_drop_component(scope, &self.exclude_protocols, swap.protocol_component()) {
                 return Err(format!(
                     "route uses component {} that this pool leaves out of its graph",
                     swap.component_id()
                 ));
             }
         }
+        self.check_commitment(order, processed)?;
         if !order.is_sell() {
             return Ok(());
         }
@@ -586,9 +596,40 @@ where
             return Ok(());
         };
         let amount_out = BigInt::from(route.amount_out(&output_token));
+        let net_amount_out = processed.net_amount_out();
         if *net_amount_out > amount_out {
             return Err(format!(
                 "net amount out {net_amount_out} is above the route amount out {amount_out}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Checks that the commitment of a processed route can be pinned: a sell order, an exclusive
+    /// leg to pin it on, and no more than the route pays. A public-only pool also needs it on every
+    /// route with an exclusive leg, because the encoder signs only a leg with a committed amount.
+    fn check_commitment(&self, order: &Order, processed: &RouteResult) -> Result<(), String> {
+        let route = processed.route();
+        let has_exclusive_leg = routes_through_exclusive(route.swaps());
+        let Some(commitment) = processed.commitment() else {
+            if has_exclusive_leg && self.liquidity_scope == LiquidityScope::PublicOnly {
+                return Err("route has an exclusive leg but no commitment".to_string());
+            }
+            return Ok(());
+        };
+        if !order.is_sell() {
+            return Err("commitment on an order that is not a sell order".to_string());
+        }
+        if !has_exclusive_leg {
+            return Err("commitment on a route with no exclusive leg".to_string());
+        }
+        let amount_out = route
+            .output_token()
+            .map(|token| route.amount_out(&token));
+        if amount_out.is_none_or(|amount_out| *commitment.committed_amount_out() > amount_out) {
+            return Err(format!(
+                "commitment {} is above the route amount out",
+                commitment.committed_amount_out()
             ));
         }
         Ok(())
@@ -638,6 +679,16 @@ where
         }
     }
 
+    /// The access the post-processors get: [`ExclusiveAccess::Granted`] when the caller has
+    /// exclusive access and the pool leaves exclusive liquidity out of its graph. A pool that
+    /// includes exclusive liquidity already routes through it.
+    fn post_process_exclusive_access(&self, params: &SolveParams) -> ExclusiveAccess {
+        match self.liquidity_scope {
+            LiquidityScope::PublicOnly => params.exclusive_access(),
+            LiquidityScope::IncludeExclusive => ExclusiveAccess::Denied,
+        }
+    }
+
     /// Runs the post-processors on the algorithm's route, which the worker already checked.
     /// Returns the route to quote and the names of the post-processors that made it. The names are
     /// empty when no post-processor replaced the route. A processed route gets its fallback
@@ -655,8 +706,13 @@ where
         if self.post_processors.is_empty() {
             return (result, Vec::new());
         }
+        let exclusive_access = self.post_process_exclusive_access(params);
+        let scope = match exclusive_access {
+            ExclusiveAccess::Granted => LiquidityScope::IncludeExclusive,
+            ExclusiveAccess::Denied => self.liquidity_scope,
+        };
         let drops_component = |component: &ProtocolComponent| {
-            should_drop_component(self.liquidity_scope, &self.exclude_protocols, component)
+            should_drop_component(scope, &self.exclude_protocols, component)
         };
         let request = PostProcessRequest::new(
             order,
@@ -668,7 +724,8 @@ where
                 .unwrap_or(deadline),
         )
         .with_label(params.state_label())
-        .with_pool_drops(&drops_component);
+        .with_pool_drops(&drops_component)
+        .with_exclusive_access(exclusive_access);
         let Some(processed) = self
             .post_processors
             .run(&request, &result)
@@ -679,13 +736,7 @@ where
         let ProcessedRoute { route: mut processed_route, post_processed_by } = processed;
         let mut checked =
             check_route(processed_route.route(), order, params.route_filter(), exclusions)
-                .and_then(|()| {
-                    self.check_processed_route(
-                        order,
-                        processed_route.route(),
-                        processed_route.net_amount_out(),
-                    )
-                });
+                .and_then(|()| self.check_processed_route(order, &processed_route, scope));
         if checked.is_ok() {
             checked = self
                 .price_fallback_legs(order, params, processed_route.route_mut())
@@ -816,6 +867,7 @@ where
                     .to_biguint()
                     .unwrap_or(BigUint::ZERO);
                 let gas_price = result.gas_price().clone();
+                let commitment = result.commitment().cloned();
                 let mut route = result.into_route();
 
                 // The worker priced a processed route in `post_process`.
@@ -898,6 +950,9 @@ where
                 .with_route(route)
                 .with_gas_price(gas_price);
                 quote.set_post_processed_by(post_processed_by);
+                if let Some(commitment) = &commitment {
+                    quote = pin_route_commitment(&quote, commitment);
+                }
                 if let Some(bps) = price_impact_bps {
                     quote = quote.with_price_impact_bps(bps);
                 }
@@ -3250,6 +3305,128 @@ mod tests {
             .is_empty());
     }
 
+    /// The post-processors get access only on a public-only pool: a pool that includes exclusive
+    /// liquidity already routes through it.
+    #[rstest]
+    #[case::public_only_granted(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        ExclusiveAccess::Granted
+    )]
+    #[case::public_only_denied(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Denied,
+        ExclusiveAccess::Denied
+    )]
+    #[case::include_exclusive_granted(
+        LiquidityScope::IncludeExclusive,
+        ExclusiveAccess::Granted,
+        ExclusiveAccess::Denied
+    )]
+    #[tokio::test]
+    async fn test_quote_post_processor_exclusive_access(
+        #[case] scope: LiquidityScope,
+        #[case] access: ExclusiveAccess,
+        #[case] expected: ExclusiveAccess,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let recorder = Arc::clone(&seen);
+        let recording = MockPostProcessor::with_request(move |request, result| {
+            *recorder.lock().unwrap() = Some(request.exclusive_access());
+            result
+        });
+        let mut worker = worker_with_post_processor(recording).with_liquidity_scope(scope);
+        let params = SolveParams::default().with_exclusive_access(access);
+
+        worker
+            .quote(&a_to_b_order(), params, far_deadline())
+            .await
+            .expect("the algorithm's route is valid");
+
+        assert_eq!(*seen.lock().unwrap(), Some(expected));
+    }
+
+    fn committed_exclusive_route(committed: u64) -> impl Fn(RouteResult) -> RouteResult {
+        move |result| {
+            exclusive_route(result).with_commitment(BigUint::from(committed), BigUint::from(100u64))
+        }
+    }
+
+    fn committed_public_route(result: RouteResult) -> RouteResult {
+        rfq_route(result).with_commitment(BigUint::from(110u64), BigUint::from(100u64))
+    }
+
+    #[rstest]
+    #[case::pinned(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(committed_exclusive_route(110)),
+        true
+    )]
+    #[case::access_denied(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Denied,
+        Box::new(committed_exclusive_route(110)),
+        false
+    )]
+    #[case::no_commitment(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(exclusive_route),
+        false
+    )]
+    #[case::commitment_above_amount_out(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(committed_exclusive_route(121)),
+        false
+    )]
+    #[case::commitment_without_exclusive_leg(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(committed_public_route),
+        false
+    )]
+    #[tokio::test]
+    async fn test_quote_with_committed_route(
+        #[case] scope: LiquidityScope,
+        #[case] access: ExclusiveAccess,
+        #[case] rewrite: Box<dyn Fn(RouteResult) -> RouteResult + Send + Sync>,
+        #[case] pinned: bool,
+    ) {
+        let mut worker =
+            worker_with_post_processor(MockPostProcessor::new(rewrite)).with_liquidity_scope(scope);
+        let params = SolveParams::default().with_exclusive_access(access);
+
+        let quote = worker
+            .quote(&a_to_b_order(), params, far_deadline())
+            .await
+            .expect("a rejected post-processed route does not fail the quote");
+
+        let order = quote.order();
+        let components: Vec<&str> = order
+            .route()
+            .expect("the quote has a route")
+            .swaps()
+            .iter()
+            .map(|swap| swap.component_id())
+            .collect();
+        if !pinned {
+            assert_eq!(components, ["p1", "p2"]);
+            assert_eq!(order.amount_out_net_gas(), &BigUint::from(192u64));
+            assert!(order.surplus_amount().is_none());
+            return;
+        }
+        assert_eq!(components, ["exclusive-leg"]);
+        assert_eq!(order.post_processed_by(), ["rfq".to_string()]);
+        assert_eq!(order.amount_out(), &BigUint::from(110u64));
+        assert_eq!(order.amount_out_net_gas(), &BigUint::from(108u64));
+        assert_eq!(order.surplus_amount(), Some(&BigUint::from(10u64)));
+        assert_eq!(order.committed_amount_out(), Some(&BigUint::from(110u64)));
+        let leg = &order.route().unwrap().swaps()[0];
+        assert_eq!(leg.committed_amount_out(), Some(&BigUint::from(110u64)));
+    }
+
     /// The value of `worker_pool_post_processed_route_rejected_total` for the test pool.
     fn rejected_route_count(snapshotter: &metrics_util::debugging::Snapshotter) -> u64 {
         use metrics_util::debugging::DebugValue;
@@ -3454,6 +3631,49 @@ mod tests {
 
         assert_eq!(has_graph_edge(&worker, "rfq-leg"), in_graph);
         assert_eq!(*added_ids.lock().unwrap(), ["rfq-leg".to_string()]);
+    }
+
+    /// A post-processor receives the market event of an exclusive component on a public-only pool
+    /// too, though that pool keeps the component out of its graph.
+    #[rstest]
+    #[case::public_only(LiquidityScope::PublicOnly, false)]
+    #[case::include_exclusive(LiquidityScope::IncludeExclusive, true)]
+    #[tokio::test]
+    async fn test_process_event_exclusive_component(
+        #[case] scope: LiquidityScope,
+        #[case] in_graph: bool,
+    ) {
+        let (market, _) = setup_market_weighted(vec![]);
+        let post_processor = MockPostProcessor::unchanged();
+        let added_ids = Arc::clone(&post_processor.added_component_ids);
+        let mut worker = worker_on_market(market, &[])
+            .with_liquidity_scope(scope)
+            .with_post_processors(vec![("exclusive".to_string(), Box::new(post_processor))]);
+        worker.initialize_graph().await;
+        let tokens = [token(0x01, "A"), token(0x02, "B")];
+        let mut exclusive = component_with_protocol("exclusive-leg", "exclusive:ekubo_v3", &tokens);
+        crate::feed::exclusivity::mark_exclusive(&mut exclusive);
+        {
+            let mut state = worker
+                .market_data
+                .try_write()
+                .expect("uncontended");
+            state.upsert_tokens(tokens);
+            state.upsert_components([exclusive.clone()]);
+        }
+        let event = MarketEvent::MarketUpdated {
+            added_components: FxHashMap::from_iter([(
+                "exclusive-leg".to_string(),
+                exclusive.tokens.into(),
+            )]),
+            removed_components: Vec::new(),
+            updated_components: Vec::new(),
+        };
+
+        worker.process_event(event).await;
+
+        assert_eq!(has_graph_edge(&worker, "exclusive-leg"), in_graph);
+        assert_eq!(*added_ids.lock().unwrap(), ["exclusive-leg".to_string()]);
     }
 
     /// The post-processor may put a component into the final quote that the algorithm cannot use.

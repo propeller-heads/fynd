@@ -6,8 +6,8 @@
 //! algorithm's route first, then runs the post-processors, then checks the processed route. The
 //! router ranks the quote after that.
 //!
-//! `rfq_swap_replacer` is built in: a pool config lists it with no registration. A registry adds
-//! only custom names.
+//! `rfq_swap_replacer` and `exclusive_swap_replacer` are built in: a pool config lists them with
+//! no registration. A registry adds only custom names.
 //!
 //! ```ignore
 //! // In the deployment's binary:
@@ -21,8 +21,10 @@
 //! post_processors = ["rfq"]
 //! ```
 
+mod exclusive;
 mod pipeline;
 pub mod registry;
+mod replace;
 mod rfq;
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -34,7 +36,8 @@ use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 pub(crate) use self::pipeline::{PostProcessors, ProcessedRoute};
 pub use self::registry::{
-    PostProcessorAlreadyRegistered, PostProcessorRegistry, UnknownPostProcessorError,
+    PostProcessorAlreadyRegistered, PostProcessorOrderError, PostProcessorRegistry,
+    UnknownPostProcessorError,
 };
 use crate::{
     derived::SharedDerivedDataRef,
@@ -43,14 +46,16 @@ use crate::{
         market_data::{MarketData, StateLabel},
     },
     types::{Order, RouteExclusions, RouteResult},
+    worker_pool_router::ExclusiveAccess,
 };
 
 /// A step that can replace the route a pool's algorithm returned.
 ///
 /// A worker owns its instances and calls them from one task, so an instance may keep state. It
 /// receives the market events the worker's graph manager receives through [`MarketEventHandler`].
-/// Events for components the pool drops (exclusive components in a `public_only` pool, excluded
-/// protocols) never arrive, but `initialize` sees the whole market.
+/// Events for components of an excluded protocol never arrive, but `initialize` sees the whole
+/// market. Events for exclusive components arrive on a `public_only` pool too, because whether a
+/// request may use them depends on the caller: see [`PostProcessRequest::exclusive_access`].
 ///
 /// The worker checks the route a processor returns. When the route is invalid, uses a pool the
 /// request excluded, or uses a component the pool drops, the worker logs a warning and quotes the
@@ -84,6 +89,7 @@ pub struct PostProcessRequest<'a> {
     derived: &'a SharedDerivedDataRef,
     exclusions: &'a RouteExclusions,
     pool_drops: Option<&'a (dyn Fn(&ProtocolComponent) -> bool + Sync)>,
+    exclusive_access: ExclusiveAccess,
     deadline: Instant,
 }
 
@@ -96,7 +102,16 @@ impl<'a> PostProcessRequest<'a> {
         exclusions: &'a RouteExclusions,
         deadline: Instant,
     ) -> Self {
-        Self { order, market, label: None, derived, exclusions, pool_drops: None, deadline }
+        Self {
+            order,
+            market,
+            label: None,
+            derived,
+            exclusions,
+            pool_drops: None,
+            exclusive_access: ExclusiveAccess::Denied,
+            deadline,
+        }
     }
 
     /// Sets the rule for dropping components from the pool. See
@@ -107,6 +122,14 @@ impl<'a> PostProcessRequest<'a> {
         pool_drops: &'a (dyn Fn(&ProtocolComponent) -> bool + Sync),
     ) -> Self {
         self.pool_drops = Some(pool_drops);
+        self
+    }
+
+    /// Sets whether the post-processor may add exclusive components to the route. See
+    /// [`exclusive_access`](Self::exclusive_access).
+    #[must_use]
+    pub fn with_exclusive_access(mut self, access: ExclusiveAccess) -> Self {
+        self.exclusive_access = access;
         self
     }
 
@@ -150,6 +173,15 @@ impl<'a> PostProcessRequest<'a> {
     pub fn drops_component(&self, component: &ProtocolComponent) -> bool {
         self.pool_drops
             .is_some_and(|drops| drops(component))
+    }
+
+    /// Whether the post-processor may add exclusive components to the route.
+    /// [`ExclusiveAccess::Granted`] only when the caller has exclusive access and the pool leaves
+    /// exclusive liquidity out of its graph; [`drops_component`](Self::drops_component) then
+    /// keeps exclusive components. [`ExclusiveAccess::Denied`] when the request has no access, and
+    /// on a pool that already routes through exclusive liquidity.
+    pub fn exclusive_access(&self) -> ExclusiveAccess {
+        self.exclusive_access
     }
 
     /// The time after which the worker stops waiting for the post-processor. The worker sets it
