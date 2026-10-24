@@ -18,7 +18,7 @@ use crate::{
     post_process::{
         replace::{
             build_index, can_serve, find_whole_candidate, update_index, Candidate, ComponentIndex,
-            ReplacementRule, RouteEvaluator, Search, Snapshot, Target,
+            Evaluation, ReplacementRule, RouteEvaluator, Search, Snapshot, Target,
         },
         PostProcessRequest, RoutePostProcessor,
     },
@@ -27,8 +27,8 @@ use crate::{
 };
 
 /// Replaces one swap or a segment of a sell order's route with one swap through an exclusive
-/// component. It keeps a replacement only when the net amount out rises and the route can commit
-/// to a price.
+/// component, or splits one swap between its pool and the exclusive component. It keeps a
+/// replacement only when the net amount out rises and the route can commit to a price.
 ///
 /// The route gets at most one exclusive leg, and a route that already has one does not change. It
 /// acts only on a `public_only` pool, for a request with exclusive access: a pool that includes
@@ -88,7 +88,8 @@ impl RoutePostProcessor for ExclusiveSwapReplacer {
     }
 }
 
-/// Replaces a target with one swap through an exclusive component.
+/// Replaces a target with one swap through an exclusive component, or splits a swap between its
+/// pool and the exclusive component.
 struct ExclusiveRule;
 
 impl ReplacementRule for ExclusiveRule {
@@ -112,8 +113,14 @@ impl ReplacementRule for ExclusiveRule {
         evaluator: &RouteEvaluator<'_>,
         min_net_amount_out: &BigInt,
     ) -> Option<Candidate> {
-        find_whole_candidate(leg, target, swaps, evaluator, min_net_amount_out)
-            .and_then(|whole| ExclusiveRule.commit(whole, evaluator))
+        let whole = find_whole_candidate(leg, target, swaps, evaluator, min_net_amount_out)
+            .and_then(|whole| ExclusiveRule.commit(whole, evaluator));
+        let split_floor = whole
+            .as_ref()
+            .map_or(min_net_amount_out, Candidate::net_amount_out);
+        let split =
+            SplitSearch::new(leg, target, swaps, evaluator, split_floor).and_then(SplitSearch::run);
+        split.or(whole)
     }
 }
 
@@ -147,6 +154,150 @@ impl ExclusiveRule {
             *USER_IMPROVEMENT_SHARE_BPS,
         )?;
         Some(candidate.with_commitment(committed_amount_out))
+    }
+}
+
+/// The number of golden-section steps for the exclusive fraction of a split. The search simulates
+/// the route `SPLIT_SEARCH_STEPS + 2` times.
+const SPLIT_SEARCH_STEPS: usize = 8;
+
+/// The ratio of the golden section: `1 / phi`.
+const GOLDEN_RATIO_INVERSE: f64 = 0.618_033_988_749_895;
+
+/// The part of the balance of the input token that the original swap of a split search holds.
+#[derive(Clone, Copy)]
+enum TargetSplit {
+    /// The original swap holds this split of the input token balance.
+    Fixed(f64),
+    /// The original swap takes what remains of the input token balance, worth this split.
+    Remainder(f64),
+}
+
+impl TargetSplit {
+    fn value(self) -> f64 {
+        match self {
+            Self::Fixed(split) | Self::Remainder(split) => split,
+        }
+    }
+}
+
+/// Searches the exclusive fraction of the target split that the exclusive component takes while
+/// the original pool keeps the rest. It assumes the net amount out has one peak over the exclusive
+/// fraction, and it counts a fraction that the exclusive component cannot fill as the lowest
+/// value.
+struct SplitSearch<'a> {
+    target: &'a Target,
+    swaps: &'a [Swap],
+    evaluator: &'a RouteEvaluator<'a>,
+    /// The exclusive swap, then the original swap with the token pair of the target.
+    split_swaps: [Swap; 2],
+    target_split: TargetSplit,
+    /// The exclusive fraction with the best evaluation so far, above `floor`.
+    best: Option<(f64, Evaluation)>,
+    floor: &'a BigInt,
+}
+
+impl<'a> SplitSearch<'a> {
+    /// Prepares a split search for the swap at the single position of `target`, with `leg` as the
+    /// exclusive swap. `None` when the target is a segment or the original swap holds no part of
+    /// the input token balance. A split must have a net amount out above `floor`.
+    fn new(
+        leg: &Swap,
+        target: &'a Target,
+        swaps: &'a [Swap],
+        evaluator: &'a RouteEvaluator<'a>,
+        floor: &'a BigInt,
+    ) -> Option<Self> {
+        let [position] = target.replaced.as_slice() else {
+            return None;
+        };
+        let original = swaps.get(*position)?;
+        let target_split = if *original.split() <= 0.0 {
+            let others: f64 = swaps
+                .iter()
+                .enumerate()
+                .filter(|(other, swap)| other != position && swap.token_in() == original.token_in())
+                .map(|(_, swap)| *swap.split())
+                .sum();
+            TargetSplit::Remainder(1.0 - others)
+        } else {
+            TargetSplit::Fixed(*original.split())
+        };
+        if target_split.value() <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            target,
+            swaps,
+            evaluator,
+            split_swaps: [leg.clone(), original.clone()],
+            target_split,
+            best: None,
+            floor,
+        })
+    }
+
+    /// Returns the split with the highest net amount out above `floor`, if any.
+    fn run(mut self) -> Option<Candidate> {
+        let (mut low, mut high) = (0.0_f64, 1.0_f64);
+        let mut left = high - GOLDEN_RATIO_INVERSE * (high - low);
+        let mut right = low + GOLDEN_RATIO_INVERSE * (high - low);
+        let mut left_net = self.evaluate(left);
+        let mut right_net = self.evaluate(right);
+        for _ in 0..SPLIT_SEARCH_STEPS {
+            // A fraction that cannot be filled has no net amount out: `None` orders below every
+            // `Some`, so the search moves away from it.
+            if left_net >= right_net {
+                high = right;
+                (right, right_net) = (left, left_net);
+                left = high - GOLDEN_RATIO_INVERSE * (high - low);
+                left_net = self.evaluate(left);
+            } else {
+                low = left;
+                (left, left_net) = (right, right_net);
+                right = low + GOLDEN_RATIO_INVERSE * (high - low);
+                right_net = self.evaluate(right);
+            }
+        }
+        let (exclusive_fraction, evaluation) = self.best.take()?;
+        self.retarget_split_swaps(exclusive_fraction);
+        let candidate = evaluation.into_candidate(self.swaps, self.target, &self.split_swaps);
+        ExclusiveRule.commit(candidate, self.evaluator)
+    }
+
+    /// Simulates the split at `exclusive_fraction` and records it if it is the best so far.
+    /// Returns its net amount out, or `None` when the simulation fails or the deadline has passed.
+    fn evaluate(&mut self, exclusive_fraction: f64) -> Option<BigInt> {
+        if self.evaluator.deadline_passed() {
+            return None;
+        }
+        self.retarget_split_swaps(exclusive_fraction);
+        let evaluation = self
+            .evaluator
+            .evaluate(self.swaps, self.target, &self.split_swaps)?;
+        let net_amount_out = evaluation.net_amount_out().clone();
+        let best_net = self
+            .best
+            .as_ref()
+            .map_or(self.floor, |(_, best)| best.net_amount_out());
+        if net_amount_out > *best_net {
+            self.best = Some((exclusive_fraction, evaluation));
+        }
+        Some(net_amount_out)
+    }
+
+    /// Gives the exclusive swap the fraction `exclusive_fraction` of the target split. The
+    /// original swap keeps the rest, or takes the remainder when it did before.
+    fn retarget_split_swaps(&mut self, exclusive_fraction: f64) {
+        let (token_in, token_out) = (&self.target.token_in, &self.target.token_out);
+        let target_split = self.target_split.value();
+        let original_split = match self.target_split {
+            TargetSplit::Fixed(_) => target_split * (1.0 - exclusive_fraction),
+            TargetSplit::Remainder(_) => 0.0,
+        };
+        let [exclusive, original] = &mut self.split_swaps;
+        exclusive.retarget(token_in.clone(), token_out.clone(), target_split * exclusive_fraction);
+        original.retarget(token_in.clone(), token_out.clone(), original_split);
     }
 }
 
