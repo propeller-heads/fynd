@@ -385,4 +385,29 @@ mod tests {
 
         assert_eq!(error, PostProcessorAlreadyRegistered { name: name.to_string() });
     }
+
+    #[rstest::rstest]
+    #[case::last(&["rfq_swap_replacer", "exclusive_swap_replacer"], None)]
+    #[case::alone(&["exclusive_swap_replacer"], None)]
+    #[case::absent(&["rfq_swap_replacer", "custom"], None)]
+    #[case::not_last(&["exclusive_swap_replacer", "rfq_swap_replacer"], Some("rfq_swap_replacer"))]
+    #[case::listed_twice(
+        &["exclusive_swap_replacer", "exclusive_swap_replacer"],
+        Some("exclusive_swap_replacer")
+    )]
+    fn test_check_post_processor_order(#[case] names: &[&str], #[case] followed_by: Option<&str>) {
+        let names: Vec<String> = names
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+
+        let result = check_post_processor_order("main", &names);
+
+        let expected = followed_by.map(|followed_by| PostProcessorOrderError {
+            worker_pool: "main".to_string(),
+            post_processor_name: ExclusiveSwapReplacer::NAME.to_string(),
+            followed_by: followed_by.to_string(),
+        });
+        assert_eq!(result.err(), expected);
+    }
 }
