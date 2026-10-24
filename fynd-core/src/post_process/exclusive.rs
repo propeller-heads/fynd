@@ -312,13 +312,13 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{component_with_protocol, MockProtocolSim},
+        algorithm::test_utils::{component_with_protocol, ConstantProductSim, MockProtocolSim},
         exclusive_route::is_exclusive_leg,
         feed::exclusivity::mark_exclusive,
         post_process::test_utils::{
             add_component, added, component_ids, insert_component, market, replaced, result,
-            run_with_access, sell_order, sequential_route, swap, swap_through_pool, tokens,
-            with_net_amount_out,
+            run_with_access, sell_order, sequential_route, swap, swap_on, swap_through_pool,
+            tokens, with_net_amount_out,
         },
         types::Order,
     };
@@ -596,6 +596,159 @@ mod tests {
             .expect("an event before initialize");
 
         let out = run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await;
+        assert!(out.is_none());
+    }
+
+    fn pool(reserve_in: u64, reserve_out: u64) -> ConstantProductSim {
+        ConstantProductSim {
+            reserve_0: BigUint::from(reserve_in),
+            reserve_1: BigUint::from(reserve_out),
+            gas: 10,
+        }
+    }
+
+    /// The total amount in of the swaps that start at `token`.
+    fn amount_in_of(result: &RouteResult, token: &Token) -> BigUint {
+        result
+            .route()
+            .swaps()
+            .iter()
+            .filter(|swap| *swap.token_in() == token.address)
+            .map(|swap| swap.amount_in())
+            .sum()
+    }
+
+    fn splits_of(result: &RouteResult) -> Vec<f64> {
+        result
+            .route()
+            .swaps()
+            .iter()
+            .map(|swap| *swap.split())
+            .collect()
+    }
+
+    /// A route of one swap from A to B through a deep pool at a price of about 2.
+    fn deep_route(a: &Token, b: &Token) -> RouteResult {
+        result(vec![swap_on("ab", (a, b), (1000, 1980), 0.0, pool(100_000, 200_000))], &[a, b])
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_split_when_price_falls_with_amount() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), pool(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+
+        let out = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &b), deep_route(&a, &b)).await,
+        );
+
+        assert_eq!(component_ids(&out), ["excl_ab", "ab"]);
+        assert_eq!(splits_of(&out), [0.14589803375031532, 0.0]);
+        assert_eq!(amount_in_of(&out, &a), BigUint::from(1000u64));
+        // The original route's net amount out is 1970. The exclusive pool alone gives 1250 minus
+        // 10 gas.
+        assert_eq!(out.net_amount_out(), &BigInt::from(1991));
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_split_limited_liquidity() {
+        let (a, b, _) = tokens();
+        let market = market();
+        let limited_pool = MockProtocolSim::new(3.0)
+            .with_gas(10)
+            .with_liquidity(1500);
+        add_exclusive(&market, "excl_ab", (&a, &b), limited_pool).await;
+        let replacer = replacer(&market).await;
+        let original = result(vec![swap("ab", (&a, &b), (1000, 2000), 0.0, 2.0)], &[&a, &b]);
+
+        let out = replaced(run_granted(&replacer, &market, &sell_order(&a, &b), original).await);
+
+        assert_eq!(component_ids(&out), ["excl_ab", "ab"]);
+        assert_eq!(splits_of(&out), [0.4984471899924292, 0.0]);
+        assert_eq!(amount_in_of(&out, &a), BigUint::from(1000u64));
+        // The original route's net amount out is 1990. The split gives about 2500 minus 20 gas.
+        assert_eq!(out.net_amount_out(), &BigInt::from(2478));
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_split_of_a_swap_with_a_split() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), pool(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+        let original = result(
+            vec![
+                swap_on("p1", (&a, &b), (600, 1188), 0.6, pool(100_000, 200_000)),
+                swap_on("p2", (&a, &b), (400, 792), 0.0, pool(100_000, 200_000)),
+            ],
+            &[&a, &b],
+        );
+        let original_net = original.net_amount_out().clone();
+
+        let out = replaced(run_granted(&replacer, &market, &sell_order(&a, &b), original).await);
+
+        assert_eq!(component_ids(&out), ["excl_ab", "p1", "p2"]);
+        assert_eq!(splits_of(&out), [0.1209756742506939, 0.4790243257493061, 0.0]);
+        assert_eq!(amount_in_of(&out, &a), BigUint::from(1000u64));
+        assert_eq!(out.net_amount_out(), &BigInt::from(1988));
+        assert!(out.net_amount_out() > &original_net);
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_split_of_the_remainder_swap() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), pool(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+        let original = result(
+            vec![
+                swap("p1", (&a, &b), (600, 1800), 0.6, 3.0),
+                swap_on("p2", (&a, &b), (400, 792), 0.0, pool(100_000, 200_000)),
+            ],
+            &[&a, &b],
+        );
+        let original_net = original.net_amount_out().clone();
+
+        let out = replaced(run_granted(&replacer, &market, &sell_order(&a, &b), original).await);
+
+        assert_eq!(component_ids(&out), ["p1", "excl_ab", "p2"]);
+        assert_eq!(splits_of(&out), [0.6, 0.11671842700025233, 0.0]);
+        assert_eq!(amount_in_of(&out, &a), BigUint::from(1000u64));
+        assert_eq!(out.net_amount_out(), &BigInt::from(2595));
+        assert!(out.net_amount_out() > &original_net);
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_split_remainder_without_share() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), pool(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+        let original = result(
+            vec![
+                swap_on("p1", (&a, &b), (600, 1188), 0.6, pool(100_000, 200_000)),
+                swap_on("p2", (&a, &b), (0, 0), 0.0, pool(100_000, 200_000)),
+                swap_on("p3", (&a, &b), (400, 792), 0.4, pool(100_000, 200_000)),
+            ],
+            &[&a, &b],
+        );
+
+        let out = replaced(run_granted(&replacer, &market, &sell_order(&a, &b), original).await);
+        assert_eq!(component_ids(&out), ["excl_ab", "p1", "p2", "p3"]);
+        assert_eq!(splits_of(&out), [0.1209756742506939, 0.4790243257493061, 0.0, 0.4]);
+        assert_eq!(out.net_amount_out(), &BigInt::from(1978));
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_split_worse_price() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), pool(1000, 1500)).await;
+        let replacer = replacer(&market).await;
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &b), deep_route(&a, &b)).await;
+
         assert!(out.is_none());
     }
 }
