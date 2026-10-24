@@ -80,6 +80,33 @@ impl ComponentIndex {
     }
 }
 
+/// Whether `leg` holds both tokens of `target` and `swaps` do not use its component.
+pub(super) fn can_serve(leg: &Swap, target: &Target, swaps: &[Swap]) -> bool {
+    let tokens = &leg.protocol_component().tokens;
+    tokens.contains(&target.token_in) &&
+        tokens.contains(&target.token_out) &&
+        !swaps
+            .iter()
+            .any(|swap| swap.component_id() == leg.component_id())
+}
+
+/// Returns the replacement of `target` by `leg` alone, if its net amount out is above
+/// `min_net_amount_out`. The leg takes the token pair and the split of the target.
+pub(super) fn find_whole_candidate(
+    leg: &Swap,
+    target: &Target,
+    swaps: &[Swap],
+    evaluator: &RouteEvaluator<'_>,
+    min_net_amount_out: &BigInt,
+) -> Option<Candidate> {
+    let mut replacement = leg.clone();
+    replacement.retarget(target.token_in.clone(), target.token_out.clone(), target.split);
+    let replacement = [replacement];
+    let evaluation = evaluator.evaluate(swaps, target, &replacement)?;
+    (*evaluation.net_amount_out() > *min_net_amount_out)
+        .then(|| evaluation.into_candidate(swaps, target, &replacement))
+}
+
 /// Indexes the components of the base market state that pass `is_member`.
 pub(super) async fn build_index(
     market: &MarketData,
@@ -133,8 +160,9 @@ pub(super) async fn update_index(
 
 /// What a search reads from the market, copied under the read lock so the search holds no lock.
 pub(super) struct Snapshot {
-    /// One swap with zero amounts for each component the search may use, in id order. Its
-    /// token pair is a placeholder: `Search` sets the pair and the split before it simulates.
+    /// One swap with zero amounts for each component the search may use, in id order. Its token
+    /// pair is a placeholder: the replacement rule sets the pair and the split before it
+    /// simulates.
     legs: Vec<Swap>,
     /// The tokens of the route.
     tokens: FxHashMap<Address, Token>,
@@ -194,7 +222,7 @@ impl Snapshot {
 }
 
 /// The gas cost of the original route in the output token, and the gas it used.
-pub(super) struct GasPricing {
+struct GasPricing {
     gas_cost_out: BigInt,
     gas: BigInt,
 }
@@ -228,21 +256,89 @@ pub(super) struct Target {
     pub(super) token_in: Address,
     pub(super) token_out: Address,
     /// The split of the replacement swap; `0.0` takes what remains of `token_in`.
-    split: f64,
+    pub(super) split: f64,
 }
 
-/// A target with the swap that replaces it.
+/// The route after a replacement, and the net amount out of that route.
 pub(super) struct Candidate {
-    target: Target,
-    leg: Swap,
+    swaps: Vec<Swap>,
+    net_amount_out: BigInt,
+}
+
+/// The result of simulating the route with a replacement.
+pub(super) struct Evaluation {
     simulated: SimulatedRoute,
     net_amount_out: BigInt,
 }
 
-/// Searches one route for replacements that raise the net amount out.
-pub(super) struct Search<'a> {
+impl Evaluation {
+    pub(super) fn net_amount_out(&self) -> &BigInt {
+        &self.net_amount_out
+    }
+
+    /// The candidate that replaces `target` of `swaps` with `replacement`, the swaps that were
+    /// evaluated. Its swaps carry the amounts and gas of the simulation.
+    pub(super) fn into_candidate(
+        self,
+        swaps: &[Swap],
+        target: &Target,
+        replacement: &[Swap],
+    ) -> Candidate {
+        let ordered = splice(swaps, &target.replaced, replacement);
+        let mut route_swaps = Vec::with_capacity(ordered.len());
+        for (swap, simulated) in ordered
+            .into_iter()
+            .zip(self.simulated.swaps)
+        {
+            route_swaps.push(
+                Swap::new(
+                    swap.component_id().to_string(),
+                    swap.protocol().to_string(),
+                    swap.token_in().clone(),
+                    swap.token_out().clone(),
+                    simulated.amount_in,
+                    simulated.amount_out,
+                    simulated.gas,
+                    swap.protocol_component().clone(),
+                    swap.protocol_state().clone_box(),
+                )
+                .with_split(*swap.split()),
+            );
+        }
+        Candidate { swaps: route_swaps, net_amount_out: self.net_amount_out }
+    }
+}
+
+/// A rule for what replaces a target of a route. [`Search`] runs the rule.
+pub(super) trait ReplacementRule {
+    /// Whether `leg` may replace `target` of `swaps`.
+    fn fits(
+        &self,
+        leg: &Swap,
+        target: &Target,
+        swaps: &[Swap],
+        evaluator: &RouteEvaluator<'_>,
+    ) -> bool;
+
+    /// Returns the replacement of `target` through `leg` that has the highest net amount out, if
+    /// that amount is above `min_net_amount_out`. Evaluates each replacement with `evaluator`.
+    /// The default replaces the target with `leg` alone.
+    fn find_candidate(
+        &self,
+        leg: &Swap,
+        target: &Target,
+        swaps: &[Swap],
+        evaluator: &RouteEvaluator<'_>,
+        min_net_amount_out: &BigInt,
+    ) -> Option<Candidate> {
+        find_whole_candidate(leg, target, swaps, evaluator, min_net_amount_out)
+    }
+}
+
+/// Simulates replacements on the route under search: holds the original route, its gas pricing,
+/// the tokens and the deadline.
+pub(super) struct RouteEvaluator<'a> {
     original: &'a RouteResult,
-    legs: Vec<Swap>,
     deadline: Instant,
     pricing: GasPricing,
     tokens: FxHashMap<Address, Token>,
@@ -251,61 +347,13 @@ pub(super) struct Search<'a> {
     total_in: BigUint,
 }
 
-impl<'a> Search<'a> {
-    /// Prepares a search of `original` on `snapshot`. `None` when the route cannot be searched:
-    /// it has no swaps, it starts and ends on one token, or it uses no gas.
-    pub(super) fn new(
-        snapshot: Snapshot,
-        request: &PostProcessRequest<'_>,
-        original: &'a RouteResult,
-    ) -> Option<Self> {
-        let route = original.route();
-        let (input_token, output_token) = (route.input_token()?, route.output_token()?);
-        if input_token == output_token {
-            return None;
-        }
-        let pricing = GasPricing::of(original, &output_token)?;
-        Some(Self {
-            original,
-            legs: snapshot.legs,
-            deadline: request.deadline(),
-            pricing,
-            tokens: snapshot.tokens,
-            input_token,
-            output_token,
-            total_in: request.order().amount().clone(),
-        })
+impl RouteEvaluator<'_> {
+    pub(super) fn input_token(&self) -> &Address {
+        &self.input_token
     }
 
-    /// Applies the best replacement until none raises the net amount out, the search has run one
-    /// round per original swap, or the deadline passes. A candidate must beat the net amount out
-    /// of the current route; the first round simulates the original route again. `None` when the
-    /// route did not change, or when the final net amount out is not above the original one.
-    pub(super) fn run(mut self) -> Option<RouteResult> {
-        let mut swaps = self.original.route().swaps().to_vec();
-        let rounds = swaps.len();
-        let mut net_amount_out = self.simulate_baseline(&swaps)?;
-        let mut changed = false;
-        for _ in 0..rounds {
-            if self.deadline_passed() {
-                break;
-            }
-            let Some(candidate) = self.best_candidate(&swaps, &net_amount_out) else {
-                break;
-            };
-            net_amount_out = candidate.net_amount_out.clone();
-            swaps = self.apply(&swaps, candidate);
-            changed = true;
-        }
-        if !changed || net_amount_out <= *self.original.net_amount_out() {
-            return None;
-        }
-        let route = Route::new(swaps, self.tokens)
-            .inspect_err(|error| {
-                warn!(%error, "cannot build the replacement route; keeping the original route");
-            })
-            .ok()?;
-        Some(RouteResult::new(route, net_amount_out, self.original.gas_price().clone()))
+    pub(super) fn deadline_passed(&self) -> bool {
+        Instant::now() >= self.deadline
     }
 
     /// The net amount out of `swaps`, simulated again with the pricing of the original route.
@@ -319,67 +367,27 @@ impl<'a> Search<'a> {
         Some(self.pricing.net_amount_out(&simulated))
     }
 
-    fn deadline_passed(&self) -> bool {
-        Instant::now() >= self.deadline
-    }
-
-    /// The candidate with the highest net amount out, if it beats `current_net`. Stops at the
-    /// deadline with the best so far.
-    fn best_candidate(&mut self, swaps: &[Swap], current_net: &BigInt) -> Option<Candidate> {
-        let mut best: Option<Candidate> = None;
-        let mut best_net = current_net.clone();
-        for target in build_targets(swaps) {
-            for position in 0..self.legs.len() {
-                if !super::rfq::fits(&self.legs[position], &target, swaps, &self.input_token) {
-                    continue;
-                }
-                if self.deadline_passed() {
-                    return best;
-                }
-                self.legs[position].retarget(
-                    target.token_in.clone(),
-                    target.token_out.clone(),
-                    target.split,
-                );
-                let leg = &self.legs[position];
-                let Some((simulated, net_amount_out)) = self.evaluate(swaps, &target, leg) else {
-                    continue;
-                };
-                if net_amount_out > best_net {
-                    best_net = net_amount_out.clone();
-                    best = Some(Candidate {
-                        target: target.clone(),
-                        leg: leg.clone(),
-                        simulated,
-                        net_amount_out,
-                    });
-                }
-            }
-        }
-        best
-    }
-
-    /// Simulates the route with `leg` in place of the target swaps.
+    /// Simulates the route with `replacement` in place of the target swaps.
     /// `None` when a swap simulation fails.
-    fn evaluate(
+    pub(super) fn evaluate(
         &self,
         swaps: &[Swap],
         target: &Target,
-        leg: &Swap,
-    ) -> Option<(SimulatedRoute, BigInt)> {
-        let ordered = splice(swaps, &target.replaced, leg);
+        replacement: &[Swap],
+    ) -> Option<Evaluation> {
+        let ordered = splice(swaps, &target.replaced, replacement);
         let simulated = self
             .simulate(&ordered)
             .inspect_err(|error| {
                 trace!(
-                    component = leg.component_id(),
+                    component = replacement.first().map(Swap::component_id),
                     %error,
-                    "dropped RFQ candidate: route simulation failed"
+                    "dropped candidate: route simulation failed"
                 );
             })
             .ok()?;
         let net_amount_out = self.pricing.net_amount_out(&simulated);
-        Some((simulated, net_amount_out))
+        Some(Evaluation { simulated, net_amount_out })
     }
 
     /// Simulates the swaps in `ordered` in topological order, using the snapshot's tokens and each
@@ -397,40 +405,114 @@ impl<'a> Search<'a> {
             |swap| Some(swap.protocol_state()),
         )
     }
+}
 
-    /// The swaps after the replacement, with the amounts and gas of the simulation.
-    fn apply(&self, swaps: &[Swap], candidate: Candidate) -> Vec<Swap> {
-        let Candidate { target, leg, simulated, .. } = candidate;
-        let ordered = splice(swaps, &target.replaced, &leg);
-        let mut replaced = Vec::with_capacity(ordered.len());
-        for (swap, simulated) in ordered.into_iter().zip(simulated.swaps) {
-            replaced.push(
-                Swap::new(
-                    swap.component_id().to_string(),
-                    swap.protocol().to_string(),
-                    swap.token_in().clone(),
-                    swap.token_out().clone(),
-                    simulated.amount_in,
-                    simulated.amount_out,
-                    simulated.gas,
-                    swap.protocol_component().clone(),
-                    swap.protocol_state().clone_box(),
-                )
-                .with_split(*swap.split()),
-            );
+/// Searches one route for replacements that raise the net amount out.
+pub(super) struct Search<'a, R> {
+    evaluator: RouteEvaluator<'a>,
+    legs: Vec<Swap>,
+    rule: R,
+}
+
+impl<'a, R: ReplacementRule> Search<'a, R> {
+    /// Prepares a search of `original` on `snapshot`. `None` when the route cannot be searched:
+    /// the route has no swaps, it starts and ends on one token, or it uses no gas.
+    pub(super) fn new(
+        snapshot: Snapshot,
+        request: &PostProcessRequest<'_>,
+        original: &'a RouteResult,
+        rule: R,
+    ) -> Option<Self> {
+        let route = original.route();
+        let (input_token, output_token) = (route.input_token()?, route.output_token()?);
+        if input_token == output_token {
+            return None;
         }
-        replaced
+        let pricing = GasPricing::of(original, &output_token)?;
+        let evaluator = RouteEvaluator {
+            original,
+            deadline: request.deadline(),
+            pricing,
+            tokens: snapshot.tokens,
+            input_token,
+            output_token,
+            total_in: request.order().amount().clone(),
+        };
+        Some(Self { evaluator, legs: snapshot.legs, rule })
+    }
+
+    /// Applies the best replacement until none raises the net amount out, the search has run one
+    /// round per original swap, or the deadline passes. A candidate must beat the net amount out
+    /// of the current route; the first round simulates the original route again. `None` when the
+    /// route did not change, or when the final net amount out is not above the original one.
+    pub(super) fn run(self) -> Option<RouteResult> {
+        let original = self.evaluator.original;
+        let mut swaps = original.route().swaps().to_vec();
+        let rounds = swaps.len();
+        let mut net_amount_out = self
+            .evaluator
+            .simulate_baseline(&swaps)?;
+        let mut changed = false;
+        for _ in 0..rounds {
+            if self.evaluator.deadline_passed() {
+                break;
+            }
+            let Some(candidate) = self.best_candidate(&swaps, &net_amount_out) else {
+                break;
+            };
+            net_amount_out = candidate.net_amount_out;
+            swaps = candidate.swaps;
+            changed = true;
+        }
+        if !changed || net_amount_out <= *original.net_amount_out() {
+            return None;
+        }
+        let route = Route::new(swaps, self.evaluator.tokens)
+            .inspect_err(|error| {
+                warn!(%error, "cannot build the replacement route; keeping the original route");
+            })
+            .ok()?;
+        Some(RouteResult::new(route, net_amount_out, original.gas_price().clone()))
+    }
+
+    /// The candidate with the highest net amount out that the rule returns, if it beats
+    /// `current_net`. Stops at the deadline with the best so far.
+    fn best_candidate(&self, swaps: &[Swap], current_net: &BigInt) -> Option<Candidate> {
+        let mut best: Option<Candidate> = None;
+        let mut best_net = current_net.clone();
+        for target in build_targets(swaps) {
+            for leg in &self.legs {
+                if !self
+                    .rule
+                    .fits(leg, &target, swaps, &self.evaluator)
+                {
+                    continue;
+                }
+                if self.evaluator.deadline_passed() {
+                    return best;
+                }
+                let Some(candidate) =
+                    self.rule
+                        .find_candidate(leg, &target, swaps, &self.evaluator, &best_net)
+                else {
+                    continue;
+                };
+                best_net = candidate.net_amount_out.clone();
+                best = Some(candidate);
+            }
+        }
+        best
     }
 }
 
-/// Returns `swaps` with the positions in `replaced` removed and `leg` inserted at the first
-/// removed position. The result keeps a topological order: `leg` consumes only tokens that the
-/// swaps before it make.
-pub(super) fn splice<'a>(swaps: &'a [Swap], replaced: &[usize], leg: &'a Swap) -> Vec<&'a Swap> {
+/// Returns `swaps` with the positions in `replaced` removed and the swaps of `replacement`
+/// inserted at the first removed position. The result keeps a topological order: the
+/// replacement consumes only tokens that the swaps before it make.
+fn splice<'a>(swaps: &'a [Swap], replaced: &[usize], replacement: &'a [Swap]) -> Vec<&'a Swap> {
     let mut ordered = Vec::with_capacity(swaps.len());
     for (position, swap) in swaps.iter().enumerate() {
         if replaced.first() == Some(&position) {
-            ordered.push(leg);
+            ordered.extend(replacement);
         }
         if !replaced.contains(&position) {
             ordered.push(swap);
@@ -440,7 +522,7 @@ pub(super) fn splice<'a>(swaps: &'a [Swap], replaced: &[usize], leg: &'a Swap) -
 }
 
 /// Returns replacement targets for individual swaps, followed by targets for segments.
-pub(super) fn build_targets(swaps: &[Swap]) -> Vec<Target> {
+fn build_targets(swaps: &[Swap]) -> Vec<Target> {
     let mut targets = Vec::new();
     for (position, swap) in swaps.iter().enumerate() {
         targets.push(Target {

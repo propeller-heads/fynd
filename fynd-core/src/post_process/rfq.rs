@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use tracing::debug;
-use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
     algorithm::paths::read_market,
@@ -12,7 +11,10 @@ use crate::{
         protocol_registry::{is_rfq_protocol, strip_fallback_prefix},
     },
     post_process::{
-        replace::{build_index, update_index, ComponentIndex, Search, Snapshot, Target},
+        replace::{
+            build_index, can_serve, update_index, ComponentIndex, ReplacementRule, RouteEvaluator,
+            Search, Snapshot, Target,
+        },
         PostProcessRequest, RoutePostProcessor,
     },
     types::{RouteResult, Swap},
@@ -74,7 +76,7 @@ impl RoutePostProcessor for RfqSwapReplacer {
                 return None;
             }
         };
-        Search::new(snapshot, request, route).and_then(Search::run)
+        Search::new(snapshot, request, route, RfqRule).and_then(Search::run)
     }
 }
 
@@ -89,16 +91,22 @@ fn fills_partially(protocol_system: &str) -> bool {
     PARTIAL_FILL_PROTOCOLS.contains(&strip_fallback_prefix(protocol_system))
 }
 
-/// Whether the RFQ swap `leg` holds both tokens of `target` and `swaps` do not use its component.
-/// A leg whose protocol cannot fill partially fits only a target that starts at `sell_token`.
-pub(super) fn fits(leg: &Swap, target: &Target, swaps: &[Swap], sell_token: &Address) -> bool {
-    let tokens = &leg.protocol_component().tokens;
-    (fills_partially(leg.protocol()) || target.token_in == *sell_token) &&
-        tokens.contains(&target.token_in) &&
-        tokens.contains(&target.token_out) &&
-        !swaps
-            .iter()
-            .any(|swap| swap.component_id() == leg.component_id())
+/// Replaces a target with one swap through an RFQ component.
+struct RfqRule;
+
+impl ReplacementRule for RfqRule {
+    /// A leg whose protocol cannot fill partially fits only a target that starts at the input
+    /// token of the order.
+    fn fits(
+        &self,
+        leg: &Swap,
+        target: &Target,
+        swaps: &[Swap],
+        evaluator: &RouteEvaluator<'_>,
+    ) -> bool {
+        (fills_partially(leg.protocol()) || target.token_in == *evaluator.input_token()) &&
+            can_serve(leg, target, swaps)
+    }
 }
 
 #[cfg(test)]
