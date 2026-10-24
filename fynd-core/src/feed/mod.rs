@@ -75,6 +75,8 @@ pub(crate) struct TychoFeedConfig {
     pub(crate) max_sync_lag: Duration,
     /// Stream each Bebop and Hashflow venue as one component instead of one per token pair.
     pub(crate) aggregate_rfqs: bool,
+    /// External liquidity a caller added beside the `--protocols` venues.
+    pub(crate) external_liquidity: Vec<book_stream::ExternalLiquidity>,
 }
 
 impl TychoFeedConfig {
@@ -102,6 +104,7 @@ impl TychoFeedConfig {
             subscription_buffer_size: None,
             max_sync_lag: crate::solver::defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
+            external_liquidity: Vec::new(),
         }
     }
 
@@ -147,6 +150,14 @@ impl TychoFeedConfig {
 
     pub(crate) fn aggregate_rfqs(mut self, enabled: bool) -> Self {
         self.aggregate_rfqs = enabled;
+        self
+    }
+
+    pub(crate) fn external_liquidity(
+        mut self,
+        external_liquidity: Vec<book_stream::ExternalLiquidity>,
+    ) -> Self {
+        self.external_liquidity = external_liquidity;
         self
     }
 }

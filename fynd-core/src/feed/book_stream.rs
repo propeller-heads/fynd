@@ -22,7 +22,6 @@ use tycho_simulation::{
         all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
         BookFeedEvent, BookFeedStreams, BookSnapshot, ReceivedAt,
     },
-    evm::tycho_models::Chain,
     pamm::protocols::metric::{self, feed::MetricFeedBuilder},
     protocol::models::ProtocolComponent,
     rfq::protocols::{
@@ -36,7 +35,7 @@ use tycho_simulation::{
     tycho_core::Bytes,
 };
 
-use super::{when_configured, DataFeedError};
+use super::{when_configured, DataFeedError, TychoFeedConfig};
 use crate::{
     feed::protocol_registry::{parse_rfq_entries, require_executor, METRIC_CHAINS},
     types::ComponentId,
@@ -65,8 +64,8 @@ impl BookUpdate {
     }
 }
 
-/// The venues a `--protocols` list asked for with `rfq:` entries, as a stream of the changes
-/// they make to the market.
+/// The book feeds a deployment runs, as a stream of the changes they make to the market: the
+/// `rfq:` venues a `--protocols` list asked for and the external liquidity a caller added.
 ///
 /// The venues underneath are latest-value feeds — a reader that falls behind skips to the newest
 /// book set — but what this yields are ordered deltas against the ids it last served, so its
@@ -78,26 +77,87 @@ pub struct BookStream {
     served: HashMap<String, HashSet<ComponentId>>,
 }
 
+/// Builds external liquidity from its source name and the config the built-in venues get, and adds
+/// it to the merged feed streams.
+type OpenExternalLiquidity =
+    dyn Fn(&str, BookFeedConfig, &mut BookFeedStreams) -> Result<(), DataFeedError> + Send + Sync;
+
+/// External liquidity added through
+/// [`FyndBuilder::with_external_liquidity`](crate::FyndBuilder::with_external_liquidity) instead
+/// of a `--protocols` entry. Its components reach the market the way the built-in venues' do.
+#[derive(Clone)]
+pub(crate) struct ExternalLiquidity {
+    /// The feed's name, which is the protocol system of the components it publishes.
+    protocol_system: String,
+    open: Arc<OpenExternalLiquidity>,
+}
+
+impl ExternalLiquidity {
+    /// Wraps `make_feed`, which builds the feed from the config the built-in venues get.
+    pub(crate) fn new<M, F>(protocol_system: String, make_feed: M) -> Self
+    where
+        M: Fn(BookFeedConfig) -> Result<F, FeedError> + Send + Sync + 'static,
+        F: SnapshotFeed<Snapshot = BookSnapshot<ReceivedAt>, Error = FeedError>,
+    {
+        let open =
+            move |protocol_system: &str, config: BookFeedConfig, feeds: &mut BookFeedStreams| {
+                let feed = make_feed(config).map_err(|e| {
+                    DataFeedError::Config(format!(
+                        "{protocol_system} external liquidity could not be built: {e}"
+                    ))
+                })?;
+                feeds
+                    .add(protocol_system, feed)
+                    .map_err(|_| {
+                        DataFeedError::Config(format!(
+                            "{protocol_system} external liquidity is added twice"
+                        ))
+                    })
+            };
+        Self { protocol_system, open: Arc::new(open) }
+    }
+
+    fn open(
+        &self,
+        config: BookFeedConfig,
+        feeds: &mut BookFeedStreams,
+    ) -> Result<(), DataFeedError> {
+        (self.open)(&self.protocol_system, config, feeds)
+    }
+}
+
+impl std::fmt::Debug for ExternalLiquidity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalLiquidity")
+            .field("protocol_system", &self.protocol_system)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BookStream {
-    /// Subscribes to every `rfq:` entry in `protocols`, or `None` when it names none.
+    /// Subscribes to every `rfq:` entry in `config.protocols` and to `config.external_liquidity`.
+    /// Returns `None` if there are neither.
     ///
-    /// The venues price their books' TVL in USD stablecoins, so `min_tvl_usd` is a USD amount —
-    /// unlike the native-token threshold the Tycho component filter takes. With `aggregate_rfqs`,
-    /// Bebop and Hashflow each stream as one component for all their pairs.
+    /// The venues price their books' TVL in USD stablecoins, so `config.min_tvl` is read here as a
+    /// USD amount — unlike the native-token threshold the Tycho component filter takes. With
+    /// `config.aggregate_rfqs`, Bebop and Hashflow each stream as one component for all their
+    /// pairs. External feeds get the same chain, tokens and floor.
     ///
     /// # Errors
     ///
     /// Returns [`DataFeedError::Config`] if a venue's credentials are missing from the
-    /// environment, or if the chain has no curated USD stablecoin set to price books against.
+    /// environment, if the chain has no curated USD stablecoin set to price built-in venues'
+    /// books against, if external liquidity cannot be built, if two sources share a name, or if a
+    /// source has the name of a `--protocols` venue.
     pub fn open(
-        chain: Chain,
-        min_tvl_usd: f64,
-        protocols: &[String],
+        config: &TychoFeedConfig,
         tokens: HashMap<Bytes, Token>,
-        aggregate_rfqs: bool,
     ) -> Result<Option<Self>, DataFeedError> {
+        let chain = config.chain;
+        let external_liquidity = &config.external_liquidity;
         let mut venues = Vec::new();
-        for (entry, venue) in parse_rfq_entries(protocols)? {
+        for (entry, venue) in parse_rfq_entries(&config.protocols)? {
+            reject_name_clash(entry, venue.protocol(), external_liquidity)?;
             match venue.protocol() {
                 bebop::PROTOCOL_SYSTEM => {
                     // The feed supports more chains than Tycho's execution registry. Reject
@@ -133,18 +193,29 @@ impl BookStream {
             }
             venues.push((entry, venue));
         }
-        if venues.is_empty() {
+        if venues.is_empty() && external_liquidity.is_empty() {
             return Ok(None);
         }
 
-        let usd_quote_tokens = Arc::new(usd_stablecoins_for_chain(chain).ok_or_else(|| {
-            DataFeedError::Config(format!(
-                "book feeds price their books in USD stablecoins, and none are known for {chain}"
-            ))
-        })?);
-        let book_config = BookFeedConfig { chain, tokens: Arc::new(tokens), min_tvl_usd };
+        // Only built-in venues use the curated USD stablecoins to price their books; external
+        // feeds price their own books.
+        let usd_quote_tokens = match usd_stablecoins_for_chain(chain) {
+            Some(usd_quote_tokens) => Arc::new(usd_quote_tokens),
+            None if venues.is_empty() => Arc::default(),
+            None => {
+                return Err(DataFeedError::Config(format!(
+                    "the rfq: book venues price their books in USD stablecoins, and none are known \
+                     for {chain}"
+                )))
+            }
+        };
+        let book_config =
+            BookFeedConfig { chain, tokens: Arc::new(tokens), min_tvl_usd: config.min_tvl };
 
         let mut books = Self { feeds: BookFeedStreams::new(), served: HashMap::new() };
+        for source in external_liquidity {
+            source.open(book_config.clone(), &mut books.feeds)?;
+        }
         for (entry, venue) in venues {
             match venue.protocol() {
                 bebop::PROTOCOL_SYSTEM => {
@@ -162,7 +233,7 @@ impl BookStream {
                     if let Ok(source) = std::env::var("BEBOP_ORIGIN_SOURCE") {
                         builder = builder.origin_source(source);
                     }
-                    if aggregate_rfqs {
+                    if config.aggregate_rfqs {
                         builder = builder.all_pairs();
                     }
                     if venue.uses_fallback_router() {
@@ -180,7 +251,7 @@ impl BookStream {
                         get_env("HASHFLOW_USER")?,
                         get_env("HASHFLOW_KEY")?,
                     );
-                    if aggregate_rfqs {
+                    if config.aggregate_rfqs {
                         builder = builder.all_pairs(QuoteRule::OncePerMaker);
                     }
                     if venue.uses_fallback_router() {
@@ -374,6 +445,25 @@ pub async fn next_book_update(books: &mut Option<BookStream>) -> Result<BookUpda
     when_configured(books.as_mut().map(BookStream::next)).await
 }
 
+/// Rejects external liquidity named like a `--protocols` venue: both would publish components under
+/// one protocol system.
+fn reject_name_clash(
+    entry: &str,
+    venue_system: &str,
+    external_liquidity: &[ExternalLiquidity],
+) -> Result<(), DataFeedError> {
+    for source in external_liquidity {
+        if source.protocol_system == entry || source.protocol_system == venue_system {
+            return Err(DataFeedError::Config(format!(
+                "external liquidity {} has the name of the --protocols entry {entry}; rename it or \
+                 drop the entry",
+                source.protocol_system
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn get_env(var: &str) -> Result<String, DataFeedError> {
     std::env::var(var).map_err(|_| DataFeedError::Config(format!("{var} env var not set")))
 }
@@ -418,14 +508,18 @@ mod tests {
         Token::new(&address, "TKN", 18, 0, &[Some(10_000)], Chain::Ethereum, 100)
     }
 
-    /// A snapshot holding one book per id, all on the same pair.
     fn book_snapshot(ids: &[&str]) -> BookSnapshot<ReceivedAt> {
+        book_snapshot_in(VENUE, ids)
+    }
+
+    /// A snapshot holding one book per id, all on the same pair, in the `protocol_system`.
+    fn book_snapshot_in(protocol_system: &str, ids: &[&str]) -> BookSnapshot<ReceivedAt> {
         let books = ids
             .iter()
             .map(|id| {
                 let component = ProtocolComponent::new(
                     Bytes::from(*id),
-                    VENUE.to_string(),
+                    protocol_system.to_string(),
                     "book".to_string(),
                     Chain::Ethereum,
                     vec![token("0x01"), token("0x02")],
@@ -511,6 +605,159 @@ mod tests {
 
         assert_eq!(update.added.len(), 1);
         assert!(update.removed.is_empty());
+    }
+
+    /// Publishes one snapshot and keeps the feed open without further updates, like a live venue
+    /// holding its last snapshot.
+    struct SingleSnapshotFeed(BookSnapshot<ReceivedAt>);
+
+    impl SnapshotFeed for SingleSnapshotFeed {
+        type Snapshot = BookSnapshot<ReceivedAt>;
+        type Error = FeedError;
+
+        fn run(
+            self,
+            publisher: tycho_simulation::snapshot_feed::Publisher<Self::Snapshot>,
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let snapshots = futures::stream::iter([Ok(self.0)]).chain(futures::stream::pending());
+            publisher.publishing(None, snapshots)
+        }
+    }
+
+    /// A feed named `protocol_system` that publishes one book per id, in that protocol system.
+    fn external_liquidity(
+        protocol_system: &str,
+        ids: &'static [&'static str],
+    ) -> ExternalLiquidity {
+        let system = protocol_system.to_string();
+        ExternalLiquidity::new(protocol_system.to_string(), move |_config: BookFeedConfig| {
+            Ok(SingleSnapshotFeed(book_snapshot_in(&system, ids)))
+        })
+    }
+
+    fn open_external_liquidity(
+        chain: Chain,
+        protocols: &[&str],
+        external_liquidity: Vec<ExternalLiquidity>,
+    ) -> Result<Option<BookStream>, DataFeedError> {
+        let protocols = protocols
+            .iter()
+            .map(|protocol| (*protocol).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0)
+                .external_liquidity(external_liquidity);
+        BookStream::open(&config, HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_alone() {
+        let mut books = open_external_liquidity(
+            Chain::Base,
+            &[],
+            vec![external_liquidity("fallback:manta", &["0x01", "0x02"])],
+        )
+        .expect("external liquidity needs no --protocols venue")
+        .expect("external liquidity opens the book stream");
+
+        let update = books.next().await.unwrap();
+
+        assert_eq!(update.protocol_system, "fallback:manta");
+        let mut added: Vec<_> = update
+            .added
+            .iter()
+            .map(|component| (component.id.to_string(), component.protocol_system.clone()))
+            .collect();
+        added.sort();
+        let manta = |id: &str| (id.to_string(), "fallback:manta".to_string());
+        assert_eq!(added, [manta("0x01"), manta("0x02")]);
+        let mut state_ids: Vec<_> = update.states.keys().cloned().collect();
+        state_ids.sort();
+        assert_eq!(state_ids, ["0x01", "0x02"]);
+    }
+
+    #[test]
+    fn test_open_external_liquidity_on_chain_without_stablecoins() {
+        let books = open_external_liquidity(
+            Chain::Unichain,
+            &[],
+            vec![external_liquidity("fallback:manta", &["0x01"])],
+        )
+        .expect("external liquidity prices its own books");
+
+        assert!(books.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_config() {
+        let received = Arc::new(std::sync::Mutex::new(None));
+        let captured = Arc::clone(&received);
+        let feed =
+            ExternalLiquidity::new("fallback:manta".to_string(), move |config: BookFeedConfig| {
+                *captured.lock().unwrap() = Some(config);
+                Ok(SingleSnapshotFeed(book_snapshot_in("fallback:manta", &["0x01"])))
+            });
+        let tokens = HashMap::from([(Bytes::from("0x01"), token("0x01"))]);
+        let config = TychoFeedConfig::new(
+            "localhost:0".to_string(),
+            Chain::Base,
+            None,
+            false,
+            Vec::new(),
+            2.5,
+        )
+        .external_liquidity(vec![feed]);
+
+        BookStream::open(&config, tokens).unwrap();
+
+        let received = received.lock().unwrap();
+        let received = received
+            .as_ref()
+            .expect("the factory builds the feed on open");
+        assert_eq!(received.chain, Chain::Base);
+        assert_eq!(received.min_tvl_usd, 2.5);
+        assert_eq!(
+            received
+                .tokens
+                .keys()
+                .collect::<Vec<_>>(),
+            [&Bytes::from("0x01")]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_external_liquidity_config_errors() {
+        let failing_build =
+            ExternalLiquidity::new("fallback:manta".to_string(), |_config: BookFeedConfig| {
+                Err::<SingleSnapshotFeed, _>(FeedError::InvalidInput("no RPC URL".to_string()))
+            });
+        let cases = [
+            ("build error", vec![], vec![failing_build], "no RPC URL"),
+            (
+                "shared name",
+                vec![],
+                vec![
+                    external_liquidity("fallback:manta", &["0x01"]),
+                    external_liquidity("fallback:manta", &["0x02"]),
+                ],
+                "added twice",
+            ),
+            (
+                "name of a --protocols venue",
+                vec!["rfq:bebop"],
+                vec![external_liquidity("rfq:bebop", &["0x01"])],
+                "--protocols",
+            ),
+        ];
+
+        for (scenario, protocols, feeds, expected) in cases {
+            let Err(DataFeedError::Config(message)) =
+                open_external_liquidity(Chain::Base, &protocols, feeds)
+            else {
+                panic!("{scenario}: the stream must not open");
+            };
+            assert!(message.contains(expected), "{scenario}: {message}");
+        }
     }
 
     #[test]
