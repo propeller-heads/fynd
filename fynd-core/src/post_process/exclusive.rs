@@ -149,3 +149,302 @@ impl ExclusiveRule {
         Some(candidate.with_commitment(committed_amount_out))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use num_bigint::{BigInt, BigUint};
+    use rstest::rstest;
+    use tycho_simulation::tycho_common::{
+        models::{protocol::ProtocolComponent, token::Token},
+        simulation::protocol_sim::ProtocolSim,
+    };
+
+    use super::*;
+    use crate::{
+        algorithm::test_utils::{component_with_protocol, MockProtocolSim},
+        exclusive_route::is_exclusive_leg,
+        feed::exclusivity::mark_exclusive,
+        post_process::test_utils::{
+            add_component, added, component_ids, insert_component, market, replaced, result,
+            run_with_access, sell_order, sequential_route, swap, swap_through_pool, tokens,
+            with_net_amount_out,
+        },
+        types::Order,
+    };
+
+    async fn run_granted(
+        replacer: &ExclusiveSwapReplacer,
+        market: &MarketData,
+        order: &Order,
+        route: RouteResult,
+    ) -> Option<RouteResult> {
+        run_with_access(replacer, market, order, ExclusiveAccess::Granted, route).await
+    }
+
+    fn exclusive_component(id: &str, pair: (&Token, &Token)) -> ProtocolComponent {
+        let mut component =
+            component_with_protocol(id, "exclusive:ekubo_v3", &[pair.0.clone(), pair.1.clone()]);
+        mark_exclusive(&mut component);
+        component
+    }
+
+    async fn add_exclusive(
+        market: &MarketData,
+        id: &str,
+        pair: (&Token, &Token),
+        sim: impl ProtocolSim + 'static,
+    ) {
+        insert_component(market, exclusive_component(id, pair), &[pair.0, pair.1], sim).await;
+    }
+
+    /// A swap of the route that goes through an exclusive component.
+    fn exclusive_swap(id: &str, pair: (&Token, &Token), amounts: (u64, u64)) -> Swap {
+        swap_through_pool(
+            exclusive_component(id, pair),
+            pair,
+            amounts,
+            0.0,
+            MockProtocolSim::new(2.0).with_gas(10),
+        )
+    }
+
+    async fn replacer(market: &MarketData) -> ExclusiveSwapReplacer {
+        let mut replacer = ExclusiveSwapReplacer::default();
+        replacer.initialize(market).await;
+        replacer
+    }
+
+    #[rstest]
+    #[case::first_hop("excl_ab", (0, 1), 3.0, 10, &["excl_ab", "bc"], Some(6000), 5980)]
+    #[case::second_hop("excl_bc", (1, 2), 3.0, 10, &["ab", "excl_bc"], None, 5980)]
+    #[case::whole_order("excl_ac", (0, 2), 5.0, 5, &["excl_ac"], None, 4995)]
+    #[tokio::test]
+    async fn test_exclusive_whole_replacement(
+        #[case] id: &str,
+        #[case] ends: (usize, usize),
+        #[case] price: f64,
+        #[case] gas: u64,
+        #[case] expected_ids: &[&str],
+        #[case] downstream_amount_out: Option<u64>,
+        #[case] expected_net: i64,
+    ) {
+        let (a, b, c) = tokens();
+        let held = [&a, &b, &c];
+        let market = market();
+        let sim = MockProtocolSim::new(price).with_gas(gas);
+        add_exclusive(&market, id, (held[ends.0], held[ends.1]), sim).await;
+        let replacer = replacer(&market).await;
+
+        let out = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
+        );
+
+        assert_eq!(component_ids(&out), expected_ids);
+        if let Some(amount_out) = downstream_amount_out {
+            assert_eq!(out.route().swaps()[1].amount_out(), &BigUint::from(amount_out));
+        }
+        assert_eq!(out.net_amount_out(), &BigInt::from(expected_net));
+    }
+
+    #[rstest]
+    #[case::granted(ExclusiveAccess::Granted, true)]
+    #[case::denied(ExclusiveAccess::Denied, false)]
+    #[tokio::test]
+    async fn test_exclusive_requires_access(
+        #[case] access: ExclusiveAccess,
+        #[case] replaces: bool,
+    ) {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+
+        let out =
+            run_with_access(&replacer, &market, &sell_order(&a, &c), access, sequential_route())
+                .await;
+
+        assert_eq!(out.is_some(), replaces);
+    }
+
+    /// The committed amount follows the user share of the improvement over the received route:
+    /// 10% of 2000 on top of its net amount out of 3980, plus the 20 of gas.
+    #[tokio::test]
+    async fn test_exclusive_commitment() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+
+        let out = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
+        );
+
+        let commitment = out
+            .commitment()
+            .expect("the replacement commits");
+        assert_eq!(commitment.committed_amount_out(), &BigUint::from(4200u64));
+        assert_eq!(commitment.reference_amount_out(), &BigUint::from(4000u64));
+    }
+
+    /// The net amount out of the original route is 3000 on an amount out of 4000. A replacement
+    /// that pays less than 4000 has the higher net amount out, but cannot keep the promise that
+    /// the user gets at least what the received route paid. One that pays more commits to the
+    /// 4000, because the user share of its improvement is below that.
+    #[rstest]
+    #[case::amount_out_below_the_route(3.9, None)]
+    #[case::amount_out_above_the_route(4.1, Some(4000))]
+    #[tokio::test]
+    async fn test_exclusive_commitment_gate(#[case] price: f64, #[case] committed: Option<u64>) {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ac", (&a, &c), MockProtocolSim::new(price).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+        let route = with_net_amount_out(sequential_route(), 3000);
+        let _ = b;
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &c), route).await;
+
+        let committed_amount_out = out
+            .as_ref()
+            .map(|out| {
+                out.commitment()
+                    .expect("the replacement commits")
+            })
+            .map(|commitment| {
+                commitment
+                    .committed_amount_out()
+                    .clone()
+            });
+        assert_eq!(committed_amount_out, committed.map(BigUint::from));
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_one_leg() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        add_exclusive(&market, "excl_bc", (&b, &c), MockProtocolSim::new(3.0).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+
+        let out = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
+        );
+
+        let exclusive_legs = out
+            .route()
+            .swaps()
+            .iter()
+            .filter(|swap| is_exclusive_leg(swap))
+            .count();
+        assert_eq!(exclusive_legs, 1);
+        assert_eq!(component_ids(&out), ["excl_ab", "bc"]);
+        assert_eq!(out.net_amount_out(), &BigInt::from(5980));
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_lower_amount_out() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(1.5).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await;
+
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_route_with_exclusive_leg() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+        let route = result(
+            vec![
+                swap("ab", (&a, &b), (1000, 2000), 0.0, 2.0),
+                exclusive_swap("excl_bc", (&b, &c), (2000, 4000)),
+            ],
+            &[&a, &b, &c],
+        );
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &c), route).await;
+
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_ignores_public_component() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_component(
+            &market,
+            "public_ab",
+            "uniswap_v2",
+            &[&a, &b],
+            MockProtocolSim::new(3.0).with_gas(10),
+        )
+        .await;
+        let replacer = replacer(&market).await;
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await;
+
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_component_added_after_initialize() {
+        let (a, b, c) = tokens();
+        let market = market();
+        let mut replacer = replacer(&market).await;
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+
+        replacer
+            .handle_event(&added("excl_ab", &[&a, &b]))
+            .await
+            .expect("adding an exclusive component");
+
+        let out = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
+        );
+        assert_eq!(component_ids(&out), ["excl_ab", "bc"]);
+    }
+
+    #[tokio::test]
+    async fn test_public_component_added_after_initialize() {
+        let (a, b, c) = tokens();
+        let market = market();
+        let mut replacer = replacer(&market).await;
+        add_component(
+            &market,
+            "public_ab",
+            "uniswap_v2",
+            &[&a, &b],
+            MockProtocolSim::new(3.0).with_gas(10),
+        )
+        .await;
+
+        replacer
+            .handle_event(&added("public_ab", &[&a, &b]))
+            .await
+            .expect("adding a public component");
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_exclusive_event_before_initialize() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        let mut replacer = ExclusiveSwapReplacer::default();
+
+        replacer
+            .handle_event(&added("excl_ab", &[&a, &b]))
+            .await
+            .expect("an event before initialize");
+
+        let out = run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await;
+        assert!(out.is_none());
+    }
+}

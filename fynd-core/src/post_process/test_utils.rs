@@ -26,6 +26,7 @@ use crate::{
     },
     post_process::{PostProcessRequest, RoutePostProcessor},
     types::{Order, OrderSide, Route, RouteExclusions, RouteResult, Swap},
+    worker_pool_router::ExclusiveAccess,
 };
 
 type Rewrite =
@@ -154,7 +155,7 @@ pub(crate) fn with_net_amount_out(result: RouteResult, net_amount_out: i64) -> R
     )
 }
 
-/// A deadline that no replacer test reaches.
+/// A deadline 60 seconds from now.
 pub(crate) fn far_deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
 }
@@ -178,18 +179,30 @@ pub(crate) async fn add_component(
     component_tokens: &[&Token],
     sim: impl ProtocolSim + 'static,
 ) {
-    let component_tokens: Vec<Token> = component_tokens
+    let owned_tokens: Vec<Token> = component_tokens
         .iter()
         .map(|token| (*token).clone())
         .collect();
+    let component = component_with_protocol(id, protocol, &owned_tokens);
+    insert_component(market, component, component_tokens, sim).await;
+}
+
+/// Adds `component` over `component_tokens` to `market`, with `sim` as its simulation state.
+pub(crate) async fn insert_component(
+    market: &MarketData,
+    component: ProtocolComponent,
+    component_tokens: &[&Token],
+    sim: impl ProtocolSim + 'static,
+) {
+    let id = component.id.to_string();
     let mut state = market.write().await;
-    state.upsert_components(std::iter::once(component_with_protocol(
-        id,
-        protocol,
-        &component_tokens,
-    )));
-    state.update_states([(id.to_string(), Box::new(sim) as Box<dyn ProtocolSim>)]);
-    state.upsert_tokens(component_tokens);
+    state.upsert_components(std::iter::once(component));
+    state.update_states([(id, Box::new(sim) as Box<dyn ProtocolSim>)]);
+    state.upsert_tokens(
+        component_tokens
+            .iter()
+            .map(|token| (*token).clone()),
+    );
 }
 
 /// A swap as returned by the algorithm, with gas priced at one output-token unit per gas unit.
@@ -211,21 +224,33 @@ pub(crate) fn swap_on(
     split: f64,
     sim: impl ProtocolSim + 'static,
 ) -> Swap {
+    let pool = component(id, &[pair.0.clone(), pair.1.clone()]);
+    swap_through_pool(pool, pair, amounts, split, sim)
+}
+
+/// A swap of `pair` through `pool`, on the pool state `sim`.
+pub(crate) fn swap_through_pool(
+    pool: ProtocolComponent,
+    pair: (&Token, &Token),
+    amounts: (u64, u64),
+    split: f64,
+    sim: impl ProtocolSim + 'static,
+) -> Swap {
     Swap::new(
-        id.to_string(),
-        "uniswap_v2".to_string(),
+        pool.id.to_string(),
+        pool.protocol_system.clone(),
         pair.0.address.clone(),
         pair.1.address.clone(),
         BigUint::from(amounts.0),
         BigUint::from(amounts.1),
         BigUint::from(10u64),
-        component(id, &[pair.0.clone(), pair.1.clone()]),
+        pool,
         Box::new(sim),
     )
     .with_split(split)
 }
 
-/// A route result of `swaps` that nets its amount out minus 10 for each swap.
+/// A route result of `swaps` whose net amount out is its amount out minus 10 per swap.
 pub(crate) fn result(swaps: Vec<Swap>, all_tokens: &[&Token]) -> RouteResult {
     let gas: u64 = swaps.len() as u64 * 10;
     let output = swaps
@@ -244,12 +269,12 @@ pub(crate) fn result(swaps: Vec<Swap>, all_tokens: &[&Token]) -> RouteResult {
     RouteResult::new(route, amount_out - gas, BigUint::from(1u64))
 }
 
-/// A sell order of 1000 `from` for `to`.
+/// A sell order of 1000 units of `from` for `to`.
 pub(crate) fn sell_order(from: &Token, to: &Token) -> Order {
     order(from, to, 1000, OrderSide::Sell)
 }
 
-/// Runs `processor` on `route` with a far deadline.
+/// Runs `processor` on `route` with [`far_deadline`].
 pub(crate) async fn run(
     processor: &impl RoutePostProcessor,
     market: &MarketData,
@@ -264,12 +289,30 @@ pub(crate) async fn run(
         .await
 }
 
-/// The route of the replacement, which the test expects.
+/// Runs `processor` on `route` for a caller with `access` to exclusive liquidity, with
+/// [`far_deadline`] and no exclusions.
+pub(crate) async fn run_with_access(
+    processor: &impl RoutePostProcessor,
+    market: &MarketData,
+    order: &Order,
+    access: ExclusiveAccess,
+    route: RouteResult,
+) -> Option<RouteResult> {
+    let derived = DerivedData::new_shared();
+    let exclusions = RouteExclusions::default();
+    let request = PostProcessRequest::new(order, market, &derived, &exclusions, far_deadline())
+        .with_exclusive_access(access);
+    processor
+        .process(&request, &route)
+        .await
+}
+
+/// The route of the replacement; panics when the post-processor kept the route.
 pub(crate) fn replaced(out: Option<RouteResult>) -> RouteResult {
     out.expect("the replacer replaces the route")
 }
 
-/// The component ids of the replacement, or none when the replacer keeps the route.
+/// The component ids of the replacement, or an empty list when the replacer keeps the route.
 pub(crate) fn replaced_ids(out: &Option<RouteResult>) -> Vec<&str> {
     out.as_ref()
         .map(component_ids)
