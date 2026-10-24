@@ -3275,6 +3275,47 @@ mod tests {
             .is_empty());
     }
 
+    /// The post-processors get access only on a public-only pool: a pool that includes exclusive
+    /// liquidity already routes through it.
+    #[rstest]
+    #[case::public_only_granted(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        ExclusiveAccess::Granted
+    )]
+    #[case::public_only_denied(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Denied,
+        ExclusiveAccess::Denied
+    )]
+    #[case::include_exclusive_granted(
+        LiquidityScope::IncludeExclusive,
+        ExclusiveAccess::Granted,
+        ExclusiveAccess::Denied
+    )]
+    #[tokio::test]
+    async fn test_quote_post_processor_exclusive_access(
+        #[case] scope: LiquidityScope,
+        #[case] access: ExclusiveAccess,
+        #[case] expected: ExclusiveAccess,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let recorder = Arc::clone(&seen);
+        let recording = MockPostProcessor::with_request(move |request, result| {
+            *recorder.lock().unwrap() = Some(request.exclusive_access());
+            result
+        });
+        let mut worker = worker_with_post_processor(recording).with_liquidity_scope(scope);
+        let params = SolveParams::default().with_exclusive_access(access);
+
+        worker
+            .quote(&a_to_b_order(), params, far_deadline())
+            .await
+            .expect("the algorithm's route is valid");
+
+        assert_eq!(*seen.lock().unwrap(), Some(expected));
+    }
+
     /// The value of `worker_pool_post_processed_route_rejected_total` for the test pool.
     fn rejected_route_count(snapshotter: &metrics_util::debugging::Snapshotter) -> u64 {
         use metrics_util::debugging::DebugValue;
@@ -3479,6 +3520,49 @@ mod tests {
 
         assert_eq!(has_graph_edge(&worker, "rfq-leg"), in_graph);
         assert_eq!(*added_ids.lock().unwrap(), ["rfq-leg".to_string()]);
+    }
+
+    /// A post-processor receives the market event of an exclusive component on a public-only pool
+    /// too, though that pool keeps the component out of its graph.
+    #[rstest]
+    #[case::public_only(LiquidityScope::PublicOnly, false)]
+    #[case::include_exclusive(LiquidityScope::IncludeExclusive, true)]
+    #[tokio::test]
+    async fn test_process_event_exclusive_component(
+        #[case] scope: LiquidityScope,
+        #[case] in_graph: bool,
+    ) {
+        let (market, _) = setup_market_weighted(vec![]);
+        let post_processor = MockPostProcessor::unchanged();
+        let added_ids = Arc::clone(&post_processor.added_component_ids);
+        let mut worker = worker_on_market(market, &[])
+            .with_liquidity_scope(scope)
+            .with_post_processors(vec![("exclusive".to_string(), Box::new(post_processor))]);
+        worker.initialize_graph().await;
+        let tokens = [token(0x01, "A"), token(0x02, "B")];
+        let mut exclusive = component_with_protocol("exclusive-leg", "exclusive:ekubo_v3", &tokens);
+        crate::feed::exclusivity::mark_exclusive(&mut exclusive);
+        {
+            let mut state = worker
+                .market_data
+                .try_write()
+                .expect("uncontended");
+            state.upsert_tokens(tokens);
+            state.upsert_components([exclusive.clone()]);
+        }
+        let event = MarketEvent::MarketUpdated {
+            added_components: FxHashMap::from_iter([(
+                "exclusive-leg".to_string(),
+                exclusive.tokens.into(),
+            )]),
+            removed_components: Vec::new(),
+            updated_components: Vec::new(),
+        };
+
+        worker.process_event(event).await;
+
+        assert_eq!(has_graph_edge(&worker, "exclusive-leg"), in_graph);
+        assert_eq!(*added_ids.lock().unwrap(), ["exclusive-leg".to_string()]);
     }
 
     /// The post-processor may put a component into the final quote that the algorithm cannot use.
