@@ -768,7 +768,7 @@ mod tests {
     use tycho_simulation::price_level_stream::config::PRICE_LEVEL_STREAM_FAMILY;
 
     use super::*;
-    use crate::feed::book_stream::BookStream;
+    use crate::feed::{book_stream::BookStream, TychoFeedConfig};
 
     #[rstest]
     #[case::rfq("rfq:bebop", true)]
@@ -957,16 +957,13 @@ mod tests {
         chain: Chain,
         entries: &[&str],
     ) -> Result<Option<BookStream>, DataFeedError> {
-        BookStream::open(
-            chain,
-            1.0,
-            &entries
-                .iter()
-                .map(|entry| (*entry).to_string())
-                .collect::<Vec<_>>(),
-            HashMap::new(),
-            false,
-        )
+        let protocols = entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0);
+        BookStream::open(&config, HashMap::new())
     }
 
     fn price_level_stream(
