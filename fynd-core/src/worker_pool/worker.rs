@@ -3346,6 +3346,87 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), Some(expected));
     }
 
+    fn committed_exclusive_route(committed: u64) -> impl Fn(RouteResult) -> RouteResult {
+        move |result| {
+            exclusive_route(result).with_commitment(BigUint::from(committed), BigUint::from(100u64))
+        }
+    }
+
+    fn committed_public_route(result: RouteResult) -> RouteResult {
+        rfq_route(result).with_commitment(BigUint::from(110u64), BigUint::from(100u64))
+    }
+
+    #[rstest]
+    #[case::pinned(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(committed_exclusive_route(110)),
+        true
+    )]
+    #[case::access_denied(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Denied,
+        Box::new(committed_exclusive_route(110)),
+        false
+    )]
+    #[case::no_commitment(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(exclusive_route),
+        false
+    )]
+    #[case::commitment_above_amount_out(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(committed_exclusive_route(121)),
+        false
+    )]
+    #[case::commitment_without_exclusive_leg(
+        LiquidityScope::PublicOnly,
+        ExclusiveAccess::Granted,
+        Box::new(committed_public_route),
+        false
+    )]
+    #[tokio::test]
+    async fn test_quote_with_committed_route(
+        #[case] scope: LiquidityScope,
+        #[case] access: ExclusiveAccess,
+        #[case] rewrite: Box<dyn Fn(RouteResult) -> RouteResult + Send + Sync>,
+        #[case] pinned: bool,
+    ) {
+        let mut worker =
+            worker_with_post_processor(MockPostProcessor::new(rewrite)).with_liquidity_scope(scope);
+        let params = SolveParams::default().with_exclusive_access(access);
+
+        let quote = worker
+            .quote(&a_to_b_order(), params, far_deadline())
+            .await
+            .expect("a rejected post-processed route does not fail the quote");
+
+        let order = quote.order();
+        let components: Vec<&str> = order
+            .route()
+            .expect("the quote has a route")
+            .swaps()
+            .iter()
+            .map(|swap| swap.component_id())
+            .collect();
+        if !pinned {
+            assert_eq!(components, ["p1", "p2"]);
+            assert_eq!(order.amount_out_net_gas(), &BigUint::from(192u64));
+            assert!(order.surplus_amount().is_none());
+            return;
+        }
+        assert_eq!(components, ["exclusive-leg"]);
+        assert_eq!(order.post_processed_by(), ["rfq".to_string()]);
+        assert_eq!(order.amount_out(), &BigUint::from(110u64));
+        assert_eq!(order.amount_out_net_gas(), &BigUint::from(108u64));
+        assert_eq!(order.surplus_amount(), Some(&BigUint::from(10u64)));
+        assert_eq!(order.committed_amount_out(), Some(&BigUint::from(110u64)));
+        let leg = &order.route().unwrap().swaps()[0];
+        assert_eq!(leg.committed_amount_out(), Some(&BigUint::from(110u64)));
+    }
+
     /// The value of `worker_pool_post_processed_route_rejected_total` for the test pool.
     fn rejected_route_count(snapshotter: &metrics_util::debugging::Snapshotter) -> u64 {
         use metrics_util::debugging::DebugValue;
