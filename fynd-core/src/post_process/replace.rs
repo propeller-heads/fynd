@@ -9,10 +9,13 @@ use std::{collections::BTreeSet, time::Instant};
 use num_bigint::{BigInt, BigUint};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{debug, trace, warn};
-use tycho_simulation::tycho_common::models::{token::Token, Address};
+use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, token::Token, Address};
 
 use crate::{
-    feed::market_data::MarketDataView,
+    feed::{
+        events::MarketEvent,
+        market_data::{MarketData, MarketDataView},
+    },
     post_process::PostProcessRequest,
     replay::{simulate_swaps, ReplayError, SimulatedRoute, SimulationEnds},
     types::{ComponentId, Route, RouteResult, Swap},
@@ -74,6 +77,57 @@ impl ComponentIndex {
             }
         }
         touching
+    }
+}
+
+/// Indexes the components of the base market state that pass `is_member`.
+pub(super) async fn build_index(
+    market: &MarketData,
+    is_member: impl Fn(&ProtocolComponent) -> bool,
+) -> ComponentIndex {
+    let mut index = ComponentIndex::default();
+    let view = market.read().await;
+    let state = view.base_market_state();
+    for system in state
+        .component_counts_by_protocol()
+        .keys()
+    {
+        for id in state.components_by_protocol(system) {
+            if let Some(component) = state
+                .get_component(id)
+                .filter(|component| is_member(component))
+            {
+                index.insert(id.clone(), component.tokens.clone());
+            }
+        }
+    }
+    index
+}
+
+/// Removes the components `event` removes from `index`, and indexes the components it adds that
+/// pass `is_member`.
+pub(super) async fn update_index(
+    index: &mut ComponentIndex,
+    market: &MarketData,
+    event: &MarketEvent,
+    is_member: impl Fn(&ProtocolComponent) -> bool,
+) {
+    let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
+    for id in removed_components {
+        index.remove(id);
+    }
+    if added_components.is_empty() {
+        return;
+    }
+    let view = market.read().await;
+    for (id, topology) in added_components {
+        index.remove(id);
+        if view
+            .get_component(id)
+            .is_some_and(&is_member)
+        {
+            index.insert(id.clone(), topology.tokens.clone());
+        }
     }
 }
 

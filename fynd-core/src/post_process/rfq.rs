@@ -12,7 +12,7 @@ use crate::{
         protocol_registry::{is_rfq_protocol, strip_fallback_prefix},
     },
     post_process::{
-        replace::{ComponentIndex, Search, Snapshot, Target},
+        replace::{build_index, update_index, ComponentIndex, Search, Snapshot, Target},
         PostProcessRequest, RoutePostProcessor,
     },
     types::{RouteResult, Swap},
@@ -43,24 +43,10 @@ impl MarketEventHandler for RfqSwapReplacer {
         let Some(market) = &self.market else {
             return Ok(());
         };
-        let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
-        for id in removed_components {
-            self.index.remove(id);
-        }
-        if added_components.is_empty() {
-            return Ok(());
-        }
-        let view = market.read().await;
-        for (id, topology) in added_components {
-            self.index.remove(id);
-            if view
-                .get_component(id)
-                .is_some_and(|component| is_rfq_protocol(&component.protocol_system))
-            {
-                self.index
-                    .insert(id.clone(), topology.tokens.clone());
-            }
-        }
+        update_index(&mut self.index, market, event, |component| {
+            is_rfq_protocol(&component.protocol_system)
+        })
+        .await;
         Ok(())
     }
 }
@@ -68,23 +54,8 @@ impl MarketEventHandler for RfqSwapReplacer {
 #[async_trait]
 impl RoutePostProcessor for RfqSwapReplacer {
     async fn initialize(&mut self, market: &MarketData) {
-        let mut index = ComponentIndex::default();
-        {
-            let view = market.read().await;
-            let state = view.base_market_state();
-            for system in state
-                .component_counts_by_protocol()
-                .keys()
-                .filter(|system| is_rfq_protocol(system))
-            {
-                for id in state.components_by_protocol(system) {
-                    if let Some(component) = state.get_component(id) {
-                        index.insert(id.clone(), component.tokens.clone());
-                    }
-                }
-            }
-        }
-        self.index = index;
+        self.index =
+            build_index(market, |component| is_rfq_protocol(&component.protocol_system)).await;
         self.market = Some(market.clone());
     }
 
