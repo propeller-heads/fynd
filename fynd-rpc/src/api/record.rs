@@ -458,7 +458,7 @@ mod tests {
     }
 
     fn solved_json(orders: Vec<fynd_core::OrderQuote>, head: Option<BlockInfo>) -> Value {
-        let quote = finalize_quote(orders, 42);
+        let quote = finalize_quote(orders, 42, None);
         record_json(request_record(request_with_signatures()), &Ok(quote), head)
     }
 
@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn test_record_without_encoding_options() {
         let request = request_record(fynd_rpc_types::QuoteRequest::new(vec![order()]));
-        let quote = finalize_quote(vec![routed_order(QuoteStatus::Success).build()], 42);
+        let quote = finalize_quote(vec![routed_order(QuoteStatus::Success).build()], 42, None);
         let value = record_json(request, &Ok(quote), None);
 
         assert!(
@@ -781,6 +781,7 @@ mod tests {
                 .route(route())
                 .build()],
             42,
+            None,
         );
         let record = QuoteRecord::build(
             request_record(request_with_signatures()),
@@ -814,6 +815,7 @@ mod tests {
                 .route(route())
                 .build()],
             solve_time_ms,
+            None,
         );
         let record = QuoteRecord::build(
             request_record(request_with_signatures()),

@@ -1235,7 +1235,8 @@ impl FyndBuilder {
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses)
             .with_encoding_retry_budget(self.encoding_retry_budget);
-        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
+            .with_derived_data(Arc::clone(&derived_data));
         if let Some(simulator) = quote_simulator {
             router = router.with_simulator(simulator);
         }
@@ -1717,7 +1718,8 @@ impl Solver {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(Duration::from_millis(max_timeout_ms.max(5000)))
             .with_min_responses(defaults::ROUTER_MIN_RESPONSES);
-        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder);
+        let router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
+            .with_derived_data(Arc::clone(&derived_data));
 
         // Trigger derived data computation
         let market_read = market_data.read().await;
