@@ -47,7 +47,10 @@ use crate::{
         DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
-    post_process::{PostProcessorRegistry, UnknownPostProcessorError},
+    post_process::{
+        registry::check_post_processor_order, PostProcessorOrderError, PostProcessorRegistry,
+        UnknownPostProcessorError,
+    },
     price_guard::{
         guard::PriceGuard, provider::PriceProvider, provider_registry::PriceProviderRegistry,
     },
@@ -399,6 +402,9 @@ pub enum SolverBuildError {
     /// A worker pool listed a post-processor that is neither built in nor registered.
     #[error(transparent)]
     UnknownPostProcessor(#[from] UnknownPostProcessorError),
+    /// A worker pool listed `exclusive_swap_replacer` before another post-processor.
+    #[error(transparent)]
+    PostProcessorOrder(#[from] PostProcessorOrderError),
     /// No native gas token is defined for the requested chain.
     #[error("gas token not configured for chain")]
     GasToken,
@@ -872,7 +878,8 @@ impl FyndBuilder {
     /// A pool lists post-processor names; this hands the builder the ones the caller registered.
     /// The built-in names need no registration. A name that is neither built in nor in
     /// `post_processors` fails [`build`](Self::build) with
-    /// [`SolverBuildError::UnknownPostProcessor`].
+    /// [`SolverBuildError::UnknownPostProcessor`]. A pool that lists `exclusive_swap_replacer`
+    /// before another post-processor fails it with [`SolverBuildError::PostProcessorOrder`].
     pub fn with_post_processors(mut self, post_processors: PostProcessorRegistry) -> Self {
         self.post_processors = post_processors;
         self
@@ -1122,6 +1129,7 @@ impl FyndBuilder {
                     let factories = self
                         .post_processors
                         .resolve(&name, &post_processors)?;
+                    check_post_processor_order(&name, &post_processors)?;
                     let named = WorkerPoolBuilder::new()
                         .name(name)
                         .algorithm_config(algo_cfg)

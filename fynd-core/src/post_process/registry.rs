@@ -60,6 +60,56 @@ impl UnknownPostProcessorError {
     }
 }
 
+/// A pool configuration listed `exclusive_swap_replacer` before another post-processor.
+///
+/// The replacer commits the route to a price. A post-processor that runs after it builds a new
+/// route without the commitment, and the worker then rejects the processed route.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "worker pool '{worker_pool}' lists post-processor '{post_processor_name}' before \
+     '{followed_by}'. List {post_processor_name} last"
+)]
+pub struct PostProcessorOrderError {
+    worker_pool: String,
+    post_processor_name: String,
+    followed_by: String,
+}
+
+impl PostProcessorOrderError {
+    /// The post-processor that must come last.
+    pub fn post_processor_name(&self) -> &str {
+        &self.post_processor_name
+    }
+
+    /// The worker pool that listed the names.
+    pub fn worker_pool(&self) -> &str {
+        &self.worker_pool
+    }
+}
+
+/// Checks that `names`, the post-processors `worker_pool` lists, put `exclusive_swap_replacer`
+/// last.
+///
+/// # Errors
+///
+/// [`PostProcessorOrderError`] when any name follows `exclusive_swap_replacer`, which includes
+/// listing it twice.
+pub(crate) fn check_post_processor_order(
+    worker_pool: &str,
+    names: &[String],
+) -> Result<(), PostProcessorOrderError> {
+    for (name, followed_by) in names.iter().zip(names.iter().skip(1)) {
+        if name == ExclusiveSwapReplacer::NAME {
+            return Err(PostProcessorOrderError {
+                worker_pool: worker_pool.to_string(),
+                post_processor_name: name.clone(),
+                followed_by: followed_by.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The factories behind the post-processor names of one pool, in config order.
 #[derive(Clone, Default)]
 pub(crate) struct PostProcessorFactories(Vec<(String, Factory)>);

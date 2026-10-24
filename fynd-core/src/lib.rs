@@ -73,8 +73,8 @@ pub use derived::computation::ComputationRequirements;
 pub use encoding::hooks::{CalldataHook, SolutionHook};
 pub use feed::{events::MarketEvent, market_data::StateLabel};
 pub use post_process::{
-    PostProcessRequest, PostProcessorAlreadyRegistered, PostProcessorRegistry, RoutePostProcessor,
-    UnknownPostProcessorError,
+    PostProcessRequest, PostProcessorAlreadyRegistered, PostProcessorOrderError,
+    PostProcessorRegistry, RoutePostProcessor, UnknownPostProcessorError,
 };
 pub use price_guard::{
     config::PriceGuardConfig,

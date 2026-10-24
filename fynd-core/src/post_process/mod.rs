@@ -36,7 +36,8 @@ use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 pub(crate) use self::pipeline::{PostProcessors, ProcessedRoute};
 pub use self::registry::{
-    PostProcessorAlreadyRegistered, PostProcessorRegistry, UnknownPostProcessorError,
+    PostProcessorAlreadyRegistered, PostProcessorOrderError, PostProcessorRegistry,
+    UnknownPostProcessorError,
 };
 use crate::{
     derived::SharedDerivedDataRef,
