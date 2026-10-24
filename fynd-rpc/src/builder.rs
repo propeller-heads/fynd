@@ -7,13 +7,17 @@ use std::{
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use fynd_core::{
-    encoding::encoder::Encoder, worker_pool::pool::WorkerPool, FyndBuilder, SolverBuildError,
+    encoding::encoder::Encoder, worker_pool::pool::WorkerPool, ExternalLiquidityConfig,
+    FyndBuilder, LiquiditySnapshot, SolverBuildError,
 };
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
-use tycho_simulation::tycho_common::{
-    models::{chain_config::TvlThresholdTier, Chain},
-    Bytes,
+use tycho_simulation::{
+    snapshot_feed::{errors::FeedError, SnapshotFeed},
+    tycho_common::{
+        models::{chain_config::TvlThresholdTier, Chain},
+        Bytes,
+    },
 };
 
 use crate::{
@@ -122,6 +126,29 @@ impl FyndRPCBuilder {
         self.fynd_builder = self
             .fynd_builder
             .with_post_processors(post_processors);
+        self
+    }
+
+    /// Adds external liquidity: components from a source outside Tycho and `--protocols`.
+    ///
+    /// `protocol_system` names the source and is the protocol system of every component it
+    /// publishes. The market feed fails at startup if `make_feed` returns an error, if two
+    /// sources share a name, or if a `--protocols` entry has the same name as the source.
+    ///
+    /// See
+    /// [`FyndBuilder::with_external_liquidity`](fynd_core::FyndBuilder::with_external_liquidity).
+    pub fn with_external_liquidity<M, F>(
+        mut self,
+        protocol_system: impl Into<String>,
+        make_feed: M,
+    ) -> Self
+    where
+        M: Fn(ExternalLiquidityConfig) -> Result<F, FeedError> + Send + Sync + 'static,
+        F: SnapshotFeed<Snapshot = LiquiditySnapshot, Error = FeedError>,
+    {
+        self.fynd_builder = self
+            .fynd_builder
+            .with_external_liquidity(protocol_system, make_feed);
         self
     }
 
