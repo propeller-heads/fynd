@@ -21,6 +21,7 @@
 //! post_processors = ["rfq"]
 //! ```
 
+mod exclusive;
 mod pipeline;
 pub mod registry;
 mod replace;
