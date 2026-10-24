@@ -208,13 +208,7 @@ impl TychoFeed {
         let mut price_level_stream =
             open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens)?
                 .map(Box::pin);
-        let mut book_stream = BookStream::open(
-            self.config.chain,
-            self.config.min_tvl,
-            &self.config.protocols,
-            all_tokens.clone(),
-            self.config.aggregate_rfqs,
-        )?;
+        let mut book_stream = BookStream::open(&self.config, all_tokens.clone())?;
 
         let mut protocol_stream = if has_tycho_protocols(&self.config.protocols) {
             let tvl_filter = ComponentFilter::with_tvl_range(
@@ -359,13 +353,7 @@ impl TychoFeed {
                     return Err(e);
                 }
             };
-        let mut book_stream = match BookStream::open(
-            self.config.chain,
-            self.config.min_tvl,
-            &self.config.protocols,
-            all_tokens.clone(),
-            self.config.aggregate_rfqs,
-        ) {
+        let mut book_stream = match BookStream::open(&self.config, all_tokens.clone()) {
             Ok(book_stream) => book_stream,
             Err(e) => {
                 setup.fail(&e.to_string());
