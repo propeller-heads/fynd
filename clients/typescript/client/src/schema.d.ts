@@ -139,6 +139,28 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description One account of a State Override Set: the values Titan's simulation set, and nothing else.
+         *
+         *     An absent field keeps the chain's value, never zero, and `stateDiff` changes only the slots it
+         *     names.
+         */
+        AccountOverride: {
+            /**
+             * @description Balance in wei, as a hex quantity.
+             * @example 0x1b6008ea9711c3f3
+             */
+            balance?: string | null;
+            /**
+             * @description Nonce, as a hex quantity.
+             * @example 0xe40
+             */
+            nonce?: string | null;
+            /** @description Storage values to set, from 32-byte slot to 32-byte value. */
+            stateDiff?: {
+                [key: string]: string;
+            };
+        };
         /** @description Source-chain block identity. */
         BlockInfo: {
             /**
@@ -717,7 +739,42 @@ export interface components {
              */
             exclude_tokens?: string[];
         };
-        /** @description Outcome of simulating an encoded quote on the latest block. */
+        /**
+         * @description The account state Titan priced a pAMM swap's venue on, to simulate the swap with.
+         *
+         *     A pAMM quote prices the block Titan is building, on venue state that is not on chain yet, so a
+         *     simulation of the swap on chain state alone usually reverts. To reproduce the quote with
+         *     `eth_simulateV1` or `eth_call`, simulate on block `block_number - 1`, pass `block_number` and
+         *     `block_timestamp` as the `number` and `time` block overrides, and add `accounts` to your state
+         *     overrides. For a route through several pAMM swaps, merge every swap's `accounts`.
+         *
+         *     A successful simulation means the quote can fill if the venue's state is current at that price
+         *     when the transaction lands, not that it will. Fynd never expires or rejects a quote because of
+         *     these overrides.
+         */
+        SimulationOverrides: {
+            /**
+             * @description The accounts to override, keyed by address, in the State Override Set encoding `eth_call`
+             *     and `eth_simulateV1` take.
+             */
+            accounts: {
+                [key: string]: components["schemas"]["AccountOverride"];
+            };
+            /**
+             * Format: int64
+             * @description The block Titan was building, the one this swap's price is for. Absent when Titan named
+             *     none.
+             * @example 26201954
+             */
+            block_number?: number | null;
+            /**
+             * Format: int64
+             * @description The Unix second of `block_number`. Absent when Titan named none.
+             * @example 1792115924
+             */
+            block_timestamp?: number | null;
+        };
+        /** @description Outcome of simulating an encoded quote. */
         SimulationResult: {
             /**
              * @description Amount returned by the router call.
@@ -793,6 +850,7 @@ export interface components {
              * @example uniswap_v2
              */
             protocol: string;
+            simulation_overrides?: null | components["schemas"]["SimulationOverrides"];
             /**
              * Format: double
              * @description Decimal of the amount to be swapped in this operation (for example, 0.5 means 50%)

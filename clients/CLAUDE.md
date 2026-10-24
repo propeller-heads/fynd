@@ -79,6 +79,11 @@ against the chain the RPC node reports and errors on a mismatch.
 **`StorageOverrides`** — Dry-run execution with simulated ERC-20 balances/approvals (storage slot
 overrides for `eth_call`).
 
+**`SimulationOverrides`** — `Swap::simulation_overrides()` on a pAMM swap whose state carried them:
+`block_number`, `block_timestamp` and `accounts` as alloy's `StateOverride`. A malformed set is
+dropped with a warning and never fails the quote. The dry run does not apply them; the TypeScript
+client maps them to `Swap.simulationOverrides`, with `accounts` in viem's `StateOverride` shape.
+
 **`ApprovalParams`** — `new(token, allowance_check: AllowanceCheck)` where `AllowanceCheck` is
 `Skip` (always build approval) or `AtLeast(BigUint)` (check current allowance first; skip if
 sufficient).

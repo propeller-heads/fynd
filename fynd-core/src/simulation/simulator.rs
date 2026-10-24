@@ -35,6 +35,7 @@ use crate::{
     encoding::encoder::PERMIT2_ADDRESS,
     simulation::{
         deviation::deviation_bps,
+        pamm_overrides::{self, RouteOverrides},
         revert,
         token_layout::{discover_layout, DiscoveryError, TokenLayout},
     },
@@ -109,6 +110,11 @@ pub(crate) struct SimulatedCall<'a> {
     pub(crate) data: &'a [u8],
     /// The block whose state the call runs on.
     pub(crate) block: BlockNumberOrTag,
+    /// The number the simulated block takes, when it must be a given block rather than the one
+    /// the node puts after `block`: a route with pAMM overrides runs as the block Titan quoted.
+    pub(crate) quoted_block_number: Option<u64>,
+    /// The timestamp the simulated block takes, together with `quoted_block_number`.
+    pub(crate) quoted_block_timestamp: Option<u64>,
 }
 
 /// Why a quote is simulated.
@@ -214,13 +220,23 @@ struct SimulationSetup<'a> {
     token_in: Address,
     /// The address that must accept the quote's placeholder client fee signature, if any.
     client_fee_receiver: Option<Address>,
+    /// The overrides of the route's pAMM swaps, merged, when any pAMM swap carries them.
+    venues: Option<RouteOverrides>,
+    /// Whether the route crosses a pAMM swap, with or without overrides.
+    has_pamm_swap: bool,
 }
 
 impl<'a> SimulationSetup<'a> {
-    /// Reads the call, the input token and the client fee receiver off an encoded quote.
+    /// Reads the call, the input token, the client fee receiver and the pAMM overrides off an
+    /// encoded quote.
     ///
     /// The router skips the client fee signature check for a zero receiver, so a zero receiver
     /// needs no override and is reported as none.
+    ///
+    /// When the route's pAMM overrides name the block Titan quoted, the call runs on that block's
+    /// parent as the quoted block, whatever `block` says. That is the state and block Titan priced
+    /// the venues on, and `eth_simulateV1` accepts the quoted block's number and timestamp only on
+    /// top of a block below it, so it works the same before and after the quoted block is mined.
     ///
     /// # Errors
     ///
@@ -235,21 +251,34 @@ impl<'a> SimulationSetup<'a> {
         let transaction = quote
             .transaction()
             .ok_or("quote has no encoded transaction")?;
-        let first_swap = quote
+        let route = quote
             .route()
-            .ok_or("quote has no route")?
+            .ok_or("quote has no route")?;
+        let first_swap = route
             .swaps()
             .first()
             .ok_or("route has no swaps")?;
+        let (venues, report) = pamm_overrides::collect(route);
+        let quoted_block_number = venues
+            .as_ref()
+            .and_then(|venues| venues.block_number);
+        let block = match (quoted_block_number, block) {
+            (Some(quoted), _) => BlockNumberOrTag::Number(quoted.saturating_sub(1)),
+            (None, SimulationBlock::Latest) => BlockNumberOrTag::Latest,
+            (None, SimulationBlock::Quote) => BlockNumberOrTag::Number(quote.block().number()),
+        };
         let call = SimulatedCall {
             sender: crate::rpc::to_address(quote.sender(), "quote sender")?,
             router: crate::rpc::to_address(transaction.to(), "transaction destination")?,
             value: U256::from_be_slice(&transaction.value().to_bytes_be()),
             data: transaction.data(),
-            block: match block {
-                SimulationBlock::Latest => BlockNumberOrTag::Latest,
-                SimulationBlock::Quote => BlockNumberOrTag::Number(quote.block().number()),
-            },
+            block,
+            quoted_block_number,
+            quoted_block_timestamp: quoted_block_number.and(
+                venues
+                    .as_ref()
+                    .and_then(|venues| venues.block_timestamp),
+            ),
         };
         let token_in = crate::rpc::to_address(first_swap.token_in(), "route token_in")?;
         let mut client_fee_receiver = None;
@@ -262,8 +291,24 @@ impl<'a> SimulationSetup<'a> {
                 client_fee_receiver = Some(receiver);
             }
         }
-        Ok(Self { call, token_in, client_fee_receiver })
+        Ok(Self {
+            call,
+            token_in,
+            client_fee_receiver,
+            venues,
+            has_pamm_swap: report.has_pamm_swap(),
+        })
     }
+}
+
+/// How a quote that crosses a pAMM swap was simulated, for the metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PammSimulation {
+    /// Whether the simulation ran on the overrides of at least one pAMM swap.
+    applied: bool,
+    /// Values a pAMM override and the sender's funding both set differently, which kept the
+    /// funding.
+    funding_collisions: u64,
 }
 
 pub(crate) enum SimulationAttempt {
@@ -323,7 +368,8 @@ impl QuoteSimulator {
     /// Simulates an encoded quote, and records the metrics of the result.
     ///
     /// The metrics carry `purpose` as a label. For a successful simulation, they also record how
-    /// far the simulated output is from the quoted output, and the gas that the call used.
+    /// far the simulated output is from the quoted output, and the gas that the call used. A
+    /// quote that crosses a pAMM swap is also counted by whether it ran on the venues' overrides.
     ///
     /// # Arguments
     ///
@@ -336,32 +382,45 @@ impl QuoteSimulator {
         client_fee: Option<&ClientFeeParams>,
         purpose: SimulationPurpose,
     ) -> SimulationAttempt {
-        let attempt = self.attempt(quote, client_fee).await;
-        record_outcome(quote, &attempt, purpose);
+        let (attempt, pamm) = self.attempt(quote, client_fee).await;
+        let outcome = record_outcome(quote, &attempt, purpose);
+        if let Some(pamm) = pamm {
+            record_pamm_outcome(quote, &attempt, outcome, pamm, purpose);
+        }
         attempt
     }
 
+    /// Simulates `quote`, and says how its pAMM swaps were simulated when it crosses one.
     async fn attempt(
         &self,
         quote: &OrderQuote,
         client_fee: Option<&ClientFeeParams>,
-    ) -> SimulationAttempt {
+    ) -> (SimulationAttempt, Option<PammSimulation>) {
         let setup = match SimulationSetup::for_quote(quote, client_fee, self.block) {
             Ok(value) => value,
-            Err(error) => return failure_with(format!("simulation setup failed: {error}")),
+            Err(error) => return (failure_with(format!("simulation setup failed: {error}")), None),
         };
+        let mut pamm = setup
+            .has_pamm_swap
+            .then_some(PammSimulation { applied: setup.venues.is_some(), funding_collisions: 0 });
         let mut overrides = match self
             .overrides(setup.call.sender, setup.token_in, setup.call.router)
             .await
         {
             Ok(value) => value,
-            Err(reason) => return failure_with(reason),
+            Err(reason) => return (failure_with(reason), pamm),
         };
         if let Some(receiver) = setup.client_fee_receiver {
             add_client_fee_receiver_override(&mut overrides, receiver);
         }
-        self.simulate_within_timeout(setup.call, overrides, SimulationEnvelope::for_quote(quote))
-            .await
+        if let (Some(venues), Some(pamm)) = (&setup.venues, pamm.as_mut()) {
+            pamm.funding_collisions =
+                pamm_overrides::add_venue_accounts(&mut overrides, &venues.accounts);
+        }
+        let attempt = self
+            .simulate_within_timeout(setup.call, overrides, SimulationEnvelope::for_quote(quote))
+            .await;
+        (attempt, pamm)
     }
 
     /// Runs one simulated call on `call.block`, within the request timeout.
@@ -373,7 +432,7 @@ impl QuoteSimulator {
     /// # Arguments
     ///
     /// * `call` - The call to simulate.
-    /// * `overrides` - The state overrides that fund the sender.
+    /// * `overrides` - The state overrides that fund the sender, and the pAMM venues' state.
     /// * `envelope` - The gas limit and the gas price of the call.
     ///
     /// # Returns
@@ -584,8 +643,12 @@ fn log_outcome(quote: &OrderQuote, outcome: &'static str, reason: &str) -> &'sta
 /// the route the solver priced does not execute, while a failure means the simulation itself did
 /// not run, so it says nothing about the route. Both carry the winning pool and algorithm, so a
 /// rise in either can be traced to the solver that produced the route. Every metric also carries
-/// the `purpose` label.
-fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt, purpose: SimulationPurpose) {
+/// the `purpose` label. Returns the outcome the simulation was counted under.
+fn record_outcome(
+    quote: &OrderQuote,
+    attempt: &SimulationAttempt,
+    purpose: SimulationPurpose,
+) -> &'static str {
     let pool = quote.worker_pool().to_string();
     let algorithm = quote.algorithm().to_string();
     let purpose = purpose.label();
@@ -620,6 +683,43 @@ fn record_outcome(quote: &OrderQuote, attempt: &SimulationAttempt, purpose: Simu
         "purpose" => purpose
     )
     .increment(1);
+    outcome
+}
+
+/// Counts one simulated quote that crosses a pAMM swap by whether it ran on the venues'
+/// overrides, and on success records how far its output landed from the quote.
+///
+/// The deviation says more than the outcome: a pAMM swap that fails in a route through the
+/// fallback router is filled from its fallback pool, so the simulation still succeeds, at a lower
+/// amount.
+fn record_pamm_outcome(
+    quote: &OrderQuote,
+    attempt: &SimulationAttempt,
+    outcome: &'static str,
+    pamm: PammSimulation,
+    purpose: SimulationPurpose,
+) {
+    let overrides = if pamm.applied { "applied" } else { "none" };
+    let purpose = purpose.label();
+    counter!(
+        pamm_overrides::SIMULATIONS_TOTAL,
+        "overrides" => overrides,
+        "outcome" => outcome,
+        "purpose" => purpose
+    )
+    .increment(1);
+    counter!(pamm_overrides::FUNDING_COLLISIONS_TOTAL, "purpose" => purpose)
+        .increment(pamm.funding_collisions);
+    if let SimulationAttempt::Success { amount_out, .. } = attempt {
+        if let Some(deviation) = deviation_bps(quote, amount_out) {
+            histogram!(
+                pamm_overrides::SIMULATION_DEVIATION_BPS,
+                "overrides" => overrides,
+                "purpose" => purpose
+            )
+            .record(deviation);
+        }
+    }
 }
 
 /// Records the gas the quote estimated and the gas the simulated call used, as absolute values.
@@ -660,8 +760,14 @@ fn failure_with(reason: String) -> SimulationAttempt {
 /// `eth_simulateV1` takes the other block fields from the block that it runs on. It leaves the
 /// coinbase and `prevrandao` at zero, and a pool can read these to detect a simulation. This sets
 /// them, and the block gas limit, to realistic values.
-fn block_overrides() -> BlockOverrides {
+///
+/// `quoted_number` and `quoted_timestamp` set the simulated block's number and time: a pAMM venue
+/// compares the block's timestamp with the price it stored, so a route with pAMM overrides runs as
+/// the block Titan quoted. Without them the node numbers the block itself.
+fn block_overrides(quoted_number: Option<u64>, quoted_timestamp: Option<u64>) -> BlockOverrides {
     BlockOverrides {
+        number: quoted_number.map(U256::from),
+        time: quoted_timestamp,
         coinbase: Some(SIMULATION_COINBASE),
         random: Some(B256::from(rand::random::<[u8; 32]>())),
         gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
@@ -702,7 +808,8 @@ async fn simulate_with_overrides(
     // The trace has to observe the same environment as `eth_simulateV1` to reproduce the same
     // revert. `prevrandao` is drawn at random per call, so it is built once and reused rather
     // than regenerated.
-    let environment = block_overrides();
+    let environment =
+        block_overrides(simulated.quoted_block_number, simulated.quoted_block_timestamp);
     let payload = simulate_payload(call.clone(), overrides.clone(), environment.clone());
     let response = match timeout(
         request_timeout,
@@ -791,7 +898,7 @@ fn simulate_payload(
 
 /// What it takes to rerun a reverted simulation exactly.
 ///
-/// The payload carries the call, the funding overrides and the block environment, with the number,
+/// The payload carries the call, the state overrides and the block environment, with the number,
 /// timestamp and `prevrandao` the simulated block actually had. Sent to `eth_simulateV1` on top of
 /// `parent_block`, it executes the same call against the same state. A route can revert on any of
 /// those inputs, a signed RFQ quote on the timestamp alone, so none of them is left to a guess.

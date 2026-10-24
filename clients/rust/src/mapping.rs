@@ -3,6 +3,10 @@
 //! Uses `fynd-rpc-types` directly for the DTO format, providing compile-time
 //! compatibility guarantees with the server.
 
+use alloy::{
+    primitives::{map::B256HashMap, Address, B256, U256},
+    rpc::types::state::{AccountOverride, StateOverride},
+};
 use fynd_rpc_types as dto;
 use fynd_rpc_types::OrderQuote;
 
@@ -11,7 +15,8 @@ use crate::{
     types::{
         BackendKind, BatchQuoteParams, BlockInfo, EncodingOptions, FeeBreakdown, HealthStatus,
         Order, OrderSide, PermitDetails, PermitSingle, Quote, QuoteOptions, QuoteParams,
-        QuoteStatus, Route, SimulationResult, Swap, Transaction, UserTransferType,
+        QuoteStatus, Route, SimulationOverrides, SimulationResult, Swap, Transaction,
+        UserTransferType,
     },
 };
 // ============================================================================
@@ -39,6 +44,47 @@ fn bytes_to_dto_addr(b: &bytes::Bytes) -> Result<dto::Bytes, FyndError> {
 /// Unwrap a DTO address back to a client `bytes::Bytes`.
 fn dto_addr_to_bytes(b: dto::Bytes) -> bytes::Bytes {
     b.0
+}
+
+/// Converts a swap's simulation overrides into alloy's override types.
+///
+/// Fails on an address that is not 20 bytes, a storage slot or value that is not 32 bytes, or a
+/// balance above 256 bits.
+fn simulation_overrides_from_dto(
+    overrides: &dto::SimulationOverrides,
+) -> Result<SimulationOverrides, String> {
+    let mut accounts = StateOverride::default();
+    for (address, account) in overrides.accounts() {
+        let address = Address::try_from(address.as_ref())
+            .map_err(|_| format!("account address is {} bytes, not 20", address.len()))?;
+        let balance = match account.balance() {
+            Some(balance) => Some(
+                U256::try_from_be_slice(&balance.to_bytes_be())
+                    .ok_or_else(|| format!("balance of {address} exceeds 256 bits"))?,
+            ),
+            None => None,
+        };
+        let mut state_diff = B256HashMap::default();
+        for (slot, value) in account.state_diff() {
+            let slot_key = B256::try_from(slot.as_ref()).map_err(|_| {
+                format!("storage slot of {address} is {} bytes, not 32", slot.len())
+            })?;
+            let word = B256::try_from(value.as_ref()).map_err(|_| {
+                format!("storage value of {address} is {} bytes, not 32", value.len())
+            })?;
+            state_diff.insert(slot_key, word);
+        }
+        accounts.insert(
+            address,
+            AccountOverride {
+                balance,
+                nonce: account.nonce(),
+                state_diff: (!state_diff.is_empty()).then_some(state_diff),
+                ..Default::default()
+            },
+        );
+    }
+    Ok(SimulationOverrides::new(overrides.block_number(), overrides.block_timestamp(), accounts))
 }
 
 // ============================================================================
@@ -350,7 +396,7 @@ impl TryFrom<dto::Swap> for Swap {
     fn try_from(ds: dto::Swap) -> Result<Self, Self::Error> {
         let token_in = dto_addr_to_bytes(ds.token_in().clone());
         let token_out = dto_addr_to_bytes(ds.token_out().clone());
-        Ok(Swap::new(
+        let swap = Swap::new(
             ds.component_id().to_string(),
             ds.protocol().to_string(),
             token_in,
@@ -359,7 +405,23 @@ impl TryFrom<dto::Swap> for Swap {
             ds.amount_out().clone(),
             ds.gas_estimate().clone(),
             ds.split(),
-        ))
+        );
+        let Some(overrides) = ds.simulation_overrides() else {
+            return Ok(swap);
+        };
+        // The overrides only serve a simulation, so a malformed set costs the swap its overrides
+        // and never the quote.
+        match simulation_overrides_from_dto(overrides) {
+            Ok(overrides) => Ok(swap.with_simulation_overrides(overrides)),
+            Err(reason) => {
+                tracing::warn!(
+                    component_id = ds.component_id(),
+                    reason,
+                    "dropping malformed simulation overrides"
+                );
+                Ok(swap)
+            }
+        }
     }
 }
 
@@ -570,6 +632,75 @@ mod tests {
         assert_eq!(client_swap.amount_in(), &BigUint::from(100u32));
         assert_eq!(client_swap.amount_out(), &BigUint::from(99u32));
         assert_eq!(client_swap.gas_estimate(), &BigUint::from(50_000u32));
+    }
+
+    /// A swap's simulation overrides reach the client in alloy's types, ready for `eth_call`.
+    #[test]
+    fn swap_try_from_dto_with_simulation_overrides() {
+        let dto_swap: dto::Swap = serde_json::from_str(&format!(
+            r#"{{
+            "component_id": "component-1",
+            "protocol": "fallback:fermiswap",
+            "token_in": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "token_out": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "amount_in": "100",
+            "amount_out": "99",
+            "gas_estimate": "50000",
+            "split": "0",
+            "simulation_overrides": {{
+                "block_number": 26201954,
+                "block_timestamp": 1792115924,
+                "accounts": {{
+                    "0x{account}": {{
+                        "balance": "0x1b6008ea9711c3f3",
+                        "nonce": "0xe40",
+                        "stateDiff": {{ "0x{slot}": "0x{value}" }}
+                    }}
+                }}
+            }}
+        }}"#,
+            account = "48".repeat(20),
+            slot = "00".repeat(32),
+            value = "04".repeat(32),
+        ))
+        .expect("valid swap JSON");
+
+        let client_swap = Swap::try_from(dto_swap).unwrap();
+
+        let overrides = client_swap
+            .simulation_overrides()
+            .expect("the swap carries overrides");
+        assert_eq!(overrides.block_number(), Some(26_201_954));
+        assert_eq!(overrides.block_timestamp(), Some(1_792_115_924));
+        let account = &overrides.accounts()[&Address::repeat_byte(0x48)];
+        assert_eq!(account.balance, Some(U256::from(0x1b60_08ea_9711_c3f3u64)));
+        assert_eq!(account.nonce, Some(0xe40));
+        assert_eq!(
+            account
+                .state_diff
+                .as_ref()
+                .and_then(|slots| slots.get(&B256::ZERO).copied()),
+            Some(B256::repeat_byte(0x04))
+        );
+    }
+
+    /// Malformed overrides cost the swap its overrides, never the quote.
+    #[test]
+    fn swap_try_from_dto_with_malformed_simulation_overrides() {
+        let short_address = Bytes::copy_from_slice(&[0x48; 19]);
+        let dto_swap = sample_dto_swap().with_simulation_overrides(dto::SimulationOverrides::new(
+            Some(1),
+            None,
+            std::collections::BTreeMap::from([(
+                dto::Bytes(short_address),
+                dto::AccountOverride::new(None, Some(1), Default::default()),
+            )]),
+        ));
+
+        let client_swap = Swap::try_from(dto_swap).unwrap();
+
+        assert_eq!(client_swap.simulation_overrides(), None);
+        assert_eq!(client_swap.component_id(), "component-1");
     }
 
     // -----------------------------------------------------------------------

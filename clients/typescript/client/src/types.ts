@@ -160,6 +160,45 @@ export interface Swap {
   amountIn: bigint;
   amountOut: bigint;
   gasEstimate: bigint;
+  /**
+   * The account state Titan priced this swap's venue on; present only on a pAMM swap whose state
+   * carried it (wire name: `simulation_overrides`).
+   */
+  simulationOverrides?: SimulationOverrides;
+}
+
+/**
+ * The account state Titan priced a pAMM swap's venue on, to simulate the swap with.
+ *
+ * A pAMM quote prices the block Titan is building, on venue state that is not on chain yet, so a
+ * simulation of the swap on chain state alone usually reverts. To reproduce the quote, simulate on
+ * block `blockNumber - 1`, pass `blockNumber` and `blockTimestamp` as the `number` and `time` block
+ * overrides, and pass `accounts` as viem's `stateOverride`. For a route through several pAMM swaps,
+ * merge every swap's accounts.
+ *
+ * A successful simulation means the quote can fill if the venue's state is current at that price
+ * when the transaction lands, not that it will.
+ */
+export interface SimulationOverrides {
+  /** The block Titan was building, the one the swap's price is for (wire name: `block_number`). */
+  blockNumber?: number;
+  /** The Unix second of `blockNumber` (wire name: `block_timestamp`). */
+  blockTimestamp?: number;
+  /** The accounts to override, in the shape of viem's `StateOverride`. */
+  accounts: AccountOverride[];
+}
+
+/**
+ * One account of a state override set: the values Titan's simulation set. An absent field keeps
+ * the chain's value, and `stateDiff` changes only the slots it names.
+ */
+export interface AccountOverride {
+  address: Address;
+  /** Balance in wei. */
+  balance?: bigint;
+  nonce?: number;
+  /** Storage values to set, by 32-byte slot. */
+  stateDiff?: { slot: Hex; value: Hex }[];
 }
 
 /** An ordered sequence of swaps forming a complete routing path. */
@@ -186,7 +225,7 @@ export interface FeeBreakdown {
   swapsHash?: Hex;
 }
 
-/** Outcome of simulating an encoded quote against the latest block. */
+/** Outcome of simulating an encoded quote. */
 export type SimulationResult =
   | { status: "success"; amountOut: bigint; gasUsed: number }
   | { status: "failure"; reason: string };
