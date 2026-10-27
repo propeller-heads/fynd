@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { toWireRequest, fromWireQuote, fromWireHealth } from './mapping.js';
 import { FyndError } from './error.js';
 import type { Address, Hex, QuoteParams } from './types.js';
@@ -362,7 +362,17 @@ describe('fromWireQuote', () => {
     expect(stateOverride).toHaveLength(1);
   });
 
-  it('drops malformed simulation overrides and keeps the swap', () => {
+  const ACCOUNT = `0x${'48'.repeat(20)}`;
+  const WORD = `0x${'00'.repeat(32)}`;
+  it.each([
+    ['a short address', { [`0x${'48'.repeat(19)}`]: { nonce: '0x1' } }],
+    ['a short storage slot', { [ACCOUNT]: { stateDiff: { '0x00': WORD } } }],
+    ['a short storage value', { [ACCOUNT]: { stateDiff: { [WORD]: '0x04' } } }],
+    ['a decimal balance', { [ACCOUNT]: { balance: '12' } }],
+    ['a balance above 256 bits', { [ACCOUNT]: { balance: `0x1${'00'.repeat(32)}` } }],
+    ['a nonce above 64 bits', { [ACCOUNT]: { nonce: `0x1${'00'.repeat(8)}` } }],
+  ])('drops simulation overrides with %s and keeps the swap', (_, accounts) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const wire: WireSolution = {
       ...baseWireSolution,
       orders: [
@@ -378,7 +388,7 @@ describe('fromWireQuote', () => {
                 amount_in:    '1000',
                 amount_out:   '3500',
                 gas_estimate: '80000',
-                simulation_overrides: { accounts: { '0x48': { balance: 'not hex' } } },
+                simulation_overrides: { accounts },
               },
             ],
           },
@@ -390,6 +400,8 @@ describe('fromWireQuote', () => {
 
     expect(swap?.componentId).toBe('0xpamm');
     expect(swap?.simulationOverrides).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('swap 0xpamm'));
+    warn.mockRestore();
   });
 
   it('maps component_id to componentId', () => {
