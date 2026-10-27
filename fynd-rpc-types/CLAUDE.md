@@ -36,7 +36,9 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 - `QuoteStatus` — Success, NoRouteFound, InsufficientLiquidity, Timeout, NotReady, PriceCheckFailed, EncodingFailed
 - `SimulationResult` — tagged by `status`: `success` (amount_out, gas_used) or `failure` (reason)
 - `Route` — Vec<Swap>
-- `Swap` — component_id, protocol, token_in/out, amount_in/out, gas_estimate, split
+- `Swap` — component_id, protocol, token_in/out, amount_in/out, gas_estimate, split, simulation_overrides (only on a pAMM swap whose state carried them)
+- `SimulationOverrides` — block_number, block_timestamp (the block Titan quoted), accounts (`AccountOverride` by address). To reproduce a pAMM quote, simulate on `block_number - 1` with those as the `number` and `time` block overrides
+- `AccountOverride` — one State Override Set account in its JSON-RPC encoding: `balance` and `nonce` as hex quantities (the private `HexQuantity` serde adapter), `stateDiff` (never `state`)
 - `BlockInfo` — number, hash, timestamp
 - `Transaction` — to, value, data (hex-encoded calldata), client_fee_signature_offset (where in `data` the client overwrites the placeholder client fee signature)
 - `HealthStatus` — healthy, last_update_ms, num_solver_pools, derived_data_ready, gas_price_age_ms
@@ -56,4 +58,5 @@ CI checks for drift in both the OpenAPI spec and the generated TypeScript types.
 ## BigUint Serialization
 
 All `BigUint` fields use `#[serde_as(as = "DisplayFromStr")]` — they serialize as decimal strings
-in JSON (e.g. `"1000000000000000000"`), not numbers.
+in JSON (e.g. `"1000000000000000000"`), not numbers. The one exception is `AccountOverride::balance`,
+a hex quantity, because a client passes that type straight to `eth_call`.

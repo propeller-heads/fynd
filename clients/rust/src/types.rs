@@ -1,5 +1,6 @@
 use alloy::{
     primitives::{keccak256, U256},
+    rpc::types::state::StateOverride,
     sol_types::SolValue,
 };
 use bytes::Bytes;
@@ -725,6 +726,7 @@ pub struct Swap {
     gas_estimate: BigUint,
     #[allow(dead_code)]
     split: f64,
+    simulation_overrides: Option<SimulationOverrides>,
 }
 
 impl Swap {
@@ -784,7 +786,65 @@ impl Swap {
             amount_out,
             gas_estimate,
             split,
+            simulation_overrides: None,
         }
+    }
+
+    /// Sets the account state Titan priced this swap's venue on.
+    pub fn with_simulation_overrides(mut self, simulation_overrides: SimulationOverrides) -> Self {
+        self.simulation_overrides = Some(simulation_overrides);
+        self
+    }
+
+    /// The account state Titan priced this swap's venue on, when this is a pAMM swap whose state
+    /// carried it. See [`SimulationOverrides`] for how to simulate the swap with it.
+    pub fn simulation_overrides(&self) -> Option<&SimulationOverrides> {
+        self.simulation_overrides.as_ref()
+    }
+}
+
+/// The account state Titan priced a pAMM swap's venue on, to simulate the swap with.
+///
+/// A pAMM quote prices the block Titan is building, on venue state that is not on chain yet, so a
+/// simulation of the swap on chain state alone usually reverts. To reproduce the quote with
+/// `eth_simulateV1` or `eth_call`, simulate on block `block_number - 1`, pass `block_number` and
+/// `block_timestamp` as the `number` and `time` block overrides, and add [`Self::accounts`] to
+/// your state overrides. For a route through several pAMM swaps, merge every swap's accounts, and
+/// when the swaps name different blocks, use the newest block number and its timestamp.
+///
+/// A successful simulation means the quote can fill if the venue's state is current at that price
+/// when the transaction lands, not that it will.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulationOverrides {
+    block_number: Option<u64>,
+    block_timestamp: Option<u64>,
+    accounts: StateOverride,
+}
+
+impl SimulationOverrides {
+    /// Create a new [`SimulationOverrides`].
+    pub fn new(
+        block_number: Option<u64>,
+        block_timestamp: Option<u64>,
+        accounts: StateOverride,
+    ) -> Self {
+        Self { block_number, block_timestamp, accounts }
+    }
+
+    /// The block Titan was building, the one the swap's price is for. `None` when Titan named
+    /// none.
+    pub fn block_number(&self) -> Option<u64> {
+        self.block_number
+    }
+
+    /// The Unix second of [`Self::block_number`]. `None` when Titan named none.
+    pub fn block_timestamp(&self) -> Option<u64> {
+        self.block_timestamp
+    }
+
+    /// The accounts to override. Each sets only a balance, a nonce and a `stateDiff`.
+    pub fn accounts(&self) -> &StateOverride {
+        &self.accounts
     }
 }
 
@@ -821,7 +881,7 @@ pub struct FeeBreakdown {
     swaps_hash: Option<[u8; 32]>,
 }
 
-/// Outcome of simulating an encoded quote against the latest block.
+/// Outcome of simulating an encoded quote.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimulationResult {
     /// The simulated router call returned an amount and consumed gas.

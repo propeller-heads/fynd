@@ -161,7 +161,7 @@ Orchestrates quote requests across multiple worker pools:
 4. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
 5. Drops candidates whose pAMM fallback cannot clear `min_amount_out`, then selects the best solution by refined `amount_out_net_gas`
 6. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided). When the best candidate fails to encode, the next candidate without an RFQ leg is tried, within the encoding retry budget
-7. Optionally simulates the encoded quotes (`--enable-simulation`, requested per quote with `EncodingOptions.simulate`)
+7. Optionally simulates the encoded quotes (`--enable-simulation`, requested per quote with `EncodingOptions.simulate`). A route through pAMM swaps whose states carry Titan's simulation overrides runs on the account state Titan priced them on: on the parent of the block Titan quoted, as that block. `finalize_quote` counts each served quote's pAMM swaps with and without overrides, and the response carries each swap's overrides
 8. Reports failures with error types and metrics
 
 ***
@@ -318,7 +318,7 @@ WorkerPoolRouter (drop pAMM-fallback candidates below min_amount_out, select bes
 Encoder (encode solution into on-chain transaction; on failure, retry next non-RFQ candidate)
     │
     ▼ (optional)
-QuoteSimulator (simulate the encoded quote)
+QuoteSimulator (simulate the encoded quote; pAMM swaps on Titan's simulation overrides)
     │
     ▼
 JSON Response to Client

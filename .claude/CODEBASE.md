@@ -69,7 +69,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 7. **Derived Data** (`fynd-core/src/derived/`) — Pre-computed spot prices, component (pool) depths, token gas prices
 8. **Encoding** (`fynd-core/src/encoding/`) — Encodes solved routes into on-chain transactions via `TychoEncoder`
 9. **Graph** (`fynd-core/src/graph/`) — `GraphManager` trait + `PetgraphStableDiGraphManager` and `TopologyGraphManager` implementations
-10. **Simulation** (`fynd-core/src/simulation/`) — trace-guided ERC-20 storage-layout discovery, `eth_simulateV1` quote simulation, and revert decoding. Enabled per deployment with `--enable-simulation`
+10. **Simulation** (`fynd-core/src/simulation/`) — trace-guided ERC-20 storage-layout discovery, `eth_simulateV1` quote simulation, and revert decoding. Enabled per deployment with `--enable-simulation`. A route through pAMM swaps runs on Titan's simulation overrides (`pamm_overrides.rs`): on the parent of the block Titan quoted, as that block, with the venues' account state merged under the sender's funding
 
 ### Data Flow
 
@@ -89,7 +89,9 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 6. If `EncodingOptions` provided, `Encoder` produces ABI-encoded calldata, one quote at a time: a
    quote that fails to encode gets `QuoteStatus::EncodingFailed` and no transaction, and the other
    quotes keep theirs. Callers read the status of each quote, as they do for `NoRouteFound`
-7. Returns `Quote` response
+7. Returns `Quote` response. Each pAMM swap whose state carried Titan's simulation overrides
+   carries them as `Swap.simulation_overrides` (block number, block timestamp, and accounts in the
+   State Override Set encoding), so a client can reproduce the quote with `eth_simulateV1`
 
 ### Threading Model
 
@@ -116,6 +118,8 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 | `JIT_ROUTER_ADDRESS` | Address of the chain's `FyndJITRouter` (also `--jit-router-address`). A quote request carrying the proxy-injected `x-jit-router: true` header is encoded to be sent there instead of to the Tycho router, with the same calldata (`Encoder::with_jit_router` stores it; `attach_transaction` sets it as `transaction.to`). Vault-funded swaps keep going to the router. `GET /v1/info` reports it as `jit_router_address`, and as `to_address` on a request carrying that header. Unset by default (such requests then fail to encode) |
 | `DISABLE_SLIPPAGE_TAKING_SIGNER_KEY` | Private key for disable-slippage-taking encoding: signs zero-fee `ClientFeeParams` naming its own address as the router fee client when a request carries the proxy-injected `x-disable-slippage-taking: true` header. The FeeCalculator's positive-slippage exemption for that address does the actual disabling. Two consequences, both covered in `fynd-core/src/encoding/disable_slippage_taking.rs`: the signer's address replaces every other fee-client attribution for that request (including the `tx.origin` fallback the order sender stands in for), so the request is charged this key's fee rates, not the caller's; and the signed params carry a deadline, so such a quote expires ~120s after encoding where an unsigned one never did. Unset by default (such requests then fail) |
 | `EXCLUSIVE_ROUTE_USER_SHARE_BPS` | Restricted exclusive-liquidity deployments only. Share of an exclusive route's improvement over the public reference handed to the user, in bps of that improvement (default `1000`) |
+| `DISABLE_PAMM_SIMULATION_OVERRIDES` | Stops the pAMM price level stream from reading Titan's quote stream, the second websocket that carries the account state Titan priced each pAMM quote on (also `--disable-pamm-simulation-overrides`). pAMM swaps then carry no `simulation_overrides`. Quoting is unaffected. Default: read |
+| `TITAN_PAMM_PRICE_LEVEL_URL`, `TITAN_PAMM_QUOTE_STREAM_URL` | Titan's price level and quote stream endpoints, read by tycho-simulation. Unset keeps the EU defaults; set both when moving region |
 | `TYCHO_SUBSCRIPTION_BUFFER_SIZE` | Delta messages buffered per Tycho subscription (also `--tycho-subscription-buffer-size`). Unset keeps Tycho's default |
 | `MAX_SYNC_LAG_SECS` | Seconds of block time a protocol Tycho reports `Delayed` may lag the newest block any protocol reported `Ready` before its pools are excluded from routing (also `--max-sync-lag-secs`, default `15`). A `Stale` protocol is excluded until it catches up and an `Ended` one stays excluded; see `MarketState::update_sync_status` |
 | `PRICING_MAX_HOPS`, `PRICING_MAX_TOKENS_PER_PASS`, `PRICING_MIN_PASS_INTERVAL_MS` | Bounds on the token-pricing pass (also `--pricing-*` flags): how far from the gas token it reaches, how many tokens one pass attempts, and the minimum interval between passes. Unset keeps the built-in defaults |
@@ -131,7 +135,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--simulate-on-quote-block` (simulate on the quote's block instead of the latest), `--encoding-retry-budget-ms` (default `5`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
+| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--simulate-on-quote-block` (simulate on the quote's block instead of the latest; a route with pAMM simulation overrides runs on the quoted block's parent either way), `--disable-pamm-simulation-overrides`, `--encoding-retry-budget-ms` (default `5`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
 | `openapi` | Print the OpenAPI spec JSON to stdout |
 | `derive-connector-tokens` | Derive and print connector token lists for configured protocols |
 

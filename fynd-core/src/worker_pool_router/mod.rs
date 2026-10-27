@@ -54,7 +54,10 @@ use crate::{
     encoding::encoder::Encoder,
     feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
     price_guard::guard::PriceGuard,
-    simulation::simulator::{QuoteSimulator, SimulationPurpose},
+    simulation::{
+        pamm_overrides,
+        simulator::{QuoteSimulator, SimulationPurpose},
+    },
     types::RouteRejection,
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
@@ -491,7 +494,8 @@ fn record_encoding_failures(quotes: &[OrderQuote], cut_off_orders: &[usize]) {
 /// Also credits each winning worker pool and algorithm. Attribution belongs here rather than at
 /// ranking: the price guard can pick a lower-ranked fallback, the exclusive overlay replaces the
 /// head of the list, and a failed encoding moves to the next candidate without an RFQ leg. These
-/// are the quotes the caller receives.
+/// are the quotes the caller receives. For the same reason, this is where the simulation overrides
+/// of their pAMM swaps are counted.
 ///
 /// `token_prices` are the derived token gas prices that restate each win's volume in the gas
 /// token; without them the wins count as unpriced.
@@ -503,6 +507,10 @@ pub fn finalize_quote(
     for quote in &order_quotes {
         record_win(quote, token_prices);
         instrumentation::record_winning_protocols(quote);
+        if let Some(route) = quote.route() {
+            let (_, report) = pamm_overrides::collect(route);
+            report.record(quote.order_id());
+        }
     }
 
     let total_gas_estimate = order_quotes
@@ -1793,6 +1801,7 @@ mod tests {
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         derived::DerivedData,
         feed::exclusivity::mark_exclusive,
+        simulation::pamm_overrides::fixtures as pamm_fixtures,
         solver::defaults,
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
@@ -2384,6 +2393,53 @@ mod tests {
         drop(worker_router);
         worker_a.abort();
         worker_b.abort();
+    }
+
+    /// `finalize_quote` counts the simulation overrides of the pAMM swaps it serves, and serves
+    /// each quote unchanged whether its pAMM swaps carry overrides or not.
+    #[test]
+    fn test_finalize_quote_counts_pamm_overrides() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let route = pamm_fixtures::route(vec![
+            pamm_fixtures::pamm_swap(
+                "with",
+                Some(pamm_fixtures::overrides(
+                    Some(10),
+                    [(0xa1, pamm_fixtures::storage(&[(0, 1)]))],
+                )),
+            ),
+            pamm_fixtures::pamm_swap("without", None),
+        ]);
+        let mut quote =
+            crate::simulation::deviation::fixtures::quote_with_fees(1_000_000).with_route(route);
+        quote.set_transaction(crate::Transaction::new(
+            Bytes::from(make_address(0x02).as_ref()),
+            BigUint::ZERO,
+            vec![0x12],
+        ));
+        let (status, amount_out) = (quote.status(), quote.amount_out().clone());
+
+        let finalized =
+            metrics::with_local_recorder(&recorder, || finalize_quote(vec![quote], 7, None));
+
+        let served = &finalized.orders()[0];
+        assert_eq!(served.status(), status);
+        assert_eq!(*served.amount_out(), amount_out);
+        assert!(served.transaction().is_some());
+        let recorded = recorded_metrics(&snapshotter);
+        let legs = |outcome: &str| {
+            recorded
+                .iter()
+                .find(|(name, labels, _)| {
+                    name == pamm_overrides::LEGS_TOTAL &&
+                        labels.contains(&format!("outcome={outcome}"))
+                })
+                .map(|(.., value)| value)
+        };
+        use metrics_util::debugging::DebugValue::Counter;
+        assert_eq!(legs("attached"), Some(&Counter(1)));
+        assert_eq!(legs("missing"), Some(&Counter(1)));
     }
 
     #[tokio::test]

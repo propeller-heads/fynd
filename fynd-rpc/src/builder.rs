@@ -239,6 +239,16 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Whether the pAMM price level stream also reads Titan's quote stream (default: `true`).
+    ///
+    /// See [`FyndBuilder::pamm_simulation_overrides`].
+    pub fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .pamm_simulation_overrides(enabled);
+        self
+    }
+
     /// Sets the number of delta messages buffered for each Tycho subscription. Leaving this
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {

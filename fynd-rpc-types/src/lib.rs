@@ -12,6 +12,8 @@
 //! - **`openapi`** — derives `utoipa::ToSchema` on all types for OpenAPI spec generation.
 //! - **`core`** — enables `Into` conversions between wire DTOs and `fynd-core` domain types.
 
+use std::collections::BTreeMap;
+
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -52,7 +54,7 @@ mod hex_bytes_serde {
 ///
 /// The inner `bytes::Bytes` is `pub` to allow zero-copy conversions with other
 /// crates that also wrap `bytes::Bytes` (e.g. the `core` feature bridge to tycho).
-#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Bytes(#[serde(with = "hex_bytes_serde")] pub bytes::Bytes);
 
 impl Bytes {
@@ -105,6 +107,55 @@ impl<const N: usize> From<[u8; N]> for Bytes {
 
 /// An EVM address — 20 bytes, same wire format as `Bytes`.
 pub type Address = Bytes;
+
+/// An integer in the JSON-RPC quantity encoding: `"0x"` followed by its hex digits without
+/// leading zeros, `"0x0"` for zero. The encoding `eth_call` and `eth_simulateV1` take for balances
+/// and nonces.
+struct HexQuantity;
+
+impl serde_with::SerializeAs<BigUint> for HexQuantity {
+    fn serialize_as<S>(value: &BigUint, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{value:#x}"))
+    }
+}
+
+impl<'de> serde_with::DeserializeAs<'de, BigUint> for HexQuantity {
+    fn deserialize_as<D>(deserializer: D) -> Result<BigUint, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let quantity = String::deserialize(deserializer)?;
+        quantity
+            .strip_prefix("0x")
+            .and_then(|digits| BigUint::parse_bytes(digits.as_bytes(), 16))
+            .ok_or_else(|| serde::de::Error::custom(format!("{quantity:?} is not a hex quantity")))
+    }
+}
+
+impl serde_with::SerializeAs<u64> for HexQuantity {
+    fn serialize_as<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&format!("{value:#x}"))
+    }
+}
+
+impl<'de> serde_with::DeserializeAs<'de, u64> for HexQuantity {
+    fn deserialize_as<D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let quantity = String::deserialize(deserializer)?;
+        quantity
+            .strip_prefix("0x")
+            .and_then(|digits| u64::from_str_radix(digits, 16).ok())
+            .ok_or_else(|| serde::de::Error::custom(format!("{quantity:?} is not a hex quantity")))
+    }
+}
 
 // ============================================================================
 // REQUEST TYPES
@@ -1028,7 +1079,7 @@ impl OrderQuote {
     }
 }
 
-/// Outcome of simulating an encoded quote on the latest block.
+/// Outcome of simulating an encoded quote.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1198,6 +1249,10 @@ pub struct Swap {
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(example = "0.0"))]
     split: f64,
+    /// The account state Titan priced this swap's venue on, to simulate the swap with. Present
+    /// only on a pAMM swap whose state carried it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    simulation_overrides: Option<SimulationOverrides>,
 }
 
 impl Swap {
@@ -1222,7 +1277,14 @@ impl Swap {
             amount_out,
             gas_estimate,
             split,
+            simulation_overrides: None,
         }
+    }
+
+    /// Sets the account state Titan priced this swap's venue on.
+    pub fn with_simulation_overrides(mut self, simulation_overrides: SimulationOverrides) -> Self {
+        self.simulation_overrides = Some(simulation_overrides);
+        self
     }
 
     /// Component (liquidity pool) identifier.
@@ -1263,6 +1325,126 @@ impl Swap {
     /// Fraction of the total amount routed through this swap.
     pub fn split(&self) -> f64 {
         self.split
+    }
+
+    /// The account state Titan priced this swap's venue on, when this is a pAMM swap whose state
+    /// carried it.
+    pub fn simulation_overrides(&self) -> Option<&SimulationOverrides> {
+        self.simulation_overrides.as_ref()
+    }
+}
+
+/// The account state Titan priced a pAMM swap's venue on, to simulate the swap with.
+///
+/// A pAMM quote prices the block Titan is building, on venue state that is not on chain yet, so a
+/// simulation of the swap on chain state alone usually reverts. To reproduce the quote with
+/// `eth_simulateV1` or `eth_call`, simulate on block `block_number - 1`, pass `block_number` and
+/// `block_timestamp` as the `number` and `time` block overrides, and add `accounts` to your state
+/// overrides. For a route through several pAMM swaps, merge every swap's `accounts`, and when the
+/// swaps name different blocks, use the newest `block_number` and its `block_timestamp`.
+///
+/// A successful simulation means the quote can fill if the venue's state is current at that price
+/// when the transaction lands, not that it will. Fynd never expires or rejects a quote because of
+/// these overrides.
+#[must_use]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SimulationOverrides {
+    /// The block Titan was building, the one this swap's price is for. Absent when Titan named
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 26201954))]
+    block_number: Option<u64>,
+    /// The Unix second of `block_number`. Absent when Titan named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(example = 1792115924))]
+    block_timestamp: Option<u64>,
+    /// The accounts to override, keyed by address, in the State Override Set encoding `eth_call`
+    /// and `eth_simulateV1` take.
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = BTreeMap<String, AccountOverride>)
+    )]
+    accounts: BTreeMap<Address, AccountOverride>,
+}
+
+impl SimulationOverrides {
+    /// Creates the overrides of one pAMM swap.
+    pub fn new(
+        block_number: Option<u64>,
+        block_timestamp: Option<u64>,
+        accounts: BTreeMap<Address, AccountOverride>,
+    ) -> Self {
+        Self { block_number, block_timestamp, accounts }
+    }
+
+    /// The block Titan was building, the one the swap's price is for.
+    pub fn block_number(&self) -> Option<u64> {
+        self.block_number
+    }
+
+    /// The Unix second of [`Self::block_number`].
+    pub fn block_timestamp(&self) -> Option<u64> {
+        self.block_timestamp
+    }
+
+    /// The accounts to override, keyed by address.
+    pub fn accounts(&self) -> &BTreeMap<Address, AccountOverride> {
+        &self.accounts
+    }
+}
+
+/// One account of a State Override Set: the values Titan's simulation set, and nothing else.
+///
+/// An absent field keeps the chain's value, never zero, and `stateDiff` changes only the slots it
+/// names.
+#[must_use]
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AccountOverride {
+    /// Balance in wei, as a hex quantity.
+    #[serde_as(as = "Option<HexQuantity>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(value_type = Option<String>, example = "0x1b6008ea9711c3f3")
+    )]
+    balance: Option<BigUint>,
+    /// Nonce, as a hex quantity.
+    #[serde_as(as = "Option<HexQuantity>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, example = "0xe40"))]
+    nonce: Option<u64>,
+    /// Storage values to set, from 32-byte slot to 32-byte value.
+    #[serde(rename = "stateDiff", default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[cfg_attr(feature = "openapi", schema(value_type = BTreeMap<String, String>))]
+    state_diff: BTreeMap<Bytes, Bytes>,
+}
+
+impl AccountOverride {
+    /// Creates the overrides of one account.
+    pub fn new(
+        balance: Option<BigUint>,
+        nonce: Option<u64>,
+        state_diff: BTreeMap<Bytes, Bytes>,
+    ) -> Self {
+        Self { balance, nonce, state_diff }
+    }
+
+    /// Balance in wei, when overridden.
+    pub fn balance(&self) -> Option<&BigUint> {
+        self.balance.as_ref()
+    }
+
+    /// Nonce, when overridden.
+    pub fn nonce(&self) -> Option<u64> {
+        self.nonce
+    }
+
+    /// Storage values to set, from 32-byte slot to 32-byte value.
+    pub fn state_diff(&self) -> &BTreeMap<Bytes, Bytes> {
+        &self.state_diff
     }
 }
 
@@ -1630,6 +1812,106 @@ mod wire_format_tests {
     // All other Bytes/Address format behaviour is covered implicitly by the
     // struct tests below. This case (no prefix) is the only non-obvious one
     // worth testing in isolation.
+
+    /// Simulation overrides use the State Override Set encoding a client passes straight to
+    /// `eth_call` or `eth_simulateV1`: hex quantities, `stateDiff`, and no field left at zero.
+    mod simulation_overrides {
+        use super::*;
+
+        fn overrides() -> SimulationOverrides {
+            SimulationOverrides::new(
+                Some(26_201_954),
+                Some(1_792_115_924),
+                BTreeMap::from([
+                    (
+                        Bytes::from([0x48u8; 20]),
+                        AccountOverride::new(
+                            Some(BigUint::from(0x1b60_08ea_9711_c3f3u64)),
+                            Some(0xe40),
+                            BTreeMap::new(),
+                        ),
+                    ),
+                    (
+                        Bytes::from([0xb2u8; 20]),
+                        AccountOverride::new(
+                            None,
+                            None,
+                            BTreeMap::from([(Bytes::from([0u8; 32]), Bytes::from([0x04u8; 32]))]),
+                        ),
+                    ),
+                ]),
+            )
+        }
+
+        #[test]
+        fn test_simulation_overrides_serde_roundtrip() {
+            let json = serde_json::to_value(overrides()).unwrap();
+
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "block_number": 26_201_954,
+                    "block_timestamp": 1_792_115_924,
+                    "accounts": {
+                        format!("0x{}", "48".repeat(20)): {
+                            "balance": "0x1b6008ea9711c3f3",
+                            "nonce": "0xe40",
+                        },
+                        format!("0x{}", "b2".repeat(20)): {
+                            "stateDiff": {
+                                format!("0x{}", "00".repeat(32)): format!("0x{}", "04".repeat(32)),
+                            },
+                        },
+                    },
+                })
+            );
+            let back: SimulationOverrides = serde_json::from_value(json).unwrap();
+            assert_eq!(back, overrides());
+        }
+
+        #[test]
+        fn test_hex_quantity_zero() {
+            let account = AccountOverride::new(Some(BigUint::ZERO), Some(0), BTreeMap::new());
+
+            assert_eq!(
+                serde_json::to_value(&account).unwrap(),
+                serde_json::json!({"balance": "0x0", "nonce": "0x0"})
+            );
+        }
+
+        #[test]
+        fn test_hex_quantity_rejects_a_decimal() {
+            assert!(serde_json::from_str::<AccountOverride>(r#"{"nonce": "12"}"#).is_err());
+            assert!(serde_json::from_str::<AccountOverride>(r#"{"balance": "0xzz"}"#).is_err());
+        }
+
+        /// A swap without overrides omits the field, and a response from a server that never
+        /// sends it still parses.
+        #[test]
+        fn test_swap_without_simulation_overrides() {
+            let swap = Swap::new(
+                "pool".to_string(),
+                "uniswap_v2".to_string(),
+                Bytes::from([0x01u8; 20]),
+                Bytes::from([0x02u8; 20]),
+                BigUint::from(1_000u64),
+                BigUint::from(990u64),
+                BigUint::from(50_000u64),
+                0.0,
+            );
+
+            let json = serde_json::to_value(&swap).unwrap();
+
+            assert!(json
+                .get("simulation_overrides")
+                .is_none());
+            let back: Swap = serde_json::from_value(json).unwrap();
+            assert_eq!(back.simulation_overrides(), None);
+            let with = swap.with_simulation_overrides(overrides());
+            let back: Swap = serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+            assert_eq!(back.simulation_overrides(), Some(&overrides()));
+        }
+    }
 
     #[test]
     fn bytes_deserializes_without_0x_prefix() {
@@ -2121,6 +2403,9 @@ mod conversions {
 
     impl From<fynd_core::Swap> for Swap {
         fn from(core: fynd_core::Swap) -> Self {
+            let simulation_overrides = core
+                .simulation_overrides()
+                .map(Into::into);
             Self {
                 component_id: core.component_id().to_string(),
                 protocol: core.protocol().to_string(),
@@ -2130,6 +2415,34 @@ mod conversions {
                 amount_out: core.amount_out().clone(),
                 gas_estimate: core.gas_estimate().clone(),
                 split: *core.split(),
+                simulation_overrides,
+            }
+        }
+    }
+
+    impl From<fynd_core::SimulationOverrides> for SimulationOverrides {
+        fn from(core: fynd_core::SimulationOverrides) -> Self {
+            let mut accounts = BTreeMap::new();
+            for (address, account) in core.accounts() {
+                let mut state_diff = BTreeMap::new();
+                for (slot, value) in account.state_diff.iter().flatten() {
+                    state_diff.insert(Bytes::from(slot.as_slice()), Bytes::from(value.as_slice()));
+                }
+                accounts.insert(
+                    Bytes::from(address.as_slice()),
+                    AccountOverride {
+                        balance: account
+                            .balance
+                            .map(|balance| BigUint::from_bytes_be(&balance.to_be_bytes::<32>())),
+                        nonce: account.nonce,
+                        state_diff,
+                    },
+                );
+            }
+            Self {
+                block_number: core.block_number(),
+                block_timestamp: core.block_timestamp(),
+                accounts,
             }
         }
     }
@@ -2416,6 +2729,79 @@ mod conversions {
             };
             let json = serde_json::to_string(&SimulationResult::from(core)).unwrap();
             assert_eq!(json, r#"{"status":"success","amount_out":"990","gas_used":1}"#);
+        }
+
+        /// A core pAMM swap whose state carries overrides reaches the wire with them, converted
+        /// to the State Override Set encoding; any other swap reaches it without.
+        #[test]
+        fn test_swap_simulation_overrides_from_core() {
+            use tycho_simulation::{
+                price_level_stream::{
+                    overrides::{AccountOverride as TychoAccountOverride, PammSimulationOverrides},
+                    state::{PriceLevelStreamQuote, PriceLevelStreamState},
+                },
+                tycho_common::{
+                    models::protocol::ProtocolComponent, simulation::protocol_sim::ProtocolSim,
+                },
+            };
+
+            let address = |byte: u8| TychoBytes::from([byte; 20]);
+            let account = TychoAccountOverride {
+                balance: Some(TychoBytes::from(vec![0x0e, 0x40])),
+                nonce: Some(1),
+                state_diff: BTreeMap::from([(
+                    TychoBytes::from([0u8; 32]),
+                    TychoBytes::from([0x04u8; 32]),
+                )]),
+            };
+            let overrides = PammSimulationOverrides {
+                accounts: BTreeMap::from([(address(0xa1), account)]),
+                block_number: Some(26_201_954),
+                block_timestamp: Some(1_792_115_924),
+                built_at_ns: 1_792_115_920_127_487_452,
+            };
+            let quote = PriceLevelStreamQuote::new(BigUint::from(1_000u64), BigUint::from(990u64));
+            let state = PriceLevelStreamState::new(
+                address(0x01),
+                address(0x02),
+                vec![quote.clone()],
+                vec![quote],
+                BigUint::from(100_000u64),
+            );
+            let swap_on = |state: Box<dyn ProtocolSim>| {
+                fynd_core::Swap::new(
+                    "pamm".to_string(),
+                    "fallback:fermiswap".to_string(),
+                    address(0x01),
+                    address(0x02),
+                    BigUint::from(1_000u64),
+                    BigUint::from(990u64),
+                    BigUint::from(100_000u64),
+                    ProtocolComponent::default(),
+                    state,
+                )
+            };
+
+            let with = Swap::from(swap_on(Box::new(
+                state
+                    .clone()
+                    .with_simulation_overrides(overrides),
+            )));
+            let without = Swap::from(swap_on(Box::new(state)));
+
+            let wire = with
+                .simulation_overrides()
+                .expect("the pAMM swap carries overrides");
+            assert_eq!(wire.block_number(), Some(26_201_954));
+            assert_eq!(wire.block_timestamp(), Some(1_792_115_924));
+            let account = &wire.accounts()[&Bytes::from([0xa1u8; 20])];
+            assert_eq!(account.balance(), Some(&BigUint::from(0x0e40u64)));
+            assert_eq!(account.nonce(), Some(1));
+            assert_eq!(
+                account.state_diff(),
+                &BTreeMap::from([(Bytes::from([0u8; 32]), Bytes::from([0x04u8; 32]))])
+            );
+            assert_eq!(without.simulation_overrides(), None);
         }
 
         #[test]

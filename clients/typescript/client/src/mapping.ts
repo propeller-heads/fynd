@@ -1,6 +1,8 @@
+import { isHex } from "viem";
 import type { components } from "./autogen.js";
 import { FyndError } from "./error.js";
 import type {
+    AccountOverride,
     Address,
     BlockInfo,
     ClientFeeParams,
@@ -15,6 +17,7 @@ import type {
     QuoteParams,
     Route,
     RouteFilter,
+    SimulationOverrides,
     SimulationResult,
     Swap,
     Transaction,
@@ -36,6 +39,7 @@ type WirePermitDetails = components["schemas"]["PermitDetails"];
 type WireClientFeeParams = components["schemas"]["ClientFeeParams"];
 type WireFeeBreakdown = components["schemas"]["FeeBreakdown"];
 type WireSimulationResult = components["schemas"]["SimulationResult"];
+type WireSimulationOverrides = components["schemas"]["SimulationOverrides"];
 type WireRouteFilter = components["schemas"]["RouteFilter"];
 
 
@@ -133,6 +137,9 @@ function fromWireRoute(wire: WireRoute): Route {
 }
 
 function fromWireSwap(wire: WireSwap): Swap {
+    const simulationOverrides = wire.simulation_overrides != null
+        ? fromWireSimulationOverrides(wire.simulation_overrides, wire.component_id)
+        : undefined;
     return {
         componentId: wire.component_id,
         protocol: wire.protocol,
@@ -141,7 +148,68 @@ function fromWireSwap(wire: WireSwap): Swap {
         amountIn: BigInt(wire.amount_in),
         amountOut: BigInt(wire.amount_out),
         gasEstimate: BigInt(wire.gas_estimate),
+        ...(simulationOverrides !== undefined ? {simulationOverrides} : {}),
     };
+}
+
+/**
+ * Converts a swap's simulation overrides into viem's state override shape. The overrides only serve
+ * a simulation, so a malformed set is dropped with a warning and never fails the quote.
+ */
+function fromWireSimulationOverrides(
+    wire: WireSimulationOverrides,
+    componentId: string,
+): SimulationOverrides | undefined {
+    try {
+        const accounts: AccountOverride[] = Object.entries(wire.accounts).map(
+            ([address, account]) => {
+                const stateDiff = Object.entries(account.stateDiff ?? {}).map(([slot, value]) => ({
+                    slot: hexOfBytes(slot, 32, `storage slot of ${address}`),
+                    value: hexOfBytes(value, 32, `storage value of ${address}`),
+                }));
+                return {
+                    address: hexOfBytes(address, 20, 'account address') as Address,
+                    ...(account.balance != null
+                        ? {balance: hexQuantity(account.balance, 256, `balance of ${address}`)}
+                        : {}),
+                    ...(account.nonce != null
+                        ? {nonce: Number(hexQuantity(account.nonce, 64, `nonce of ${address}`))}
+                        : {}),
+                    ...(stateDiff.length > 0 ? {stateDiff} : {}),
+                };
+            },
+        );
+        return {
+            ...(wire.block_number != null ? {blockNumber: wire.block_number} : {}),
+            ...(wire.block_timestamp != null ? {blockTimestamp: wire.block_timestamp} : {}),
+            accounts,
+        };
+    } catch (error) {
+        console.warn(
+            `[fynd] dropping malformed simulation overrides of swap ${componentId}: ${String(error)}`,
+        );
+        return undefined;
+    }
+}
+
+/** Returns `value` when it is exactly `bytes` bytes of hex, and throws naming `what` otherwise. */
+function hexOfBytes(value: string, bytes: number, what: string): Hex {
+    if (!isHex(value, {strict: true}) || value.length !== 2 + 2 * bytes) {
+        throw new Error(`${what} ${value} is not ${bytes} bytes of hex`);
+    }
+    return value;
+}
+
+/** Parses a JSON-RPC hex quantity of at most `bits` bits, and throws naming `what` otherwise. */
+function hexQuantity(value: string, bits: number, what: string): bigint {
+    if (!isHex(value, {strict: true}) || value === '0x') {
+        throw new Error(`${what} ${value} is not a hex quantity`);
+    }
+    const quantity = BigInt(value);
+    if (quantity >= 1n << BigInt(bits)) {
+        throw new Error(`${what} ${value} exceeds ${bits} bits`);
+    }
+    return quantity;
 }
 
 function fromWireBlockInfo(wire: WireBlockInfo): BlockInfo {
