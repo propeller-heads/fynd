@@ -174,7 +174,8 @@ export interface Swap {
  * simulation of the swap on chain state alone usually reverts. To reproduce the quote, simulate on
  * block `blockNumber - 1`, pass `blockNumber` and `blockTimestamp` as the `number` and `time` block
  * overrides, and pass `accounts` as viem's `stateOverride`. For a route through several pAMM swaps,
- * merge every swap's accounts.
+ * merge every swap's accounts, and when the swaps name different blocks, use the newest
+ * `blockNumber` and its `blockTimestamp`.
  *
  * A successful simulation means the quote can fill if the venue's state is current at that price
  * when the transaction lands, not that it will.
