@@ -147,7 +147,9 @@ clap = { version = "4.5", features = ["derive", "env"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: Bebop levels are JSON floats on the nexus wire; without it a price can
+# read back one ULP off.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_with = { version = "3", features = ["std"] }
 toml = "0.8"
 
