@@ -46,6 +46,8 @@ struct ReplayRouteFilter {
     exclude_protocols: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_tokens: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    require_tokens: Vec<String>,
 }
 
 impl ReplayRouteFilter {
@@ -65,16 +67,28 @@ impl ReplayRouteFilter {
             .iter()
             .map(ToString::to_string)
             .collect();
+        let mut required: Vec<String> = filter
+            .required_tokens()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         pools.sort_unstable();
         protocols.sort_unstable();
         tokens.sort_unstable();
-        Self { exclude_pools: pools, exclude_protocols: protocols, exclude_tokens: tokens }
+        required.sort_unstable();
+        Self {
+            exclude_pools: pools,
+            exclude_protocols: protocols,
+            exclude_tokens: tokens,
+            require_tokens: required,
+        }
     }
 
     fn is_empty(&self) -> bool {
         self.exclude_pools.is_empty() &&
             self.exclude_protocols.is_empty() &&
-            self.exclude_tokens.is_empty()
+            self.exclude_tokens.is_empty() &&
+            self.require_tokens.is_empty()
     }
 }
 
