@@ -500,7 +500,8 @@ mod tests {
         top_n: usize,
         min_component_count: usize,
     ) -> Vec<(String, SelectedBy)> {
-        select_connectors(scores, wrap_pair, top_n, min_component_count)
+        let sizes = RankingSizes { pool_count: top_n, tvl: top_n };
+        select_connectors(scores, wrap_pair, sizes, min_component_count)
             .into_iter()
             .map(|entry| (entry.score.symbol, entry.selected_by))
             .collect()
@@ -551,6 +552,31 @@ mod tests {
     }
 
     #[test]
+    fn test_select_connectors_takes_each_ranking_size() {
+        let scores = vec![
+            score("Hub", 50, 1.0),
+            score("Busy", 40, 2.0),
+            score("Deep", 2, 900.0),
+            score("Mid", 3, 500.0),
+        ];
+        let sizes = RankingSizes { pool_count: 1, tvl: 2 };
+
+        let picked: Vec<(String, SelectedBy)> = select_connectors(scores, &[], sizes, 2)
+            .into_iter()
+            .map(|entry| (entry.score.symbol, entry.selected_by))
+            .collect();
+
+        assert_eq!(
+            picked,
+            vec![
+                ("Deep".to_string(), SelectedBy::Tvl),
+                ("Mid".to_string(), SelectedBy::Tvl),
+                ("Hub".to_string(), SelectedBy::PoolCount),
+            ]
+        );
+    }
+
+    #[test]
     fn test_select_connectors_min_component_count_applies_to_both() {
         let scores = vec![score("Lone", 1, 5000.0), score("Pair", 2, 10.0)];
 
@@ -576,7 +602,7 @@ mod tests {
     fn test_select_connectors_orders_by_tvl_rank_and_breaks_ties_by_address() {
         let scores = vec![score("B", 5, 10.0), score("A", 5, 10.0), score("C", 9, 20.0)];
 
-        let ranked = select_connectors(scores, &[], 3, 1);
+        let ranked = select_connectors(scores, &[], RankingSizes { pool_count: 3, tvl: 3 }, 1);
 
         let order: Vec<&str> = ranked
             .iter()
