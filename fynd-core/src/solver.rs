@@ -743,6 +743,12 @@ impl FyndBuilder {
     /// published set. Every component must be executable: its protocol system needs an executor
     /// on the configured chain.
     ///
+    /// The prefix of `protocol_system` decides how Fynd treats the components:
+    /// - `fallback:` makes them pAMMs. A graph leaves one out when no fallback candidate pool
+    ///   exists for its swap directions, and token gas pricing ignores them.
+    /// - `rfq:` puts them under the RFQ swap replacer and the RFQ encoding-failure handling, and
+    ///   token gas pricing ignores them. `fallback:rfq:` gets both treatments.
+    ///
     /// Fynd drops, with a warning, each component whose protocol system differs from
     /// `protocol_system` or that has a token outside the token universe. It also drops one whose
     /// id the market already holds under another protocol system.
@@ -750,6 +756,10 @@ impl FyndBuilder {
     /// The market feed fails at startup, with a configuration error, if `make_feed` returns an
     /// error, if two sources share a `protocol_system`, or if a `--protocols` entry has the same
     /// name as the source.
+    ///
+    /// `make_feed` runs each time the market feed opens its book feeds, so again after every
+    /// restart of the market feed. A feed that panics ends the whole market feed, the Tycho
+    /// stream included.
     pub fn with_external_liquidity<M, F>(
         mut self,
         protocol_system: impl Into<String>,
