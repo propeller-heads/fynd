@@ -454,8 +454,8 @@ impl StoredComponent {
 }
 
 impl MarketState {
-    /// The pools and tokens `filter` excludes, with each protocol system it names replaced by
-    /// the components this market holds for that system.
+    /// The pools and tokens `filter` excludes and the tokens it requires, with each protocol
+    /// system it names replaced by the components this market holds for that system.
     ///
     /// A protocol system matches exactly (`uniswap_v2`), or as a family when the entry ends in
     /// `:` (`fallback:`). An entry this market holds no component for excludes nothing.
@@ -479,6 +479,7 @@ impl MarketState {
         ResolvedRouteConstraints {
             pools,
             tokens: filter.excluded_tokens().clone(),
+            required_tokens: filter.required_tokens().clone(),
             unsynced_pools: Arc::clone(&self.unsynced_pools),
         }
     }

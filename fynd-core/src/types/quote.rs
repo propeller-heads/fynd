@@ -83,18 +83,20 @@ impl QuoteRequest {
     }
 }
 
-/// What a caller names to keep out of a route: pools, protocol systems and tokens.
+/// What a caller names to keep out of a route (pools, protocol systems and tokens) and the tokens
+/// every route must pass through.
 ///
 /// This is the request's own words. A solve reads [`ResolvedRouteConstraints`] instead, which
 /// [`crate::feed::market_data::MarketState::resolve_route_filter`] builds from this by replacing
 /// each protocol system with the pools that system holds.
 ///
-/// Empty by default, so nothing is excluded unless the request names it.
+/// Empty by default, so nothing is excluded or required unless the request names it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RouteConstraints {
     excluded_pools: FxHashSet<ComponentId>,
     excluded_protocols: FxHashSet<String>,
     excluded_tokens: FxHashSet<Address>,
+    required_tokens: FxHashSet<Address>,
 }
 
 impl RouteConstraints {
@@ -123,12 +125,22 @@ impl RouteConstraints {
         self
     }
 
-    /// Whether nothing is excluded, so a caller can skip the checks.
+    /// Requires every route to pass through every one of these tokens.
+    ///
+    /// The order's input and output tokens count as passed, so listing either adds no constraint.
+    #[must_use]
+    pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.required_tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded or required, so a caller can skip the checks.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.excluded_pools.is_empty() &&
             self.excluded_protocols.is_empty() &&
-            self.excluded_tokens.is_empty()
+            self.excluded_tokens.is_empty() &&
+            self.required_tokens.is_empty()
     }
 
     /// The pools excluded, by component id.
@@ -148,6 +160,42 @@ impl RouteConstraints {
     pub fn excluded_tokens(&self) -> &FxHashSet<Address> {
         &self.excluded_tokens
     }
+
+    /// A route must pass through every token in this set.
+    #[must_use]
+    pub fn required_tokens(&self) -> &FxHashSet<Address> {
+        &self.required_tokens
+    }
+
+    /// Checks that no route could satisfy the filter's required and excluded tokens.
+    ///
+    /// # Errors
+    ///
+    /// [`RouteConstraintsError::RequiredTokenExcluded`] when a token is both required and
+    /// excluded.
+    pub fn validate(&self) -> Result<(), RouteConstraintsError> {
+        match self
+            .required_tokens
+            .intersection(&self.excluded_tokens)
+            .next()
+        {
+            Some(token) => {
+                Err(RouteConstraintsError::RequiredTokenExcluded { token: token.clone() })
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// Errors that can occur when validating a [`RouteConstraints`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum RouteConstraintsError {
+    /// A token is in both the required and the excluded tokens.
+    #[error("token {token} is both required and excluded")]
+    RequiredTokenExcluded {
+        /// The token named in both sets.
+        token: Address,
+    },
 }
 
 /// The pools and tokens one solve must not use, with every protocol system already
@@ -160,12 +208,16 @@ impl RouteConstraints {
 /// A token here is excluded as an intermediate only: the order's own two tokens stay allowed,
 /// because every route touches them.
 ///
+/// `ResolvedRouteConstraints` also holds a set of tokens, every one of which a route must pass
+/// through.
+///
 /// Every solve also excludes the pools of protocols the market marks out of sync; see
 /// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedRouteConstraints {
     pub(crate) pools: FxHashSet<ComponentId>,
     pub(crate) tokens: FxHashSet<Address>,
+    pub(crate) required_tokens: FxHashSet<Address>,
     pub(crate) unsynced_pools: Arc<FxHashSet<ComponentId>>,
 }
 
@@ -183,6 +235,14 @@ impl ResolvedRouteConstraints {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
         self.tokens.extend(tokens);
+        self
+    }
+
+    /// Requires routes to pass through every one of these tokens.
+    #[must_use]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.required_tokens.extend(tokens);
         self
     }
 
@@ -215,6 +275,20 @@ impl ResolvedRouteConstraints {
     #[must_use]
     pub fn excludes_token(&self, token: &Address) -> bool {
         self.tokens.contains(token)
+    }
+
+    /// Whether a token path, endpoints included, visits every required token.
+    ///
+    /// Always true when no token is required.
+    #[must_use]
+    pub fn visits_all_required_tokens<'a>(
+        &self,
+        path: impl IntoIterator<Item = &'a Address>,
+    ) -> bool {
+        let visited: FxHashSet<&Address> = path.into_iter().collect();
+        self.required_tokens
+            .iter()
+            .all(|token| visited.contains(token))
     }
 }
 
