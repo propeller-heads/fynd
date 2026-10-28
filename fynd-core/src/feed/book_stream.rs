@@ -876,6 +876,18 @@ mod tests {
                 vec![external_liquidity("rfq:bebop", &["0x01"])],
                 "--protocols",
             ),
+            (
+                "name of a Tycho --protocols entry",
+                vec!["uniswap_v2"],
+                vec![external_liquidity("uniswap_v2", &["0x01"])],
+                "--protocols",
+            ),
+            (
+                "venue of a fallback --protocols entry",
+                vec!["fallback:rfq:bebop"],
+                vec![external_liquidity("rfq:bebop", &["0x01"])],
+                "--protocols",
+            ),
         ];
 
         for (scenario, protocols, feeds, expected) in cases {
