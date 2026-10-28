@@ -67,6 +67,7 @@ describe('toWireRequest', () => {
           excludePools: ['0xabc'],
           excludeProtocols: ['uniswap_v2'],
           excludeTokens: [TOKEN_OUT],
+          requireTokens: [TOKEN_IN],
         },
       },
     });
@@ -74,6 +75,7 @@ describe('toWireRequest', () => {
       exclude_pools: ['0xabc'],
       exclude_protocols: ['uniswap_v2'],
       exclude_tokens: [TOKEN_OUT],
+      require_tokens: [TOKEN_IN],
     });
   });
 
