@@ -95,7 +95,6 @@ pub struct BookStream {
 /// Builds external liquidity from its source name and its config, and adds it to the merged feed
 /// streams.
 type OpenExternalLiquidity = dyn Fn(
-        &str,
         ExternalLiquidityConfig,
         &mut SnapshotFeedStreams<LiquiditySnapshot, FeedError>,
     ) -> Result<(), DataFeedError>
@@ -105,11 +104,10 @@ type OpenExternalLiquidity = dyn Fn(
 /// External liquidity added through
 /// [`FyndBuilder::with_external_liquidity`](crate::FyndBuilder::with_external_liquidity) instead
 /// of a `--protocols` entry. Its components reach the market the way the built-in venues' do.
-#[derive(Clone)]
 pub(crate) struct ExternalLiquidity {
     /// The feed's name, which is the protocol system of the components it publishes.
     protocol_system: String,
-    open: Arc<OpenExternalLiquidity>,
+    open: Box<OpenExternalLiquidity>,
 }
 
 impl ExternalLiquidity {
@@ -119,10 +117,11 @@ impl ExternalLiquidity {
         M: Fn(ExternalLiquidityConfig) -> Result<F, FeedError> + Send + Sync + 'static,
         F: SnapshotFeed<Snapshot = LiquiditySnapshot, Error = FeedError>,
     {
+        let name = protocol_system.clone();
         let open =
-            move |protocol_system: &str,
-                  config: ExternalLiquidityConfig,
+            move |config: ExternalLiquidityConfig,
                   feeds: &mut SnapshotFeedStreams<LiquiditySnapshot, FeedError>| {
+                let protocol_system = name.as_str();
                 let feed = make_feed(config).map_err(|e| {
                     DataFeedError::Config(format!(
                         "{protocol_system} external liquidity could not be built: {e}"
@@ -136,7 +135,7 @@ impl ExternalLiquidity {
                         ))
                     })
             };
-        Self { protocol_system, open: Arc::new(open) }
+        Self { protocol_system, open: Box::new(open) }
     }
 
     fn open(
@@ -144,7 +143,7 @@ impl ExternalLiquidity {
         config: ExternalLiquidityConfig,
         feeds: &mut SnapshotFeedStreams<LiquiditySnapshot, FeedError>,
     ) -> Result<(), DataFeedError> {
-        (self.open)(&self.protocol_system, config, feeds)
+        (self.open)(config, feeds)
     }
 }
 
@@ -374,10 +373,17 @@ impl BookStream {
     async fn next(&mut self) -> Result<BookUpdate, DataFeedError> {
         loop {
             let (provider, event) = tokio::select! {
-                Some((provider, event)) = self.feeds.next(), if !self.feeds.is_empty() => {
+                Some((provider, event)) = self.feeds.next() => {
+                    if let SnapshotFeedEvent::Published(snapshot) = &event {
+                        debug!(
+                            protocol_system = provider,
+                            received_at = %snapshot.anchor.0,
+                            "received book snapshot"
+                        );
+                    }
                     (provider, liquidity_event(event))
                 }
-                Some((provider, event)) = self.external.next(), if !self.external.is_empty() => {
+                Some((provider, event)) = self.external.next() => {
                     let event = match event {
                         SnapshotFeedEvent::Published(snapshot) => SnapshotFeedEvent::Published(
                             self.keep_valid_components(&provider, snapshot),
@@ -545,7 +551,7 @@ fn reject_name_clash(
                 .is_some_and(|venue| venue.protocol() == source.protocol_system);
         if clashes {
             return Err(DataFeedError::Config(format!(
-                "external liquidity {} has the name of the --protocols entry {entry}; rename it or \
+                "external liquidity {} clashes with the --protocols entry {entry}; rename it or \
                  drop the entry",
                 source.protocol_system
             )));
@@ -1017,53 +1023,50 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_open_external_liquidity_config_errors() {
-        let failing_build = ExternalLiquidity::new(
-            "fallback:manta".to_string(),
-            |_config: ExternalLiquidityConfig| {
-                Err::<SingleSnapshotFeed, _>(FeedError::InvalidInput("no RPC URL".to_string()))
-            },
-        );
-        let cases = [
-            ("build error", vec![], vec![failing_build], "no RPC URL"),
-            (
-                "shared name",
-                vec![],
-                vec![
-                    external_liquidity("fallback:manta", &["0x01"]),
-                    external_liquidity("fallback:manta", &["0x02"]),
-                ],
-                "added twice",
-            ),
-            (
-                "name of a --protocols venue",
-                vec!["rfq:bebop"],
-                vec![external_liquidity("rfq:bebop", &["0x01"])],
-                "--protocols",
-            ),
-            (
-                "name of a Tycho --protocols entry",
-                vec!["uniswap_v2"],
-                vec![external_liquidity("uniswap_v2", &["0x01"])],
-                "--protocols",
-            ),
-            (
-                "venue of a fallback --protocols entry",
-                vec!["fallback:rfq:bebop"],
-                vec![external_liquidity("rfq:bebop", &["0x01"])],
-                "--protocols",
-            ),
-        ];
+    fn failing_build() -> ExternalLiquidity {
+        ExternalLiquidity::new("fallback:manta".to_string(), |_config: ExternalLiquidityConfig| {
+            Err::<SingleSnapshotFeed, _>(FeedError::InvalidInput("no RPC URL".to_string()))
+        })
+    }
 
-        for (scenario, protocols, feeds, expected) in cases {
-            let Err(DataFeedError::Config(message)) =
-                open_external_liquidity(Chain::Base, &protocols, feeds)
-            else {
-                panic!("{scenario}: the stream must not open");
-            };
-            assert!(message.contains(expected), "{scenario}: {message}");
-        }
+    #[rstest::rstest]
+    #[case::build_error(&[], vec![failing_build()], "no RPC URL")]
+    #[case::shared_name(
+        &[],
+        vec![
+            external_liquidity("fallback:manta", &["0x01"]),
+            external_liquidity("fallback:manta", &["0x02"]),
+        ],
+        "added twice"
+    )]
+    #[case::name_of_protocols_venue(
+        &["rfq:bebop"],
+        vec![external_liquidity("rfq:bebop", &["0x01"])],
+        "clashes with the --protocols entry rfq:bebop"
+    )]
+    #[case::name_of_tycho_entry(
+        &["uniswap_v2"],
+        vec![external_liquidity("uniswap_v2", &["0x01"])],
+        "clashes with the --protocols entry uniswap_v2"
+    )]
+    #[case::venue_of_fallback_entry(
+        &["fallback:rfq:bebop"],
+        vec![external_liquidity("rfq:bebop", &["0x01"])],
+        "external liquidity rfq:bebop clashes with the --protocols entry fallback:rfq:bebop"
+    )]
+    #[tokio::test]
+    async fn test_open_external_liquidity_config_errors(
+        #[case] protocols: &[&str],
+        #[case] feeds: Vec<ExternalLiquidity>,
+        #[case] expected: &str,
+    ) {
+        let Err(DataFeedError::Config(message)) =
+            open_external_liquidity(Chain::Base, protocols, feeds)
+        else {
+            panic!("the stream must not open");
+        };
+
+        assert!(message.contains(expected), "{message}");
     }
 
     #[test]

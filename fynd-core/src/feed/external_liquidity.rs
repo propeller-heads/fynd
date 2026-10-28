@@ -3,6 +3,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use tracing::warn;
 use tycho_simulation::{
     book::{BookSnapshot, ReceivedAt},
     protocol::models::ProtocolComponent,
@@ -62,11 +63,18 @@ pub struct LiquiditySnapshot {
 }
 
 impl LiquiditySnapshot {
-    /// A snapshot serving `components`. If two share a component id, the later one is kept.
+    /// A snapshot serving `components`. If two share a component id, the later one is kept and a
+    /// warning says so.
     pub fn new(components: Vec<LiquidityComponent>) -> Self {
         let mut by_id = HashMap::with_capacity(components.len());
         for entry in components {
-            by_id.insert(entry.component.id.to_string(), entry);
+            let id = entry.component.id.to_string();
+            if by_id
+                .insert(id.clone(), entry)
+                .is_some()
+            {
+                warn!("Two components share the id {id}; keeping the later one");
+            }
         }
         Self { components: Arc::new(by_id) }
     }

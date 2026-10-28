@@ -33,7 +33,7 @@ pub(crate) async fn when_configured<T>(source: Option<impl Future<Output = T>>) 
 }
 
 /// Configuration for the TychoFeed.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct TychoFeedConfig {
     /// Tycho WebSocket URL.
     pub(crate) tycho_url: String,
