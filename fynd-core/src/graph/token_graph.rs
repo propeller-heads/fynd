@@ -1356,6 +1356,82 @@ mod tests {
         assert_eq!(routes, FxHashSet::from_iter([vec!["ac", "cd"]]));
     }
 
+    /// A route must pass through every required token; an order's own token counts as passed.
+    /// Required tokens are indices into the graph's `[a, b, c, d]`; index 4 is a token outside the
+    /// graph.
+    #[rstest]
+    #[case::intermediate(&[1], vec![vec!["ab", "bd"]])]
+    #[case::no_path_has_both(&[1, 2], vec![])]
+    #[case::endpoint_and_intermediate(&[0, 1], vec![vec!["ab", "bd"]])]
+    #[case::endpoint(&[3], vec![vec!["ab", "bd"], vec!["ac", "cd"]])]
+    #[case::off_every_route(&[4], vec![])]
+    fn test_paths_with_required_token(
+        #[case] required: &[usize],
+        #[case] expected: Vec<Vec<&str>>,
+    ) {
+        let (a, b, c, d) = addrs();
+        let tokens = [a.clone(), b, c, d.clone(), Address::from([0x99; 20])];
+        let m = diamond_graph();
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(
+            required
+                .iter()
+                .map(|&index| tokens[index].clone()),
+        );
+
+        let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
+
+        assert_eq!(routes, FxHashSet::from_iter(expected));
+    }
+
+    /// A path keeps only if it visits every required token, not just one of them.
+    #[rstest]
+    #[case::one_token(&[0x59], 2)]
+    #[case::both_tokens(&[0x58, 0x59], 1)]
+    fn test_paths_with_several_required_tokens(#[case] required: &[u8], #[case] expected: usize) {
+        let m = stacked_graph();
+        let g = m.graph();
+        let exclusions = ResolvedRouteConstraints::default()
+            .with_required_tokens(required.iter().map(|&byte| addr(byte)));
+
+        let paths = g
+            .paths_between(
+                &addr(0x51),
+                &addr(0x54),
+                RouteSearch {
+                    bounds: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
+                    exclusions: &exclusions,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(paths.len(), expected);
+    }
+
+    /// A route that returns to its start token must also pass through a required token.
+    #[test]
+    fn test_cyclic_paths_with_required_token() {
+        let (a, b, _, _) = addrs();
+        let m = diamond_graph();
+        let g = m.graph();
+        let start = g.get_token_ix(&a).unwrap();
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens([b.clone()]);
+
+        let cycles = g.paths_between_ix(
+            start,
+            start,
+            RouteSearch {
+                bounds: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
+                exclusions: &exclusions,
+            },
+        );
+
+        assert!(!cycles.is_empty());
+        let b_ix = g.get_token_ix(&b).unwrap();
+        assert!(cycles
+            .iter()
+            .all(|cycle| cycle.contains(&b_ix)));
+    }
+
     /// A pair whose every pool is excluded no longer connects its two tokens.
     #[test]
     fn test_paths_with_every_pool_of_a_pair_excluded() {
