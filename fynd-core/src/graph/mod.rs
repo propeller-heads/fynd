@@ -20,7 +20,7 @@ use tycho_simulation::{
 use crate::{
     derived::DerivedData,
     feed::market_data::MarketDataView,
-    types::{ComponentId, ComponentTopology, RouteExclusions},
+    types::{ComponentId, ComponentTopology, ResolvedRouteConstraints},
 };
 
 /// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
@@ -140,7 +140,7 @@ where
 ///
 /// Bundles what an algorithm configures once — how long a route may be, and which tokens it may
 /// pass through — so they travel as one argument instead of three. What a request excludes is not
-/// here: that changes per solve and travels beside this as a [`RouteExclusions`].
+/// here: that changes per solve and travels beside this as a [`ResolvedRouteConstraints`].
 #[derive(Debug, Clone)]
 pub struct GraphQueryFilter {
     /// Shortest route to return, in hops. A query with `0` matches nothing.
@@ -161,7 +161,7 @@ pub struct RouteSearch<'a> {
     /// How long a route may be, and which tokens it may pass through.
     pub bounds: &'a GraphQueryFilter,
     /// Pools and tokens this request excludes.
-    pub exclusions: &'a RouteExclusions,
+    pub exclusions: &'a ResolvedRouteConstraints,
 }
 
 impl RouteSearch<'_> {

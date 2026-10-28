@@ -85,19 +85,19 @@ impl QuoteRequest {
 
 /// What a caller names to keep out of a route: pools, protocol systems and tokens.
 ///
-/// This is the request's own words. A solve reads [`RouteExclusions`] instead, which
+/// This is the request's own words. A solve reads [`ResolvedRouteConstraints`] instead, which
 /// [`crate::feed::market_data::MarketState::resolve_route_filter`] builds from this by replacing
 /// each protocol system with the pools that system holds.
 ///
 /// Empty by default, so nothing is excluded unless the request names it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RouteExclusionFilter {
+pub struct RouteConstraints {
     excluded_pools: FxHashSet<ComponentId>,
     excluded_protocols: FxHashSet<String>,
     excluded_tokens: FxHashSet<Address>,
 }
 
-impl RouteExclusionFilter {
+impl RouteConstraints {
     /// Excludes these pools, by component id.
     #[must_use]
     pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
@@ -154,7 +154,7 @@ impl RouteExclusionFilter {
 /// replaced by its pools.
 ///
 /// A graph knows a pool by its component id, so a search reads this rather than the
-/// [`RouteExclusionFilter`] the caller wrote. An algorithm honours it while it searches and
+/// [`RouteConstraints`] the caller wrote. An algorithm honours it while it searches and
 /// simulates, and the worker checks the route it gets back.
 ///
 /// A token here is excluded as an intermediate only: the order's own two tokens stay allowed,
@@ -163,13 +163,13 @@ impl RouteExclusionFilter {
 /// Every solve also excludes the pools of protocols the market marks out of sync; see
 /// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RouteExclusions {
+pub struct ResolvedRouteConstraints {
     pub(crate) pools: FxHashSet<ComponentId>,
     pub(crate) tokens: FxHashSet<Address>,
     pub(crate) unsynced_pools: Arc<FxHashSet<ComponentId>>,
 }
 
-impl RouteExclusions {
+impl ResolvedRouteConstraints {
     /// Excludes these pools, by component id.
     #[must_use]
     #[cfg(any(test, feature = "test-utils"))]
@@ -251,7 +251,7 @@ pub struct QuoteOptions {
     /// Filled from `options.route_filter` on the wire. Skipped during JSON serialization — the
     /// wire type owns the request shape.
     #[serde(skip)]
-    route_filter: RouteExclusionFilter,
+    route_filter: RouteConstraints,
 }
 
 impl QuoteOptions {
@@ -292,7 +292,7 @@ impl QuoteOptions {
     }
 
     /// Excludes the pools, protocol systems and tokens this filter names.
-    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+    pub fn with_route_filter(mut self, filter: RouteConstraints) -> Self {
         self.route_filter = filter;
         self
     }
@@ -335,12 +335,12 @@ impl QuoteOptions {
 
     /// Returns what this request excludes from a route. Empty unless one was set.
     #[must_use]
-    pub fn route_filter(&self) -> &RouteExclusionFilter {
+    pub fn route_filter(&self) -> &RouteConstraints {
         &self.route_filter
     }
 }
 
-type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<RouteExclusions>)>>>;
+type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<ResolvedRouteConstraints>)>>>;
 
 /// Parameters for a single solve operation.
 ///
@@ -353,7 +353,7 @@ pub struct SolveParams {
     state_label: Option<StateLabel>,
     /// Liquidity the request will not route through. Resolved against the market by the worker,
     /// which is where the protocol systems it names become pools.
-    route_filter: RouteExclusionFilter,
+    route_filter: RouteConstraints,
     /// Whether the caller may use exclusive liquidity. Public-only pools hand it to their
     /// post-processors.
     exclusive_access: ExclusiveAccess,
@@ -388,7 +388,7 @@ impl Default for SolveParams {
     fn default() -> Self {
         Self {
             state_label: None,
-            route_filter: RouteExclusionFilter::default(),
+            route_filter: RouteConstraints::default(),
             exclusive_access: ExclusiveAccess::default(),
             exclusion_cache: Arc::new(Mutex::new(None)),
         }
@@ -403,7 +403,7 @@ impl SolveParams {
     }
 
     /// Excludes the pools, protocol systems and tokens this filter names.
-    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+    pub fn with_route_filter(mut self, filter: RouteConstraints) -> Self {
         self.route_filter = filter;
         self.exclusion_cache = Arc::new(Mutex::new(None));
         self
@@ -421,7 +421,7 @@ impl SolveParams {
     }
 
     /// Returns what the request excludes from a route. Empty unless one was set.
-    pub fn route_filter(&self) -> &RouteExclusionFilter {
+    pub fn route_filter(&self) -> &RouteConstraints {
         &self.route_filter
     }
 
@@ -438,8 +438,8 @@ impl SolveParams {
     pub(crate) fn cache_exclusions_for_test(
         &self,
         generation: u64,
-        exclusions: RouteExclusions,
-    ) -> Arc<RouteExclusions> {
+        exclusions: ResolvedRouteConstraints,
+    ) -> Arc<ResolvedRouteConstraints> {
         let exclusions = Arc::new(exclusions);
         *self.exclusion_cache.lock().unwrap() = Some((generation, exclusions.clone()));
         exclusions
@@ -456,7 +456,7 @@ mod solve_params_tests {
         let clone = params.clone();
         let exclusions = params.cache_exclusions_for_test(
             7,
-            RouteExclusions::default().with_pools(["pool".to_string()]),
+            ResolvedRouteConstraints::default().with_pools(["pool".to_string()]),
         );
         let cached = clone
             .cached_exclusions()

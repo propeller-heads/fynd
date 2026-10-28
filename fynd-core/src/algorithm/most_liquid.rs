@@ -40,7 +40,7 @@ use crate::{
     graph::{
         GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
     },
-    types::{ComponentId, Route, RouteExclusions, RouteResult, Swap},
+    types::{ComponentId, ResolvedRouteConstraints, Route, RouteResult, Swap},
     AlgorithmError,
 };
 
@@ -77,7 +77,7 @@ struct SolveContext<'a> {
     graph: &'a TopologyGraph<DepthAndPrice>,
     market: &'a MarketState,
     /// The pools and tokens this request excludes, checked before a pool is simulated.
-    exclusions: &'a RouteExclusions,
+    exclusions: &'a ResolvedRouteConstraints,
     token_prices: Option<&'a TokenGasPrices>,
     amount_in: &'a BigUint,
     /// What a unit of gas costs, read once off the market snapshot.
@@ -492,7 +492,7 @@ impl MostLiquidAlgorithm {
         market: MarketData,
         label: Option<StateLabel>,
         scored_paths: &[(TokenPath, f64)],
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Result<MarketState, AlgorithmError> {
         let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
         for (token_path, _) in scored_paths {
@@ -1129,7 +1129,7 @@ mod tests {
         )
         .unwrap()
         .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
-            RouteExclusions::default().with_tokens([a.address.clone(), c.address.clone()]),
+            ResolvedRouteConstraints::default().with_tokens([a.address.clone(), c.address.clone()]),
         ))
         .await
         .unwrap();
@@ -1156,10 +1156,9 @@ mod tests {
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(
-                SolveRequest::new(manager.graph(), market, &order)
-                    .with_exclusions(RouteExclusions::default().with_pools(["best".to_string()])),
-            )
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
+                ResolvedRouteConstraints::default().with_pools(["best".to_string()]),
+            ))
             .await
             .unwrap();
 

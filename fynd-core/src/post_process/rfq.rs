@@ -146,7 +146,7 @@ mod tests {
             add_component, added, component_ids, far_deadline, market, replaced, replaced_ids,
             result, run, sell_order, sequential_route, swap, tokens,
         },
-        types::{Route, RouteExclusions},
+        types::{ResolvedRouteConstraints, Route},
     };
 
     async fn add_rfq(
@@ -176,7 +176,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &c),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 sequential_route(),
             )
             .await,
@@ -201,7 +201,7 @@ mod tests {
             &replacer,
             &market,
             &sell_order(&a, &c),
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
             sequential_route(),
         )
         .await;
@@ -221,7 +221,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &c),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 sequential_route(),
             )
             .await,
@@ -255,7 +255,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &b),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 split_route(),
             )
             .await,
@@ -281,7 +281,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &b),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 split_route(),
             )
             .await,
@@ -301,7 +301,7 @@ mod tests {
         let market = market();
         add_rfq(&market, "rfq_ab", &[&a, &b], MockProtocolSim::new(3.0).with_gas(10)).await;
         let replacer = replacer(&market).await;
-        let exclusions = RouteExclusions::default().with_pools(["rfq_ab".to_string()]);
+        let exclusions = ResolvedRouteConstraints::default().with_pools(["rfq_ab".to_string()]);
 
         let replacement =
             run(&replacer, &market, &sell_order(&a, &c), &exclusions, sequential_route()).await;
@@ -326,7 +326,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &c),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 sequential_route(),
             )
             .await,
@@ -355,7 +355,7 @@ mod tests {
             &replacer,
             &market,
             &sell_order(&a, &c),
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
             sequential_route(),
         )
         .await;
@@ -385,7 +385,7 @@ mod tests {
             &replacer,
             &market,
             &sell_order(&a, &c),
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
             sequential_route(),
         )
         .await;
@@ -408,7 +408,7 @@ mod tests {
             &replacer,
             &market,
             &sell_order(&a, &c),
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
             sequential_route(),
         )
         .await;
@@ -426,8 +426,14 @@ mod tests {
         let replacer = replacer(&market).await;
         let route = result(vec![swap("ab", (&a, &b), (1000, 2000), 0.0, 2.0)], &[&a, &b]);
 
-        let replacement =
-            run(&replacer, &market, &sell_order(&a, &b), &RouteExclusions::default(), route).await;
+        let replacement = run(
+            &replacer,
+            &market,
+            &sell_order(&a, &b),
+            &ResolvedRouteConstraints::default(),
+            route,
+        )
+        .await;
 
         match expected_net {
             Some(net) => {
@@ -452,7 +458,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &c),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 sequential_route(),
             )
             .await,
@@ -478,7 +484,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &c),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 sequential_route(),
             )
             .await,
@@ -495,7 +501,7 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let request =
             PostProcessRequest::new(&order, &market, &derived, &exclusions, Instant::now());
 
@@ -514,7 +520,7 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let label = "missing".to_string();
         let request =
             PostProcessRequest::new(&order, &market, &derived, &exclusions, far_deadline())
@@ -547,8 +553,14 @@ mod tests {
         let route = Route::new(vec![free], [(a.address.clone(), a.clone())]).expect("one swap");
         let route = RouteResult::new(route, BigInt::from(2000), BigUint::from(1u64));
 
-        let replacement =
-            run(&replacer, &market, &sell_order(&a, &b), &RouteExclusions::default(), route).await;
+        let replacement = run(
+            &replacer,
+            &market,
+            &sell_order(&a, &b),
+            &ResolvedRouteConstraints::default(),
+            route,
+        )
+        .await;
 
         assert!(replacement.is_none());
     }
@@ -579,7 +591,7 @@ mod tests {
             &replacer,
             &market,
             &sell_order(&a, &c),
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
             sequential_route(),
         )
         .await;
@@ -600,7 +612,7 @@ mod tests {
                 &replacer,
                 &market,
                 &sell_order(&a, &c),
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
                 sequential_route(),
             )
             .await,
@@ -617,7 +629,7 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let drops = |component: &ProtocolComponent| component.id == "rfq_ab";
         let request =
             PostProcessRequest::new(&order, &market, &derived, &exclusions, far_deadline())
@@ -638,8 +650,14 @@ mod tests {
         let replacer = replacer(&market).await;
         let stale = result(vec![swap("ab", (&a, &b), (1000, 1500), 0.0, 2.0)], &[&a, &b]);
 
-        let replacement =
-            run(&replacer, &market, &sell_order(&a, &b), &RouteExclusions::default(), stale).await;
+        let replacement = run(
+            &replacer,
+            &market,
+            &sell_order(&a, &b),
+            &ResolvedRouteConstraints::default(),
+            stale,
+        )
+        .await;
 
         assert!(replacement.is_none());
     }
@@ -654,9 +672,14 @@ mod tests {
         let replacer = replacer(&market).await;
         let optimistic = result(vec![swap("ab", (&a, &b), (1000, 2500), 0.0, 2.0)], &[&a, &b]);
 
-        let replacement =
-            run(&replacer, &market, &sell_order(&a, &b), &RouteExclusions::default(), optimistic)
-                .await;
+        let replacement = run(
+            &replacer,
+            &market,
+            &sell_order(&a, &b),
+            &ResolvedRouteConstraints::default(),
+            optimistic,
+        )
+        .await;
 
         assert!(replacement.is_none());
     }

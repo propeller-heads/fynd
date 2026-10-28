@@ -21,7 +21,7 @@ use crate::{
         events::{EventError, MarketEvent, MarketEventHandler},
         market_data::MarketDataView,
     },
-    types::{ComponentId, ComponentTopology, RouteExclusions, SwapDirection},
+    types::{ComponentId, ComponentTopology, ResolvedRouteConstraints, SwapDirection},
 };
 
 /// The pools that trade one directed token pair.
@@ -137,7 +137,7 @@ impl<D> TopologyGraph<D> {
         &self,
         from: NodeIndex,
         to: NodeIndex,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Leg<'_, D> {
         let pools = self.pools_between(from, to);
         if exclusions.is_empty() ||
@@ -163,7 +163,7 @@ impl<D> TopologyGraph<D> {
         &self,
         from: NodeIndex,
         to: NodeIndex,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> bool {
         let pools = self.pools_between(from, to);
         if exclusions.is_empty() {
@@ -277,7 +277,7 @@ impl<D> TopologyGraph<D> {
         &self,
         token_path: &[NodeIndex],
         max_paths: Option<usize>,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Vec<Path<'_, D>> {
         // Inline, like everything else in the search: this runs once per token sequence found and
         // a route has at most `max_hops` legs. Each leg holds only the pools the request allows,
@@ -1062,7 +1062,7 @@ mod tests {
             return Vec::new();
         };
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens };
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
         graph
             .paths_between_ix(from, to, search)
@@ -1269,7 +1269,7 @@ mod tests {
         let (from, to) = (g.get_token_ix(&a).unwrap(), g.get_token_ix(&b).unwrap());
 
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens: None };
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
 
         assert!(g
@@ -1297,7 +1297,7 @@ mod tests {
             start,
             RouteSearch {
                 bounds: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
-                exclusions: &RouteExclusions::default(),
+                exclusions: &ResolvedRouteConstraints::default(),
             },
         );
 
@@ -1318,7 +1318,7 @@ mod tests {
         from: &Address,
         to: &Address,
         hops: (usize, usize),
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> FxHashSet<Vec<&'a str>> {
         let filter =
             GraphQueryFilter { min_hops: hops.0, max_hops: hops.1, connector_tokens: None };
@@ -1338,7 +1338,7 @@ mod tests {
     fn test_paths_with_excluded_token() {
         let (a, b, _, d) = addrs();
         let m = diamond_graph();
-        let exclusions = RouteExclusions::default().with_tokens([b.clone()]);
+        let exclusions = ResolvedRouteConstraints::default().with_tokens([b.clone()]);
 
         let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
 
@@ -1350,7 +1350,7 @@ mod tests {
     fn test_paths_with_every_pool_of_a_pair_excluded() {
         let (a, _, _, d) = addrs();
         let m = diamond_graph();
-        let exclusions = RouteExclusions::default().with_pools(["ab".to_string()]);
+        let exclusions = ResolvedRouteConstraints::default().with_pools(["ab".to_string()]);
 
         let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
 
@@ -1363,7 +1363,7 @@ mod tests {
         let (a, _, c, _) = addrs();
         let m = parallel_graph();
         let exclusions =
-            RouteExclusions::default().with_pools(["ab2".to_string(), "bc1".to_string()]);
+            ResolvedRouteConstraints::default().with_pools(["ab2".to_string(), "bc1".to_string()]);
 
         let routes = routes_excluding(m.graph(), &a, &c, (2, 2), &exclusions);
 

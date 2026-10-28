@@ -1886,9 +1886,9 @@ mod conversions {
         }
     }
 
-    impl Into<fynd_core::RouteExclusionFilter> for RouteFilter {
-        fn into(self) -> fynd_core::RouteExclusionFilter {
-            fynd_core::RouteExclusionFilter::default()
+    impl Into<fynd_core::RouteConstraints> for RouteFilter {
+        fn into(self) -> fynd_core::RouteConstraints {
+            fynd_core::RouteConstraints::default()
                 .with_excluded_pools(self.exclude_pools)
                 .with_excluded_protocols(self.exclude_protocols)
                 .with_excluded_tokens(
@@ -2239,7 +2239,7 @@ mod conversions {
 
             let core: fynd_core::QuoteOptions = dto.into();
 
-            let expected = fynd_core::RouteExclusionFilter::default()
+            let expected = fynd_core::RouteConstraints::default()
                 .with_excluded_pools(["pool-1".to_string()])
                 .with_excluded_protocols(["uniswap_v2".to_string()])
                 .with_excluded_tokens([TychoBytes::from(usdt)]);

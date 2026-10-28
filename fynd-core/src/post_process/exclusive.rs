@@ -376,7 +376,7 @@ mod tests {
             run_with_access, sell_order, sequential_route, swap, swap_on, swap_through_pool,
             tokens, with_net_amount_out,
         },
-        types::{Order, RouteExclusions},
+        types::{Order, ResolvedRouteConstraints},
     };
 
     async fn run_granted(
@@ -973,7 +973,7 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let request =
             PostProcessRequest::new(&order, &market, &derived, &exclusions, Instant::now())
                 .with_exclusive_access(ExclusiveAccess::Granted);

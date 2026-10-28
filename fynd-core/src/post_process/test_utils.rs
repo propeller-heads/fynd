@@ -25,7 +25,7 @@ use crate::{
         market_data::MarketData,
     },
     post_process::{PostProcessRequest, RoutePostProcessor},
-    types::{Order, OrderSide, Route, RouteExclusions, RouteResult, Swap},
+    types::{Order, OrderSide, ResolvedRouteConstraints, Route, RouteResult, Swap},
     worker_pool_router::ExclusiveAccess,
 };
 
@@ -279,7 +279,7 @@ pub(crate) async fn run(
     processor: &impl RoutePostProcessor,
     market: &MarketData,
     order: &Order,
-    exclusions: &RouteExclusions,
+    exclusions: &ResolvedRouteConstraints,
     route: RouteResult,
 ) -> Option<RouteResult> {
     let derived = DerivedData::new_shared();
@@ -299,7 +299,7 @@ pub(crate) async fn run_with_access(
     route: RouteResult,
 ) -> Option<RouteResult> {
     let derived = DerivedData::new_shared();
-    let exclusions = RouteExclusions::default();
+    let exclusions = ResolvedRouteConstraints::default();
     let request = PostProcessRequest::new(order, market, &derived, &exclusions, far_deadline())
         .with_exclusive_access(access);
     processor

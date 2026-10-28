@@ -35,7 +35,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     post_process::{PostProcessRequest, PostProcessors, ProcessedRoute, RoutePostProcessor},
-    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions, RouteResult},
+    types::{internal::SolveTask, ResolvedRouteConstraints, Route, RouteConstraints, RouteResult},
     worker_pool_router::{ExclusiveAccess, LiquidityScope},
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -72,7 +72,10 @@ fn should_drop_component(
 /// generation changes.
 ///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
-fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
+fn resolve_exclusions(
+    view: &MarketDataView<'_>,
+    params: &SolveParams,
+) -> Arc<ResolvedRouteConstraints> {
     let generation = view
         .base_market_state()
         .exclusion_generation();
@@ -108,8 +111,8 @@ fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<Ro
 fn check_route(
     route: &Route,
     order: &Order,
-    filter: &RouteExclusionFilter,
-    exclusions: &RouteExclusions,
+    filter: &RouteConstraints,
+    exclusions: &ResolvedRouteConstraints,
 ) -> Result<(), String> {
     route
         .validate()
@@ -134,7 +137,7 @@ fn check_route(
 fn validate_route_filter(
     route: &Route,
     order: &Order,
-    filter: &RouteExclusionFilter,
+    filter: &RouteConstraints,
 ) -> Result<(), String> {
     if filter.is_empty() {
         return Ok(());
@@ -699,7 +702,7 @@ where
         &self,
         order: &Order,
         params: &SolveParams,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
         deadline: Instant,
         result: RouteResult,
     ) -> (RouteResult, Vec<String>) {
@@ -1328,7 +1331,7 @@ mod tests {
         post_process::test_utils::{direct_swap, swap_through, MockPostProcessor},
         tests::metrics::recorded_metrics,
         types::{
-            ComponentId, ComponentTopology, OrderSide, Route, RouteExclusionFilter, RouteRejection,
+            ComponentId, ComponentTopology, OrderSide, Route, RouteConstraints, RouteRejection,
             RouteResult, Swap,
         },
         AlgorithmError,
@@ -1491,16 +1494,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
-    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
-    #[case::protocol_prefix(RouteExclusionFilter::default().with_excluded_protocols(["uniswap:".to_string()]), None)]
-    #[case::intermediate(RouteExclusionFilter::default().with_excluded_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
-    #[case::empty(RouteExclusionFilter::default(), None)]
-    #[case::unrelated(RouteExclusionFilter::default().with_excluded_pools(["other".to_string()]).with_excluded_protocols(["other".to_string()]).with_excluded_tokens([token(0x04, "D").address]), None)]
-    #[case::endpoints(RouteExclusionFilter::default().with_excluded_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
+    #[case::pool(RouteConstraints::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
+    #[case::protocol(RouteConstraints::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
+    #[case::protocol_prefix(RouteConstraints::default().with_excluded_protocols(["uniswap:".to_string()]), None)]
+    #[case::intermediate(RouteConstraints::default().with_excluded_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
+    #[case::empty(RouteConstraints::default(), None)]
+    #[case::unrelated(RouteConstraints::default().with_excluded_pools(["other".to_string()]).with_excluded_protocols(["other".to_string()]).with_excluded_tokens([token(0x04, "D").address]), None)]
+    #[case::endpoints(RouteConstraints::default().with_excluded_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
     #[tokio::test]
     async fn test_quote_enforces_route_filter(
-        #[case] filter: RouteExclusionFilter,
+        #[case] filter: RouteConstraints,
         #[case] rejection: Option<&str>,
         #[values(false, true)] split: bool,
     ) {
@@ -1680,7 +1683,7 @@ mod tests {
 
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
         let params = SolveParams::default().with_route_filter(
-            RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]),
+            RouteConstraints::default().with_excluded_protocols(["uniswap_v2".to_string()]),
         );
 
         let result = worker
@@ -1952,7 +1955,7 @@ mod tests {
     /// be in place before the quote.
     async fn quote_pamm_route_against(
         market: MarketData,
-        filter: RouteExclusionFilter,
+        filter: RouteConstraints,
     ) -> Result<SingleOrderQuote, SolveError> {
         let derived = DerivedData::new_shared();
         let mut worker =
@@ -1997,10 +2000,10 @@ mod tests {
     /// The request's filter reaches the pool a pAMM leg settles through, so excluding every
     /// candidate, by pool or by protocol, leaves the leg no fallback.
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_excluded_pools([FALLBACK_POOL.to_string()]))]
-    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
+    #[case::pool(RouteConstraints::default().with_excluded_pools([FALLBACK_POOL.to_string()]))]
+    #[case::protocol(RouteConstraints::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
     #[tokio::test]
-    async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteExclusionFilter) {
+    async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteConstraints) {
         let result =
             quote_pamm_route_against(market_with_unpriceable_fallback_pool(), filter).await;
 
@@ -2047,7 +2050,7 @@ mod tests {
     async fn test_quote_pamm_route_without_fallback_pool() {
         let (market, _) = setup_market_weighted(vec![]);
 
-        let result = quote_pamm_route_against(market, RouteExclusionFilter::default()).await;
+        let result = quote_pamm_route_against(market, RouteConstraints::default()).await;
 
         assert!(
             matches!(
@@ -2064,7 +2067,7 @@ mod tests {
     async fn test_quote_pamm_route_with_unpriceable_fallback() {
         let result = quote_pamm_route_against(
             market_with_unpriceable_fallback_pool(),
-            RouteExclusionFilter::default(),
+            RouteConstraints::default(),
         )
         .await;
 
@@ -3212,7 +3215,7 @@ mod tests {
         let params = SolveParams::default()
             .with_state_label("overlay".to_string())
             .with_route_filter(
-                RouteExclusionFilter::default().with_excluded_pools(["unused".to_string()]),
+                RouteConstraints::default().with_excluded_pools(["unused".to_string()]),
             );
 
         worker
@@ -3281,7 +3284,7 @@ mod tests {
                     .collect(),
             );
         let params = SolveParams::default().with_route_filter(
-            RouteExclusionFilter::default().with_excluded_protocols(
+            RouteConstraints::default().with_excluded_protocols(
                 request_excluded
                     .iter()
                     .map(ToString::to_string),

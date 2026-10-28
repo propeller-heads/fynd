@@ -3,7 +3,7 @@
 
 use fynd_core::{
     types::RouteRejection, EncodingOptions, ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest,
-    QuoteStatus, RouteExclusionFilter, SolveError,
+    QuoteStatus, RouteConstraints, SolveError,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -48,7 +48,7 @@ struct ReplayExclusionRouteFilter {
 }
 
 impl ReplayExclusionRouteFilter {
-    fn capture(filter: &RouteExclusionFilter) -> Self {
+    fn capture(filter: &RouteConstraints) -> Self {
         let mut pools: Vec<String> = filter
             .excluded_pools()
             .iter()

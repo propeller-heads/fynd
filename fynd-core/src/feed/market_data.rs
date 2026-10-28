@@ -31,8 +31,8 @@ use tycho_simulation::{
 use crate::{
     feed::component_filter::protocol_matches,
     types::{
-        swap_directions, BlockInfo, ComponentId, ComponentTopology, RouteExclusionFilter,
-        RouteExclusions, SwapDirection,
+        swap_directions, BlockInfo, ComponentId, ComponentTopology, ResolvedRouteConstraints,
+        RouteConstraints, SwapDirection,
     },
 };
 
@@ -431,14 +431,16 @@ pub struct MarketState {
     /// Protocol systems excluded from routing because they are out of sync; see
     /// [`MarketState::update_sync_status`].
     unsynced_protocols: FxHashSet<String>,
-    /// The components of `unsynced_protocols`, shared with every request's [`RouteExclusions`].
+    /// The components of `unsynced_protocols`, shared with every request's
+    /// [`ResolvedRouteConstraints`].
     unsynced_pools: Arc<FxHashSet<ComponentId>>,
     /// The components of each protocol system, maintained on upsert/remove so a quote that
     /// excludes a protocol names that system's pools without scanning the component map, and so
     /// the metrics sampler can count them without one either.
     components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
     /// Changes when a component is added or removed or `unsynced_protocols` changes, the two
-    /// things a resolved [`RouteExclusions`] depends on. Not when a component's state changes.
+    /// things a resolved [`ResolvedRouteConstraints`] depends on. Not when a component's state
+    /// changes.
     exclusion_generation: u64,
 }
 
@@ -458,7 +460,7 @@ impl MarketState {
     /// A protocol system matches exactly (`uniswap_v2`), or as a family when the entry ends in
     /// `:` (`fallback:`). An entry this market holds no component for excludes nothing.
     #[must_use]
-    pub fn resolve_route_filter(&self, filter: &RouteExclusionFilter) -> RouteExclusions {
+    pub fn resolve_route_filter(&self, filter: &RouteConstraints) -> ResolvedRouteConstraints {
         let mut pools = filter.excluded_pools().clone();
         for entry in filter.excluded_protocols() {
             if entry.ends_with(':') {
@@ -474,7 +476,7 @@ impl MarketState {
                 );
             }
         }
-        RouteExclusions {
+        ResolvedRouteConstraints {
             pools,
             tokens: filter.excluded_tokens().clone(),
             unsynced_pools: Arc::clone(&self.unsynced_pools),
@@ -952,10 +954,10 @@ mod tests {
             component_with_protocol("v3", "uniswap_v3", &[a, b]),
         ]);
         let prefix = market.resolve_route_filter(
-            &RouteExclusionFilter::default().with_excluded_protocols(["fallback:".to_string()]),
+            &RouteConstraints::default().with_excluded_protocols(["fallback:".to_string()]),
         );
         let partial = market.resolve_route_filter(
-            &RouteExclusionFilter::default().with_excluded_protocols(["propamm".to_string()]),
+            &RouteConstraints::default().with_excluded_protocols(["propamm".to_string()]),
         );
         assert!(prefix.excludes_pool("pamm"));
         assert!(!prefix.excludes_pool("v3"));
@@ -974,7 +976,7 @@ mod tests {
             component_with_protocol("v3_pool", "uniswap_v3", &[token_a.clone(), token_b.clone()]),
         ]);
 
-        let filter = RouteExclusionFilter::default()
+        let filter = RouteConstraints::default()
             .with_excluded_pools(["named_pool".to_string()])
             .with_excluded_protocols(["uniswap_v2".to_string()])
             .with_excluded_tokens([token_b.address.clone()]);
@@ -987,7 +989,7 @@ mod tests {
         assert!(
             market
                 .resolve_route_filter(
-                    &RouteExclusionFilter::default()
+                    &RouteConstraints::default()
                         .with_excluded_protocols(["not_a_protocol".to_string()])
                 )
                 .is_empty(),
@@ -1153,7 +1155,7 @@ mod tests {
     fn test_update_sync_status(#[case] status: SynchronizerState, #[case] excluded: bool) {
         let market = market_with_v3_status(status);
 
-        let exclusions = market.resolve_route_filter(&RouteExclusionFilter::default());
+        let exclusions = market.resolve_route_filter(&RouteConstraints::default());
         assert_eq!(exclusions.excludes_pool("v3_pool"), excluded);
         assert_eq!(
             market
@@ -1188,7 +1190,7 @@ mod tests {
 
         assert_ne!(market.exclusion_generation(), generation);
         assert!(market
-            .resolve_route_filter(&RouteExclusionFilter::default())
+            .resolve_route_filter(&RouteConstraints::default())
             .is_empty());
     }
 

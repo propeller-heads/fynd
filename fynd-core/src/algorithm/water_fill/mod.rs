@@ -1717,7 +1717,7 @@ mod tests {
             },
         },
         graph::GraphManager,
-        types::{quote::OrderSide, RouteExclusions},
+        types::{quote::OrderSide, ResolvedRouteConstraints},
     };
 
     fn config() -> AlgorithmConfig {
@@ -1993,9 +1993,10 @@ mod tests {
         );
 
         let exclusions = if exclude_endpoints {
-            RouteExclusions::default().with_tokens([link.address.clone(), weth.address.clone()])
+            ResolvedRouteConstraints::default()
+                .with_tokens([link.address.clone(), weth.address.clone()])
         } else {
-            RouteExclusions::default()
+            ResolvedRouteConstraints::default()
         };
         let start = Instant::now();
         let view = market.read().await;

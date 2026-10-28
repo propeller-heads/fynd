@@ -29,7 +29,7 @@ use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
     feed::{component_filter::protocol_matches, events::MarketEvent, market_data::MarketDataView},
     replay::replay_route,
-    types::{ComponentId, FallbackLeg, Route, RouteExclusionFilter, RouteRejection, Swap},
+    types::{ComponentId, FallbackLeg, Route, RouteConstraints, RouteRejection, Swap},
 };
 
 /// Marks a component that a fallback router executes, e.g. `fallback:fermiswap` or
@@ -103,7 +103,7 @@ pub(crate) fn price_through_fallbacks(
     route: &mut Route,
     market: &MarketDataView<'_>,
     index: &FallbackPoolIndex,
-    filter: &RouteExclusionFilter,
+    filter: &RouteConstraints,
     pool_exclusions: &[String],
 ) -> Result<BigUint, FallbackError> {
     for swap in route.swaps_mut() {
@@ -177,7 +177,7 @@ fn select_fallback(
     swap: &Swap,
     market: &MarketDataView<'_>,
     index: &FallbackPoolIndex,
-    filter: &RouteExclusionFilter,
+    filter: &RouteConstraints,
     pool_exclusions: &[String],
 ) -> Result<FallbackLeg, FallbackError> {
     let leg = swap.component_id();
@@ -254,7 +254,7 @@ fn select_fallback(
 fn is_excluded(
     candidate: &ComponentId,
     market: &MarketDataView<'_>,
-    filter: &RouteExclusionFilter,
+    filter: &RouteConstraints,
     pool_exclusions: &[String],
 ) -> bool {
     if filter
@@ -885,7 +885,7 @@ mod tests {
         let index = FallbackPoolIndex::build(&view);
 
         let fallback =
-            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
+            select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
                 .expect("candidates exist");
 
         assert_eq!(fallback.component_id(), BETTER_POOL);
@@ -896,11 +896,11 @@ mod tests {
     /// The better pool is excluded by pool id and by protocol system in turn, and the leg takes
     /// the one left either way.
     #[rstest]
-    #[case::by_pool(RouteExclusionFilter::default().with_excluded_pools([BETTER_POOL.to_string()]))]
+    #[case::by_pool(RouteConstraints::default().with_excluded_pools([BETTER_POOL.to_string()]))]
     #[case::by_protocol(
-        RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()])
+        RouteConstraints::default().with_excluded_protocols(["uniswap_v2".to_string()])
     )]
-    fn test_select_fallback_excluded_candidates(#[case] filter: RouteExclusionFilter) {
+    fn test_select_fallback_excluded_candidates(#[case] filter: RouteConstraints) {
         let market = market_with_fallback_pools();
         let view = market
             .try_read_blocking()
@@ -922,7 +922,7 @@ mod tests {
             .try_read_blocking()
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
-        let filter = RouteExclusionFilter::default()
+        let filter = RouteConstraints::default()
             .with_excluded_protocols(["uniswap_v2".to_string(), "uniswap_v3".to_string()]);
 
         let error =
@@ -949,7 +949,7 @@ mod tests {
             &pamm_swap(),
             &view,
             &index,
-            &RouteExclusionFilter::default(),
+            &RouteConstraints::default(),
             &pool_exclusions,
         )
         .expect("the worse pool is left");
@@ -972,7 +972,7 @@ mod tests {
         let index = FallbackPoolIndex::build(&view);
 
         let fallback =
-            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
+            select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
                 .expect("the worse pool is left");
 
         assert_eq!(fallback.component_id(), WORSE_POOL);
@@ -1001,7 +1001,7 @@ mod tests {
         let index = FallbackPoolIndex::build(&view);
 
         let fallback =
-            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
+            select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
                 .expect("candidate pools exist");
 
         // The overlay halves the better pool, dropping it below the worse one's unchanged 1.0.
@@ -1021,14 +1021,9 @@ mod tests {
         let mut route = Route::new(vec![pamm_swap(), unbacked_pamm_swap()], FxHashMap::default())
             .expect("non-empty route");
 
-        let error = price_through_fallbacks(
-            &mut route,
-            &view,
-            &index,
-            &RouteExclusionFilter::default(),
-            &[],
-        )
-        .expect_err("the second leg has no candidate pool");
+        let error =
+            price_through_fallbacks(&mut route, &view, &index, &RouteConstraints::default(), &[])
+                .expect_err("the second leg has no candidate pool");
 
         assert_eq!(
             error,
@@ -1049,9 +1044,8 @@ mod tests {
             .expect("uncontended");
         let index = FallbackPoolIndex::build(&view);
 
-        let error =
-            select_fallback(&pamm_swap(), &view, &index, &RouteExclusionFilter::default(), &[])
-                .expect_err("no candidates");
+        let error = select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
+            .expect_err("no candidates");
 
         assert_eq!(
             error,
@@ -1074,7 +1068,7 @@ mod tests {
         let mut route = Route::new(vec![uniswap_swap(), pamm_swap()], FxHashMap::default())
             .expect("non-empty route");
 
-        price_through_fallbacks(&mut route, &view, &index, &RouteExclusionFilter::default(), &[])
+        price_through_fallbacks(&mut route, &view, &index, &RouteConstraints::default(), &[])
             .expect("candidate pools exist");
 
         let [plain, pamm] = route.swaps() else { panic!("two legs") };
@@ -1102,14 +1096,9 @@ mod tests {
             Route::new(vec![pamm_swap().with_split(0.6), pamm_swap()], FxHashMap::default())
                 .expect("non-empty route");
 
-        let amount_out = price_through_fallbacks(
-            &mut route,
-            &view,
-            &index,
-            &RouteExclusionFilter::default(),
-            &[],
-        )
-        .expect("candidate pools exist");
+        let amount_out =
+            price_through_fallbacks(&mut route, &view, &index, &RouteConstraints::default(), &[])
+                .expect("candidate pools exist");
 
         // Both legs fall back to the better pool and split one 2000 input: 60% at its 1.5, then
         // the remaining 800 at the 2.5 the mock reports after the first swap. Pricing one leg
