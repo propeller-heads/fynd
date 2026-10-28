@@ -110,6 +110,28 @@ pub(crate) struct SimulatedCall<'a> {
     pub(crate) data: &'a [u8],
     /// The block whose state the call runs on.
     pub(crate) block: BlockNumberOrTag,
+    /// How the simulated block sets `prevrandao`.
+    pub(crate) prev_randao: PrevRandaoOverride,
+}
+
+/// How the simulated block sets `prevrandao`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrevRandaoOverride {
+    /// A random value, so a pool cannot tell a simulation by a zero `prevrandao`.
+    Random,
+    /// No override: the node keeps its own value. BSC stores the millisecond part of the block
+    /// time in this field and rejects values of 1000 or more.
+    NodeValue,
+}
+
+impl PrevRandaoOverride {
+    /// Returns the override for `chain`.
+    pub(crate) fn for_chain(chain: Chain) -> Self {
+        match chain {
+            Chain::Bsc => Self::NodeValue,
+            _ => Self::Random,
+        }
+    }
 }
 
 /// Why a quote is simulated.
@@ -166,6 +188,8 @@ pub struct QuoteSimulator {
     /// Time between two blocks of the chain. It sets the longest wait for a block that the node
     /// does not have yet.
     block_time: Duration,
+    /// How the simulated block sets `prevrandao`.
+    prev_randao: PrevRandaoOverride,
 }
 
 /// Wait before the first retry when the node does not have the quote's block. Each later wait is
@@ -232,6 +256,7 @@ impl<'a> SimulationSetup<'a> {
         quote: &'a OrderQuote,
         client_fee: Option<&ClientFeeParams>,
         block: SimulationBlock,
+        prev_randao: PrevRandaoOverride,
     ) -> Result<Self, String> {
         let transaction = quote
             .transaction()
@@ -251,6 +276,7 @@ impl<'a> SimulationSetup<'a> {
                 SimulationBlock::Latest => BlockNumberOrTag::Latest,
                 SimulationBlock::Quote => BlockNumberOrTag::Number(quote.block().number()),
             },
+            prev_randao,
         };
         let token_in = crate::rpc::to_address(first_swap.token_in(), "route token_in")?;
         let mut client_fee_receiver = None;
@@ -311,7 +337,8 @@ impl QuoteSimulator {
             Address::from_slice(native_token.address.as_ref()),
             request_timeout,
         )
-        .with_block(block);
+        .with_block(block)
+        .with_prev_randao(PrevRandaoOverride::for_chain(chain));
         if block == SimulationBlock::Latest {
             return Ok(simulator);
         }
@@ -347,10 +374,11 @@ impl QuoteSimulator {
         quote: &OrderQuote,
         client_fee: Option<&ClientFeeParams>,
     ) -> SimulationAttempt {
-        let setup = match SimulationSetup::for_quote(quote, client_fee, self.block) {
-            Ok(value) => value,
-            Err(error) => return failure_with(format!("simulation setup failed: {error}")),
-        };
+        let setup =
+            match SimulationSetup::for_quote(quote, client_fee, self.block, self.prev_randao) {
+                Ok(value) => value,
+                Err(error) => return failure_with(format!("simulation setup failed: {error}")),
+            };
         let mut overrides = match self
             .overrides(setup.call.sender, setup.token_in, setup.call.router)
             .await
@@ -440,6 +468,12 @@ impl QuoteSimulator {
         self
     }
 
+    /// Returns this simulator with `prev_randao` as how each simulated block sets `prevrandao`.
+    pub(crate) fn with_prev_randao(mut self, prev_randao: PrevRandaoOverride) -> Self {
+        self.prev_randao = prev_randao;
+        self
+    }
+
     pub(crate) fn with_provider(
         provider: RootProvider<Ethereum>,
         native_token: Address,
@@ -452,6 +486,7 @@ impl QuoteSimulator {
             request_timeout,
             block: SimulationBlock::Latest,
             block_time: DEFAULT_BLOCK_TIME,
+            prev_randao: PrevRandaoOverride::Random,
         }
     }
 
@@ -660,11 +695,16 @@ fn failure_with(reason: String) -> SimulationAttempt {
 ///
 /// `eth_simulateV1` takes the other block fields from the block that it runs on. It leaves the
 /// fee recipient and `prevrandao` at zero, and a pool can read these to detect a simulation. This
-/// sets them, and the block gas limit, to realistic values.
-fn block_environment() -> SimulationBlockEnvironment {
+/// sets them, and the block gas limit, to realistic values. `prevrandao` is random, except on BSC,
+/// where it is left to the node because BSC rejects an override of 1000 or more.
+fn block_environment(prev_randao: PrevRandaoOverride) -> SimulationBlockEnvironment {
+    let prev_randao = match prev_randao {
+        PrevRandaoOverride::Random => Some(B256::from(rand::random::<[u8; 32]>())),
+        PrevRandaoOverride::NodeValue => None,
+    };
     SimulationBlockEnvironment {
         fee_recipient: Some(SIMULATION_COINBASE),
-        prev_randao: Some(B256::from(rand::random::<[u8; 32]>())),
+        prev_randao,
         gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
         ..Default::default()
     }
@@ -709,9 +749,9 @@ async fn simulate_with_overrides(
         ..Default::default()
     };
     // The trace has to observe the same environment as `eth_simulateV1` to reproduce the same
-    // revert. `prevrandao` is drawn at random per call, so it is built once and reused rather
+    // revert. A random `prevrandao` is drawn per call, so it is built once and reused rather
     // than regenerated.
-    let environment = block_environment();
+    let environment = block_environment(simulated.prev_randao);
     let payload =
         SimulationRequest::single_call(call.clone(), overrides.clone(), environment.clone());
     let response = match timeout(
