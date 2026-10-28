@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -12,22 +17,32 @@ use tracing::info;
 use tycho_simulation::{
     evm::protocol::native_wrapper::state::NATIVE_WRAPPER_ID,
     tycho_client::rpc::{
-        ComponentTvlPaginatedParams, HttpRPCClient, HttpRPCClientOptions, RPCClient,
+        ComponentTvlPaginatedParams, HttpRPCClient, HttpRPCClientOptions,
+        ProtocolStatesPaginatedParams, RPCClient,
     },
     tycho_common::models::{chain_config::TvlThresholdTier, Address, Chain},
 };
 
-/// Concurrent TVL requests per protocol system.
+/// Concurrent TVL and balance requests per protocol system.
 const TVL_FETCH_CONCURRENCY: usize = 10;
+
+/// Components per balance request; states carry every attribute, so pages are kept small.
+const BALANCE_FETCH_CHUNK_SIZE: usize = 100;
 
 /// Derives recommended connector tokens from live Tycho market data.
 ///
-/// Connects to Tycho, waits for the initial market snapshot, then fetches the TVL of every
-/// component in it and scores each token by the components it appears in and by their summed TVL.
-/// The connector tokens are the top `--top-n` by pool count together with the top `--top-n-tvl`
-/// by TVL.
-/// Pool count finds the hubs; TVL finds deep tokens that sit in few pools and drops spam tokens
-/// spread over many tiny ones. The chain's native and wrapped native tokens are always added.
+/// Connects to Tycho, waits for the initial market snapshot, then fetches the TVL and token
+/// balances of every component in it. Raw TVL can be faked: tokens that only trade against each
+/// other at self-set prices report huge values. So each pool is credited only up to twice the
+/// native value of the trusted tokens it holds, where the trusted tokens are the chain's native
+/// and wrapped native tokens plus the `--trusted-tokens` tokens with the most native backing
+/// (native balance held in pools that pair them with native). A token's backed TVL is its pools'
+/// credit minus its largest pool's, since a middle hop needs depth on both sides.
+///
+/// The connector tokens are the top `--top-n` by pool count (among tokens whose backed TVL
+/// reaches the minimum TVL) together with the top `--top-n-tvl` by backed TVL. Pool count finds
+/// the hubs; backed TVL finds deep tokens that sit in few pools. The chain's native and wrapped
+/// native tokens are always added.
 ///
 /// Outputs a ranked list and a ready-to-paste TOML snippet.
 #[derive(Args, PartialEq, Debug)]
@@ -65,13 +80,18 @@ pub struct DeriveConnectorTokensArgs {
     #[arg(long, default_value_t = 10)]
     pub top_n: usize,
 
-    /// Number of top tokens taken from the TVL ranking. Defaults to `--top-n`.
+    /// Number of top tokens taken from the backed TVL ranking. Defaults to `--top-n`.
     #[arg(long)]
     pub top_n_tvl: Option<usize>,
 
     /// Minimum number of components a token must appear in to be included.
     #[arg(long, default_value_t = 2)]
     pub min_component_count: usize,
+
+    /// Number of tokens, besides the native and wrapped native tokens, whose price is trusted to
+    /// credit pool TVL. They are the ones with the most native balance in native pools.
+    #[arg(long, default_value_t = 25)]
+    pub trusted_tokens: usize,
 
     /// Output format: "toml", "json", or "text".
     #[arg(long, default_value = "toml")]
@@ -151,26 +171,35 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    let (components, symbols) = snapshot_components(&market_data).await;
+    let (components, mut tokens) = snapshot_components(&market_data).await;
     solver.shutdown();
 
-    let tvl = fetch_component_tvl(
-        &tycho_url,
-        args.tycho_api_key.as_deref(),
-        !args.disable_tls,
-        chain,
-        &components,
-    )
-    .await?;
-
-    let scores = score_tokens(&components, &tvl, &symbols);
-    let total = scores.len();
-    let wrap_pair: Vec<Address> = std::iter::once(chain.native_token())
+    let anchor_tokens: Vec<_> = std::iter::once(chain.native_token())
         .chain(chain.wrapped_native_token())
-        .map(|token| token.address)
         .collect();
+    let wrap_pair: Vec<Address> = anchor_tokens
+        .iter()
+        .map(|token| token.address.clone())
+        .collect();
+    for token in anchor_tokens {
+        tokens
+            .entry(token.address)
+            .or_insert(TokenInfo { symbol: token.symbol, decimals: token.decimals });
+    }
+
+    let rpc_client =
+        build_rpc_client(&tycho_url, args.tycho_api_key.as_deref(), !args.disable_tls)?;
+    let tvl = fetch_component_tvl(&rpc_client, chain, &components).await?;
+    let balances = fetch_component_balances(&rpc_client, chain, &components, &tokens).await?;
+    let pools = PoolData { components: &components, tvl: &tvl, balances: &balances };
+
+    let backing = native_backing(&pools, &wrap_pair);
+    let prices = trusted_prices(&pools, &wrap_pair, &backing, args.trusted_tokens);
+    let credit = backed_credit(&pools, &prices);
+    let scores = score_tokens(&components, &credit, &tokens);
+    let total = scores.len();
     let sizes = RankingSizes { pool_count: args.top_n, tvl: args.top_n_tvl.unwrap_or(args.top_n) };
-    let selected = select_connectors(scores, &wrap_pair, sizes, args.min_component_count);
+    let selected = select_connectors(scores, &wrap_pair, sizes, args.min_component_count, min_tvl);
     let tvl_unit = chain.native_token().symbol;
 
     match args.output.as_str() {
@@ -196,13 +225,32 @@ struct SnapshotComponent {
     tokens: Vec<Address>,
 }
 
+/// The symbol and decimals of a token in the snapshot.
+#[derive(Clone, Debug)]
+struct TokenInfo {
+    symbol: String,
+    decimals: u32,
+}
+
+/// Token balances of each component, in whole token units.
+type Balances = HashMap<ComponentId, HashMap<Address, f64>>;
+
+/// The components with their TVL (in native token) and token balances.
+///
+/// A component missing from `tvl` or `balances` has none known.
+struct PoolData<'a> {
+    components: &'a [SnapshotComponent],
+    tvl: &'a HashMap<ComponentId, f64>,
+    balances: &'a Balances,
+}
+
 /// What the ranking knows about one token.
 #[derive(Clone, Debug, PartialEq)]
 struct TokenScore {
     symbol: String,
     component_count: usize,
-    /// Summed TVL, in the chain's native token, of every component holding the token.
-    tvl: f64,
+    /// Credited TVL, in the chain's native token, of the token's components outside the largest.
+    backed_tvl: f64,
 }
 
 /// Which ranking put a token in the connector list.
@@ -225,27 +273,30 @@ impl SelectedBy {
     }
 }
 
-/// A token chosen as a connector, with its 1-based rank in each ranking.
+/// A token chosen as a connector, with its 1-based rank in each ranking, if it qualifies for it.
 #[derive(Clone, Debug, PartialEq)]
 struct ConnectorSelection {
     address: Address,
     score: TokenScore,
-    component_rank: usize,
-    tvl_rank: usize,
+    component_rank: Option<usize>,
+    tvl_rank: Option<usize>,
     selected_by: SelectedBy,
 }
 
 async fn snapshot_components(
     market_data: &MarketData,
-) -> (Vec<SnapshotComponent>, HashMap<Address, String>) {
+) -> (Vec<SnapshotComponent>, HashMap<Address, TokenInfo>) {
     let guard = market_data.read().await;
     let mut components = Vec::new();
-    let mut symbols = HashMap::new();
+    let mut tokens = HashMap::new();
     for (id, topology) in guard.component_topology() {
         let Some(component) = guard.get_component(&id) else { continue };
         for addr in &topology.tokens {
             if let Some(token) = guard.get_token(addr) {
-                symbols.insert(addr.clone(), token.symbol.clone());
+                tokens.insert(
+                    addr.clone(),
+                    TokenInfo { symbol: token.symbol.clone(), decimals: token.decimals },
+                );
             }
         }
         components.push(SnapshotComponent {
@@ -254,26 +305,24 @@ async fn snapshot_components(
             tokens: topology.tokens,
         });
     }
-    (components, symbols)
+    (components, tokens)
 }
 
-/// Fetches the TVL of the topology's components from Tycho, one request per protocol system.
-///
-/// Components of non-Tycho systems (RFQ, price level books, the synthetic native wrapper) and
-/// components Tycho reports no TVL for are absent from the result.
-async fn fetch_component_tvl(
+fn build_rpc_client(
     tycho_url: &str,
     auth_key: Option<&str>,
     use_tls: bool,
-    chain: Chain,
-    components: &[SnapshotComponent],
-) -> Result<HashMap<ComponentId, f64>> {
+) -> Result<HttpRPCClient> {
     let rpc_url =
         if use_tls { format!("https://{tycho_url}") } else { format!("http://{tycho_url}") };
     let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
-    let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)
-        .context("failed to build Tycho RPC client for TVL fetch")?;
+    HttpRPCClient::new(&rpc_url, rpc_options).context("failed to build Tycho RPC client")
+}
 
+/// Groups the ids of the components Tycho serves by protocol system.
+///
+/// Non-Tycho systems (RFQ, price level books, the synthetic native wrapper) are left out.
+fn tycho_ids_by_system(components: &[SnapshotComponent]) -> HashMap<&str, Vec<ComponentId>> {
     let mut ids_by_system: HashMap<&str, Vec<ComponentId>> = HashMap::new();
     for component in components {
         if is_tycho_system(&component.protocol_system) &&
@@ -285,9 +334,20 @@ async fn fetch_component_tvl(
                 .push(component.id.clone());
         }
     }
+    ids_by_system
+}
 
+/// Fetches the TVL of the topology's components from Tycho, one request per protocol system.
+///
+/// Components of non-Tycho systems and components Tycho reports no TVL for are absent from the
+/// result.
+async fn fetch_component_tvl(
+    rpc_client: &HttpRPCClient,
+    chain: Chain,
+    components: &[SnapshotComponent],
+) -> Result<HashMap<ComponentId, f64>> {
     let mut tvl = HashMap::new();
-    for (system, ids) in ids_by_system {
+    for (system, ids) in tycho_ids_by_system(components) {
         let params = ComponentTvlPaginatedParams::new(chain, TVL_FETCH_CONCURRENCY)
             .with_protocol_system(system)
             .with_component_ids(ids);
@@ -303,43 +363,207 @@ async fn fetch_component_tvl(
     Ok(tvl)
 }
 
-/// Counts the components holding each token and sums their TVL; a component with no TVL entry
-/// adds 0.
+/// Fetches the token balances of the topology's components from Tycho, one request series per
+/// protocol system.
+///
+/// Balances are in whole token units. Components of non-Tycho systems are absent, and so are
+/// balances of tokens whose decimals are unknown.
+async fn fetch_component_balances(
+    rpc_client: &HttpRPCClient,
+    chain: Chain,
+    components: &[SnapshotComponent],
+    tokens: &HashMap<Address, TokenInfo>,
+) -> Result<Balances> {
+    let mut balances = Balances::new();
+    for (system, ids) in tycho_ids_by_system(components) {
+        let params = ProtocolStatesPaginatedParams::new(chain, system, TVL_FETCH_CONCURRENCY)
+            .with_protocol_ids(ids)
+            .with_include_balances(true)
+            .with_chunk_size(BALANCE_FETCH_CHUNK_SIZE);
+        let states = rpc_client
+            .get_protocol_states_paginated(params)
+            .await
+            .with_context(|| {
+                format!("failed to fetch component balances for protocol system {system}")
+            })?;
+        info!(system, components = states.len(), "fetched component balances");
+        for state in states {
+            let mut whole_balances = HashMap::new();
+            for (token, raw) in state.balances {
+                let Some(info) = tokens.get(&token) else { continue };
+                whole_balances.insert(token, raw_to_whole_units(raw.as_ref(), info.decimals));
+            }
+            balances.insert(state.component_id, whole_balances);
+        }
+    }
+    Ok(balances)
+}
+
+/// Converts a big-endian raw token amount to whole token units.
+fn raw_to_whole_units(raw: &[u8], decimals: u32) -> f64 {
+    let mut amount = 0.0;
+    for byte in raw {
+        amount = amount * 256.0 + f64::from(*byte);
+    }
+    amount / 10f64.powi(decimals as i32)
+}
+
+/// The summed balance of the anchor tokens in one component.
+fn anchor_balance(balances: &HashMap<Address, f64>, anchors: &[Address]) -> f64 {
+    anchors
+        .iter()
+        .filter_map(|anchor| balances.get(anchor))
+        .sum()
+}
+
+/// The anchor balance, in native units, held in the components of each non-anchor token.
+fn native_backing(pools: &PoolData, anchors: &[Address]) -> HashMap<Address, f64> {
+    let mut backing: HashMap<Address, f64> = HashMap::new();
+    for component in pools.components {
+        let Some(balances) = pools.balances.get(&component.id) else { continue };
+        let held = anchor_balance(balances, anchors);
+        if held <= 0.0 {
+            continue;
+        }
+        for token in component
+            .tokens
+            .iter()
+            .filter(|token| !anchors.contains(token))
+        {
+            *backing
+                .entry(token.clone())
+                .or_default() += held;
+        }
+    }
+    backing
+}
+
+/// The `count` tokens with the most backing, ties broken by address.
+fn most_backed(backing: &HashMap<Address, f64>, count: usize) -> HashSet<&Address> {
+    let mut ranked: Vec<(&Address, f64)> = backing
+        .iter()
+        .map(|(token, amount)| (token, *amount))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    ranked
+        .into_iter()
+        .take(count)
+        .map(|(token, _)| token)
+        .collect()
+}
+
+/// The native price per whole token of the anchors (1) and of the `trusted_count` most backed
+/// tokens.
+///
+/// A trusted token is priced from its two-token component with the largest anchor balance: the
+/// component's TVL minus the anchor side, over the token's balance. A trusted token with no such
+/// component is left unpriced.
+fn trusted_prices(
+    pools: &PoolData,
+    anchors: &[Address],
+    backing: &HashMap<Address, f64>,
+    trusted_count: usize,
+) -> HashMap<Address, f64> {
+    let trusted = most_backed(backing, trusted_count);
+    let mut prices: HashMap<Address, f64> = anchors
+        .iter()
+        .map(|anchor| (anchor.clone(), 1.0))
+        .collect();
+    let mut deepest_anchor_side: HashMap<&Address, f64> = HashMap::new();
+    for component in pools.components {
+        let [first, second] = component.tokens.as_slice() else { continue };
+        let Some(balances) = pools.balances.get(&component.id) else { continue };
+        let anchor_side = anchor_balance(balances, anchors);
+        let pool_tvl = pools
+            .tvl
+            .get(&component.id)
+            .copied()
+            .unwrap_or(0.0);
+        for token in [first, second] {
+            let amount = balances
+                .get(token)
+                .copied()
+                .unwrap_or(0.0);
+            let deepest = deepest_anchor_side
+                .get(token)
+                .copied()
+                .unwrap_or(0.0);
+            if trusted.contains(token) && amount > 0.0 && anchor_side > deepest {
+                deepest_anchor_side.insert(token, anchor_side);
+                prices.insert(token.clone(), (pool_tvl - anchor_side).max(0.0) / amount);
+            }
+        }
+    }
+    prices
+}
+
+/// Each component's TVL capped at twice the native value of the priced tokens it holds.
+///
+/// A component holding no priced token is credited 0.
+fn backed_credit(pools: &PoolData, prices: &HashMap<Address, f64>) -> HashMap<ComponentId, f64> {
+    let mut credit = HashMap::new();
+    for component in pools.components {
+        let mut held_value = 0.0;
+        if let Some(balances) = pools.balances.get(&component.id) {
+            for token in &component.tokens {
+                if let (Some(price), Some(amount)) = (prices.get(token), balances.get(token)) {
+                    held_value += price * amount;
+                }
+            }
+        }
+        let pool_tvl = pools
+            .tvl
+            .get(&component.id)
+            .copied()
+            .unwrap_or(0.0);
+        credit.insert(component.id.clone(), pool_tvl.min(2.0 * held_value));
+    }
+    credit
+}
+
+/// Counts the components holding each token and sums their credit minus the largest one's; a
+/// component with no credit entry adds 0.
 fn score_tokens(
     components: &[SnapshotComponent],
-    tvl: &HashMap<ComponentId, f64>,
-    symbols: &HashMap<Address, String>,
+    credit: &HashMap<ComponentId, f64>,
+    tokens: &HashMap<Address, TokenInfo>,
 ) -> Vec<(Address, TokenScore)> {
-    let mut scores: HashMap<Address, TokenScore> = HashMap::new();
+    let mut totals: HashMap<Address, (usize, f64, f64)> = HashMap::new();
     for component in components {
-        let component_tvl = tvl
+        let component_credit = credit
             .get(&component.id)
             .copied()
             .unwrap_or(0.0);
         for addr in &component.tokens {
-            let score = scores
-                .entry(addr.clone())
-                .or_insert_with(|| TokenScore {
-                    symbol: symbols
-                        .get(addr)
-                        .cloned()
-                        .unwrap_or_else(|| "?".to_string()),
-                    component_count: 0,
-                    tvl: 0.0,
-                });
-            score.component_count += 1;
-            score.tvl += component_tvl;
+            let (count, sum, largest) = totals.entry(addr.clone()).or_default();
+            *count += 1;
+            *sum += component_credit;
+            *largest = largest.max(component_credit);
         }
     }
-    scores.into_iter().collect()
+    totals
+        .into_iter()
+        .map(|(addr, (component_count, sum, largest))| {
+            let symbol = tokens
+                .get(&addr)
+                .map_or_else(|| "?".to_string(), |info| info.symbol.clone());
+            (addr, TokenScore { symbol, component_count, backed_tvl: sum - largest })
+        })
+        .collect()
 }
 
-/// The 1-based rank of each score under `order`, ties broken by address.
+/// The 1-based rank of each score that `qualifies` under `order`, ties broken by address.
 fn rank_by(
     scores: &[(Address, TokenScore)],
+    qualifies: impl Fn(&TokenScore) -> bool,
     order: impl Fn(&TokenScore, &TokenScore) -> Ordering,
-) -> Vec<usize> {
-    let mut indices: Vec<usize> = (0..scores.len()).collect();
+) -> Vec<Option<usize>> {
+    let mut indices: Vec<usize> = (0..scores.len())
+        .filter(|&i| qualifies(&scores[i].1))
+        .collect();
     indices.sort_by(|&a, &b| {
         order(&scores[a].1, &scores[b].1).then_with(|| {
             scores[a]
@@ -348,39 +572,45 @@ fn rank_by(
                 .cmp(scores[b].0.as_ref())
         })
     });
-    let mut ranks = vec![0; scores.len()];
+    let mut ranks = vec![None; scores.len()];
     for (position, index) in indices.into_iter().enumerate() {
-        ranks[index] = position + 1;
+        ranks[index] = Some(position + 1);
     }
     ranks
 }
 
-/// Picks the top tokens by pool count and by TVL, as many as `sizes` says, then the wrap pair if
-/// absent.
+/// Picks the top tokens by pool count and by backed TVL, as many as `sizes` says, then the wrap
+/// pair if absent.
 ///
-/// Only tokens in at least `min_component_count` components are ranked, and a token with no TVL
-/// is never picked by TVL. The result is ordered by TVL rank.
+/// Only tokens in at least `min_component_count` components are ranked. A token needs backed TVL
+/// above 0 to be ranked by TVL, and at least `min_tvl` to be ranked by pool count. The result is
+/// ordered by TVL rank, then pool-count rank.
 fn select_connectors(
-    mut scores: Vec<(Address, TokenScore)>,
+    scores: Vec<(Address, TokenScore)>,
     wrap_pair: &[Address],
     sizes: RankingSizes,
     min_component_count: usize,
+    min_tvl: f64,
 ) -> Vec<ConnectorSelection> {
-    scores.retain(|(address, score)| {
-        score.component_count >= min_component_count || wrap_pair.contains(address)
-    });
-    let component_ranks = rank_by(&scores, |a, b| {
-        b.component_count
-            .cmp(&a.component_count)
-    });
-    let tvl_ranks = rank_by(&scores, |a, b| b.tvl.total_cmp(&a.tvl));
+    let component_ranks = rank_by(
+        &scores,
+        |score| score.component_count >= min_component_count && score.backed_tvl >= min_tvl,
+        |a, b| {
+            b.component_count
+                .cmp(&a.component_count)
+        },
+    );
+    let tvl_ranks = rank_by(
+        &scores,
+        |score| score.component_count >= min_component_count && score.backed_tvl > 0.0,
+        |a, b| b.backed_tvl.total_cmp(&a.backed_tvl),
+    );
 
     let mut selected = Vec::new();
     for (i, (address, score)) in scores.into_iter().enumerate() {
         let (component_rank, tvl_rank) = (component_ranks[i], tvl_ranks[i]);
-        let meets_min = score.component_count >= min_component_count;
-        let by_count = meets_min && component_rank <= sizes.pool_count;
-        let by_tvl = meets_min && score.tvl > 0.0 && tvl_rank <= sizes.tvl;
+        let by_count = component_rank.is_some_and(|rank| rank <= sizes.pool_count);
+        let by_tvl = tvl_rank.is_some_and(|rank| rank <= sizes.tvl);
         let selected_by = match (by_count, by_tvl) {
             (true, true) => SelectedBy::Both,
             (true, false) => SelectedBy::PoolCount,
@@ -390,8 +620,26 @@ fn select_connectors(
         };
         selected.push(ConnectorSelection { address, score, component_rank, tvl_rank, selected_by });
     }
-    selected.sort_by_key(|entry| entry.tvl_rank);
+    selected.sort_by(|a, b| {
+        a.tvl_rank
+            .unwrap_or(usize::MAX)
+            .cmp(&b.tvl_rank.unwrap_or(usize::MAX))
+            .then_with(|| {
+                a.component_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.component_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                a.address
+                    .as_ref()
+                    .cmp(b.address.as_ref())
+            })
+    });
     selected
+}
+
+fn rank_label(rank: Option<usize>) -> String {
+    rank.map_or_else(|| "-".to_string(), |rank| rank.to_string())
 }
 
 fn print_toml(
@@ -405,7 +653,7 @@ fn print_toml(
     let date = Utc::now().format("%Y-%m-%d");
     println!("# Derived connector tokens for {chain} ({date})");
     println!(
-        "# Top {} by pool count + top {} by TVL, plus the wrap pair: {} of {total} tokens.",
+        "# Top {} by pool count + top {} by backed TVL, plus the wrap pair: {} of {total} tokens.",
         sizes.pool_count,
         sizes.tvl,
         selected.len()
@@ -413,13 +661,13 @@ fn print_toml(
     println!("connector_tokens = [");
     for entry in selected {
         println!(
-            "    \"0x{}\",  # {}  — {} pools (#{}), {:.0} {tvl_unit} TVL (#{}), by {}",
+            "    \"0x{}\",  # {}  — {} pools (#{}), {:.0} {tvl_unit} backed TVL (#{}), by {}",
             hex::encode(entry.address.as_ref()),
             entry.score.symbol,
             entry.score.component_count,
-            entry.component_rank,
-            entry.score.tvl,
-            entry.tvl_rank,
+            rank_label(entry.component_rank),
+            entry.score.backed_tvl,
+            rank_label(entry.tvl_rank),
             entry.selected_by.as_str(),
         );
     }
@@ -434,7 +682,7 @@ fn print_json(selected: &[ConnectorSelection]) -> Result<()> {
                 "address": format!("0x{}", hex::encode(entry.address.as_ref())),
                 "symbol": entry.score.symbol,
                 "component_count": entry.score.component_count,
-                "tvl": entry.score.tvl,
+                "backed_tvl": entry.score.backed_tvl,
                 "component_rank": entry.component_rank,
                 "tvl_rank": entry.tvl_rank,
                 "selected_by": entry.selected_by.as_str(),
@@ -447,23 +695,23 @@ fn print_json(selected: &[ConnectorSelection]) -> Result<()> {
 
 fn print_text(selected: &[ConnectorSelection], tvl_unit: &str) {
     println!(
-        "{:<10} {:>6} {:>10} {:>16} {:>9}  {:<10} Address",
+        "{:<10} {:>6} {:>10} {:>24} {:>9}  {:<10} Address",
         "Symbol",
         "Pools",
         "Pool rank",
-        format!("TVL ({tvl_unit})"),
+        format!("Backed TVL ({tvl_unit})"),
         "TVL rank",
         "Selected"
     );
     println!("{:-<100}", "");
     for entry in selected {
         println!(
-            "{:<10} {:>6} {:>10} {:>16.0} {:>9}  {:<10} 0x{}",
+            "{:<10} {:>6} {:>10} {:>24.0} {:>9}  {:<10} 0x{}",
             entry.score.symbol,
             entry.score.component_count,
-            entry.component_rank,
-            entry.score.tvl,
-            entry.tvl_rank,
+            rank_label(entry.component_rank),
+            entry.score.backed_tvl,
+            rank_label(entry.tvl_rank),
             entry.selected_by.as_str(),
             hex::encode(entry.address.as_ref()),
         );
