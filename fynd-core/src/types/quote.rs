@@ -2814,6 +2814,26 @@ mod tests {
         assert!(exclusions.is_empty());
     }
 
+    #[test]
+    fn test_retain_excluded_protocols_keeps_the_rest_of_the_filter() {
+        let pool = "pool".to_string();
+        let tokens = [token(0x08, "E").address, token(0x09, "X").address];
+        let filter = RouteConstraints::default()
+            .with_excluded_pools([pool.clone()])
+            .with_excluded_tokens([tokens[0].clone()])
+            .with_required_tokens([tokens[1].clone()])
+            .with_excluded_protocols(["uniswap_v2".to_string(), "bebop".to_string()]);
+
+        let retained = filter.retain_excluded_protocols(|protocol| protocol != "bebop");
+
+        let expected = RouteConstraints::default()
+            .with_excluded_pools([pool])
+            .with_excluded_tokens([tokens[0].clone()])
+            .with_required_tokens([tokens[1].clone()])
+            .with_excluded_protocols(["uniswap_v2".to_string()]);
+        assert_eq!(retained, expected);
+    }
+
     #[rstest]
     #[case::no_overlap(&[0x08], &[0x09], None)]
     #[case::overlap(&[0x08, 0x09], &[0x09], Some(0x09))]
