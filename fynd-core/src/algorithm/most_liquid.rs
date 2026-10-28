@@ -1140,6 +1140,47 @@ mod tests {
         assert_eq!(result.route().swaps()[1].component_id(), "bc");
     }
 
+    /// Without a required token the direct pool wins. Requiring X removes the direct path before
+    /// `max_routes` keeps only the top-ranked remaining path.
+    #[rstest::rstest]
+    #[case::no_required_token(false, &["ab"])]
+    #[case::required_token(true, &["ax", "xb"])]
+    #[tokio::test]
+    async fn test_find_best_route_with_required_token(
+        #[case] require_x: bool,
+        #[case] expected_pools: &[&str],
+    ) {
+        let a = token(0x01, "A");
+        let b = token(0x02, "B");
+        let x = token(0x03, "X");
+        let (market, manager) = setup_market_weighted(vec![
+            ("ab", &a, &b, MockProtocolSim::new(3.0)),
+            ("ax", &a, &x, MockProtocolSim::new(2.0)),
+            ("xb", &x, &b, MockProtocolSim::new(2.0)),
+        ]);
+        let order = order(&a, &b, 1000, OrderSide::Sell);
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 2, Duration::from_secs(1), Some(1)).unwrap(),
+        )
+        .unwrap();
+        let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
+        let request = SolveRequest::new(manager.graph(), market, &order)
+            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+
+        let result = algorithm
+            .find_best_route(request)
+            .await
+            .unwrap();
+
+        let pools: Vec<&str> = result
+            .route()
+            .swaps()
+            .iter()
+            .map(|swap| swap.component_id())
+            .collect();
+        assert_eq!(pools, expected_pools);
+    }
+
     /// A pool the request excludes is not offered to any hop, so the next best pool wins.
     #[tokio::test]
     async fn test_find_best_route_with_excluded_pool() {

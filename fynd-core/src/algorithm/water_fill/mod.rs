@@ -1720,7 +1720,7 @@ mod tests {
             },
             test_utils::{
                 addr, setup_market_unweighted_topology, setup_market_weighted_boxed,
-                token_with_decimals, ConstantProductSim, DivByZeroSim,
+                token_with_decimals, ConstantProductSim, DivByZeroSim, MockProtocolSim,
             },
         },
         graph::GraphManager,
@@ -1845,6 +1845,39 @@ mod tests {
             .await
             .expect("water_fill returns a split when no single path fills");
         assert!(split.route().swaps().len() >= 2, "expected a split across both components");
+    }
+
+    /// Without a required token the direct pool wins. Requiring X leaves only routes through X, so
+    /// every swap of the result touches X.
+    #[rstest::rstest]
+    #[case::no_required_token(false)]
+    #[case::required_token(true)]
+    #[tokio::test]
+    async fn test_find_best_route_with_required_token(#[case] require_x: bool) {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        let x = token_with_decimals(0x03, "X", 18);
+        let (market, gm) = setup_market_weighted_boxed(vec![
+            ("ab", &a, &b, Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
+            ("ax", &a, &x, Box::new(MockProtocolSim::new(2.0))),
+            ("xb", &x, &b, Box::new(MockProtocolSim::new(2.0))),
+        ]);
+        let order = whole_weth_order(&a.address, &b.address, 1);
+        let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
+        let request = SolveRequest::new(gm.graph(), market, &order)
+            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+
+        let result = water_fill_default()
+            .find_best_route(request)
+            .await
+            .unwrap();
+
+        let swaps = result.route().swaps();
+        assert!(!swaps.is_empty());
+        for swap in swaps {
+            let touches_x = swap.token_in() == &x.address || swap.token_out() == &x.address;
+            assert_eq!(touches_x, require_x, "unexpected swap {}", swap.component_id());
+        }
     }
 
     /// A component whose math panics mid-simulation must be skipped like any failing component,

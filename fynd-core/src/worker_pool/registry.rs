@@ -441,6 +441,24 @@ mod tests {
         let _ = shutdown_tx.send(());
     }
 
+    #[rstest::rstest]
+    #[case::most_liquid("most_liquid", true)]
+    #[case::bellman_ford("bellman_ford", false)]
+    #[case::water_fill("water_fill", true)]
+    #[case::path_frank_wolfe("path_frank_wolfe", false)]
+    fn test_registry_reports_required_token_support(
+        #[case] algorithm: &str,
+        #[case] expected: bool,
+    ) {
+        let params = make_params(algorithm, 1);
+
+        let spawned = AlgorithmSpawner::Registry { algorithm: algorithm.to_string() }
+            .spawn(params)
+            .unwrap();
+
+        assert_eq!(spawned.supports_required_tokens, expected);
+    }
+
     #[test]
     fn test_registry_spawns_path_frank_wolfe() {
         let (shutdown_tx, _) = broadcast::channel(1);
