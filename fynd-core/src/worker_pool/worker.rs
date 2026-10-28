@@ -13,9 +13,13 @@ use std::{
 };
 
 use num_bigint::{BigInt, BigUint};
+use rustc_hash::FxHashSet;
 use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
-use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
+use tycho_simulation::{
+    tycho_common::models::{protocol::ProtocolComponent, Address},
+    tycho_core::Bytes,
+};
 
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
@@ -134,6 +138,7 @@ fn check_route(
 /// Check every leg, including split branches, against the original request filter. Reading
 /// protocol systems from the returned components also covers pools added after exclusions were
 /// resolved. The order's endpoints remain allowed by intermediate-token exclusions.
+/// Also checks that every path of the route passes through every required token.
 fn validate_route_filter(
     route: &Route,
     order: &Order,
@@ -168,7 +173,44 @@ fn validate_route_filter(
             }
         }
     }
+    if route_bypasses_required_tokens(route, order, filter.required_tokens()) {
+        return Err("route reaches the output token without passing through every required token"
+            .to_string());
+    }
     Ok(())
+}
+
+/// Whether `route` contains a path from the order's input token to its output token that skips
+/// at least one required token.
+///
+/// A required input or output token is passed by every path and adds no constraint.
+fn route_bypasses_required_tokens(
+    route: &Route,
+    order: &Order,
+    required_tokens: &FxHashSet<Address>,
+) -> bool {
+    required_tokens
+        .iter()
+        .filter(|&token| token != order.token_in() && token != order.token_out())
+        .any(|token| reaches_output_avoiding(route, order, token))
+}
+
+/// Whether the route's swaps lead from the order's input token to its output token without
+/// passing through `avoided`.
+///
+/// Traverses the swaps as a graph, so a split branch that skips `avoided` is found.
+fn reaches_output_avoiding(route: &Route, order: &Order, avoided: &Address) -> bool {
+    let mut reached = FxHashSet::from_iter([order.token_in()]);
+    let mut frontier = vec![order.token_in()];
+    while let Some(token) = frontier.pop() {
+        for swap in route.swaps() {
+            let next = swap.token_out();
+            if swap.token_in() == token && next != avoided && reached.insert(next) {
+                frontier.push(next);
+            }
+        }
+    }
+    reached.contains(order.token_out())
 }
 
 /// Records per-worker-pool queue metrics at task pickup: how long the task waited in the
