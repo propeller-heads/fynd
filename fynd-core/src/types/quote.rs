@@ -277,6 +277,12 @@ impl ResolvedRouteConstraints {
         self.tokens.contains(token)
     }
 
+    /// The tokens every route must pass through.
+    #[must_use]
+    pub fn required_tokens(&self) -> &FxHashSet<Address> {
+        &self.required_tokens
+    }
+
     /// Whether a token path, endpoints included, visits every required token.
     ///
     /// Always true when no token is required.
