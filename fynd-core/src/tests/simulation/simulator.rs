@@ -81,6 +81,7 @@ async fn test_simulated_call_returns_its_logs_undecoded() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Latest,
+            prev_randao: PrevRandaoOverride::Random,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -305,11 +306,26 @@ fn test_envelope_prices_a_quote_that_carries_no_gas_price() {
 
 #[test]
 fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
-    let environment = block_environment();
+    let environment = block_environment(PrevRandaoOverride::Random);
     assert_eq!(environment.fee_recipient, Some(SIMULATION_COINBASE));
     assert_eq!(environment.gas_limit, Some(SIMULATION_BLOCK_GAS_LIMIT));
     assert_ne!(environment.prev_randao, Some(B256::ZERO));
     assert!(environment.prev_randao.is_some());
+}
+
+/// BSC rejects a block override of `prevRandao` at 1000 or more, so BSC keeps the node's value.
+#[test]
+fn test_prev_randao_is_left_to_the_node_only_on_bsc() {
+    let cases = [
+        (Chain::Bsc, false),
+        (Chain::Ethereum, true),
+        (Chain::Base, true),
+        (Chain::Arbitrum, true),
+    ];
+    for (chain, overridden) in cases {
+        let environment = block_environment(PrevRandaoOverride::for_chain(chain));
+        assert_eq!(environment.prev_randao.is_some(), overridden, "{chain:?}");
+    }
 }
 
 /// `eth_simulateV1` numbers its own block, and `debug_traceCall` at latest runs one below it, so
@@ -317,7 +333,7 @@ fn test_block_overrides_leave_nothing_a_pool_reads_at_zero() {
 /// makes the node refuse the call outright once a block lands mid-quote.
 #[test]
 fn test_executed_in_pins_the_block_without_touching_the_rest() {
-    let base = block_environment();
+    let base = block_environment(PrevRandaoOverride::Random);
     let pinned = executed_in(base.clone(), 25_903_761, 1_788_531_000);
 
     assert_eq!(pinned.number, Some(U256::from(25_903_761_u64)));
@@ -331,7 +347,7 @@ fn test_executed_in_pins_the_block_without_touching_the_rest() {
 /// sit above the head.
 #[test]
 fn test_block_overrides_leave_the_block_for_the_node_to_number() {
-    let environment = block_environment();
+    let environment = block_environment(PrevRandaoOverride::Random);
 
     assert_eq!(environment.number, None);
     assert_eq!(environment.time, None);
@@ -476,6 +492,7 @@ fn call_on_block(number: u64) -> SimulatedCall<'static> {
         value: U256::ZERO,
         data: &[0x12],
         block: BlockNumberOrTag::Number(number),
+        prev_randao: PrevRandaoOverride::Random,
     }
 }
 
@@ -614,7 +631,9 @@ fn test_simulator_runs_on_the_latest_block_by_default() {
     let simulator = mocked_simulator(&Asserter::new(), TEST_TIMEOUT);
     let quote = encoded_quote();
 
-    let setup = SimulationSetup::for_quote(&quote, None, simulator.block).expect("a valid quote");
+    let setup =
+        SimulationSetup::for_quote(&quote, None, simulator.block, PrevRandaoOverride::Random)
+            .expect("a valid quote");
 
     assert_eq!(setup.call.block, BlockNumberOrTag::Latest);
 }
@@ -623,8 +642,13 @@ fn test_simulator_runs_on_the_latest_block_by_default() {
 fn test_setup_runs_on_the_quote_block_when_asked() {
     let quote = encoded_quote();
 
-    let setup =
-        SimulationSetup::for_quote(&quote, None, SimulationBlock::Quote).expect("a valid quote");
+    let setup = SimulationSetup::for_quote(
+        &quote,
+        None,
+        SimulationBlock::Quote,
+        PrevRandaoOverride::Random,
+    )
+    .expect("a valid quote");
 
     assert_eq!(setup.call.block, BlockNumberOrTag::Number(quote.block().number()));
 }
@@ -655,6 +679,7 @@ async fn test_simulation_runs_on_the_block_it_is_given() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Number(1_234),
+            prev_randao: PrevRandaoOverride::Random,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -683,6 +708,7 @@ async fn test_simulate_call_against_mocked_provider() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Latest,
+            prev_randao: PrevRandaoOverride::Random,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -706,6 +732,7 @@ async fn test_simulated_call_rejects_non_uint256_return_data() {
             value: U256::ZERO,
             data: &[],
             block: BlockNumberOrTag::Latest,
+            prev_randao: PrevRandaoOverride::Random,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -735,6 +762,7 @@ async fn test_simulated_call_decodes_revert_data_from_mocked_rpc_error() {
             value: U256::ZERO,
             data: &[],
             block: BlockNumberOrTag::Latest,
+            prev_randao: PrevRandaoOverride::Random,
         },
         native_balance_override(Address::repeat_byte(1)),
         test_envelope(),
@@ -878,6 +906,7 @@ async fn simulate_reverting_call(asserter: Asserter) -> SimulationAttempt {
                 value: U256::ZERO,
                 data: &[0x12],
                 block: BlockNumberOrTag::Latest,
+                prev_randao: PrevRandaoOverride::Random,
             },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
@@ -949,6 +978,7 @@ async fn test_reverted_simulation_carries_a_replay_pinned_to_its_block() {
             value: U256::ZERO,
             data: &[0x12],
             block: BlockNumberOrTag::Latest,
+            prev_randao: PrevRandaoOverride::Random,
         },
         native_balance_override(sender),
         test_envelope(),
@@ -1009,6 +1039,7 @@ async fn test_simulation_times_out_when_the_node_does_not_answer() {
                 value: U256::ZERO,
                 data: &[0x12],
                 block: BlockNumberOrTag::Latest,
+                prev_randao: PrevRandaoOverride::Random,
             },
             native_balance_override(Address::repeat_byte(1)),
             test_envelope(),
@@ -1172,6 +1203,7 @@ async fn test_live_accept_any_erc1271_signature_code() {
                 value,
                 data: &data,
                 block: BlockNumberOrTag::Latest,
+                prev_randao: PrevRandaoOverride::Random,
             },
             overrides.clone(),
             test_envelope(),
@@ -1255,6 +1287,7 @@ async fn test_live_simulate_and_trace() {
                 value: U256::ZERO,
                 data: &data,
                 block: BlockNumberOrTag::Latest,
+                prev_randao: PrevRandaoOverride::Random,
             },
             native_balance_override(sender),
             test_envelope(),
