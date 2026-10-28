@@ -132,8 +132,11 @@ impl FyndRPCBuilder {
     /// Adds external liquidity: components from a source outside Tycho and `--protocols`.
     ///
     /// `protocol_system` names the source and is the protocol system of every component it
-    /// publishes. The market feed fails at startup if `make_feed` returns an error, if two
-    /// sources share a name, or if a `--protocols` entry has the same name as the source.
+    /// publishes. Components under another protocol system, with a token outside the token
+    /// universe, or with the id of a component the market holds under another protocol system
+    /// are dropped with a warning. The market feed fails at startup if `make_feed` returns an
+    /// error, if two sources share a name, or if a `--protocols` entry has the same name as the
+    /// source.
     ///
     /// See
     /// [`FyndBuilder::with_external_liquidity`](fynd_core::FyndBuilder::with_external_liquidity).

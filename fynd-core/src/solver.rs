@@ -743,6 +743,10 @@ impl FyndBuilder {
     /// published set. Every component must be executable: its protocol system needs an executor
     /// on the configured chain.
     ///
+    /// Fynd drops, with a warning, each component whose protocol system differs from
+    /// `protocol_system` or that has a token outside the token universe. It also drops one whose
+    /// id the market already holds under another protocol system.
+    ///
     /// The market feed fails at startup, with a configuration error, if `make_feed` returns an
     /// error, if two sources share a `protocol_system`, or if a `--protocols` entry has the same
     /// name as the source.

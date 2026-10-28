@@ -5,13 +5,17 @@
 //! - Updates MarketState (exclusive write access)
 //! - Broadcasts MarketEvents to Solvers
 
-use std::{collections::HashSet, pin::Pin, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    time::Instant,
+};
 
 use metrics::{gauge, histogram};
 use rustc_hash::FxHashMap;
 use tokio::sync::{broadcast, oneshot};
 use tokio_stream::{Stream, StreamExt};
-use tracing::{debug, info, instrument, span, trace, Instrument, Level};
+use tracing::{debug, info, instrument, span, trace, warn, Instrument, Level};
 use tycho_simulation::{
     evm::{
         pending::PendingBlockProcessor,
@@ -19,7 +23,7 @@ use tycho_simulation::{
     },
     protocol::models::{ProtocolComponent, Update},
     tycho_client::feed::component_tracker::ComponentFilter,
-    tycho_common::traits::TxDeltaIndexer,
+    tycho_common::{simulation::protocol_sim::ProtocolSim, traits::TxDeltaIndexer},
     utils::load_all_tokens,
 };
 
@@ -27,7 +31,7 @@ use crate::{
     feed::{
         book_stream::{next_book_update, BookStream, BookUpdate},
         events::MarketEvent,
-        market_data::MarketData,
+        market_data::{MarketData, MarketState},
         protocol_registry::{has_tycho_protocols, open_price_level_stream, register_exchanges},
         when_configured, DataFeedError, TychoFeedConfig,
     },
@@ -573,27 +577,38 @@ impl TychoFeed {
     /// market's block label nor invalidate a simulation overlay built against the current one.
     #[instrument(skip(self, update), fields(protocol_system = %update.protocol_system))]
     async fn handle_book_update(&self, update: BookUpdate) -> Result<(), DataFeedError> {
-        let BookUpdate { protocol_system, added, removed, updated, states } = update;
-
-        info!(
-            "received {} books from {protocol_system}: {} new components, {} removed, {} updated",
-            states.len(),
-            added.len(),
-            removed.len(),
-            updated.len()
-        );
+        let BookUpdate { protocol_system, mut added, mut removed, mut updated, mut states } =
+            update;
 
         let update_start = Instant::now();
-        let refreshed_ids: Vec<ComponentId> = updated
-            .iter()
-            .map(|component| component.id.to_string())
-            .collect();
-        let (added_topology, component_count, token_count) = {
+        let (refreshed_ids, added_topology, component_count, token_count) = {
             let mut market_data = self
                 .market_data
                 .write()
                 .instrument(span!(Level::DEBUG, "data_feed_write_lock"))
                 .await;
+            drop_foreign_components(
+                &market_data,
+                &protocol_system,
+                BookUpdateParts {
+                    added: &mut added,
+                    removed: &mut removed,
+                    updated: &mut updated,
+                    states: &mut states,
+                },
+            );
+            info!(
+                "received {} books from {protocol_system}: {} new components, {} removed, {} \
+                 updated",
+                states.len(),
+                added.len(),
+                removed.len(),
+                updated.len()
+            );
+            let refreshed_ids: Vec<ComponentId> = updated
+                .iter()
+                .map(|component| component.id.to_string())
+                .collect();
             market_data.upsert_tokens(
                 added
                     .iter()
@@ -616,7 +631,12 @@ impl TychoFeed {
                     Some((id, topology))
                 })
                 .collect();
-            (added_topology, market_data.component_count(), market_data.token_count())
+            (
+                refreshed_ids,
+                added_topology,
+                market_data.component_count(),
+                market_data.token_count(),
+            )
         };
         // A refreshed component whose swap directions changed is reported as added.
         let updated_components = refreshed_ids
@@ -638,6 +658,46 @@ impl TychoFeed {
 
         Ok(())
     }
+}
+
+/// The parts of a [`BookUpdate`] that name components.
+struct BookUpdateParts<'a> {
+    added: &'a mut Vec<ProtocolComponent>,
+    removed: &'a mut Vec<ComponentId>,
+    updated: &'a mut Vec<ProtocolComponent>,
+    states: &'a mut HashMap<ComponentId, Box<dyn ProtocolSim>>,
+}
+
+/// Removes from a book update every component the market holds under another protocol system.
+///
+/// A book feed owns only the components of its own protocol system, so it must not replace,
+/// refresh or remove a pool that Tycho or another feed serves under the same id.
+fn drop_foreign_components(
+    market_data: &MarketState,
+    protocol_system: &str,
+    BookUpdateParts { added, removed, updated, states }: BookUpdateParts<'_>,
+) {
+    let held_elsewhere = |id: &str| {
+        market_data
+            .get_component(id)
+            .map(|held| held.protocol_system.as_str())
+            .filter(|held_system| *held_system != protocol_system)
+    };
+    for components in [added, updated] {
+        components.retain(|component| {
+            let id = component.id.to_string();
+            let Some(held_system) = held_elsewhere(&id) else {
+                return true;
+            };
+            warn!(
+                "Book feed {protocol_system} published component {id}, which the market holds \
+                 under {held_system}; dropping it"
+            );
+            states.remove(&id);
+            false
+        });
+    }
+    removed.retain(|id| held_elsewhere(id).is_none());
 }
 
 /// Converts a streamed component into the market's representation without stripping the `0x`
