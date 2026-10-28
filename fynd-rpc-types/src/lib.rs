@@ -145,10 +145,10 @@ impl QuoteRequest {
     }
 }
 
-/// Liquidity a request excludes from a route.
+/// Liquidity a request excludes from a route, and tokens it requires a route to pass through.
 ///
 /// Every field is optional. The pools, protocol systems and tokens it names are excluded from
-/// every route.
+/// every route, and every route must pass through every one of its required tokens.
 #[must_use]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -172,6 +172,19 @@ pub struct RouteFilter {
         )
     )]
     exclude_tokens: Vec<Address>,
+    /// Every route must pass through every listed token. The order's input and output
+    /// tokens count as passed, so listing either adds no constraint. A token cannot also be in
+    /// `exclude_tokens`. Only some algorithms support it; when no solver pool serving the
+    /// request does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(
+            value_type = Vec<String>,
+            example = json!(["0x6B175474E89094C44Da98b954EedeAC495271d0F"])
+        )
+    )]
+    require_tokens: Vec<Address>,
 }
 
 impl RouteFilter {
@@ -193,6 +206,12 @@ impl RouteFilter {
         self
     }
 
+    /// Requires every route to pass through every one of these tokens.
+    pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.require_tokens.extend(tokens);
+        self
+    }
+
     /// The pools excluded, by component id.
     pub fn excluded_pools(&self) -> &[String] {
         &self.exclude_pools
@@ -206,6 +225,11 @@ impl RouteFilter {
     /// The tokens excluded as intermediates.
     pub fn excluded_tokens(&self) -> &[Address] {
         &self.exclude_tokens
+    }
+
+    /// A route must pass through every token in this list.
+    pub fn required_tokens(&self) -> &[Address] {
+        &self.require_tokens
     }
 }
 
@@ -1893,6 +1917,11 @@ mod conversions {
                 .with_excluded_protocols(self.exclude_protocols)
                 .with_excluded_tokens(
                     self.exclude_tokens
+                        .into_iter()
+                        .map(Into::into),
+                )
+                .with_required_tokens(
+                    self.require_tokens
                         .into_iter()
                         .map(Into::into),
                 )
