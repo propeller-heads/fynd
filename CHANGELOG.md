@@ -1,4 +1,36 @@
 
+## [0.117.0](https://github.com/propeller-heads/fynd/compare/0.116.3...0.117.0) (2026-10-28)
+
+### Features
+
+* **clients:** recognise the two require_tokens server codes ([f5d19bd](https://github.com/propeller-heads/fynd/commit/f5d19bd2f4a720d06ecceeeb1a274a27558faedf))
+* **clients:** send requireTokens in the TypeScript route filter ([621b170](https://github.com/propeller-heads/fynd/commit/621b170bc1b1c64c559ed3c0bbfa4365a91ccd67))
+* **derive-connector-tokens:** rank by backed TVL, not raw pool TVL ([6cfee6c](https://github.com/propeller-heads/fynd/commit/6cfee6c99bfa9698bea17625e6ecb9aa1a74acda))
+* **derive-connector-tokens:** size the TVL ranking with --top-n-tvl ([b0cea16](https://github.com/propeller-heads/fynd/commit/b0cea16fdd5f750d95d94d80853fc69c932049e9))
+* **derive-connector-tokens:** add the top tokens by pool TVL ([fe7d37d](https://github.com/propeller-heads/fynd/commit/fe7d37d87a202df78d60f4fcc8795f64b8b6ee8c))
+* **core:** drop excluded protocols from a route filter in place ([a7bdbf6](https://github.com/propeller-heads/fynd/commit/a7bdbf60d08e6bde21ff94a4b6da768b6b52496a))
+* **core:** expose the required tokens of resolved route constraints ([d5d1691](https://github.com/propeller-heads/fynd/commit/d5d16912477e3c91fcd0a1931aab7a5e90e10e8c))
+* **core:** let water_fill honour required tokens ([f6c6894](https://github.com/propeller-heads/fynd/commit/f6c689421579002a6c542b75e0e46a572a191ee7))
+* **core:** let most_liquid honour required tokens ([8c2a11c](https://github.com/propeller-heads/fynd/commit/8c2a11c0bb29032072589612ef34025c339c8e5f))
+* **core:** skip pools without required-token support at allocation ([84c1e1c](https://github.com/propeller-heads/fynd/commit/84c1e1ca12a9042e48a56779a9ba316e7e43a28b))
+* **core:** reject routes that skip a required token ([404cd76](https://github.com/propeller-heads/fynd/commit/404cd76e2749000a47284232942514811fe7b70a))
+* **core:** refuse required tokens an algorithm cannot honour ([fd40f04](https://github.com/propeller-heads/fynd/commit/fd40f0416fc020f04f2f4124f53f0882903a36ed))
+* **core:** carry required-token support on the pool handle ([366f87f](https://github.com/propeller-heads/fynd/commit/366f87f7ecb23e7225254087af7a14af891a273d))
+* **core:** report required-token support per worker pool ([8366570](https://github.com/propeller-heads/fynd/commit/8366570e1c942539e9b5609e0f461cd98dec03e2))
+* **core:** keep only token paths through every required token ([ca56949](https://github.com/propeller-heads/fynd/commit/ca56949a6cc8b051b281f7bbc1a64533a5ec3cfc))
+* **core:** let route constraints require tokens ([77dcd3a](https://github.com/propeller-heads/fynd/commit/77dcd3a399cb435f50fe41c24a80690064198115))
+* **fynd-rpc:** answer 422 when no pool supports require_tokens ([b69564c](https://github.com/propeller-heads/fynd/commit/b69564c8f1279d3465fbffb0550d47449f8d0e77))
+* **fynd-rpc:** reject a token that is both required and excluded ([bc6a573](https://github.com/propeller-heads/fynd/commit/bc6a573ef7419487b0b3aebfb8387fba534509da))
+* **fynd-rpc-types:** accept require_tokens in the route filter ([2c740ff](https://github.com/propeller-heads/fynd/commit/2c740ff82d67436f76fed018d2e050fff649d460))
+
+### Bug Fixes
+
+* **core:** keep required tokens in replacement segments ([35d202c](https://github.com/propeller-heads/fynd/commit/35d202c416e75eeb02af3cdee7c2bcd45b33b27a))
+* **core:** let required tokens through the connector list ([d75b0a4](https://github.com/propeller-heads/fynd/commit/d75b0a4c5d28638249581bf94b765e0af29de63e))
+* **simulation:** leave prevrandao to the node on BSC ([c0315d8](https://github.com/propeller-heads/fynd/commit/c0315d853de51a3443b07bccae1bc15dd9d40d27))
+* **rpc:** capture require_tokens in the replay log and quote record ([67e215f](https://github.com/propeller-heads/fynd/commit/67e215f3d2bedc323502157dbc72bb3945871eee))
+
+
 ## [0.116.3](https://github.com/propeller-heads/fynd/compare/0.116.2...0.116.3) (2026-10-28)
 
 ### Bug Fixes
