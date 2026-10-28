@@ -999,6 +999,20 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_route_filter_with_required_tokens() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let market = MarketState::new();
+
+        let exclusions = market.resolve_route_filter(
+            &RouteConstraints::default().with_required_tokens([token_b.address.clone()]),
+        );
+
+        assert!(exclusions.visits_all_required_tokens([&token_b.address]));
+        assert!(!exclusions.visits_all_required_tokens([&token_a.address]));
+    }
+
+    #[test]
     fn component_counts_by_protocol_tracks_upserts_and_removals() {
         let mut market = MarketState::new();
         let component_tokens = [token(0x0A, "A"), token(0x0B, "B")];

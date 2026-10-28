@@ -2758,6 +2758,80 @@ mod tests {
         )
     }
 
+    #[rstest]
+    #[case::none_required(&[], &[0x01, 0x02], true)]
+    #[case::through_required(&[0x09], &[0x01, 0x09, 0x02], true)]
+    #[case::every_one_visited(&[0x08, 0x09], &[0x01, 0x08, 0x09, 0x02], true)]
+    #[case::one_of_two_missing(&[0x08, 0x09], &[0x01, 0x09, 0x02], false)]
+    #[case::endpoint_and_intermediate(&[0x01, 0x09], &[0x01, 0x09, 0x02], true)]
+    #[case::endpoint_and_missing(&[0x01, 0x09], &[0x01, 0x03, 0x02], false)]
+    #[case::avoids_required(&[0x09], &[0x01, 0x03, 0x02], false)]
+    #[case::input_is_required(&[0x01], &[0x01, 0x03, 0x02], true)]
+    #[case::output_is_required(&[0x02], &[0x01, 0x03, 0x02], true)]
+    fn test_visits_all_required_tokens(
+        #[case] required: &[u8],
+        #[case] path: &[u8],
+        #[case] expected: bool,
+    ) {
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(
+            required
+                .iter()
+                .map(|&byte| token(byte, "T").address),
+        );
+        let path: Vec<Address> = path
+            .iter()
+            .map(|&byte| token(byte, "T").address)
+            .collect();
+
+        assert_eq!(exclusions.visits_all_required_tokens(&path), expected);
+    }
+
+    #[test]
+    fn test_route_filter_with_only_required_tokens() {
+        let filter = RouteConstraints::default().with_required_tokens([token(0x09, "X").address]);
+
+        assert!(!filter.is_empty());
+    }
+
+    #[test]
+    fn test_exclusions_with_only_required_tokens_exclude_nothing() {
+        let exclusions =
+            ResolvedRouteConstraints::default().with_required_tokens([token(0x09, "X").address]);
+
+        assert!(exclusions.is_empty());
+    }
+
+    #[rstest]
+    #[case::no_overlap(&[0x08], &[0x09], None)]
+    #[case::overlap(&[0x08, 0x09], &[0x09], Some(0x09))]
+    #[case::nothing_required(&[], &[0x09], None)]
+    #[case::nothing_excluded(&[0x09], &[], None)]
+    fn test_route_filter_validate(
+        #[case] required: &[u8],
+        #[case] excluded: &[u8],
+        #[case] overlap: Option<u8>,
+    ) {
+        let addresses = |bytes: &[u8]| -> Vec<Address> {
+            bytes
+                .iter()
+                .map(|&byte| token(byte, "T").address)
+                .collect()
+        };
+        let filter = RouteConstraints::default()
+            .with_required_tokens(addresses(required))
+            .with_excluded_tokens(addresses(excluded));
+
+        let result = filter.validate();
+
+        match (overlap, result) {
+            (None, Ok(())) => {}
+            (Some(byte), Err(RouteConstraintsError::RequiredTokenExcluded { token })) => {
+                assert_eq!(token, make_address(byte));
+            }
+            (expected, result) => panic!("expected overlap {expected:?}, got {result:?}"),
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Order Tests
     // -------------------------------------------------------------------------
