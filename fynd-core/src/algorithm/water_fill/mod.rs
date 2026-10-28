@@ -459,6 +459,8 @@ impl Algorithm for WaterFillAlgorithm {
     type GraphType = TopologyGraph<DepthAndPrice>;
     type GraphManager = TopologyGraphManager<DepthAndPrice>;
 
+    const SUPPORTS_REQUIRED_TOKENS: bool = true;
+
     fn name(&self) -> &str {
         "water_fill"
     }
@@ -1381,6 +1383,11 @@ where
         frontier = prune_candidate_frontier(next_by_node);
     }
 
+    found.retain(|(path, _)| {
+        cfg.search
+            .exclusions
+            .visits_all_required_tokens(path.tokens.iter().copied())
+    });
     rank_found_candidate_paths(found, cfg.max_candidates, order)
 }
 
