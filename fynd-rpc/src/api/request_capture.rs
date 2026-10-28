@@ -32,13 +32,14 @@ struct ReplayOptions {
     min_responses: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_gas: Option<String>,
-    #[serde(skip_serializing_if = "ReplayExclusionRouteFilter::is_empty")]
-    route_filter: ReplayExclusionRouteFilter,
+    #[serde(skip_serializing_if = "ReplayRouteFilter::is_empty")]
+    route_filter: ReplayRouteFilter,
 }
 
-/// The liquidity a captured request excluded, sorted so two captures of one request read alike.
+/// The liquidity a captured request excluded and the tokens it required, sorted so two captures
+/// of one request read alike.
 #[derive(Debug, Clone, Serialize)]
-struct ReplayExclusionRouteFilter {
+struct ReplayRouteFilter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_pools: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -47,7 +48,7 @@ struct ReplayExclusionRouteFilter {
     exclude_tokens: Vec<String>,
 }
 
-impl ReplayExclusionRouteFilter {
+impl ReplayRouteFilter {
     fn capture(filter: &RouteConstraints) -> Self {
         let mut pools: Vec<String> = filter
             .excluded_pools()
@@ -134,7 +135,7 @@ impl ReplayRequest {
                 max_gas: options
                     .max_gas()
                     .map(ToString::to_string),
-                route_filter: ReplayExclusionRouteFilter::capture(options.route_filter()),
+                route_filter: ReplayRouteFilter::capture(options.route_filter()),
             },
             exclusive_access: access == ExclusiveAccess::Granted,
             disable_slippage_taking: options
