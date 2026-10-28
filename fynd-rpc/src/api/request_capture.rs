@@ -420,7 +420,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use fynd_rpc_types::{QuoteOptions, QuoteRequest};
+    use fynd_rpc_types::{Bytes, QuoteOptions, QuoteRequest};
     use rstest::rstest;
     use serde_json::Value;
     use tracing_subscriber::fmt::MakeWriter;
@@ -486,12 +486,14 @@ mod tests {
         assert_eq!(options["max_gas"], "500000");
     }
 
-    /// The filter decides the route, so a replay has to see what the original request excluded.
+    /// The filter decides the route, so a replay has to see what the original request excluded
+    /// and required.
     #[test]
     fn test_replay_json_with_a_route_filter() {
         let filter = fynd_rpc_types::RouteFilter::default()
             .with_excluded_pools(["pool-1".to_string()])
-            .with_excluded_protocols(["uniswap_v2".to_string()]);
+            .with_excluded_protocols(["uniswap_v2".to_string()])
+            .with_required_tokens([Bytes::from([0xDDu8; 20]), Bytes::from([0xCCu8; 20])]);
         let options = QuoteOptions::default().with_route_filter(filter);
         let request = QuoteRequest::new(vec![order()]).with_options(options);
 
@@ -502,6 +504,42 @@ mod tests {
         assert_eq!(captured["exclude_pools"], serde_json::json!(["pool-1"]));
         assert_eq!(captured["exclude_protocols"], serde_json::json!(["uniswap_v2"]));
         assert!(captured.get("exclude_tokens").is_none(), "an empty list is left out");
+        assert_eq!(
+            captured["require_tokens"],
+            serde_json::json!([
+                "0xcccccccccccccccccccccccccccccccccccccccc",
+                "0xdddddddddddddddddddddddddddddddddddddddd"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_replay_json_captures_a_filter_with_only_required_tokens() {
+        let filter = fynd_rpc_types::RouteFilter::default()
+            .with_required_tokens([Bytes::from([0xCCu8; 20])]);
+        let options = QuoteOptions::default().with_route_filter(filter);
+        let request = QuoteRequest::new(vec![order()]).with_options(options);
+
+        let json = replay_json(request, ExclusiveAccess::Denied);
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            value["options"]["route_filter"],
+            serde_json::json!({"require_tokens": ["0xcccccccccccccccccccccccccccccccccccccccc"]})
+        );
+    }
+
+    #[test]
+    fn test_replay_json_omits_an_empty_route_filter() {
+        let request = QuoteRequest::new(vec![order()]);
+        let json = replay_json(request, ExclusiveAccess::Denied);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value["options"]
+                .get("route_filter")
+                .is_none(),
+            "json was: {json}"
+        );
     }
 
     #[rstest]
