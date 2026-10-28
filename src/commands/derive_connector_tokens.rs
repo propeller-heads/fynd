@@ -720,15 +720,17 @@ fn print_text(selected: &[ConnectorSelection], tvl_unit: &str) {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn addr(byte: u8) -> Address {
         Address::from([byte; 20])
     }
 
-    fn score(symbol: &str, component_count: usize, tvl: f64) -> (Address, TokenScore) {
+    fn score(symbol: &str, component_count: usize, backed_tvl: f64) -> (Address, TokenScore) {
         let byte = symbol.as_bytes()[0];
-        (addr(byte), TokenScore { symbol: symbol.to_string(), component_count, tvl })
+        (addr(byte), TokenScore { symbol: symbol.to_string(), component_count, backed_tvl })
     }
 
     fn component(id: &str, tokens: &[u8]) -> SnapshotComponent {
@@ -742,6 +744,17 @@ mod tests {
         }
     }
 
+    fn pool_balances(id: &str, held: &[(u8, f64)]) -> (ComponentId, HashMap<Address, f64>) {
+        (
+            id.to_string(),
+            held.iter()
+                .map(|(b, amount)| (addr(*b), *amount))
+                .collect(),
+        )
+    }
+
+    const ANCHOR: u8 = 1;
+
     fn selection(
         scores: Vec<(Address, TokenScore)>,
         wrap_pair: &[Address],
@@ -749,30 +762,84 @@ mod tests {
         min_component_count: usize,
     ) -> Vec<(String, SelectedBy)> {
         let sizes = RankingSizes { pool_count: top_n, tvl: top_n };
-        select_connectors(scores, wrap_pair, sizes, min_component_count)
+        select_connectors(scores, wrap_pair, sizes, min_component_count, 0.0)
             .into_iter()
             .map(|entry| (entry.score.symbol, entry.selected_by))
             .collect()
     }
 
     #[test]
-    fn test_score_tokens_sums_tvl_and_counts_missing_as_zero() {
-        let components = [component("a", &[1, 2]), component("b", &[1, 3])];
-        let tvl = HashMap::from([("a".to_string(), 10.0)]);
+    fn test_raw_to_whole_units() {
+        assert_eq!(raw_to_whole_units(&[0x01, 0x00], 2), 2.56);
+        assert_eq!(raw_to_whole_units(&[], 6), 0.0);
+    }
 
-        let mut scores = score_tokens(&components, &tvl, &HashMap::new());
+    #[rstest]
+    #[case::capped_at_tvl(&[(2, 100.0)], 50.0, 50.0)]
+    #[case::capped_at_twice_trusted_value(&[(2, 10.0)], 100.0, 20.0)]
+    #[case::untrusted_pair_gets_nothing(&[(3, 1e9), (4, 1e9)], 1e6, 0.0)]
+    #[case::fake_side_not_counted(&[(2, 10.0), (3, 1e9)], 1e6, 20.0)]
+    fn test_backed_credit(#[case] held: &[(u8, f64)], #[case] tvl: f64, #[case] expected: f64) {
+        let tokens: Vec<u8> = held.iter().map(|(b, _)| *b).collect();
+        let components = [component("p", &tokens)];
+        let balances = Balances::from([pool_balances("p", held)]);
+        let tvl = HashMap::from([("p".to_string(), tvl)]);
+        let pools = PoolData { components: &components, tvl: &tvl, balances: &balances };
+        let prices = HashMap::from([(addr(2), 1.0)]);
+
+        let credit = backed_credit(&pools, &prices);
+
+        assert_eq!(credit["p"], expected);
+    }
+
+    #[test]
+    fn test_trusted_prices_use_deepest_two_token_anchor_pool() {
+        let components = [
+            component("shallow", &[ANCHOR, 2]),
+            component("deep", &[2, ANCHOR]),
+            component("triple", &[ANCHOR, 2, 3]),
+            component("other", &[3, 4]),
+        ];
+        let balances = Balances::from([
+            pool_balances("shallow", &[(ANCHOR, 1.0), (2, 100.0)]),
+            pool_balances("deep", &[(ANCHOR, 10.0), (2, 50.0)]),
+            pool_balances("triple", &[(ANCHOR, 99.0), (2, 1.0), (3, 1.0)]),
+            pool_balances("other", &[(3, 5.0), (4, 5.0)]),
+        ]);
+        let tvl = HashMap::from([
+            ("shallow".to_string(), 4.0),
+            ("deep".to_string(), 30.0),
+            ("triple".to_string(), 200.0),
+        ]);
+        let pools = PoolData { components: &components, tvl: &tvl, balances: &balances };
+        let anchors = [addr(ANCHOR)];
+        let backing = native_backing(&pools, &anchors);
+
+        let prices = trusted_prices(&pools, &anchors, &backing, 5);
+
+        // Token 3 only has a three-token pool, token 4 no anchor pool: neither is priced.
+        assert_eq!(prices, HashMap::from([(addr(ANCHOR), 1.0), (addr(2), 0.4)]));
+        assert_eq!(trusted_prices(&pools, &anchors, &backing, 0).len(), 1);
+    }
+
+    #[test]
+    fn test_score_tokens_backed_tvl_excludes_largest_component() {
+        let components = [component("a", &[1, 2]), component("b", &[1, 3]), component("c", &[1])];
+        let credit = HashMap::from([("a".to_string(), 10.0), ("b".to_string(), 4.0)]);
+
+        let mut scores = score_tokens(&components, &credit, &HashMap::new());
         scores.sort_by_key(|(address, _)| address.clone());
 
         let summary: Vec<(usize, f64)> = scores
             .iter()
-            .map(|(_, s)| (s.component_count, s.tvl))
+            .map(|(_, s)| (s.component_count, s.backed_tvl))
             .collect();
-        assert_eq!(summary, vec![(2, 10.0), (1, 10.0), (1, 0.0)]);
+        assert_eq!(summary, vec![(3, 4.0), (1, 0.0), (1, 0.0)]);
     }
 
     #[test]
     fn test_select_connectors_by_each_ranking() {
-        // Deep: few pools, large TVL. Spam: many pools, no TVL.
+        // Deep: few pools, large backed TVL. Spam: many pools, no backed TVL.
         let scores =
             vec![score("Deep", 2, 1000.0), score("Spam", 50, 0.0), score("Filler", 3, 1.0)];
 
@@ -785,6 +852,20 @@ mod tests {
                 ("Spam".to_string(), SelectedBy::PoolCount)
             ]
         );
+    }
+
+    #[test]
+    fn test_select_connectors_pool_count_blocked_below_min_tvl() {
+        let scores = vec![score("Spam", 50, 0.5), score("Hub", 40, 6.0), score("Deep", 2, 900.0)];
+        let sizes = RankingSizes { pool_count: 1, tvl: 1 };
+
+        let picked = select_connectors(scores, &[], sizes, 2, 5.0);
+
+        let by: Vec<(&str, SelectedBy)> = picked
+            .iter()
+            .map(|entry| (entry.score.symbol.as_str(), entry.selected_by))
+            .collect();
+        assert_eq!(by, vec![("Deep", SelectedBy::Tvl), ("Hub", SelectedBy::PoolCount)]);
     }
 
     #[test]
@@ -809,7 +890,7 @@ mod tests {
         ];
         let sizes = RankingSizes { pool_count: 1, tvl: 2 };
 
-        let picked: Vec<(String, SelectedBy)> = select_connectors(scores, &[], sizes, 2)
+        let picked: Vec<(String, SelectedBy)> = select_connectors(scores, &[], sizes, 2, 0.0)
             .into_iter()
             .map(|entry| (entry.score.symbol, entry.selected_by))
             .collect();
@@ -850,13 +931,13 @@ mod tests {
     fn test_select_connectors_orders_by_tvl_rank_and_breaks_ties_by_address() {
         let scores = vec![score("B", 5, 10.0), score("A", 5, 10.0), score("C", 9, 20.0)];
 
-        let ranked = select_connectors(scores, &[], RankingSizes { pool_count: 3, tvl: 3 }, 1);
+        let ranked = select_connectors(scores, &[], RankingSizes { pool_count: 3, tvl: 3 }, 1, 0.0);
 
         let order: Vec<&str> = ranked
             .iter()
             .map(|entry| entry.score.symbol.as_str())
             .collect();
         assert_eq!(order, vec!["C", "A", "B"]);
-        assert_eq!(ranked[1].component_rank, 2);
+        assert_eq!(ranked[1].component_rank, Some(2));
     }
 }
