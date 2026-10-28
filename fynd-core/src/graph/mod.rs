@@ -147,8 +147,8 @@ pub struct GraphQueryFilter {
     pub min_hops: usize,
     /// Longest route to return, in hops.
     pub max_hops: usize,
-    /// Tokens a route may pass *through*. Its own endpoints are always allowed, whatever this
-    /// holds. `None` allows every token.
+    /// Tokens a route may pass *through*. Its own endpoints and the tokens the request requires
+    /// are always allowed, whatever this holds. `None` allows every token.
     pub connector_tokens: Option<FxHashSet<Address>>,
 }
 
@@ -166,7 +166,8 @@ pub struct RouteSearch<'a> {
 
 impl RouteSearch<'_> {
     /// Whether a route may pass through this token: an endpoint always may, and an
-    /// intermediate must clear both the connector list and the request's exclusions.
+    /// intermediate must clear the request's exclusions and either be on the connector list or be
+    /// a token the request requires.
     #[must_use]
     pub fn allows_token(self, token: &Address, endpoints: (&Address, &Address)) -> bool {
         self.exclusions
@@ -176,7 +177,10 @@ impl RouteSearch<'_> {
                 self.bounds
                     .connector_tokens
                     .as_ref()
-                    .is_none_or(|tokens| tokens.contains(token)))
+                    .is_none_or(|tokens| tokens.contains(token)) ||
+                self.exclusions
+                    .required_tokens()
+                    .contains(token))
     }
 }
 

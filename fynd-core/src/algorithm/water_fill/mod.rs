@@ -1555,7 +1555,12 @@ fn candidate_priority<W>(
         .connector_tokens
         .as_ref()
     {
-        Some(tokens) => tokens.contains(token).then_some(1),
+        Some(tokens) => (tokens.contains(token) ||
+            cfg.search
+                .exclusions
+                .required_tokens()
+                .contains(token))
+        .then_some(1),
         None => cfg
             .anchor_tokens
             .contains(token)
