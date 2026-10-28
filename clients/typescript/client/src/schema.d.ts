@@ -719,7 +719,8 @@ export interface components {
             exclude_tokens?: string[];
             /**
              * @description Every route must pass through every listed token. The order's input and output
-             *     tokens count as passed, so listing either adds no constraint. A token cannot also be in
+             *     tokens count as passed, so listing either adds no constraint. A required token may be an
+             *     intermediate even when a pool's connector tokens leave it out. A token cannot also be in
              *     `exclude_tokens`. Only some algorithms support it; when no solver pool serving the
              *     request does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.
              * @example [

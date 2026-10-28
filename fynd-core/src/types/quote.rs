@@ -135,6 +135,7 @@ impl RouteConstraints {
     /// Requires every route to pass through every one of these tokens.
     ///
     /// The order's input and output tokens count as passed, so listing either adds no constraint.
+    /// A required token may be an intermediate even when a pool's connector tokens leave it out.
     #[must_use]
     pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
         self.required_tokens.extend(tokens);

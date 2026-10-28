@@ -1213,7 +1213,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Every route must pass through every listed token. The order's input and output\ntokens count as passed, so listing either adds no constraint. A token cannot also be in\n`exclude_tokens`. Only some algorithms support it; when no solver pool serving the\nrequest does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.",
+            "description": "Every route must pass through every listed token. The order's input and output\ntokens count as passed, so listing either adds no constraint. A required token may be an\nintermediate even when a pool's connector tokens leave it out. A token cannot also be in\n`exclude_tokens`. Only some algorithms support it; when no solver pool serving the\nrequest does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.",
             "example": [
               "0x6B175474E89094C44Da98b954EedeAC495271d0F"
             ]
