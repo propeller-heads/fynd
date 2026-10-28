@@ -46,7 +46,9 @@ use super::{
     when_configured, DataFeedError, TychoFeedConfig,
 };
 use crate::{
-    feed::protocol_registry::{parse_rfq_entries, require_executor, METRIC_CHAINS},
+    feed::protocol_registry::{
+        matches_streamed_system, parse_rfq_entries, require_executor, RfqEntry, METRIC_CHAINS,
+    },
     types::ComponentId,
 };
 
@@ -169,16 +171,16 @@ impl BookStream {
     /// Returns [`DataFeedError::Config`] if a venue's credentials are missing from the
     /// environment, if the chain has no curated USD stablecoin set to price built-in venues'
     /// books against, if external liquidity cannot be built, if two sources share a name, or if a
-    /// source has the name of a `--protocols` venue.
+    /// source has the name of a `--protocols` entry.
     pub fn open(
         config: &TychoFeedConfig,
         tokens: HashMap<Bytes, Token>,
     ) -> Result<Option<Self>, DataFeedError> {
         let chain = config.chain;
         let external_liquidity = &config.external_liquidity;
+        reject_name_clash(&config.protocols, external_liquidity)?;
         let mut venues = Vec::new();
         for (entry, venue) in parse_rfq_entries(&config.protocols)? {
-            reject_name_clash(entry, venue.protocol(), external_liquidity)?;
             match venue.protocol() {
                 bebop::PROTOCOL_SYSTEM => {
                     // The feed supports more chains than Tycho's execution registry. Reject
@@ -528,15 +530,20 @@ pub async fn next_book_update(books: &mut Option<BookStream>) -> Result<BookUpda
     when_configured(books.as_mut().map(BookStream::next)).await
 }
 
-/// Rejects external liquidity named like a `--protocols` venue: both would publish components under
+/// Rejects external liquidity named like a `--protocols` entry: both would publish components under
 /// one protocol system.
 fn reject_name_clash(
-    entry: &str,
-    venue_system: &str,
+    protocols: &[String],
     external_liquidity: &[ExternalLiquidity],
 ) -> Result<(), DataFeedError> {
-    for source in external_liquidity {
-        if source.protocol_system == entry || source.protocol_system == venue_system {
+    for (entry, source) in protocols
+        .iter()
+        .cartesian_product(external_liquidity)
+    {
+        let clashes = matches_streamed_system(entry, &source.protocol_system) ||
+            RfqEntry::parse(entry)
+                .is_some_and(|venue| venue.protocol() == source.protocol_system);
+        if clashes {
             return Err(DataFeedError::Config(format!(
                 "external liquidity {} has the name of the --protocols entry {entry}; rename it or \
                  drop the entry",
