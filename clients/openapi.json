@@ -143,7 +143,7 @@
           "solver"
         ],
         "summary": "POST /v1/quote - Request a quote.",
-        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: No routes found\n- 503 Service Unavailable: Queue full or service overloaded\n- 503 Service Unavailable: Queue full, service overloaded, or quote timeout",
+        "description": "Accepts a `QuoteRequest` and returns a `Quote` with the best routes found, or an error\nif the request could not be filled.\n\n# Errors\n\n- 400 Bad Request: Invalid request format\n- 422 Unprocessable Entity: The request could not be filled: no route, encoding failed, or\n  `require_tokens` not supported; see `code`\n- 503 Service Unavailable: Queue full or service overloaded\n- 503 Service Unavailable: Queue full, service overloaded, or quote timeout",
         "operationId": "quote",
         "requestBody": {
           "content": {
@@ -177,7 +177,7 @@
             }
           },
           "422": {
-            "description": "No route found",
+            "description": "The request could not be filled: no route, encoding failed, or require_tokens not supported; see `code`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1179,7 +1179,7 @@
       },
       "RouteFilter": {
         "type": "object",
-        "description": "Liquidity a request excludes from a route.\n\nEvery field is optional. The pools, protocol systems and tokens it names are excluded from\nevery route.",
+        "description": "Liquidity a request excludes from a route, and tokens it requires a route to pass through.\n\nEvery field is optional. The pools, protocol systems and tokens it names are excluded from\nevery route, and every route must pass through every one of its required tokens.",
         "properties": {
           "exclude_pools": {
             "type": "array",
@@ -1206,6 +1206,16 @@
             "description": "Tokens to exclude as intermediates. The order's own two tokens are always allowed, so\nnaming one of them changes nothing.",
             "example": [
               "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+            ]
+          },
+          "require_tokens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every route must pass through every listed token. The order's input and output\ntokens count as passed, so listing either adds no constraint. A required token may be an\nintermediate even when a pool's connector tokens leave it out. A token cannot also be in\n`exclude_tokens`. Only some algorithms support it; when no solver pool serving the\nrequest does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.",
+            "example": [
+              "0x6B175474E89094C44Da98b954EedeAC495271d0F"
             ]
           }
         }

@@ -47,25 +47,40 @@ pub enum ExclusiveAccess {
 pub(crate) struct OrderClass {
     /// Whether this order may be served by exclusive-access worker pools.
     exclusive_access: ExclusiveAccess,
+    /// Whether every route must pass through every one of the request's required tokens, which
+    /// only worker pools whose algorithm supports required tokens can serve.
+    requires_tokens: bool,
 }
 
 impl OrderClass {
-    /// Classifies an order whose only distinguishing property is the caller's access.
-    pub(crate) fn new(exclusive_access: ExclusiveAccess) -> Self {
-        Self { exclusive_access }
+    /// Classifies an order by the caller's access and whether the request requires tokens.
+    pub(crate) fn new(exclusive_access: ExclusiveAccess, requires_tokens: bool) -> Self {
+        Self { exclusive_access, requires_tokens }
+    }
+
+    /// Returns the same class with the required-token condition lifted.
+    pub(crate) fn without_required_tokens(self) -> Self {
+        Self { requires_tokens: false, ..self }
+    }
+
+    /// Returns whether every route must pass through every one of the request's required tokens.
+    pub(crate) fn requires_tokens(self) -> bool {
+        self.requires_tokens
     }
 }
 
 impl SolverPoolHandle {
     /// Returns whether this worker pool serves orders of `class`.
     ///
-    /// Every configured condition must hold; today the only one is the liquidity scope.
+    /// Every configured condition must hold: the liquidity scope, and support for required
+    /// tokens when the order requires them.
     pub(crate) fn serves(&self, class: OrderClass) -> bool {
-        match self.liquidity_scope() {
+        let scope_serves = match self.liquidity_scope() {
             // Public liquidity is available to every caller.
             LiquidityScope::PublicOnly => true,
             LiquidityScope::IncludeExclusive => class.exclusive_access == ExclusiveAccess::Granted,
-        }
+        };
+        scope_serves && (!class.requires_tokens || self.supports_required_tokens())
     }
 }
 
@@ -213,7 +228,25 @@ mod tests {
         let worker_pool = SolverPoolHandle::new("worker_pool", TaskQueueHandle::from_sender(tx))
             .with_liquidity_scope(scope);
 
-        assert_eq!(worker_pool.serves(OrderClass::new(access)), expected);
+        assert_eq!(worker_pool.serves(OrderClass::new(access, false)), expected);
+    }
+
+    #[rstest]
+    #[case::required_and_supported(true, true, true)]
+    #[case::required_and_unsupported(true, false, false)]
+    #[case::not_required_and_unsupported(false, false, true)]
+    fn test_serves_required_tokens(
+        #[case] requires_tokens: bool,
+        #[case] supports: bool,
+        #[case] expected: bool,
+    ) {
+        let (tx, _rx) = async_channel::bounded(1);
+        let worker_pool = SolverPoolHandle::new("worker_pool", TaskQueueHandle::from_sender(tx))
+            .with_supports_required_tokens(supports);
+
+        let class = OrderClass::new(ExclusiveAccess::Denied, requires_tokens);
+
+        assert_eq!(worker_pool.serves(class), expected);
     }
 
     fn handle(name: &str) -> SolverPoolHandle {
@@ -232,7 +265,7 @@ mod tests {
     #[test]
     fn test_allocate_without_allowlist_keeps_every_serving_pool() {
         let pools = [handle("a"), handle("b")];
-        let allocation = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), None);
+        let allocation = allocate(&pools, OrderClass::new(ExclusiveAccess::Denied, false), None);
         assert_eq!(names(&allocation), vec!["a", "b"]);
     }
 
@@ -241,7 +274,7 @@ mod tests {
         let pools = [handle("a"), handle("b"), handle("c")];
         let allowlist = ["c".to_string(), "a".to_string()];
         let allocation =
-            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist));
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied, false), Some(&allowlist));
         assert_eq!(names(&allocation), vec!["a", "c"]);
     }
 
@@ -281,7 +314,7 @@ mod tests {
         ];
         let allowlist = ["exclusive".to_string()];
         let allocation =
-            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied), Some(&allowlist));
+            allocate(&pools, OrderClass::new(ExclusiveAccess::Denied, false), Some(&allowlist));
         assert!(allocation.is_empty());
     }
 }

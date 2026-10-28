@@ -92,7 +92,8 @@ export interface paths {
          *     # Errors
          *
          *     - 400 Bad Request: Invalid request format
-         *     - 422 Unprocessable Entity: No routes found
+         *     - 422 Unprocessable Entity: The request could not be filled: no route, encoding failed, or
+         *       `require_tokens` not supported; see `code`
          *     - 503 Service Unavailable: Queue full or service overloaded
          *     - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
          */
@@ -692,10 +693,10 @@ export interface components {
             swaps: components["schemas"]["Swap"][];
         };
         /**
-         * @description Liquidity a request excludes from a route.
+         * @description Liquidity a request excludes from a route, and tokens it requires a route to pass through.
          *
          *     Every field is optional. The pools, protocol systems and tokens it names are excluded from
-         *     every route.
+         *     every route, and every route must pass through every one of its required tokens.
          */
         RouteFilter: {
             /** @description Pools to exclude, by component id. */
@@ -716,6 +717,17 @@ export interface components {
              *     ]
              */
             exclude_tokens?: string[];
+            /**
+             * @description Every route must pass through every listed token. The order's input and output
+             *     tokens count as passed, so listing either adds no constraint. A required token may be an
+             *     intermediate even when a pool's connector tokens leave it out. A token cannot also be in
+             *     `exclude_tokens`. Only some algorithms support it; when no solver pool serving the
+             *     request does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.
+             * @example [
+             *       "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+             *     ]
+             */
+            require_tokens?: string[];
         };
         /** @description Outcome of simulating an encoded quote on the latest block. */
         SimulationResult: {
@@ -1026,7 +1038,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description No route found */
+            /** @description The request could not be filled: no route, encoding failed, or require_tokens not supported; see `code` */
             422: {
                 headers: {
                     [name: string]: unknown;

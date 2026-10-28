@@ -62,6 +62,12 @@ pub enum RequestValidationError {
     /// The encoding options failed [`fynd_core::EncodingOptions::validate`].
     #[error("invalid encoding options: {0}")]
     InvalidEncodingOptions(#[from] EncodingOptionsError),
+    /// A token is in both `require_tokens` and `exclude_tokens` of the route filter.
+    #[error("token {token} is both required and excluded by the route filter")]
+    RequiredTokenExcluded {
+        /// The token named in both lists.
+        token: String,
+    },
 }
 
 impl RequestValidationError {
@@ -85,6 +91,7 @@ impl RequestValidationError {
                     "INVALID_ENCODING_OPTIONS"
                 }
             },
+            Self::RequiredTokenExcluded { .. } => "REQUIRED_TOKEN_EXCLUDED",
         }
     }
 }
@@ -113,6 +120,7 @@ pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
         SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
         SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
         SolveError::MaxGasExceeded => "MAX_GAS_EXCEEDED",
+        SolveError::RequiredTokensNotSupported => "REQUIRED_TOKENS_NOT_SUPPORTED",
         SolveError::MissingData(_) => "MISSING_DATA",
         SolveError::SimulationFailed(_) => "SIMULATION_FAILED",
         other => {
@@ -300,5 +308,13 @@ mod tests {
         let (status, body) = json_body(ApiError::SolveFailed(err)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], "FAILED_ENCODING");
+    }
+
+    #[actix_web::test]
+    async fn test_required_tokens_not_supported_returns_422() {
+        let (status, body) =
+            json_body(ApiError::SolveFailed(SolveError::RequiredTokensNotSupported)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "REQUIRED_TOKENS_NOT_SUPPORTED");
     }
 }

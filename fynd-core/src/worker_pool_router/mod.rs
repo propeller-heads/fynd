@@ -115,12 +115,30 @@ pub struct SolverPoolHandle {
     /// Which liquidity this worker pool routes through. Decides whether an order is dispatched
     /// to it ([`SolverPoolHandle::serves`]).
     liquidity_scope: LiquidityScope,
+    /// Whether this worker pool's algorithm honours the route filter's required tokens. A
+    /// request that requires tokens is not dispatched to a pool where this is `false`.
+    supports_required_tokens: bool,
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`LiquidityScope`].
+    /// Creates a new solver pool handle with the default [`LiquidityScope`], not supporting
+    /// required tokens.
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
-        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
+        Self {
+            name: name.into(),
+            queue,
+            liquidity_scope: LiquidityScope::default(),
+            supports_required_tokens: false,
+        }
+    }
+
+    /// Sets whether the worker pool's algorithm honours the route filter's required tokens.
+    ///
+    /// Take it from `WorkerPool::supports_required_tokens`. Left unset, the pool is never sent a
+    /// request that requires tokens.
+    pub fn with_supports_required_tokens(mut self, supports: bool) -> Self {
+        self.supports_required_tokens = supports;
+        self
     }
 
     /// Sets the worker pool's liquidity scope.
@@ -142,6 +160,11 @@ impl SolverPoolHandle {
     /// Returns the worker pool's liquidity scope.
     pub fn liquidity_scope(&self) -> LiquidityScope {
         self.liquidity_scope
+    }
+
+    /// Returns whether the worker pool's algorithm honours the route filter's required tokens.
+    pub fn supports_required_tokens(&self) -> bool {
+        self.supports_required_tokens
     }
 }
 
@@ -562,7 +585,14 @@ impl WorkerPoolRouter {
         // One allocation per order: which worker pools serve an order is a property of the order,
         // not of the request. Today every order in a request classifies identically; once
         // trade size joins `OrderClass` they will differ.
-        let class = OrderClass::new(access);
+        let class = OrderClass::new(
+            access,
+            !request
+                .options()
+                .route_filter()
+                .required_tokens()
+                .is_empty(),
+        );
         let pool_allowlist = request.options().worker_pools();
         if let Some(allowlist) = pool_allowlist {
             validate_pool_allowlist(&self.solver_pools, allowlist)?;
@@ -576,6 +606,12 @@ impl WorkerPoolRouter {
             .iter()
             .any(Allocation::is_empty)
         {
+            let serves_without_required_tokens =
+                !allocate(&self.solver_pools, class.without_required_tokens(), pool_allowlist)
+                    .is_empty();
+            if class.requires_tokens() && serves_without_required_tokens {
+                return Err(SolveError::RequiredTokensNotSupported);
+            }
             return Err(SolveError::Internal(format!(
                 "no solver pool serves this request: {class:?}"
             )));
@@ -1377,7 +1413,8 @@ fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
 
 /// Shared-graph facts beat path-specific reasons (most specific first: amount-too-small and a
 /// rejected route, then no-scorable-paths, then no-graph-path), which beat liquidity, then data,
-/// then algorithm faults, then infrastructure errors. The first error wins within a tier.
+/// then algorithm faults, then infrastructure errors, then a pool's refusal of required tokens.
+/// The first error wins within a tier.
 fn aggregate_no_route_cause(failed_solvers: &[(String, SolveError)]) -> Option<SolveError> {
     lowest_tier_cause(
         failed_solvers
@@ -1419,6 +1456,9 @@ fn cause_tier(error: &SolveError) -> u8 {
         SolveError::EncodingUnavailable(_) |
         SolveError::PriceCheckFailed { .. } => 5,
         SolveError::NoRouteFound { reason: None, .. } => 6,
+        // A pool that cannot take the filter says nothing about the order once a pool that can
+        // has failed for its own reason.
+        SolveError::RequiredTokensNotSupported => 7,
     }
 }
 
@@ -1537,7 +1577,7 @@ mod tests {
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
         EncodingOptions, FeeBreakdown, NoPathReason, OrderSide, PermitDetails, PermitSingle, Route,
-        SimulationResult, SingleOrderQuote, Swap, UserTransferType,
+        RouteConstraints, SimulationResult, SingleOrderQuote, Swap, UserTransferType,
     };
 
     fn default_encoder() -> Encoder {
@@ -4188,6 +4228,133 @@ mod tests {
         let expected = has_derived_data.then_some(prices);
         assert_eq!(ranked.token_prices().as_deref(), expected.as_ref());
         worker.abort();
+    }
+
+    fn requiring_tokens_request(order_count: usize) -> QuoteRequest {
+        let route_filter = RouteConstraints::default().with_required_tokens([make_address(0x03)]);
+        let orders = (0..order_count)
+            .map(|_| make_order())
+            .collect();
+        QuoteRequest::new(orders, QuoteOptions::default().with_route_filter(route_filter))
+    }
+
+    fn supporting(pool: SolverPoolHandle) -> SolverPoolHandle {
+        pool.with_supports_required_tokens(true)
+    }
+
+    #[tokio::test]
+    async fn test_solve_required_tokens_with_no_supporting_pool() {
+        let (pool_a, worker_a, received_a) =
+            create_counting_mock_worker_pool("a", Ok(make_single_quote(950)), 0);
+        let (pool_b, worker_b, received_b) =
+            create_counting_mock_worker_pool("b", Ok(make_single_quote(900)), 0);
+        let worker_router = WorkerPoolRouter::new(
+            vec![pool_a, pool_b],
+            WorkerPoolRouterConfig::default(),
+            default_encoder(),
+        );
+
+        let result = worker_router
+            .solve(&requiring_tokens_request(1), ExclusiveAccess::Denied)
+            .await;
+
+        assert!(matches!(result, Err(SolveError::RequiredTokensNotSupported)), "{result:?}");
+        assert_eq!(received_a.load(Ordering::SeqCst), 0);
+        assert_eq!(received_b.load(Ordering::SeqCst), 0);
+        worker_a.abort();
+        worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_solve_required_tokens_with_one_supporting_pool() {
+        let (supporting_pool, worker_a, received_a) =
+            create_counting_mock_worker_pool("supporting", Ok(make_single_quote(950)), 0);
+        let (other_pool, worker_b, received_b) =
+            create_counting_mock_worker_pool("other", Ok(make_single_quote(990)), 0);
+        let worker_router = WorkerPoolRouter::new(
+            vec![supporting(supporting_pool), other_pool],
+            WorkerPoolRouterConfig::default(),
+            default_encoder(),
+        );
+
+        let ranked = worker_router
+            .solve(&requiring_tokens_request(1), ExclusiveAccess::Denied)
+            .await
+            .expect("solve");
+
+        let best = &ranked.per_order()[0][0];
+        assert_eq!(best.status(), QuoteStatus::Success);
+        assert_eq!(best.amount_out_net_gas(), &BigUint::from(950u64));
+        assert_eq!(received_a.load(Ordering::SeqCst), 1);
+        assert_eq!(received_b.load(Ordering::SeqCst), 0);
+        worker_a.abort();
+        worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_solve_required_tokens_with_supporting_pool_timeout() {
+        let (supporting_pool, worker_a, _) = create_counting_mock_worker_pool(
+            "supporting",
+            Err(SolveError::Timeout { elapsed_ms: 10 }),
+            0,
+        );
+        let (other_pool, worker_b, _) =
+            create_counting_mock_worker_pool("other", Ok(make_single_quote(990)), 0);
+        let worker_router = WorkerPoolRouter::new(
+            vec![supporting(supporting_pool), other_pool],
+            WorkerPoolRouterConfig::default(),
+            default_encoder(),
+        );
+
+        let ranked = worker_router
+            .solve(&requiring_tokens_request(1), ExclusiveAccess::Denied)
+            .await
+            .expect("solve");
+
+        assert_eq!(ranked.per_order()[0][0].status(), QuoteStatus::Timeout);
+        worker_a.abort();
+        worker_b.abort();
+    }
+
+    #[tokio::test]
+    async fn test_solve_required_tokens_with_two_orders_and_no_supporting_pool() {
+        let (pool, worker, received) =
+            create_counting_mock_worker_pool("a", Ok(make_single_quote(950)), 0);
+        let worker_router =
+            WorkerPoolRouter::new(vec![pool], WorkerPoolRouterConfig::default(), default_encoder());
+
+        let result = worker_router
+            .solve(&requiring_tokens_request(2), ExclusiveAccess::Denied)
+            .await;
+
+        assert!(matches!(result, Err(SolveError::RequiredTokensNotSupported)), "{result:?}");
+        assert_eq!(received.load(Ordering::SeqCst), 0);
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn test_solve_without_required_tokens_dispatches_to_every_pool() {
+        let (pool_a, worker_a, received_a) =
+            create_counting_mock_worker_pool("a", Ok(make_single_quote(950)), 0);
+        let (pool_b, worker_b, received_b) =
+            create_counting_mock_worker_pool("b", Ok(make_single_quote(900)), 0);
+        let worker_router = WorkerPoolRouter::new(
+            vec![supporting(pool_a), pool_b],
+            WorkerPoolRouterConfig::default().with_min_responses(2),
+            default_encoder(),
+        );
+        let request = QuoteRequest::new(vec![make_order()], QuoteOptions::default());
+
+        let ranked = worker_router
+            .solve(&request, ExclusiveAccess::Denied)
+            .await
+            .expect("solve");
+
+        assert_eq!(ranked.per_order()[0].len(), 2);
+        assert_eq!(received_a.load(Ordering::SeqCst), 1);
+        assert_eq!(received_b.load(Ordering::SeqCst), 1);
+        worker_a.abort();
+        worker_b.abort();
     }
 
     /// 2_000_000 USDC units per 1e15 wei is 2000 USDC per ETH.

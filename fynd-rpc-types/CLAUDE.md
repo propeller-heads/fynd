@@ -19,9 +19,11 @@ Single file: `src/lib.rs`. All types derive `Serialize + Deserialize`.
 - `QuoteRequest` — orders + options
 - `Order` — token_in, token_out, amount, side (Sell only), sender, optional receiver
 - `QuoteOptions` — timeout_ms, min_responses, max_gas, encoding_options, route_filter
-- `RouteFilter` — exclude_pools, exclude_protocols, exclude_tokens: the liquidity a request
-  excludes from every route. Built with `with_excluded_pools` / `with_excluded_protocols` /
-  `with_excluded_tokens`, read with `excluded_pools` / `excluded_protocols` / `excluded_tokens`
+- `RouteFilter` — exclude_pools, exclude_protocols, exclude_tokens, require_tokens: the liquidity
+  a request excludes from every route, and the tokens every route must pass through every one of. Built
+  with `with_excluded_pools` / `with_excluded_protocols` / `with_excluded_tokens` /
+  `with_required_tokens`, read with `excluded_pools` / `excluded_protocols` / `excluded_tokens` /
+  `required_tokens`
 - `EncodingOptions` — slippage, transfer_type, permit, permit2_signature, client_fee_params, price_guard (optional `PriceGuardConfig`), simulate (ask for `simulation_result` on each quote)
 - `UserTransferType` — TransferFrom (default) / TransferFromPermit2 / UseVaultsFunds
 - `ClientFeeParams` — bps, receiver, max_contribution, deadline, signature (client fee on swap output)

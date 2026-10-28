@@ -3,7 +3,7 @@
 
 use fynd_core::{
     types::RouteRejection, EncodingOptions, ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest,
-    QuoteStatus, RouteExclusionFilter, SolveError,
+    QuoteStatus, RouteConstraints, SolveError,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -32,23 +32,26 @@ struct ReplayOptions {
     min_responses: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_gas: Option<String>,
-    #[serde(skip_serializing_if = "ReplayExclusionRouteFilter::is_empty")]
-    route_filter: ReplayExclusionRouteFilter,
+    #[serde(skip_serializing_if = "ReplayRouteFilter::is_empty")]
+    route_filter: ReplayRouteFilter,
 }
 
-/// The liquidity a captured request excluded, sorted so two captures of one request read alike.
+/// The liquidity a captured request excluded and the tokens it required, sorted so two captures
+/// of one request read alike.
 #[derive(Debug, Clone, Serialize)]
-struct ReplayExclusionRouteFilter {
+struct ReplayRouteFilter {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_pools: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_protocols: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     exclude_tokens: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    require_tokens: Vec<String>,
 }
 
-impl ReplayExclusionRouteFilter {
-    fn capture(filter: &RouteExclusionFilter) -> Self {
+impl ReplayRouteFilter {
+    fn capture(filter: &RouteConstraints) -> Self {
         let mut pools: Vec<String> = filter
             .excluded_pools()
             .iter()
@@ -64,16 +67,28 @@ impl ReplayExclusionRouteFilter {
             .iter()
             .map(ToString::to_string)
             .collect();
+        let mut required: Vec<String> = filter
+            .required_tokens()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         pools.sort_unstable();
         protocols.sort_unstable();
         tokens.sort_unstable();
-        Self { exclude_pools: pools, exclude_protocols: protocols, exclude_tokens: tokens }
+        required.sort_unstable();
+        Self {
+            exclude_pools: pools,
+            exclude_protocols: protocols,
+            exclude_tokens: tokens,
+            require_tokens: required,
+        }
     }
 
     fn is_empty(&self) -> bool {
         self.exclude_pools.is_empty() &&
             self.exclude_protocols.is_empty() &&
-            self.exclude_tokens.is_empty()
+            self.exclude_tokens.is_empty() &&
+            self.require_tokens.is_empty()
     }
 }
 
@@ -134,7 +149,7 @@ impl ReplayRequest {
                 max_gas: options
                     .max_gas()
                     .map(ToString::to_string),
-                route_filter: ReplayExclusionRouteFilter::capture(options.route_filter()),
+                route_filter: ReplayRouteFilter::capture(options.route_filter()),
             },
             exclusive_access: access == ExclusiveAccess::Granted,
             disable_slippage_taking: options
@@ -222,6 +237,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",
         SolveError::MaxGasExceeded => "request/max_gas_exceeded",
+        SolveError::RequiredTokensNotSupported => "request/required_tokens_not_supported",
         SolveError::MissingData(_) => "data/missing_data",
         SolveError::MarketDataStale { .. } => "data/market_data_stale",
         SolveError::ComputationFailed(_) => "data/computation_failed",
@@ -404,7 +420,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use fynd_rpc_types::{QuoteOptions, QuoteRequest};
+    use fynd_rpc_types::{Bytes, QuoteOptions, QuoteRequest};
     use rstest::rstest;
     use serde_json::Value;
     use tracing_subscriber::fmt::MakeWriter;
@@ -470,12 +486,14 @@ mod tests {
         assert_eq!(options["max_gas"], "500000");
     }
 
-    /// The filter decides the route, so a replay has to see what the original request excluded.
+    /// The filter decides the route, so a replay has to see what the original request excluded
+    /// and required.
     #[test]
     fn test_replay_json_with_a_route_filter() {
         let filter = fynd_rpc_types::RouteFilter::default()
             .with_excluded_pools(["pool-1".to_string()])
-            .with_excluded_protocols(["uniswap_v2".to_string()]);
+            .with_excluded_protocols(["uniswap_v2".to_string()])
+            .with_required_tokens([Bytes::from([0xDDu8; 20]), Bytes::from([0xCCu8; 20])]);
         let options = QuoteOptions::default().with_route_filter(filter);
         let request = QuoteRequest::new(vec![order()]).with_options(options);
 
@@ -486,6 +504,42 @@ mod tests {
         assert_eq!(captured["exclude_pools"], serde_json::json!(["pool-1"]));
         assert_eq!(captured["exclude_protocols"], serde_json::json!(["uniswap_v2"]));
         assert!(captured.get("exclude_tokens").is_none(), "an empty list is left out");
+        assert_eq!(
+            captured["require_tokens"],
+            serde_json::json!([
+                "0xcccccccccccccccccccccccccccccccccccccccc",
+                "0xdddddddddddddddddddddddddddddddddddddddd"
+            ])
+        );
+    }
+
+    #[test]
+    fn test_replay_json_captures_a_filter_with_only_required_tokens() {
+        let filter = fynd_rpc_types::RouteFilter::default()
+            .with_required_tokens([Bytes::from([0xCCu8; 20])]);
+        let options = QuoteOptions::default().with_route_filter(filter);
+        let request = QuoteRequest::new(vec![order()]).with_options(options);
+
+        let json = replay_json(request, ExclusiveAccess::Denied);
+        let value: Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            value["options"]["route_filter"],
+            serde_json::json!({"require_tokens": ["0xcccccccccccccccccccccccccccccccccccccccc"]})
+        );
+    }
+
+    #[test]
+    fn test_replay_json_omits_an_empty_route_filter() {
+        let request = QuoteRequest::new(vec![order()]);
+        let json = replay_json(request, ExclusiveAccess::Denied);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value["options"]
+                .get("route_filter")
+                .is_none(),
+            "json was: {json}"
+        );
     }
 
     #[rstest]
@@ -638,6 +692,10 @@ mod tests {
         assert_eq!(
             failure_reason_slug(s, Some(&SolveError::MaxGasExceeded)),
             "request/max_gas_exceeded"
+        );
+        assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::RequiredTokensNotSupported)),
+            "request/required_tokens_not_supported"
         );
         assert_eq!(
             failure_reason_slug(s, Some(&SolveError::MissingData("gas price".to_string()))),

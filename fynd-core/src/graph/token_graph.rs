@@ -21,7 +21,7 @@ use crate::{
         events::{EventError, MarketEvent, MarketEventHandler},
         market_data::MarketDataView,
     },
-    types::{ComponentId, ComponentTopology, RouteExclusions, SwapDirection},
+    types::{ComponentId, ComponentTopology, ResolvedRouteConstraints, SwapDirection},
 };
 
 /// The pools that trade one directed token pair.
@@ -137,7 +137,7 @@ impl<D> TopologyGraph<D> {
         &self,
         from: NodeIndex,
         to: NodeIndex,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Leg<'_, D> {
         let pools = self.pools_between(from, to);
         if exclusions.is_empty() ||
@@ -163,7 +163,7 @@ impl<D> TopologyGraph<D> {
         &self,
         from: NodeIndex,
         to: NodeIndex,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> bool {
         let pools = self.pools_between(from, to);
         if exclusions.is_empty() {
@@ -241,7 +241,8 @@ impl<D> TopologyGraph<D> {
         Ok(self.paths_between_ix(from_ix, to_ix, search))
     }
 
-    /// Every token path from `from` to `to` within the filter's hop bounds.
+    /// Every token path from `from` to `to` within the filter's hop bounds that visits every one
+    /// of the request's required tokens, if it names any.
     ///
     /// Empty when there is no route. Check [`TopologyGraph::expand_path`] for expanded pool paths.
     ///
@@ -256,11 +257,21 @@ impl<D> TopologyGraph<D> {
         if filter.min_hops == 0 || filter.min_hops > filter.max_hops {
             return Vec::new();
         }
-        if from == to {
+        let mut token_paths = if from == to {
             self.circular_token_paths(to, search)
         } else {
             self.bidirectional_search(from, to, search)
-        }
+        };
+        token_paths.retain(|token_path| {
+            search
+                .exclusions
+                .visits_all_required_tokens(
+                    token_path
+                        .iter()
+                        .map(|&token| &self[token]),
+                )
+        });
+        token_paths
     }
 
     /// Writes out one route per combination of pools along `token_path`.
@@ -277,7 +288,7 @@ impl<D> TopologyGraph<D> {
         &self,
         token_path: &[NodeIndex],
         max_paths: Option<usize>,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Vec<Path<'_, D>> {
         // Inline, like everything else in the search: this runs once per token sequence found and
         // a route has at most `max_hops` legs. Each leg holds only the pools the request allows,
@@ -1062,7 +1073,7 @@ mod tests {
             return Vec::new();
         };
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens };
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
         graph
             .paths_between_ix(from, to, search)
@@ -1269,7 +1280,7 @@ mod tests {
         let (from, to) = (g.get_token_ix(&a).unwrap(), g.get_token_ix(&b).unwrap());
 
         let filter = GraphQueryFilter { min_hops, max_hops, connector_tokens: None };
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
 
         assert!(g
@@ -1297,7 +1308,7 @@ mod tests {
             start,
             RouteSearch {
                 bounds: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
-                exclusions: &RouteExclusions::default(),
+                exclusions: &ResolvedRouteConstraints::default(),
             },
         );
 
@@ -1318,7 +1329,7 @@ mod tests {
         from: &Address,
         to: &Address,
         hops: (usize, usize),
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> FxHashSet<Vec<&'a str>> {
         let filter =
             GraphQueryFilter { min_hops: hops.0, max_hops: hops.1, connector_tokens: None };
@@ -1338,11 +1349,87 @@ mod tests {
     fn test_paths_with_excluded_token() {
         let (a, b, _, d) = addrs();
         let m = diamond_graph();
-        let exclusions = RouteExclusions::default().with_tokens([b.clone()]);
+        let exclusions = ResolvedRouteConstraints::default().with_tokens([b.clone()]);
 
         let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
 
         assert_eq!(routes, FxHashSet::from_iter([vec!["ac", "cd"]]));
+    }
+
+    /// A route must pass through every required token; an order's own token counts as passed.
+    /// Required tokens are indices into the graph's `[a, b, c, d]`; index 4 is a token outside the
+    /// graph.
+    #[rstest]
+    #[case::intermediate(&[1], vec![vec!["ab", "bd"]])]
+    #[case::no_path_has_both(&[1, 2], vec![])]
+    #[case::endpoint_and_intermediate(&[0, 1], vec![vec!["ab", "bd"]])]
+    #[case::endpoint(&[3], vec![vec!["ab", "bd"], vec!["ac", "cd"]])]
+    #[case::off_every_route(&[4], vec![])]
+    fn test_paths_with_required_token(
+        #[case] required: &[usize],
+        #[case] expected: Vec<Vec<&str>>,
+    ) {
+        let (a, b, c, d) = addrs();
+        let tokens = [a.clone(), b, c, d.clone(), Address::from([0x99; 20])];
+        let m = diamond_graph();
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(
+            required
+                .iter()
+                .map(|&index| tokens[index].clone()),
+        );
+
+        let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
+
+        assert_eq!(routes, FxHashSet::from_iter(expected));
+    }
+
+    /// A path keeps only if it visits every required token, not just one of them.
+    #[rstest]
+    #[case::one_token(&[0x59], 2)]
+    #[case::both_tokens(&[0x58, 0x59], 1)]
+    fn test_paths_with_several_required_tokens(#[case] required: &[u8], #[case] expected: usize) {
+        let m = stacked_graph();
+        let g = m.graph();
+        let exclusions = ResolvedRouteConstraints::default()
+            .with_required_tokens(required.iter().map(|&byte| addr(byte)));
+
+        let paths = g
+            .paths_between(
+                &addr(0x51),
+                &addr(0x54),
+                RouteSearch {
+                    bounds: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
+                    exclusions: &exclusions,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(paths.len(), expected);
+    }
+
+    /// A route that returns to its start token must also pass through a required token.
+    #[test]
+    fn test_cyclic_paths_with_required_token() {
+        let (a, b, _, _) = addrs();
+        let m = diamond_graph();
+        let g = m.graph();
+        let start = g.get_token_ix(&a).unwrap();
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens([b.clone()]);
+
+        let cycles = g.paths_between_ix(
+            start,
+            start,
+            RouteSearch {
+                bounds: &GraphQueryFilter { min_hops: 1, max_hops: 4, connector_tokens: None },
+                exclusions: &exclusions,
+            },
+        );
+
+        assert!(!cycles.is_empty());
+        let b_ix = g.get_token_ix(&b).unwrap();
+        assert!(cycles
+            .iter()
+            .all(|cycle| cycle.contains(&b_ix)));
     }
 
     /// A pair whose every pool is excluded no longer connects its two tokens.
@@ -1350,7 +1437,7 @@ mod tests {
     fn test_paths_with_every_pool_of_a_pair_excluded() {
         let (a, _, _, d) = addrs();
         let m = diamond_graph();
-        let exclusions = RouteExclusions::default().with_pools(["ab".to_string()]);
+        let exclusions = ResolvedRouteConstraints::default().with_pools(["ab".to_string()]);
 
         let routes = routes_excluding(m.graph(), &a, &d, (1, 3), &exclusions);
 
@@ -1363,7 +1450,7 @@ mod tests {
         let (a, _, c, _) = addrs();
         let m = parallel_graph();
         let exclusions =
-            RouteExclusions::default().with_pools(["ab2".to_string(), "bc1".to_string()]);
+            ResolvedRouteConstraints::default().with_pools(["ab2".to_string(), "bc1".to_string()]);
 
         let routes = routes_excluding(m.graph(), &a, &c, (2, 2), &exclusions);
 
@@ -1501,6 +1588,41 @@ mod tests {
         // B must not appear; C must appear
         assert!(!intermediates.contains(&b), "B should be blocked");
         assert!(intermediates.contains(&c), "C should be allowed");
+    }
+
+    /// With connector list {B}, C passes only as a required token: `A -> C -> D` is found when C
+    /// is required and absent otherwise.
+    #[rstest]
+    #[case::not_required(false, false)]
+    #[case::required(true, true)]
+    fn test_required_token_passes_connector_list(
+        #[case] require_c: bool,
+        #[case] expects_route_through_c: bool,
+    ) {
+        let (a, b, c, d) = addrs();
+        let m = diamond_graph();
+        let filter = GraphQueryFilter {
+            min_hops: 1,
+            max_hops: 2,
+            connector_tokens: Some(FxHashSet::from_iter([b])),
+        };
+        let required = if require_c { vec![c] } else { vec![] };
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(required);
+        let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
+
+        let routes = all_ids(
+            m.graph()
+                .paths_between(&a, &d, search)
+                .unwrap()
+                .iter()
+                .flat_map(|token_path| {
+                    m.graph()
+                        .expand_path(token_path, None, &exclusions)
+                })
+                .collect(),
+        );
+
+        assert_eq!(routes.contains(&vec!["ac", "cd"]), expects_route_through_c);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use tycho_simulation::{
 use crate::{
     derived::DerivedData,
     feed::market_data::MarketDataView,
-    types::{ComponentId, ComponentTopology, RouteExclusions},
+    types::{ComponentId, ComponentTopology, ResolvedRouteConstraints},
 };
 
 /// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
@@ -140,15 +140,15 @@ where
 ///
 /// Bundles what an algorithm configures once — how long a route may be, and which tokens it may
 /// pass through — so they travel as one argument instead of three. What a request excludes is not
-/// here: that changes per solve and travels beside this as a [`RouteExclusions`].
+/// here: that changes per solve and travels beside this as a [`ResolvedRouteConstraints`].
 #[derive(Debug, Clone)]
 pub struct GraphQueryFilter {
     /// Shortest route to return, in hops. A query with `0` matches nothing.
     pub min_hops: usize,
     /// Longest route to return, in hops.
     pub max_hops: usize,
-    /// Tokens a route may pass *through*. Its own endpoints are always allowed, whatever this
-    /// holds. `None` allows every token.
+    /// Tokens a route may pass *through*. Its own endpoints and the tokens the request requires
+    /// are always allowed, whatever this holds. `None` allows every token.
     pub connector_tokens: Option<FxHashSet<Address>>,
 }
 
@@ -161,12 +161,13 @@ pub struct RouteSearch<'a> {
     /// How long a route may be, and which tokens it may pass through.
     pub bounds: &'a GraphQueryFilter,
     /// Pools and tokens this request excludes.
-    pub exclusions: &'a RouteExclusions,
+    pub exclusions: &'a ResolvedRouteConstraints,
 }
 
 impl RouteSearch<'_> {
     /// Whether a route may pass through this token: an endpoint always may, and an
-    /// intermediate must clear both the connector list and the request's exclusions.
+    /// intermediate must clear the request's exclusions and either be on the connector list or be
+    /// a token the request requires.
     #[must_use]
     pub fn allows_token(self, token: &Address, endpoints: (&Address, &Address)) -> bool {
         self.exclusions
@@ -176,7 +177,10 @@ impl RouteSearch<'_> {
                 self.bounds
                     .connector_tokens
                     .as_ref()
-                    .is_none_or(|tokens| tokens.contains(token)))
+                    .is_none_or(|tokens| tokens.contains(token)) ||
+                self.exclusions
+                    .required_tokens()
+                    .contains(token))
     }
 }
 

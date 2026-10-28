@@ -285,7 +285,7 @@ impl TestScenario {
     /// Builds a `SharedDerivedDataRef` with unit token-gas-prices for every token in this
     /// scenario, matching the `TestScenario` gas assumption (1 output-token = 1 ETH). This lets
     /// BF's `compute_net_amount_out` deduct gas costs.
-    pub(crate) fn build_derived_data(&self) -> SharedDerivedDataRef {
+    pub fn build_derived_data(&self) -> SharedDerivedDataRef {
         let unit_price = Price::new(BigUint::from(1u64), BigUint::from(1u64));
         let mut token_prices = FxHashMap::default();
 

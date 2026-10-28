@@ -155,7 +155,7 @@ curl -X POST https://fynd-api.propellerheads.xyz/v1/ethereum/quote \
 | `min_responses` | server default | Minimum number of solver pools that must respond before the server returns. `1` returns as soon as one pool has a route (fastest). Higher values wait for more pools to compete, improving price at the cost of latency. |
 | `encoding_options` | `null` | If set, the response includes a ready-to-submit `transaction` object. See [step 4](#4-encode-and-approve). |
 | `max_gas` | `null` | Cap on gas units the route may use. Routes exceeding it are rejected. |
-| `route_filter` | `null` | Liquidity to exclude from every route: `exclude_pools` (component ids), `exclude_protocols` (exact protocol system names, e.g. `uniswap_v2`, or family prefixes, e.g. `fallback:`) and `exclude_tokens` (tokens no route may pass through; the order's own two are always allowed). A name the server holds no pool for excludes nothing. |
+| `route_filter` | `null` | Liquidity to exclude from every route: `exclude_pools` (component ids), `exclude_protocols` (exact protocol system names, e.g. `uniswap_v2`, or family prefixes, e.g. `fallback:`) and `exclude_tokens` (tokens no route may pass through; the order's own two are always allowed). A name the server holds no pool for excludes nothing. `require_tokens` forces every route through every one of the listed tokens; the order's input and output tokens count as passed, a required token may be an intermediate even when a pool's connector tokens leave it out, and a token cannot also be in `exclude_tokens` (`REQUIRED_TOKEN_EXCLUDED`). Only the `most_liquid` and `water_fill` algorithms support it, and the router sends such an order only to pools that run one of them. When no solver pool serving the request does, the request fails with a `422` and the code `REQUIRED_TOKENS_NOT_SUPPORTED`. |
 
 The response contains the route, the expected `amount_out`, gas estimate, and the `solve_time_ms` the server spent finding the route:
 
@@ -539,6 +539,9 @@ A `400` carries a `code` naming what to fix. `BAD_REQUEST` means the body did no
 | `ZERO_AMOUNT` | An order's `amount` is `0` |
 | `INVALID_SLIPPAGE` | `encoding_options.slippage` is not a number from `0` to below `1` |
 | `CLIENT_FEE_TOO_HIGH` | `encoding_options.client_fee_params.bps` is above `10000` |
+| `REQUIRED_TOKEN_EXCLUDED` | A token is in both `route_filter.require_tokens` and `route_filter.exclude_tokens` |
+
+A `422` with `REQUIRED_TOKENS_NOT_SUPPORTED` means `route_filter.require_tokens` was set and no solver pool serving the request supports it; drop the filter or use a deployment that runs `most_liquid` or `water_fill`.
 
 A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — it means the solver ran but couldn't find a profitable route for the pair at the requested size. Check `/v1/{chain}/health` (`last_update_ms: 0` means the Tycho stream isn't delivering live state yet), try a different token pair or size, or confirm the tokens have [Tycho-indexed liquidity](https://docs.propellerheads.xyz/tycho) on that chain.
 

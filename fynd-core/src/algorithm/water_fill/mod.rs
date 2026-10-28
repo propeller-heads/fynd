@@ -459,6 +459,8 @@ impl Algorithm for WaterFillAlgorithm {
     type GraphType = TopologyGraph<DepthAndPrice>;
     type GraphManager = TopologyGraphManager<DepthAndPrice>;
 
+    const SUPPORTS_REQUIRED_TOKENS: bool = true;
+
     fn name(&self) -> &str {
         "water_fill"
     }
@@ -1381,6 +1383,11 @@ where
         frontier = prune_candidate_frontier(next_by_node);
     }
 
+    found.retain(|(path, _)| {
+        cfg.search
+            .exclusions
+            .visits_all_required_tokens(path.tokens.iter().copied())
+    });
     rank_found_candidate_paths(found, cfg.max_candidates, order)
 }
 
@@ -1548,7 +1555,12 @@ fn candidate_priority<W>(
         .connector_tokens
         .as_ref()
     {
-        Some(tokens) => tokens.contains(token).then_some(1),
+        Some(tokens) => (tokens.contains(token) ||
+            cfg.search
+                .exclusions
+                .required_tokens()
+                .contains(token))
+        .then_some(1),
         None => cfg
             .anchor_tokens
             .contains(token)
@@ -1713,11 +1725,11 @@ mod tests {
             },
             test_utils::{
                 addr, setup_market_unweighted_topology, setup_market_weighted_boxed,
-                token_with_decimals, ConstantProductSim, DivByZeroSim,
+                token_with_decimals, ConstantProductSim, DivByZeroSim, MockProtocolSim,
             },
         },
         graph::GraphManager,
-        types::{quote::OrderSide, RouteExclusions},
+        types::{quote::OrderSide, ResolvedRouteConstraints},
     };
 
     fn config() -> AlgorithmConfig {
@@ -1838,6 +1850,78 @@ mod tests {
             .await
             .expect("water_fill returns a split when no single path fills");
         assert!(split.route().swaps().len() >= 2, "expected a split across both components");
+    }
+
+    /// Without a required token the direct pool wins. Requiring X leaves only routes through X, so
+    /// every swap of the result touches X.
+    #[rstest::rstest]
+    #[case::no_required_token(false)]
+    #[case::required_token(true)]
+    #[tokio::test]
+    async fn test_find_best_route_with_required_token(#[case] require_x: bool) {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        let x = token_with_decimals(0x03, "X", 18);
+        let (market, gm) = setup_market_weighted_boxed(vec![
+            ("ab", &a, &b, Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
+            ("ax", &a, &x, Box::new(MockProtocolSim::new(2.0))),
+            ("xb", &x, &b, Box::new(MockProtocolSim::new(2.0))),
+        ]);
+        let order = whole_weth_order(&a.address, &b.address, 1);
+        let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
+        let request = SolveRequest::new(gm.graph(), market, &order)
+            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+
+        let result = water_fill_default()
+            .find_best_route(request)
+            .await
+            .unwrap();
+
+        let swaps = result.route().swaps();
+        assert!(!swaps.is_empty());
+        for swap in swaps {
+            let touches_x = swap.token_in() == &x.address || swap.token_out() == &x.address;
+            assert_eq!(touches_x, require_x, "unexpected swap {}", swap.component_id());
+        }
+    }
+
+    /// With connector list {B}, the route through X exists only when the request requires X, and
+    /// then it is the only route.
+    #[rstest::rstest]
+    #[case::not_required(false, "ab")]
+    #[case::required(true, "ax")]
+    #[tokio::test]
+    async fn test_required_token_passes_connector_list(
+        #[case] require_x: bool,
+        #[case] first_pool: &str,
+    ) {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        let x = token_with_decimals(0x03, "X", 18);
+        let y = token_with_decimals(0x04, "Y", 18);
+        let (market, gm) = setup_market_weighted_boxed(vec![
+            ("ab", &a, &b, Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
+            ("by", &b, &y, Box::new(MockProtocolSim::new(3.0))),
+            ("ax", &a, &x, Box::new(MockProtocolSim::new(2.0))),
+            ("xy", &x, &y, Box::new(MockProtocolSim::new(2.0))),
+        ]);
+        let order = whole_weth_order(&a.address, &y.address, 1);
+        let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
+        let request = SolveRequest::new(gm.graph(), market, &order)
+            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+        let algorithm = WaterFillAlgorithm::with_config(
+            AlgorithmConfig::new(1, 3, Duration::from_millis(5000), None)
+                .unwrap()
+                .with_connector_tokens([b.address.clone()]),
+        )
+        .unwrap();
+
+        let result = algorithm
+            .find_best_route(request)
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps()[0].component_id(), first_pool);
     }
 
     /// A component whose math panics mid-simulation must be skipped like any failing component,
@@ -1993,9 +2077,10 @@ mod tests {
         );
 
         let exclusions = if exclude_endpoints {
-            RouteExclusions::default().with_tokens([link.address.clone(), weth.address.clone()])
+            ResolvedRouteConstraints::default()
+                .with_tokens([link.address.clone(), weth.address.clone()])
         } else {
-            RouteExclusions::default()
+            ResolvedRouteConstraints::default()
         };
         let start = Instant::now();
         let view = market.read().await;

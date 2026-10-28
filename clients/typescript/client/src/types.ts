@@ -105,9 +105,10 @@ export interface Transaction {
 }
 
 /**
- * Liquidity a request excludes from a route.
+ * Liquidity a request excludes from a route, and tokens it requires a route to pass through.
  *
- * The pools, protocols and tokens it names are excluded from every route.
+ * The pools, protocols and tokens it names are excluded from every route, and every route must
+ * pass through every one of its required tokens.
  */
 export interface RouteFilter {
   /** Pools to exclude, by component id. */
@@ -119,6 +120,14 @@ export interface RouteFilter {
    * naming one of them changes nothing.
    */
   excludeTokens?: Address[];
+  /**
+   * Every route must pass through every listed token. The order's input and output tokens
+   * count as passed, so listing either adds no constraint. A required token may be an
+   * intermediate even when a pool's connector tokens leave it out. A token cannot also be in
+   * `excludeTokens`. Only some algorithms support it; when no solver pool serving the request
+   * does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.
+   */
+  requireTokens?: Address[];
 }
 
 /** Optional parameters for a quote request. */
