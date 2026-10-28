@@ -156,7 +156,8 @@ reason.
 
 ## Non-Tycho Liquidity Sources
 
-Three forms of `--protocols` entry name streams other than Tycho's, each with its own endpoint:
+Three forms of `--protocols` entry name streams other than Tycho's, each with its own endpoint. A fourth
+source needs no entry: external liquidity a caller adds in code (below).
 
 | Entry | Opened by | Stream |
 |---|---|---|
@@ -174,6 +175,19 @@ price-level `Update`s go through `handle_tycho_message`; `BookUpdate`s go throug
 `handle_book_update`. Both non-Tycho stream groups are opened before `run_with_pending` answers its
 `PendingFeedSetup` handshake, so a configuration error reaches the caller as an error rather than
 as a handle to a feed that dies.
+
+`FyndBuilder::with_external_liquidity(protocol_system, make_feed)` adds external liquidity: a feed of
+the caller's own, which publishes `LiquiditySnapshot`s (`feed/external_liquidity.rs`). A snapshot holds
+the `LiquidityComponent`s (a `ProtocolComponent` and an `Arc<dyn ProtocolSim>` state) the source serves
+at that moment. `make_feed` gets an `ExternalLiquidityConfig` (chain, token universe, `min_tvl`) and
+runs on every `BookStream::open`. `BookStream` merges the built-in venue feeds and the external feeds
+(`external`) and turns both into the same `BookUpdate`s, so the rules below hold for both. Three checks
+guard the market. `open` refuses a source named like any `--protocols` entry (or like the venue behind a
+`rfq:` or `fallback:rfq:` entry), and two sources with one name. `BookStream` drops, with a warning, an
+external component whose protocol system is not the source's name or that has a token outside the
+token universe. `handle_book_update` drops, for every book feed, a component whose id the market holds
+under another protocol system: it neither replaces nor removes it. The name's prefix decides the
+treatment: `fallback:` makes pAMMs, `rfq:` puts the components under the RFQ replacer.
 
 A book venue publishes states of the world, not incremental changes: the newest set replaces the
 last one, and a pair missing from it is a pair the venue stopped serving. `BookStream` keeps the ids
