@@ -1,20 +1,32 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{cmp::Ordering, collections::HashMap, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Args;
 use fynd_core::{
-    feed::market_data::MarketData,
+    feed::{market_data::MarketData, protocol_registry::is_tycho_system},
     solver::{FyndBuilder, SolverBuildError},
+    types::ComponentId,
 };
 use fynd_rpc::parse_chain;
 use tracing::info;
-use tycho_simulation::tycho_common::models::{chain_config::TvlThresholdTier, Address};
+use tycho_simulation::{
+    evm::protocol::native_wrapper::state::NATIVE_WRAPPER_ID,
+    tycho_client::rpc::{
+        ComponentTvlPaginatedParams, HttpRPCClient, HttpRPCClientOptions, RPCClient,
+    },
+    tycho_common::models::{chain_config::TvlThresholdTier, Address, Chain},
+};
+
+/// Concurrent TVL requests per protocol system.
+const TVL_FETCH_CONCURRENCY: usize = 10;
 
 /// Derives recommended connector tokens from live Tycho market data.
 ///
-/// Connects to Tycho, waits for the initial market snapshot, then ranks every
-/// token by how many components it appears in. The most-connected tokens are the best
-/// candidates for intermediate ("connector") hops in multi-hop routes.
+/// Connects to Tycho, waits for the initial market snapshot, then fetches the TVL of every
+/// component in it and scores each token by the components it appears in and by their summed TVL.
+/// The connector tokens are the top `--top-n` by pool count together with the top `--top-n` by TVL.
+/// Pool count finds the hubs; TVL finds deep tokens that sit in few pools and drops spam tokens
+/// spread over many tiny ones. The chain's native and wrapped native tokens are always added.
 ///
 /// Outputs a ranked list and a ready-to-paste TOML snippet.
 #[derive(Args, PartialEq, Debug)]
@@ -48,7 +60,7 @@ pub struct DeriveConnectorTokensArgs {
     #[arg(long)]
     pub min_tvl: Option<f64>,
 
-    /// Number of top connector tokens to suggest.
+    /// Number of top tokens taken from each ranking (pool count and TVL).
     #[arg(long, default_value_t = 10)]
     pub top_n: usize,
 
@@ -98,8 +110,8 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
     let min_tvl = args
         .min_tvl
         .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Low));
-    let mut builder =
-        FyndBuilder::new(chain, tycho_url, rpc_url, protocols, min_tvl).algorithm("most_liquid");
+    let mut builder = FyndBuilder::new(chain, tycho_url.clone(), rpc_url, protocols, min_tvl)
+        .algorithm("most_liquid");
     if let Some(key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(key.clone());
     }
@@ -134,100 +146,282 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    let scores = score_tokens(&market_data).await;
-    let mut ranked: Vec<(Address, TokenScore)> = scores.into_iter().collect();
-    ranked.sort_by_key(|(_, s)| std::cmp::Reverse(s.component_count));
-    let total = ranked.len();
-
-    let mut candidates: Vec<&(Address, TokenScore)> = ranked
-        .iter()
-        .filter(|(_, s)| s.component_count >= args.min_component_count)
-        .take(args.top_n)
-        .collect();
-
-    // Always include the chain's native and wrapped native tokens so that
-    // wrap/unwrap hops are never accidentally blocked by connector_tokens.
-    let wrap_pair = std::iter::once(chain.native_token())
-        .chain(chain.wrapped_native_token())
-        .map(|token| token.address);
-    for addr in wrap_pair {
-        let already_present = candidates
-            .iter()
-            .any(|(a, _)| *a == addr);
-        if !already_present {
-            if let Some(entry) = ranked.iter().find(|(a, _)| *a == addr) {
-                candidates.push(entry);
-            }
-        }
-    }
-
+    let (components, symbols) = snapshot_components(&market_data).await;
     solver.shutdown();
 
+    let tvl = fetch_component_tvl(
+        &tycho_url,
+        args.tycho_api_key.as_deref(),
+        !args.disable_tls,
+        chain,
+        &components,
+    )
+    .await?;
+
+    let scores = score_tokens(&components, &tvl, &symbols);
+    let total = scores.len();
+    let wrap_pair: Vec<Address> = std::iter::once(chain.native_token())
+        .chain(chain.wrapped_native_token())
+        .map(|token| token.address)
+        .collect();
+    let selected = select_connectors(scores, &wrap_pair, args.top_n, args.min_component_count);
+    let tvl_unit = chain.native_token().symbol;
+
     match args.output.as_str() {
-        "toml" => print_toml(&candidates, &args.chain, total),
-        "json" => print_json(&candidates, total)?,
-        _ => print_text(&candidates, total),
+        "toml" => print_toml(&selected, &args.chain, &tvl_unit, args.top_n, total),
+        "json" => print_json(&selected)?,
+        _ => print_text(&selected, &tvl_unit),
     }
 
     Ok(())
 }
 
+/// A topology component: its id, the Tycho protocol system it belongs to and the tokens it holds.
+struct SnapshotComponent {
+    id: ComponentId,
+    protocol_system: String,
+    tokens: Vec<Address>,
+}
+
+/// What the ranking knows about one token.
+#[derive(Clone, Debug, PartialEq)]
 struct TokenScore {
     symbol: String,
     component_count: usize,
+    /// Summed TVL, in the chain's native token, of every component holding the token.
+    tvl: f64,
 }
 
-async fn score_tokens(market_data: &MarketData) -> HashMap<Address, TokenScore> {
-    let guard = market_data.read().await;
-    let topology = guard.component_topology();
+/// Which ranking put a token in the connector list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectedBy {
+    PoolCount,
+    Tvl,
+    Both,
+    WrapPair,
+}
 
-    // Count component appearances per token.
-    let mut component_count: HashMap<Address, usize> = HashMap::new();
-    for component in topology.values() {
-        for addr in &component.tokens {
-            *component_count
-                .entry(addr.clone())
-                .or_insert(0) += 1;
+impl SelectedBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            SelectedBy::PoolCount => "pool_count",
+            SelectedBy::Tvl => "tvl",
+            SelectedBy::Both => "both",
+            SelectedBy::WrapPair => "wrap_pair",
+        }
+    }
+}
+
+/// A token chosen as a connector, with its 1-based rank in each ranking.
+#[derive(Clone, Debug, PartialEq)]
+struct ConnectorSelection {
+    address: Address,
+    score: TokenScore,
+    component_rank: usize,
+    tvl_rank: usize,
+    selected_by: SelectedBy,
+}
+
+async fn snapshot_components(
+    market_data: &MarketData,
+) -> (Vec<SnapshotComponent>, HashMap<Address, String>) {
+    let guard = market_data.read().await;
+    let mut components = Vec::new();
+    let mut symbols = HashMap::new();
+    for (id, topology) in guard.component_topology() {
+        let Some(component) = guard.get_component(&id) else { continue };
+        for addr in &topology.tokens {
+            if let Some(token) = guard.get_token(addr) {
+                symbols.insert(addr.clone(), token.symbol.clone());
+            }
+        }
+        components.push(SnapshotComponent {
+            id,
+            protocol_system: component.protocol_system.clone(),
+            tokens: topology.tokens,
+        });
+    }
+    (components, symbols)
+}
+
+/// Fetches the TVL of the topology's components from Tycho, one request per protocol system.
+///
+/// Components of non-Tycho systems (RFQ, price level books, the synthetic native wrapper) and
+/// components Tycho reports no TVL for are absent from the result.
+async fn fetch_component_tvl(
+    tycho_url: &str,
+    auth_key: Option<&str>,
+    use_tls: bool,
+    chain: Chain,
+    components: &[SnapshotComponent],
+) -> Result<HashMap<ComponentId, f64>> {
+    let rpc_url =
+        if use_tls { format!("https://{tycho_url}") } else { format!("http://{tycho_url}") };
+    let rpc_options = HttpRPCClientOptions::new().with_auth_key(auth_key.map(|s| s.to_string()));
+    let rpc_client = HttpRPCClient::new(&rpc_url, rpc_options)
+        .context("failed to build Tycho RPC client for TVL fetch")?;
+
+    let mut ids_by_system: HashMap<&str, Vec<ComponentId>> = HashMap::new();
+    for component in components {
+        if is_tycho_system(&component.protocol_system) &&
+            component.protocol_system != NATIVE_WRAPPER_ID
+        {
+            ids_by_system
+                .entry(&component.protocol_system)
+                .or_default()
+                .push(component.id.clone());
         }
     }
 
-    component_count
-        .into_iter()
-        .map(|(addr, count)| {
-            let symbol = guard
-                .get_token(&addr)
-                .map(|t| t.symbol.clone())
-                .unwrap_or_else(|| "?".to_string());
-            (addr, TokenScore { symbol, component_count: count })
-        })
-        .collect()
+    let mut tvl = HashMap::new();
+    for (system, ids) in ids_by_system {
+        let params = ComponentTvlPaginatedParams::new(chain, TVL_FETCH_CONCURRENCY)
+            .with_protocol_system(system)
+            .with_component_ids(ids);
+        let system_tvl = rpc_client
+            .get_component_tvl_paginated(params)
+            .await
+            .with_context(|| {
+                format!("failed to fetch component TVL for protocol system {system}")
+            })?;
+        info!(system, components = system_tvl.len(), "fetched component TVL");
+        tvl.extend(system_tvl);
+    }
+    Ok(tvl)
 }
 
-fn print_toml(candidates: &[&(Address, TokenScore)], chain: &str, total: usize) {
+/// Counts the components holding each token and sums their TVL; a component with no TVL entry
+/// adds 0.
+fn score_tokens(
+    components: &[SnapshotComponent],
+    tvl: &HashMap<ComponentId, f64>,
+    symbols: &HashMap<Address, String>,
+) -> Vec<(Address, TokenScore)> {
+    let mut scores: HashMap<Address, TokenScore> = HashMap::new();
+    for component in components {
+        let component_tvl = tvl
+            .get(&component.id)
+            .copied()
+            .unwrap_or(0.0);
+        for addr in &component.tokens {
+            let score = scores
+                .entry(addr.clone())
+                .or_insert_with(|| TokenScore {
+                    symbol: symbols
+                        .get(addr)
+                        .cloned()
+                        .unwrap_or_else(|| "?".to_string()),
+                    component_count: 0,
+                    tvl: 0.0,
+                });
+            score.component_count += 1;
+            score.tvl += component_tvl;
+        }
+    }
+    scores.into_iter().collect()
+}
+
+/// The 1-based rank of each score under `order`, ties broken by address.
+fn rank_by(
+    scores: &[(Address, TokenScore)],
+    order: impl Fn(&TokenScore, &TokenScore) -> Ordering,
+) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..scores.len()).collect();
+    indices.sort_by(|&a, &b| {
+        order(&scores[a].1, &scores[b].1).then_with(|| {
+            scores[a]
+                .0
+                .as_ref()
+                .cmp(scores[b].0.as_ref())
+        })
+    });
+    let mut ranks = vec![0; scores.len()];
+    for (position, index) in indices.into_iter().enumerate() {
+        ranks[index] = position + 1;
+    }
+    ranks
+}
+
+/// Picks the top `top_n` tokens by pool count and by TVL, then the wrap pair if absent.
+///
+/// Only tokens in at least `min_component_count` components are ranked, and a token with no TVL
+/// is never picked by TVL. The result is ordered by TVL rank.
+fn select_connectors(
+    mut scores: Vec<(Address, TokenScore)>,
+    wrap_pair: &[Address],
+    top_n: usize,
+    min_component_count: usize,
+) -> Vec<ConnectorSelection> {
+    scores.retain(|(address, score)| {
+        score.component_count >= min_component_count || wrap_pair.contains(address)
+    });
+    let component_ranks = rank_by(&scores, |a, b| {
+        b.component_count
+            .cmp(&a.component_count)
+    });
+    let tvl_ranks = rank_by(&scores, |a, b| b.tvl.total_cmp(&a.tvl));
+
+    let mut selected = Vec::new();
+    for (i, (address, score)) in scores.into_iter().enumerate() {
+        let (component_rank, tvl_rank) = (component_ranks[i], tvl_ranks[i]);
+        let meets_min = score.component_count >= min_component_count;
+        let by_count = meets_min && component_rank <= top_n;
+        let by_tvl = meets_min && score.tvl > 0.0 && tvl_rank <= top_n;
+        let selected_by = match (by_count, by_tvl) {
+            (true, true) => SelectedBy::Both,
+            (true, false) => SelectedBy::PoolCount,
+            (false, true) => SelectedBy::Tvl,
+            (false, false) if wrap_pair.contains(&address) => SelectedBy::WrapPair,
+            (false, false) => continue,
+        };
+        selected.push(ConnectorSelection { address, score, component_rank, tvl_rank, selected_by });
+    }
+    selected.sort_by_key(|entry| entry.tvl_rank);
+    selected
+}
+
+fn print_toml(
+    selected: &[ConnectorSelection],
+    chain: &str,
+    tvl_unit: &str,
+    top_n: usize,
+    total: usize,
+) {
     use chrono::Utc;
     let date = Utc::now().format("%Y-%m-%d");
     println!("# Derived connector tokens for {chain} ({date})");
-    println!("# Score = component_count. Top {} of {} tokens.", candidates.len(), total);
+    println!(
+        "# Top {top_n} by pool count + top {top_n} by TVL, plus the wrap pair: {} of {total} tokens.",
+        selected.len()
+    );
     println!("connector_tokens = [");
-    for (addr, score) in candidates {
+    for entry in selected {
         println!(
-            "    \"0x{}\",  # {}  — {} components",
-            hex::encode(addr.as_ref()),
-            score.symbol,
-            score.component_count,
+            "    \"0x{}\",  # {}  — {} pools (#{}), {:.0} {tvl_unit} TVL (#{}), by {}",
+            hex::encode(entry.address.as_ref()),
+            entry.score.symbol,
+            entry.score.component_count,
+            entry.component_rank,
+            entry.score.tvl,
+            entry.tvl_rank,
+            entry.selected_by.as_str(),
         );
     }
     println!("]");
 }
 
-fn print_json(candidates: &[&(Address, TokenScore)], _total: usize) -> Result<()> {
-    let entries: Vec<serde_json::Value> = candidates
+fn print_json(selected: &[ConnectorSelection]) -> Result<()> {
+    let entries: Vec<serde_json::Value> = selected
         .iter()
-        .map(|(addr, score)| {
+        .map(|entry| {
             serde_json::json!({
-                "address": format!("0x{}", hex::encode(addr.as_ref())),
-                "symbol": score.symbol,
-                "component_count": score.component_count,
+                "address": format!("0x{}", hex::encode(entry.address.as_ref())),
+                "symbol": entry.score.symbol,
+                "component_count": entry.score.component_count,
+                "tvl": entry.score.tvl,
+                "component_rank": entry.component_rank,
+                "tvl_rank": entry.tvl_rank,
+                "selected_by": entry.selected_by.as_str(),
             })
         })
         .collect();
@@ -235,16 +429,27 @@ fn print_json(candidates: &[&(Address, TokenScore)], _total: usize) -> Result<()
     Ok(())
 }
 
-fn print_text(candidates: &[&(Address, TokenScore)], _total: usize) {
-    println!("{:<5} {:<10} {:>6}  Address", "Rank", "Symbol", "Pools");
-    println!("{:-<60}", "");
-    for (i, (addr, score)) in candidates.iter().enumerate() {
+fn print_text(selected: &[ConnectorSelection], tvl_unit: &str) {
+    println!(
+        "{:<10} {:>6} {:>10} {:>16} {:>9}  {:<10} Address",
+        "Symbol",
+        "Pools",
+        "Pool rank",
+        format!("TVL ({tvl_unit})"),
+        "TVL rank",
+        "Selected"
+    );
+    println!("{:-<100}", "");
+    for entry in selected {
         println!(
-            "{:<5} {:<10} {:>6}  0x{}",
-            i + 1,
-            score.symbol,
-            score.component_count,
-            hex::encode(addr.as_ref()),
+            "{:<10} {:>6} {:>10} {:>16.0} {:>9}  {:<10} 0x{}",
+            entry.score.symbol,
+            entry.score.component_count,
+            entry.component_rank,
+            entry.score.tvl,
+            entry.tvl_rank,
+            entry.selected_by.as_str(),
+            hex::encode(entry.address.as_ref()),
         );
     }
 }
