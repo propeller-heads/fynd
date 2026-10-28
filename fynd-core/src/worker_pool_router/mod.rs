@@ -115,12 +115,30 @@ pub struct SolverPoolHandle {
     /// Which liquidity this worker pool routes through. Decides whether an order is dispatched
     /// to it ([`SolverPoolHandle::serves`]).
     liquidity_scope: LiquidityScope,
+    /// Whether this worker pool's algorithm honours the route filter's required tokens. A
+    /// request that requires tokens is not dispatched to a pool where this is `false`.
+    supports_required_tokens: bool,
 }
 
 impl SolverPoolHandle {
-    /// Creates a new solver pool handle with the default [`LiquidityScope`].
+    /// Creates a new solver pool handle with the default [`LiquidityScope`], not supporting
+    /// required tokens.
     pub fn new(name: impl Into<String>, queue: TaskQueueHandle) -> Self {
-        Self { name: name.into(), queue, liquidity_scope: LiquidityScope::default() }
+        Self {
+            name: name.into(),
+            queue,
+            liquidity_scope: LiquidityScope::default(),
+            supports_required_tokens: false,
+        }
+    }
+
+    /// Sets whether the worker pool's algorithm honours the route filter's required tokens.
+    ///
+    /// Take it from `WorkerPool::supports_required_tokens`. Left unset, the pool is never sent a
+    /// request that requires tokens.
+    pub fn with_supports_required_tokens(mut self, supports: bool) -> Self {
+        self.supports_required_tokens = supports;
+        self
     }
 
     /// Sets the worker pool's liquidity scope.
@@ -142,6 +160,11 @@ impl SolverPoolHandle {
     /// Returns the worker pool's liquidity scope.
     pub fn liquidity_scope(&self) -> LiquidityScope {
         self.liquidity_scope
+    }
+
+    /// Returns whether the worker pool's algorithm honours the route filter's required tokens.
+    pub fn supports_required_tokens(&self) -> bool {
+        self.supports_required_tokens
     }
 }
 
