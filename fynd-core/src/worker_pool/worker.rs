@@ -773,6 +773,16 @@ where
         params: SolveParams,
         deadline: Instant,
     ) -> Result<SingleOrderQuote, SolveError> {
+        if !params
+            .route_filter()
+            .required_tokens()
+            .is_empty() &&
+            !A::SUPPORTS_REQUIRED_TOKENS
+        {
+            debug!(order_id = %order.id(), "algorithm does not support required tokens");
+            return Err(SolveError::RequiredTokensNotSupported);
+        }
+
         let start_time = Instant::now();
 
         // Log order details once at entry

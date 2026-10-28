@@ -222,6 +222,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",
         SolveError::MaxGasExceeded => "request/max_gas_exceeded",
+        SolveError::RequiredTokensNotSupported => "request/required_tokens_not_supported",
         SolveError::MissingData(_) => "data/missing_data",
         SolveError::MarketDataStale { .. } => "data/market_data_stale",
         SolveError::ComputationFailed(_) => "data/computation_failed",

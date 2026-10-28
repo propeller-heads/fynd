@@ -455,6 +455,7 @@ fn error_label(error: &SolveError) -> &'static str {
         SolveError::EncodingUnavailable(_) => "encoding unavailable",
         SolveError::PriceCheckFailed { .. } => "price check failed",
         SolveError::MaxGasExceeded => "max gas exceeded",
+        SolveError::RequiredTokensNotSupported => "required tokens not supported",
         SolveError::MissingData(_) => "missing data",
         SolveError::SimulationFailed(_) => "simulation failed",
         // `SolveError` is `#[non_exhaustive]`; a variant added upstream lands here.
