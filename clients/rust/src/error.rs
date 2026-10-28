@@ -11,7 +11,9 @@ pub enum ErrorCode {
     ///
     /// Server codes: `BAD_REQUEST` (the body does not parse), `INVALID_ORDER`, and the request
     /// validation codes `NO_ORDERS`, `TOO_MANY_ORDERS`, `SAME_TOKENS`, `ZERO_AMOUNT`,
-    /// `INVALID_SLIPPAGE` and `CLIENT_FEE_TOO_HIGH`.
+    /// `INVALID_SLIPPAGE`, `CLIENT_FEE_TOO_HIGH` and `REQUIRED_TOKEN_EXCLUDED`. Also
+    /// `REQUIRED_TOKENS_NOT_SUPPORTED`: no solver pool serving the request supports
+    /// `route_filter.require_tokens`.
     BadRequest,
 
     /// No swap route exists between the requested token pair.
@@ -63,7 +65,9 @@ impl ErrorCode {
             "SAME_TOKENS" |
             "ZERO_AMOUNT" |
             "INVALID_SLIPPAGE" |
-            "CLIENT_FEE_TOO_HIGH" => Self::BadRequest,
+            "CLIENT_FEE_TOO_HIGH" |
+            "REQUIRED_TOKEN_EXCLUDED" |
+            "REQUIRED_TOKENS_NOT_SUPPORTED" => Self::BadRequest,
             "NO_ROUTE_FOUND" => Self::NoRouteFound,
             "INSUFFICIENT_LIQUIDITY" => Self::InsufficientLiquidity,
             "TIMEOUT" => Self::SolveTimeout,
