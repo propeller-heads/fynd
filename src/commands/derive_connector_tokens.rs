@@ -453,3 +453,120 @@ fn print_text(selected: &[ConnectorSelection], tvl_unit: &str) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 20])
+    }
+
+    fn score(symbol: &str, component_count: usize, tvl: f64) -> (Address, TokenScore) {
+        let byte = symbol.as_bytes()[0];
+        (addr(byte), TokenScore { symbol: symbol.to_string(), component_count, tvl })
+    }
+
+    fn component(id: &str, tokens: &[u8]) -> SnapshotComponent {
+        SnapshotComponent {
+            id: id.to_string(),
+            protocol_system: "uniswap_v2".to_string(),
+            tokens: tokens
+                .iter()
+                .map(|b| addr(*b))
+                .collect(),
+        }
+    }
+
+    fn selection(
+        scores: Vec<(Address, TokenScore)>,
+        wrap_pair: &[Address],
+        top_n: usize,
+        min_component_count: usize,
+    ) -> Vec<(String, SelectedBy)> {
+        select_connectors(scores, wrap_pair, top_n, min_component_count)
+            .into_iter()
+            .map(|entry| (entry.score.symbol, entry.selected_by))
+            .collect()
+    }
+
+    #[test]
+    fn test_score_tokens_sums_tvl_and_counts_missing_as_zero() {
+        let components = [component("a", &[1, 2]), component("b", &[1, 3])];
+        let tvl = HashMap::from([("a".to_string(), 10.0)]);
+
+        let mut scores = score_tokens(&components, &tvl, &HashMap::new());
+        scores.sort_by_key(|(address, _)| address.clone());
+
+        let summary: Vec<(usize, f64)> = scores
+            .iter()
+            .map(|(_, s)| (s.component_count, s.tvl))
+            .collect();
+        assert_eq!(summary, vec![(2, 10.0), (1, 10.0), (1, 0.0)]);
+    }
+
+    #[test]
+    fn test_select_connectors_by_each_ranking() {
+        // Deep: few pools, large TVL. Spam: many pools, no TVL.
+        let scores =
+            vec![score("Deep", 2, 1000.0), score("Spam", 50, 0.0), score("Filler", 3, 1.0)];
+
+        let picked = selection(scores, &[], 1, 2);
+
+        assert_eq!(
+            picked,
+            vec![
+                ("Deep".to_string(), SelectedBy::Tvl),
+                ("Spam".to_string(), SelectedBy::PoolCount)
+            ]
+        );
+    }
+
+    #[test]
+    fn test_select_connectors_token_in_both_lists_appears_once() {
+        let scores = vec![score("Hub", 50, 1000.0), score("Small", 3, 1.0)];
+
+        let picked = selection(scores, &[], 2, 2);
+
+        assert_eq!(
+            picked,
+            vec![("Hub".to_string(), SelectedBy::Both), ("Small".to_string(), SelectedBy::Both)]
+        );
+    }
+
+    #[test]
+    fn test_select_connectors_min_component_count_applies_to_both() {
+        let scores = vec![score("Lone", 1, 5000.0), score("Pair", 2, 10.0)];
+
+        // With one slot per ranking, the ineligible "Lone" must not take the TVL slot.
+        let picked = selection(scores, &[], 1, 2);
+
+        assert_eq!(picked, vec![("Pair".to_string(), SelectedBy::Both)]);
+    }
+
+    #[test]
+    fn test_select_connectors_adds_wrap_pair_when_unselected() {
+        let scores = vec![score("Hub", 50, 1000.0), score("Weth", 1, 0.0), score("Other", 1, 0.0)];
+
+        let picked = selection(scores, &[addr(b'W'), addr(b'X')], 1, 2);
+
+        assert_eq!(
+            picked,
+            vec![("Hub".to_string(), SelectedBy::Both), ("Weth".to_string(), SelectedBy::WrapPair)]
+        );
+    }
+
+    #[test]
+    fn test_select_connectors_orders_by_tvl_rank_and_breaks_ties_by_address() {
+        let scores = vec![score("B", 5, 10.0), score("A", 5, 10.0), score("C", 9, 20.0)];
+
+        let ranked = select_connectors(scores, &[], 3, 1);
+
+        let order: Vec<&str> = ranked
+            .iter()
+            .map(|entry| entry.score.symbol.as_str())
+            .collect();
+        assert_eq!(order, vec!["C", "A", "B"]);
+        assert_eq!(ranked[1].component_rank, 2);
+    }
+}
