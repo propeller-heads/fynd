@@ -1672,7 +1672,8 @@ mod wire_format_tests {
                 "route_filter": {
                     "exclude_pools": ["0xabc"],
                     "exclude_protocols": ["uniswap_v2"],
-                    "exclude_tokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"]
+                    "exclude_tokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"],
+                    "require_tokens": ["0x6B175474E89094C44Da98b954EedeAC495271d0F"]
                 }
             }"#;
 
@@ -1685,6 +1686,25 @@ mod wire_format_tests {
                 filter.excluded_tokens(),
                 [Bytes::from(hex::decode("dAC17F958D2ee523a2206206994597C13D831ec7").unwrap())]
             );
+            assert_eq!(
+                filter.required_tokens(),
+                [Bytes::from(hex::decode("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap())]
+            );
+        }
+
+        #[test]
+        fn test_route_filter_serialization_round_trips_required_tokens() {
+            let dai = Bytes::from(vec![0x6B; 20]);
+            let filter = RouteFilter::default().with_required_tokens([dai]);
+
+            let json = serde_json::to_value(&filter).unwrap();
+            let parsed: RouteFilter = serde_json::from_value(json.clone()).unwrap();
+
+            assert_eq!(
+                json,
+                serde_json::json!({ "require_tokens": ["0x6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b"] })
+            );
+            assert_eq!(parsed.required_tokens(), filter.required_tokens());
         }
     }
 
@@ -2259,11 +2279,13 @@ mod conversions {
         #[test]
         fn test_route_filter_into_core() {
             let usdt = make_address(0xDA);
+            let dai = make_address(0x6B);
             let dto = QuoteOptions::default().with_route_filter(
                 RouteFilter::default()
                     .with_excluded_pools(["pool-1".to_string()])
                     .with_excluded_protocols(["uniswap_v2".to_string()])
-                    .with_excluded_tokens([usdt.clone()]),
+                    .with_excluded_tokens([usdt.clone()])
+                    .with_required_tokens([dai.clone()]),
             );
 
             let core: fynd_core::QuoteOptions = dto.into();
@@ -2271,7 +2293,8 @@ mod conversions {
             let expected = fynd_core::RouteConstraints::default()
                 .with_excluded_pools(["pool-1".to_string()])
                 .with_excluded_protocols(["uniswap_v2".to_string()])
-                .with_excluded_tokens([TychoBytes::from(usdt)]);
+                .with_excluded_tokens([TychoBytes::from(usdt)])
+                .with_required_tokens([TychoBytes::from(dai)]);
             assert_eq!(core.route_filter(), &expected);
         }
 
