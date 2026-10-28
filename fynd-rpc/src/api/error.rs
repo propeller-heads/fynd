@@ -120,6 +120,7 @@ pub(crate) fn solve_error_code(err: &SolveError) -> &'static str {
         SolveError::EncodingUnavailable(_) => "ENCODING_UNAVAILABLE",
         SolveError::PriceCheckFailed { .. } => "PRICE_CHECK_FAILED",
         SolveError::MaxGasExceeded => "MAX_GAS_EXCEEDED",
+        SolveError::RequiredTokensNotSupported => "REQUIRED_TOKENS_NOT_SUPPORTED",
         SolveError::MissingData(_) => "MISSING_DATA",
         SolveError::SimulationFailed(_) => "SIMULATION_FAILED",
         other => {

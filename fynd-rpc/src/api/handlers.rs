@@ -58,7 +58,8 @@ pub(crate) fn configure_routes(
 /// # Errors
 ///
 /// - 400 Bad Request: Invalid request format
-/// - 422 Unprocessable Entity: No routes found
+/// - 422 Unprocessable Entity: The request could not be filled: no route, encoding failed, or
+///   `require_tokens` not supported; see `code`
 /// - 503 Service Unavailable: Queue full or service overloaded
 /// - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
 #[utoipa::path(
@@ -69,7 +70,7 @@ pub(crate) fn configure_routes(
     responses(
         (status = 200, description = "Quote completed", body = dto::Quote),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 422, description = "No route found", body = ErrorResponse),
+        (status = 422, description = "The request could not be filled: no route, encoding failed, or require_tokens not supported; see `code`", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
         (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
