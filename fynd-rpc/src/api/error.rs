@@ -309,4 +309,12 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["code"], "FAILED_ENCODING");
     }
+
+    #[actix_web::test]
+    async fn test_required_tokens_not_supported_returns_422() {
+        let (status, body) =
+            json_body(ApiError::SolveFailed(SolveError::RequiredTokensNotSupported)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "REQUIRED_TOKENS_NOT_SUPPORTED");
+    }
 }
