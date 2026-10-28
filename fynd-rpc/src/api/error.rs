@@ -62,6 +62,12 @@ pub enum RequestValidationError {
     /// The encoding options failed [`fynd_core::EncodingOptions::validate`].
     #[error("invalid encoding options: {0}")]
     InvalidEncodingOptions(#[from] EncodingOptionsError),
+    /// A token is in both `require_tokens` and `exclude_tokens` of the route filter.
+    #[error("token {token} is both required and excluded by the route filter")]
+    RequiredTokenExcluded {
+        /// The token named in both lists.
+        token: String,
+    },
 }
 
 impl RequestValidationError {
@@ -85,6 +91,7 @@ impl RequestValidationError {
                     "INVALID_ENCODING_OPTIONS"
                 }
             },
+            Self::RequiredTokenExcluded { .. } => "REQUIRED_TOKEN_EXCLUDED",
         }
     }
 }

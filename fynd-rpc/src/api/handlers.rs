@@ -126,8 +126,9 @@ pub async fn quote(
 /// # Errors
 ///
 /// [`ApiError::InvalidRequest`] naming the rule the request broke: no orders, an order that fails
-/// [`fynd_core::Order::validate`], or encoding options that fail
-/// [`fynd_core::EncodingOptions::validate`].
+/// [`fynd_core::Order::validate`], encoding options that fail
+/// [`fynd_core::EncodingOptions::validate`], or a route filter that fails
+/// [`fynd_core::RouteConstraints::validate`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
@@ -148,6 +149,15 @@ pub fn validate_quote_request(
         encoding_options
             .validate()
             .map_err(RequestValidationError::from)?;
+    }
+    if let Err(fynd_core::RouteConstraintsError::RequiredTokenExcluded { token }) = core_request
+        .options()
+        .route_filter()
+        .validate()
+    {
+        return Err(
+            RequestValidationError::RequiredTokenExcluded { token: token.to_string() }.into()
+        );
     }
     Ok(core_request)
 }
