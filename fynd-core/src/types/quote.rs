@@ -118,6 +118,13 @@ impl RouteConstraints {
         self
     }
 
+    /// Keeps only the excluded protocol systems for which `keep` returns true.
+    #[must_use]
+    pub fn retain_excluded_protocols(mut self, keep: impl FnMut(&String) -> bool) -> Self {
+        self.excluded_protocols.retain(keep);
+        self
+    }
+
     /// Excludes routes that pass through these tokens.
     #[must_use]
     pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
