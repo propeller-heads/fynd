@@ -47,25 +47,40 @@ pub enum ExclusiveAccess {
 pub(crate) struct OrderClass {
     /// Whether this order may be served by exclusive-access worker pools.
     exclusive_access: ExclusiveAccess,
+    /// Whether every route must pass through every one of the request's required tokens, which
+    /// only worker pools whose algorithm supports required tokens can serve.
+    requires_tokens: bool,
 }
 
 impl OrderClass {
-    /// Classifies an order whose only distinguishing property is the caller's access.
-    pub(crate) fn new(exclusive_access: ExclusiveAccess) -> Self {
-        Self { exclusive_access }
+    /// Classifies an order by the caller's access and whether the request requires tokens.
+    pub(crate) fn new(exclusive_access: ExclusiveAccess, requires_tokens: bool) -> Self {
+        Self { exclusive_access, requires_tokens }
+    }
+
+    /// Returns the same class with the required-token condition lifted.
+    pub(crate) fn without_required_tokens(self) -> Self {
+        Self { requires_tokens: false, ..self }
+    }
+
+    /// Returns whether every route must pass through every one of the request's required tokens.
+    pub(crate) fn requires_tokens(self) -> bool {
+        self.requires_tokens
     }
 }
 
 impl SolverPoolHandle {
     /// Returns whether this worker pool serves orders of `class`.
     ///
-    /// Every configured condition must hold; today the only one is the liquidity scope.
+    /// Every configured condition must hold: the liquidity scope, and support for required
+    /// tokens when the order requires them.
     pub(crate) fn serves(&self, class: OrderClass) -> bool {
-        match self.liquidity_scope() {
+        let scope_serves = match self.liquidity_scope() {
             // Public liquidity is available to every caller.
             LiquidityScope::PublicOnly => true,
             LiquidityScope::IncludeExclusive => class.exclusive_access == ExclusiveAccess::Granted,
-        }
+        };
+        scope_serves && (!class.requires_tokens || self.supports_required_tokens())
     }
 }
 

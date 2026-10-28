@@ -585,7 +585,14 @@ impl WorkerPoolRouter {
         // One allocation per order: which worker pools serve an order is a property of the order,
         // not of the request. Today every order in a request classifies identically; once
         // trade size joins `OrderClass` they will differ.
-        let class = OrderClass::new(access);
+        let class = OrderClass::new(
+            access,
+            !request
+                .options()
+                .route_filter()
+                .required_tokens()
+                .is_empty(),
+        );
         let pool_allowlist = request.options().worker_pools();
         if let Some(allowlist) = pool_allowlist {
             validate_pool_allowlist(&self.solver_pools, allowlist)?;
@@ -599,6 +606,12 @@ impl WorkerPoolRouter {
             .iter()
             .any(Allocation::is_empty)
         {
+            let serves_without_required_tokens =
+                !allocate(&self.solver_pools, class.without_required_tokens(), pool_allowlist)
+                    .is_empty();
+            if class.requires_tokens() && serves_without_required_tokens {
+                return Err(SolveError::RequiredTokensNotSupported);
+            }
             return Err(SolveError::Internal(format!(
                 "no solver pool serves this request: {class:?}"
             )));
@@ -1400,7 +1413,8 @@ fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
 
 /// Shared-graph facts beat path-specific reasons (most specific first: amount-too-small and a
 /// rejected route, then no-scorable-paths, then no-graph-path), which beat liquidity, then data,
-/// then algorithm faults, then infrastructure errors. The first error wins within a tier.
+/// then algorithm faults, then infrastructure errors, then a pool's refusal of required tokens.
+/// The first error wins within a tier.
 fn aggregate_no_route_cause(failed_solvers: &[(String, SolveError)]) -> Option<SolveError> {
     lowest_tier_cause(
         failed_solvers
@@ -1442,6 +1456,9 @@ fn cause_tier(error: &SolveError) -> u8 {
         SolveError::EncodingUnavailable(_) |
         SolveError::PriceCheckFailed { .. } => 5,
         SolveError::NoRouteFound { reason: None, .. } => 6,
+        // A pool that cannot take the filter says nothing about the order once a pool that can
+        // has failed for its own reason.
+        SolveError::RequiredTokensNotSupported => 7,
     }
 }
 
