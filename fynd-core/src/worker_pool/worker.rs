@@ -68,7 +68,7 @@ fn should_drop_component(
         is_excluded_protocol(exclude_protocols, component)
 }
 
-/// The exclusions this request resolves to against `view`, resolved once and shared.
+/// The constraints this request resolves to against `view`, resolved once and shared.
 ///
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The answer depends on the market's
@@ -137,8 +137,8 @@ fn check_route(
 
 /// Check every leg, including split branches, against the original request filter. Reading
 /// protocol systems from the returned components also covers pools added after exclusions were
-/// resolved. The order's endpoints remain allowed by intermediate-token exclusions.
-/// Also checks that every path of the route passes through every required token.
+/// resolved. The order's endpoints remain allowed by intermediate-token exclusions, and every
+/// token path of the route must pass through every required token.
 fn validate_route_filter(
     route: &Route,
     order: &Order,

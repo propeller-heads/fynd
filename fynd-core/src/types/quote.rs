@@ -169,13 +169,13 @@ impl RouteConstraints {
         &self.excluded_tokens
     }
 
-    /// A route must pass through every token in this set.
+    /// The tokens every route must pass through.
     #[must_use]
     pub fn required_tokens(&self) -> &FxHashSet<Address> {
         &self.required_tokens
     }
 
-    /// Checks that no route could satisfy the filter's required and excluded tokens.
+    /// Checks that no token is both required and excluded, which no route could satisfy.
     ///
     /// # Errors
     ///
@@ -195,7 +195,7 @@ impl RouteConstraints {
     }
 }
 
-/// Errors that can occur when validating a [`RouteConstraints`].
+/// Why a [`RouteConstraints`] fails validation.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RouteConstraintsError {
     /// A token is in both the required and the excluded tokens.
@@ -206,18 +206,16 @@ pub enum RouteConstraintsError {
     },
 }
 
-/// The pools and tokens one solve must not use, with every protocol system already
-/// replaced by its pools.
+/// The resolved constraints of one solve: the pools and tokens it must not use, with every
+/// protocol system already replaced by its pools, and the tokens every token path must visit.
 ///
 /// A graph knows a pool by its component id, so a search reads this rather than the
 /// [`RouteConstraints`] the caller wrote. An algorithm honours it while it searches and
 /// simulates, and the worker checks the route it gets back.
 ///
-/// A token here is excluded as an intermediate only: the order's own two tokens stay allowed,
-/// because every route touches them.
-///
-/// `ResolvedRouteConstraints` also holds a set of tokens, every one of which a route must pass
-/// through.
+/// The order's own two tokens are exempt from both sets, because every route touches them: an
+/// excluded token is excluded as an intermediate only, and a required token counts as visited
+/// when it is one of them.
 ///
 /// Every solve also excludes the pools of protocols the market marks out of sync; see
 /// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status).

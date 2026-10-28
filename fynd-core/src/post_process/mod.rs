@@ -57,11 +57,11 @@ use crate::{
 /// market. Events for exclusive components arrive on a `public_only` pool too, because whether a
 /// request may use them depends on the caller: see [`PostProcessRequest::exclusive_access`].
 ///
-/// The worker checks the route a processor returns. When the route is invalid, uses a pool the
-/// request excluded, or uses a component the pool drops, the worker logs a warning and quotes the
-/// route the algorithm returned. A processor owns `net_amount_out`: the worker does not recompute
-/// it, and the router ranks quotes on it. For a sell order the worker also keeps the algorithm's
-/// route when `net_amount_out` is above the route's amount out.
+/// The worker checks the route a processor returns. When the route is invalid, breaks the
+/// request's route filter, or uses a component the pool drops, the worker logs a warning and
+/// quotes the route the algorithm returned. A processor owns `net_amount_out`: the worker does not
+/// recompute it, and the router ranks quotes on it. For a sell order the worker also keeps the
+/// algorithm's route when `net_amount_out` is above the route's amount out.
 #[async_trait]
 pub trait RoutePostProcessor: MarketEventHandler + Send + Sync {
     /// The worker calls this when it builds its graph: at start, and after it falls behind on
