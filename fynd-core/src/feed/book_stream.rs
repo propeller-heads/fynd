@@ -585,8 +585,16 @@ mod tests {
         BookStream {
             feeds: BookFeedStreams::new(),
             external: SnapshotFeedStreams::new(),
+            tokens: known_tokens(),
             served: HashMap::new(),
         }
+    }
+
+    fn known_tokens() -> Arc<HashMap<Bytes, Token>> {
+        Arc::new(HashMap::from([
+            (Bytes::from("0x01"), token("0x01")),
+            (Bytes::from("0x02"), token("0x02")),
+        ]))
     }
 
     fn token(address: &str) -> Token {
@@ -688,6 +696,33 @@ mod tests {
         assert!(update.removed.is_empty());
     }
 
+    #[test]
+    fn test_keep_valid_components() {
+        let mut components = Vec::new();
+        for (id, protocol_system, token_address) in [
+            ("0x0a", "fallback:manta", "0x02"),
+            ("0x0b", "uniswap_v2", "0x02"),
+            ("0x0c", "fallback:manta", "0x99"),
+        ] {
+            let mut entry = book_snapshot_in(protocol_system, &[id])
+                .components()
+                .next()
+                .unwrap()
+                .clone();
+            entry.component.tokens = vec![token("0x01"), token(token_address)];
+            components.push(entry);
+        }
+
+        let kept = book_stream()
+            .keep_valid_components("fallback:manta", LiquiditySnapshot::new(components));
+
+        let ids: Vec<_> = kept
+            .components()
+            .map(|entry| entry.component.id.to_string())
+            .collect();
+        assert_eq!(ids, ["0x0a"]);
+    }
+
     /// Publishes one snapshot and keeps the feed open without further updates, like a live venue
     /// holding its last snapshot.
     struct SingleSnapshotFeed(LiquiditySnapshot);
@@ -731,7 +766,7 @@ mod tests {
         let config =
             TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0)
                 .external_liquidity(external_liquidity);
-        BookStream::open(&config, HashMap::new())
+        BookStream::open(&config, known_tokens().as_ref().clone())
     }
 
     #[tokio::test]
