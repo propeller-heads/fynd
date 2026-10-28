@@ -372,9 +372,9 @@ mod tests {
         exclusive_route::is_exclusive_leg,
         feed::exclusivity::mark_exclusive,
         post_process::test_utils::{
-            add_component, added, component_ids, insert_component, market, replaced, result,
-            run_with_access, sell_order, sequential_route, swap, swap_on, swap_through_pool,
-            tokens, with_net_amount_out,
+            add_component, added, component_ids, far_deadline, insert_component, market, replaced,
+            result, run_with_access, sell_order, sequential_route, swap, swap_on,
+            swap_through_pool, tokens, with_net_amount_out,
         },
         types::{Order, ResolvedRouteConstraints},
     };
@@ -560,6 +560,36 @@ mod tests {
             run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await;
 
         assert!(replacement.is_none());
+    }
+
+    /// The whole-order exclusive pool beats the first-hop one, but it skips B. With B required the
+    /// replacer keeps B and replaces the first hop instead.
+    #[rstest]
+    #[case::nothing_required(false, &["excl_ac"])]
+    #[case::b_required(true, &["excl_ab", "bc"])]
+    #[tokio::test]
+    async fn test_exclusive_keeps_required_token(
+        #[case] require_b: bool,
+        #[case] expected_ids: &[&str],
+    ) {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        add_exclusive(&market, "excl_ac", (&a, &c), MockProtocolSim::new(10.0).with_gas(5)).await;
+        let replacer = replacer(&market).await;
+        let required = if require_b { vec![b.address.clone()] } else { vec![] };
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(required);
+        let derived = DerivedData::new_shared();
+        let order = sell_order(&a, &c);
+        let request =
+            PostProcessRequest::new(&order, &market, &derived, &exclusions, far_deadline())
+                .with_exclusive_access(ExclusiveAccess::Granted);
+
+        let replacement = replacer
+            .process(&request, &sequential_route())
+            .await;
+
+        assert_eq!(component_ids(&replaced(replacement)), expected_ids);
     }
 
     #[tokio::test]
