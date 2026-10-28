@@ -722,6 +722,8 @@ impl Algorithm for MostLiquidAlgorithm {
     type GraphType = TopologyGraph<DepthAndPrice>;
     type GraphManager = TopologyGraphManager<DepthAndPrice>;
 
+    const SUPPORTS_REQUIRED_TOKENS: bool = true;
+
     fn name(&self) -> &str {
         "most_liquid"
     }
