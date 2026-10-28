@@ -24,7 +24,8 @@ const TVL_FETCH_CONCURRENCY: usize = 10;
 ///
 /// Connects to Tycho, waits for the initial market snapshot, then fetches the TVL of every
 /// component in it and scores each token by the components it appears in and by their summed TVL.
-/// The connector tokens are the top `--top-n` by pool count together with the top `--top-n` by TVL.
+/// The connector tokens are the top `--top-n` by pool count together with the top `--top-n-tvl`
+/// by TVL.
 /// Pool count finds the hubs; TVL finds deep tokens that sit in few pools and drops spam tokens
 /// spread over many tiny ones. The chain's native and wrapped native tokens are always added.
 ///
@@ -60,9 +61,13 @@ pub struct DeriveConnectorTokensArgs {
     #[arg(long)]
     pub min_tvl: Option<f64>,
 
-    /// Number of top tokens taken from each ranking (pool count and TVL).
+    /// Number of top tokens taken from the pool-count ranking.
     #[arg(long, default_value_t = 10)]
     pub top_n: usize,
+
+    /// Number of top tokens taken from the TVL ranking. Defaults to `--top-n`.
+    #[arg(long)]
+    pub top_n_tvl: Option<usize>,
 
     /// Minimum number of components a token must appear in to be included.
     #[arg(long, default_value_t = 2)]
@@ -164,16 +169,24 @@ pub async fn run(args: DeriveConnectorTokensArgs) -> Result<()> {
         .chain(chain.wrapped_native_token())
         .map(|token| token.address)
         .collect();
-    let selected = select_connectors(scores, &wrap_pair, args.top_n, args.min_component_count);
+    let sizes = RankingSizes { pool_count: args.top_n, tvl: args.top_n_tvl.unwrap_or(args.top_n) };
+    let selected = select_connectors(scores, &wrap_pair, sizes, args.min_component_count);
     let tvl_unit = chain.native_token().symbol;
 
     match args.output.as_str() {
-        "toml" => print_toml(&selected, &args.chain, &tvl_unit, args.top_n, total),
+        "toml" => print_toml(&selected, &args.chain, &tvl_unit, sizes, total),
         "json" => print_json(&selected)?,
         _ => print_text(&selected, &tvl_unit),
     }
 
     Ok(())
+}
+
+/// How many top tokens to take from each ranking.
+#[derive(Clone, Copy, Debug)]
+struct RankingSizes {
+    pool_count: usize,
+    tvl: usize,
 }
 
 /// A topology component: its id, the Tycho protocol system it belongs to and the tokens it holds.
@@ -342,14 +355,15 @@ fn rank_by(
     ranks
 }
 
-/// Picks the top `top_n` tokens by pool count and by TVL, then the wrap pair if absent.
+/// Picks the top tokens by pool count and by TVL, as many as `sizes` says, then the wrap pair if
+/// absent.
 ///
 /// Only tokens in at least `min_component_count` components are ranked, and a token with no TVL
 /// is never picked by TVL. The result is ordered by TVL rank.
 fn select_connectors(
     mut scores: Vec<(Address, TokenScore)>,
     wrap_pair: &[Address],
-    top_n: usize,
+    sizes: RankingSizes,
     min_component_count: usize,
 ) -> Vec<ConnectorSelection> {
     scores.retain(|(address, score)| {
@@ -365,8 +379,8 @@ fn select_connectors(
     for (i, (address, score)) in scores.into_iter().enumerate() {
         let (component_rank, tvl_rank) = (component_ranks[i], tvl_ranks[i]);
         let meets_min = score.component_count >= min_component_count;
-        let by_count = meets_min && component_rank <= top_n;
-        let by_tvl = meets_min && score.tvl > 0.0 && tvl_rank <= top_n;
+        let by_count = meets_min && component_rank <= sizes.pool_count;
+        let by_tvl = meets_min && score.tvl > 0.0 && tvl_rank <= sizes.tvl;
         let selected_by = match (by_count, by_tvl) {
             (true, true) => SelectedBy::Both,
             (true, false) => SelectedBy::PoolCount,
@@ -384,14 +398,16 @@ fn print_toml(
     selected: &[ConnectorSelection],
     chain: &str,
     tvl_unit: &str,
-    top_n: usize,
+    sizes: RankingSizes,
     total: usize,
 ) {
     use chrono::Utc;
     let date = Utc::now().format("%Y-%m-%d");
     println!("# Derived connector tokens for {chain} ({date})");
     println!(
-        "# Top {top_n} by pool count + top {top_n} by TVL, plus the wrap pair: {} of {total} tokens.",
+        "# Top {} by pool count + top {} by TVL, plus the wrap pair: {} of {total} tokens.",
+        sizes.pool_count,
+        sizes.tvl,
         selected.len()
     );
     println!("connector_tokens = [");
