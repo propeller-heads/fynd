@@ -16,7 +16,8 @@ use tycho_simulation::{
 /// What an external liquidity source needs to know to start: the chain, the tokens it may serve
 /// and the TVL floor in USD. They are the same values the built-in RFQ venues get.
 ///
-/// A source must not serve a component that has a token outside `tokens`.
+/// A source must not serve a component that has a token outside `tokens`; Fynd drops such a
+/// component with a warning.
 #[derive(Clone)]
 pub struct ExternalLiquidityConfig {
     /// The chain the deployment runs on.

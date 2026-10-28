@@ -84,6 +84,8 @@ pub struct BookStream {
     feeds: BookFeedStreams,
     /// The external liquidity sources' feeds, merged the same way.
     external: SnapshotFeedStreams<LiquiditySnapshot, FeedError>,
+    /// The tokens the deployment trades, by address: the only ones an external source may serve.
+    tokens: Arc<HashMap<Bytes, Token>>,
     /// The component ids each venue's last applied book set contained.
     served: HashMap<String, HashSet<ComponentId>>,
 }
@@ -240,6 +242,7 @@ impl BookStream {
         let mut books = Self {
             feeds: BookFeedStreams::new(),
             external: SnapshotFeedStreams::new(),
+            tokens: Arc::clone(&book_config.tokens),
             served: HashMap::new(),
         };
         for source in external_liquidity {
@@ -372,7 +375,15 @@ impl BookStream {
                 Some((provider, event)) = self.feeds.next(), if !self.feeds.is_empty() => {
                     (provider, liquidity_event(event))
                 }
-                Some(next) = self.external.next(), if !self.external.is_empty() => next,
+                Some((provider, event)) = self.external.next(), if !self.external.is_empty() => {
+                    let event = match event {
+                        SnapshotFeedEvent::Published(snapshot) => SnapshotFeedEvent::Published(
+                            self.keep_valid_components(&provider, snapshot),
+                        ),
+                        other => other,
+                    };
+                    (provider, event)
+                }
                 else => {
                     return Err(DataFeedError::StreamError(
                         "every book feed and external liquidity source gave up".to_string(),
@@ -450,6 +461,37 @@ impl BookStream {
         *served = current;
 
         BookUpdate { protocol_system, added, removed, updated, states }
+    }
+
+    /// Returns `snapshot` without the components an external source may not serve: those under
+    /// another protocol system than the source's name, and those with a token the deployment does
+    /// not trade. Each dropped component is logged.
+    fn keep_valid_components(
+        &self,
+        source: &str,
+        snapshot: LiquiditySnapshot,
+    ) -> LiquiditySnapshot {
+        let mut valid = Vec::new();
+        for entry in snapshot.components() {
+            let component = &entry.component;
+            let reason = if component.protocol_system != source {
+                format!("its protocol system is {}", component.protocol_system)
+            } else if let Some(token) = component
+                .tokens
+                .iter()
+                .find(|token| !self.tokens.contains_key(&token.address))
+            {
+                format!("its token {} is not in the token set", token.address)
+            } else {
+                valid.push(entry.clone());
+                continue;
+            };
+            warn!(
+                "External liquidity {source} published component {}, but {reason}; dropping it",
+                component.id
+            );
+        }
+        LiquiditySnapshot::new(valid)
     }
 
     /// Drops everything a venue served, leaving it able to serve again if it recovers.
