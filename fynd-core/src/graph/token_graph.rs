@@ -241,7 +241,8 @@ impl<D> TopologyGraph<D> {
         Ok(self.paths_between_ix(from_ix, to_ix, search))
     }
 
-    /// Every token path from `from` to `to` within the filter's hop bounds.
+    /// Every token path from `from` to `to` within the filter's hop bounds that visits every one
+    /// of the request's required tokens, if it names any.
     ///
     /// Empty when there is no route. Check [`TopologyGraph::expand_path`] for expanded pool paths.
     ///
@@ -256,11 +257,21 @@ impl<D> TopologyGraph<D> {
         if filter.min_hops == 0 || filter.min_hops > filter.max_hops {
             return Vec::new();
         }
-        if from == to {
+        let mut token_paths = if from == to {
             self.circular_token_paths(to, search)
         } else {
             self.bidirectional_search(from, to, search)
-        }
+        };
+        token_paths.retain(|token_path| {
+            search
+                .exclusions
+                .visits_all_required_tokens(
+                    token_path
+                        .iter()
+                        .map(|&token| &self[token]),
+                )
+        });
+        token_paths
     }
 
     /// Writes out one route per combination of pools along `token_path`.
