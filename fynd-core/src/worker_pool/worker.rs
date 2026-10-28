@@ -1525,6 +1525,8 @@ mod tests {
         type GraphType = StableDiGraph<DepthAndPrice>;
         type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
+        const SUPPORTS_REQUIRED_TOKENS: bool = true;
+
         fn name(&self) -> &str {
             "filter_ignoring_mock"
         }
@@ -1545,6 +1547,96 @@ mod tests {
         }
     }
 
+    fn a_to_c_swap(
+        id: &str,
+        token_in: &tycho_simulation::tycho_common::models::token::Token,
+        token_out: &tycho_simulation::tycho_common::models::token::Token,
+        amount_in: u64,
+        amount_out: u64,
+    ) -> Swap {
+        Swap::new(
+            id.to_string(),
+            "uniswap_v2".to_string(),
+            token_in.address.clone(),
+            token_out.address.clone(),
+            BigUint::from(amount_in),
+            BigUint::from(amount_out),
+            BigUint::from(1u64),
+            component(id, &[token_in.clone(), token_out.clone()]),
+            Box::new(MockProtocolSim::new(2.0)),
+        )
+    }
+
+    /// A route from A to C through B. When `split` is true, half goes directly to C and half goes
+    /// through B.
+    fn a_to_c_route(split: bool) -> Route {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let swaps = if split {
+            vec![
+                a_to_c_swap("direct", &token_a, &token_c, 50, 40).with_split(0.5),
+                a_to_c_swap("p1", &token_a, &token_b, 50, 45),
+                a_to_c_swap("p2", &token_b, &token_c, 45, 40),
+            ]
+        } else {
+            vec![
+                a_to_c_swap("p1", &token_a, &token_b, 100, 90),
+                a_to_c_swap("p2", &token_b, &token_c, 90, 80),
+            ]
+        };
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
+    /// A route from A to C through D only.
+    fn a_to_c_route_through_d() -> Route {
+        let token_a = token(0x01, "A");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let swaps = vec![
+            a_to_c_swap("a_to_d", &token_a, &token_d, 100, 90),
+            a_to_c_swap("d_to_c", &token_d, &token_c, 90, 80),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
+    /// A route from A to C through B and then D.
+    fn a_to_c_route_through_b_then_d() -> Route {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let swaps = vec![
+            a_to_c_swap("a_to_b", &token_a, &token_b, 100, 90),
+            a_to_c_swap("b_to_d", &token_b, &token_d, 90, 80),
+            a_to_c_swap("d_to_c", &token_d, &token_c, 80, 70),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
+    /// A route from A to C that splits in half between a branch through B and one through D.
+    fn a_to_c_route_through_b_and_d() -> Route {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let swaps = vec![
+            a_to_c_swap("via_b_in", &token_a, &token_b, 50, 45).with_split(0.5),
+            a_to_c_swap("via_d_in", &token_a, &token_d, 50, 45),
+            a_to_c_swap("via_b_out", &token_b, &token_c, 45, 40),
+            a_to_c_swap("via_d_out", &token_d, &token_c, 45, 40),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
     #[rstest]
     #[case::pool(RouteConstraints::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
     #[case::protocol(RouteConstraints::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
@@ -1560,39 +1652,8 @@ mod tests {
         #[values(false, true)] split: bool,
     ) {
         let token_a = token(0x01, "A");
-        let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
-        let make_swap = |id: &str,
-                         token_in: &tycho_simulation::tycho_common::models::token::Token,
-                         token_out: &tycho_simulation::tycho_common::models::token::Token,
-                         amount_in: u64,
-                         amount_out: u64| {
-            Swap::new(
-                id.to_string(),
-                "uniswap_v2".to_string(),
-                token_in.address.clone(),
-                token_out.address.clone(),
-                BigUint::from(amount_in),
-                BigUint::from(amount_out),
-                BigUint::from(1u64),
-                component(id, &[token_in.clone(), token_out.clone()]),
-                Box::new(MockProtocolSim::new(2.0)),
-            )
-        };
-        let swaps = if split {
-            vec![
-                make_swap("direct", &token_a, &token_c, 50, 40).with_split(0.5),
-                make_swap("p1", &token_a, &token_b, 50, 45),
-                make_swap("p2", &token_b, &token_c, 45, 40),
-            ]
-        } else {
-            vec![
-                make_swap("p1", &token_a, &token_b, 100, 90),
-                make_swap("p2", &token_b, &token_c, 90, 80),
-            ]
-        };
-        let route = Route::new(swaps, FxHashMap::default()).unwrap();
-        route.validate().unwrap();
+        let route = a_to_c_route(split);
         // The returned pools are absent from this market: protocol validation must inspect the
         // actual route rather than relying on the pool IDs resolved before the algorithm ran.
         let (market, _) = setup_market_weighted(vec![]);
@@ -1614,6 +1675,89 @@ mod tests {
             (None, Ok(quote)) => assert_eq!(quote.order().status(), QuoteStatus::Success),
             (expected, result) => panic!("expected rejection {expected:?}, got {result:?}"),
         }
+    }
+
+    /// Every branch of the route must pass through every required token. The split route has one
+    /// branch straight from A to C; the two-branch route splits between B and D.
+    #[rstest]
+    #[case::through_required(a_to_c_route(false), &[0x02], None)]
+    #[case::split_branch_skips_required(a_to_c_route(true), &[0x02], Some("required token"))]
+    #[case::required_unvisited(a_to_c_route(false), &[0x04], Some("required token"))]
+    #[case::one_of_two_visited(a_to_c_route(false), &[0x04, 0x02], Some("required token"))]
+    #[case::other_of_two_visited(a_to_c_route_through_d(), &[0x04, 0x02], Some("required token"))]
+    #[case::both_on_one_path(a_to_c_route_through_b_then_d(), &[0x02, 0x04], None)]
+    #[case::endpoint_and_intermediate(a_to_c_route(false), &[0x01, 0x02], None)]
+    #[case::endpoint_and_intermediate_skipped(a_to_c_route(true), &[0x01, 0x02], Some("required token"))]
+    #[case::input_required(a_to_c_route(true), &[0x01], None)]
+    #[case::output_required(a_to_c_route(true), &[0x03], None)]
+    #[case::each_branch_has_one_of_two(
+        a_to_c_route_through_b_and_d(),
+        &[0x02, 0x04],
+        Some("required token")
+    )]
+    #[case::one_branch_skips_required(
+        a_to_c_route_through_b_and_d(),
+        &[0x02],
+        Some("required token")
+    )]
+    #[tokio::test]
+    async fn test_quote_enforces_required_tokens(
+        #[case] route: Route,
+        #[case] required: &[u8],
+        #[case] rejection: Option<&str>,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_c = token(0x03, "C");
+        let filter = RouteConstraints::default().with_required_tokens(
+            required
+                .iter()
+                .map(|&byte| token(byte, "R").address),
+        );
+        let (market, _) = setup_market_weighted(vec![]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            FilterIgnoringAlgorithm(route),
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = worker
+            .quote(&ord, SolveParams::default().with_route_filter(filter), far_deadline())
+            .await;
+
+        match (rejection, result) {
+            (Some(expected), Err(SolveError::AlgorithmError(msg))) => {
+                assert!(msg.contains(expected), "unexpected message: {msg}");
+            }
+            (None, Ok(quote)) => assert_eq!(quote.order().status(), QuoteStatus::Success),
+            (expected, result) => panic!("expected rejection {expected:?}, got {result:?}"),
+        }
+    }
+
+    /// The worker rejects required tokens before calling an unsupported algorithm; calling
+    /// `InvalidRouteAlgorithm` would instead produce an invalid-route error.
+    #[tokio::test]
+    async fn test_quote_required_tokens_with_unsupported_algorithm() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            InvalidRouteAlgorithm,
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let filter = RouteConstraints::default().with_required_tokens([token_b.address]);
+
+        let result = worker
+            .quote(&ord, SolveParams::default().with_route_filter(filter), far_deadline())
+            .await;
+
+        assert!(matches!(result, Err(SolveError::RequiredTokensNotSupported)), "{result:?}");
     }
 
     /// Always fails, with an error message listing the pools the worker resolved the request's

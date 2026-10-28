@@ -332,6 +332,7 @@ mod tests {
     #[case(SolveError::NoRouteFound { order_id: "o1".to_string(), reason: None }, "no_route")]
     #[case(SolveError::QueueFull, "queue_full")]
     #[case(SolveError::MaxGasExceeded, "max_gas_exceeded")]
+    #[case(SolveError::RequiredTokensNotSupported, "required_tokens_not_supported")]
     #[case(SolveError::AlgorithmError("boom".to_string()), "algorithm_error")]
     #[case(SolveError::MissingData("gas".to_string()), "missing_data")]
     #[case(SolveError::SimulationFailed("revert".to_string()), "simulation_failed")]

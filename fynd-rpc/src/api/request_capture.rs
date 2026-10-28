@@ -641,6 +641,10 @@ mod tests {
             "request/max_gas_exceeded"
         );
         assert_eq!(
+            failure_reason_slug(s, Some(&SolveError::RequiredTokensNotSupported)),
+            "request/required_tokens_not_supported"
+        );
+        assert_eq!(
             failure_reason_slug(s, Some(&SolveError::MissingData("gas price".to_string()))),
             "data/missing_data"
         );
