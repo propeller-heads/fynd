@@ -187,6 +187,8 @@ mod tests {
             "ZERO_AMOUNT",
             "INVALID_SLIPPAGE",
             "CLIENT_FEE_TOO_HIGH",
+            "REQUIRED_TOKEN_EXCLUDED",
+            "REQUIRED_TOKENS_NOT_SUPPORTED",
         ] {
             assert_eq!(ErrorCode::from_server_code(code), ErrorCode::BadRequest, "{code}");
         }
