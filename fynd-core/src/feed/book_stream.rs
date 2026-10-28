@@ -841,7 +841,7 @@ mod tests {
             .as_ref()
             .expect("the factory builds the feed on open");
         assert_eq!(received.chain, Chain::Base);
-        assert_eq!(received.min_tvl_usd, 2.5);
+        assert_eq!(received.min_tvl, 2.5);
         assert_eq!(
             received
                 .tokens
