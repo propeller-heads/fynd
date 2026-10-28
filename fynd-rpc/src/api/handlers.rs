@@ -644,6 +644,7 @@ mod tests {
 
         const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
         const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        const DAI: &str = "0x6B175474E89094C44Da98b954EedeAC495271d0F";
 
         fn dto_order_for(token_in: &str, token_out: &str, amount: &str) -> dto::Order {
             serde_json::from_value(serde_json::json!({
@@ -741,6 +742,35 @@ mod tests {
             }));
 
             assert_eq!(rejection_code(request), "CLIENT_FEE_TOO_HIGH");
+        }
+
+        /// The validator rejects required tokens that are also excluded and accepts required
+        /// tokens that are not excluded.
+        #[rstest]
+        #[case::overlap(&[DAI], &[DAI], Some("REQUIRED_TOKEN_EXCLUDED"))]
+        #[case::overlap_in_lists(&[USDC, DAI], &[DAI, WETH], Some("REQUIRED_TOKEN_EXCLUDED"))]
+        #[case::disjoint(&[DAI], &[USDC], None)]
+        #[case::only_required(&[DAI], &[], None)]
+        fn test_validate_quote_request_checks_required_tokens(
+            #[case] required: &[&str],
+            #[case] excluded: &[&str],
+            #[case] rejection: Option<&str>,
+        ) {
+            let request: dto::QuoteRequest = serde_json::from_value(serde_json::json!({
+                "orders": [dto_order()],
+                "options": {"route_filter": {
+                    "require_tokens": required,
+                    "exclude_tokens": excluded
+                }}
+            }))
+            .expect("valid request json");
+
+            match rejection {
+                Some(code) => assert_eq!(rejection_code(request), code),
+                None => {
+                    validate_quote_request(request).expect("the route filter is satisfiable");
+                }
+            }
         }
 
         #[test]
