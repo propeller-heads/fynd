@@ -103,6 +103,15 @@ impl UnknownAlgorithmError {
     }
 }
 
+/// The threads a spawner started, with what the pool's algorithm reports about itself.
+#[derive(Debug)]
+pub(crate) struct SpawnedWorkers {
+    /// Join handles of the worker threads.
+    pub(crate) handles: Vec<JoinHandle<()>>,
+    /// Whether the pool's algorithm honours the route filter's required tokens.
+    pub(crate) supports_required_tokens: bool,
+}
+
 /// Determines how a worker pool spawns its workers.
 ///
 /// - `Registry`: looks up a built-in algorithm by name.
@@ -113,7 +122,7 @@ pub(crate) enum AlgorithmSpawner {
     /// Spawn workers using a custom factory function (type-erased).
     Custom {
         algorithm: String,
-        spawner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync>,
+        spawner: Box<dyn Fn(SpawnWorkersParams) -> SpawnedWorkers + Send + Sync>,
     },
 }
 
@@ -137,7 +146,7 @@ impl AlgorithmSpawner {
     pub(crate) fn spawn(
         self,
         params: SpawnWorkersParams,
-    ) -> Result<Vec<JoinHandle<()>>, UnknownAlgorithmError> {
+    ) -> Result<SpawnedWorkers, UnknownAlgorithmError> {
         match self {
             Self::Registry { algorithm } => match algorithm.as_str() {
                 "most_liquid" => Ok(spawn_most_liquid_workers(params)),
@@ -174,10 +183,7 @@ impl AlgorithmSpawner {
 /// The `factory` closure is called once per worker to create the algorithm instance.
 /// It is borrowed rather than consumed, so callers (including type-erased spawner closures)
 /// can call this function without giving up ownership of the factory.
-pub(crate) fn spawn_workers_generic<A, F>(
-    params: SpawnWorkersParams,
-    factory: &F,
-) -> Vec<JoinHandle<()>>
+pub(crate) fn spawn_workers_generic<A, F>(params: SpawnWorkersParams, factory: &F) -> SpawnedWorkers
 where
     A: crate::algorithm::Algorithm + 'static,
     A::GraphManager:
@@ -245,11 +251,11 @@ where
         "spawned workers"
     );
 
-    workers
+    SpawnedWorkers { handles: workers, supports_required_tokens: A::SUPPORTS_REQUIRED_TOKENS }
 }
 
 /// Spawns workers for the MostLiquid algorithm.
-fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> SpawnedWorkers {
     let factory = |config: AlgorithmConfig| {
         MostLiquidAlgorithm::with_config(config)
             .expect("invalid worker configuration for MostLiquidAlgorithm")
@@ -258,13 +264,13 @@ fn spawn_most_liquid_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> 
 }
 
 /// Spawns workers for the BellmanFord algorithm.
-fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_bellman_ford_workers(params: SpawnWorkersParams) -> SpawnedWorkers {
     let factory = |config: AlgorithmConfig| BellmanFordAlgorithm::with_config(config);
     spawn_workers_generic(params, &factory)
 }
 
 /// Spawns workers for the PathFrankWolfe split-routing algorithm.
-fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> SpawnedWorkers {
     let factory = |config: AlgorithmConfig| {
         PathFrankWolfeAlgorithm::new(config, PathFrankWolfeConfig::default())
     };
@@ -272,7 +278,7 @@ fn spawn_path_frank_wolfe_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<
 }
 
 /// Spawns workers for the water-fill portfolio split-routing algorithm.
-fn spawn_water_fill_workers(params: SpawnWorkersParams) -> Vec<JoinHandle<()>> {
+fn spawn_water_fill_workers(params: SpawnWorkersParams) -> SpawnedWorkers {
     let factory = |config: AlgorithmConfig| {
         WaterFillAlgorithm::with_config(config)
             .expect("invalid worker configuration for WaterFillAlgorithm")
@@ -356,7 +362,7 @@ mod tests {
         let workers =
             AlgorithmSpawner::Registry { algorithm: "most_liquid".to_string() }.spawn(params);
         assert!(workers.is_ok());
-        let workers = workers.unwrap();
+        let workers = workers.unwrap().handles;
         assert_eq!(workers.len(), 3);
 
         // Shutdown workers gracefully
@@ -401,7 +407,7 @@ mod tests {
 
         // Using MostLiquid anyway for simplicity - not to have to define a new algorithm from
         // scratch
-        let spawner: Box<dyn Fn(SpawnWorkersParams) -> Vec<JoinHandle<()>> + Send + Sync> =
+        let spawner: Box<dyn Fn(SpawnWorkersParams) -> SpawnedWorkers + Send + Sync> =
             Box::new(|p| {
                 let factory = |config: AlgorithmConfig| {
                     MostLiquidAlgorithm::with_config(config)
@@ -430,7 +436,7 @@ mod tests {
             });
 
         assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 2);
+        assert_eq!(workers.unwrap().handles.len(), 2);
 
         let _ = shutdown_tx.send(());
     }
@@ -464,7 +470,7 @@ mod tests {
         let workers =
             AlgorithmSpawner::Registry { algorithm: "path_frank_wolfe".to_string() }.spawn(params);
         assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 1);
+        assert_eq!(workers.unwrap().handles.len(), 1);
 
         let _ = shutdown_tx.send(());
         drop(event_tx);
@@ -499,7 +505,7 @@ mod tests {
         let workers =
             AlgorithmSpawner::Registry { algorithm: "water_fill".to_string() }.spawn(params);
         assert!(workers.is_ok());
-        assert_eq!(workers.unwrap().len(), 1);
+        assert_eq!(workers.unwrap().handles.len(), 1);
 
         let _ = shutdown_tx.send(());
         drop(event_tx);
