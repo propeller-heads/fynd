@@ -747,6 +747,172 @@ mod tests {
         }
     }
 
+    /// How a [`ScriptedFeed`] ends after publishing its snapshot.
+    #[derive(Clone, Copy)]
+    enum Finish {
+        Hold,
+        Withdraw,
+        RanOut,
+        Fail,
+        Panic,
+    }
+
+    /// Publishes one snapshot, then finishes as `finish` says.
+    struct ScriptedFeed<T> {
+        snapshot: T,
+        finish: Finish,
+    }
+
+    impl<T: Send + Sync + 'static> SnapshotFeed for ScriptedFeed<T> {
+        type Snapshot = T;
+        type Error = FeedError;
+
+        async fn run(
+            self,
+            publisher: tycho_simulation::snapshot_feed::Publisher<Self::Snapshot>,
+        ) -> Result<(), Self::Error> {
+            let first = futures::stream::iter([Ok::<_, FeedError>(self.snapshot)]);
+            let idle = futures::stream::pending();
+            // Gives the reader time to take the snapshot before the feed ends.
+            let pause =
+                futures::stream::once(tokio::time::sleep(std::time::Duration::from_millis(50)))
+                    .filter_map(|()| async { None::<Result<T, FeedError>> });
+            match self.finish {
+                Finish::Hold => {
+                    publisher
+                        .publishing(None, first.chain(idle))
+                        .await
+                }
+                Finish::Withdraw => {
+                    let stale_after = Some(std::time::Duration::from_millis(20));
+                    publisher
+                        .publishing(stale_after, first.chain(idle))
+                        .await
+                }
+                Finish::RanOut => {
+                    publisher
+                        .publishing(None, first.chain(pause))
+                        .await
+                }
+                Finish::Fail => {
+                    let failure = futures::stream::iter([Err(FeedError::Fatal("x".into()))]);
+                    publisher
+                        .publishing(None, first.chain(pause).chain(failure))
+                        .await
+                }
+                Finish::Panic => {
+                    publisher
+                        .publishing(None, first.chain(pause))
+                        .await?;
+                    panic!("scripted panic")
+                }
+            }
+        }
+    }
+
+    fn builtin_snapshot(ids: &[&str]) -> BookSnapshot<ReceivedAt> {
+        let mut books = HashMap::new();
+        for entry in book_snapshot(ids).components() {
+            books.insert(
+                entry.component.id.to_string(),
+                tycho_simulation::book::Book {
+                    component: entry.component.clone(),
+                    state: Arc::clone(&entry.state),
+                    updated_at: None,
+                },
+            );
+        }
+        BookSnapshot { anchor: ReceivedAt(chrono::Utc::now()), books: Arc::new(books) }
+    }
+
+    fn scripted_external(books: &mut BookStream, finish: Finish) {
+        let feed = ScriptedFeed { snapshot: book_snapshot_in("fallback:manta", &["0x01"]), finish };
+        assert!(books
+            .external
+            .add("fallback:manta", feed)
+            .is_ok());
+    }
+
+    async fn next_update(books: &mut BookStream) -> Result<BookUpdate, DataFeedError> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), books.next())
+            .await
+            .expect("the book stream yielded nothing")
+    }
+
+    #[tokio::test]
+    async fn test_next_builtin_published() {
+        let mut books = book_stream();
+        let feed = ScriptedFeed { snapshot: builtin_snapshot(&["0x01"]), finish: Finish::Hold };
+        assert!(books.feeds.add(VENUE, feed).is_ok());
+
+        let update = next_update(&mut books).await.unwrap();
+
+        assert_eq!(update.protocol_system, VENUE);
+        assert_eq!(update.added.len(), 1);
+        assert!(update.removed.is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::withdrawn(Finish::Withdraw)]
+    #[case::ran_out(Finish::RanOut)]
+    #[case::failed(Finish::Fail)]
+    #[tokio::test]
+    async fn test_next_external_stops_serving(#[case] finish: Finish) {
+        let mut books = book_stream();
+        scripted_external(&mut books, finish);
+
+        let served = next_update(&mut books).await.unwrap();
+        let dropped = next_update(&mut books).await.unwrap();
+
+        assert_eq!(served.added.len(), 1);
+        assert_eq!(dropped.removed, ["0x01"]);
+        assert!(dropped.added.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_next_external_panicked() {
+        let mut books = book_stream();
+        scripted_external(&mut books, Finish::Panic);
+
+        let message = loop {
+            match next_update(&mut books).await {
+                Ok(_) => {}
+                Err(DataFeedError::StreamError(message)) => break message,
+                Err(other) => panic!("unexpected error: {other}"),
+            }
+        };
+
+        assert!(message.contains("fallback:manta"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_next_external_outlives_builtin() {
+        let mut books = book_stream();
+        let builtin =
+            ScriptedFeed { snapshot: builtin_snapshot(&["0x01"]), finish: Finish::RanOut };
+        assert!(books.feeds.add(VENUE, builtin).is_ok());
+        scripted_external(&mut books, Finish::Hold);
+
+        let mut seen = Vec::new();
+        while !seen.contains(&"fallback:manta".to_string()) {
+            seen.push(
+                next_update(&mut books)
+                    .await
+                    .unwrap()
+                    .protocol_system,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_next_without_feeds() {
+        let Err(DataFeedError::StreamError(message)) = book_stream().next().await else {
+            panic!("a stream with no feeds must end");
+        };
+
+        assert!(message.contains("gave up"), "{message}");
+    }
+
     /// A feed named `protocol_system` that publishes one book per id, in that protocol system.
     fn external_liquidity(
         protocol_system: &str,

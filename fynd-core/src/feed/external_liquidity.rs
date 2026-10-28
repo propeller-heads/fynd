@@ -90,3 +90,40 @@ pub(crate) fn liquidity_snapshot_from_books(
     }
     LiquiditySnapshot::new(components)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algorithm::test_utils::MockProtocolSim;
+
+    #[test]
+    fn test_snapshot_keeps_later_component_for_repeated_id() {
+        let component = |protocol_type_name: &str| LiquidityComponent {
+            component: ProtocolComponent::new(
+                Bytes::from("0x01"),
+                "fallback:manta".to_string(),
+                protocol_type_name.to_string(),
+                Chain::Ethereum,
+                vec![],
+                vec![],
+                HashMap::new(),
+                Bytes::default(),
+                Default::default(),
+            ),
+            state: Arc::new(MockProtocolSim::new(1.0)),
+        };
+
+        let snapshot = LiquiditySnapshot::new(vec![component("earlier"), component("later")]);
+
+        let kept: Vec<_> = snapshot
+            .components()
+            .map(|entry| {
+                entry
+                    .component
+                    .protocol_type_name
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(kept, ["later"]);
+    }
+}
