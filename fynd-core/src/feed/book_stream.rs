@@ -238,7 +238,7 @@ impl BookStream {
         let external_config = ExternalLiquidityConfig {
             chain,
             tokens: Arc::clone(&book_config.tokens),
-            min_tvl_usd: config.min_tvl,
+            min_tvl: config.min_tvl,
         };
 
         let mut books = Self {

@@ -14,7 +14,7 @@ use tycho_simulation::{
 };
 
 /// What an external liquidity source needs to know to start: the chain, the tokens it may serve
-/// and the TVL floor in USD. They are the same values the built-in RFQ venues get.
+/// and the TVL floor. They are the same values the built-in RFQ venues get.
 ///
 /// A source must not serve a component that has a token outside `tokens`; Fynd drops such a
 /// component with a warning.
@@ -24,8 +24,9 @@ pub struct ExternalLiquidityConfig {
     pub chain: Chain,
     /// The tokens a source may serve, by address.
     pub tokens: Arc<HashMap<Bytes, Token>>,
-    /// The smallest TVL, in USD, a component should have to be worth serving.
-    pub min_tvl_usd: f64,
+    /// The TVL floor Fynd filters Tycho pools with, in the chain's native token. It is the value
+    /// of `TychoFeedConfig::min_tvl`.
+    pub min_tvl: f64,
 }
 
 impl std::fmt::Debug for ExternalLiquidityConfig {
@@ -33,7 +34,7 @@ impl std::fmt::Debug for ExternalLiquidityConfig {
         f.debug_struct("ExternalLiquidityConfig")
             .field("chain", &self.chain)
             .field("token_count", &self.tokens.len())
-            .field("min_tvl_usd", &self.min_tvl_usd)
+            .field("min_tvl", &self.min_tvl)
             .finish()
     }
 }
