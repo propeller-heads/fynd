@@ -119,7 +119,11 @@ impl Algorithm for DirectComponentAlgorithm {
                 state.clone_box(),
             );
 
-            let route = Route::new(vec![swap], FxHashMap::default())?;
+            let tokens = [
+                (token_in.address.clone(), token_in.clone()),
+                (token_out.address.clone(), token_out.clone()),
+            ];
+            let route = Route::new(vec![swap], tokens)?;
 
             // Validate every candidate route before returning it. The solver worker rejects
             // invalid routes (disconnected swaps, repeated tokens, malformed splits) and that

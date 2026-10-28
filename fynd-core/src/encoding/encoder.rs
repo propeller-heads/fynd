@@ -134,7 +134,7 @@ fn solution_from_quote(
             .ok_or_else(|| {
                 SolveError::FailedEncoding(format!(
                     "token {addr:?} not found in route's token map; \
-                 algorithm must populate Route::with_tokens for every swap token"
+                 algorithm must pass every swap token to Route::new"
                 ))
             })
     };
