@@ -1300,6 +1300,7 @@ mod tests {
                     .await
                     .topology_of(VENUE)
                     .is_some();
+                venue.protocol_system = "rfq:test".to_string();
                 let (added, updated) =
                     if served { (vec![], vec![venue]) } else { (vec![venue], vec![]) };
                 let update = BookUpdate {
@@ -1354,6 +1355,61 @@ mod tests {
             2
         );
         assert!(updated_components.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_book_update_keeps_other_protocol_systems() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let _event_rx = feed.subscribe();
+        let tokens = vec![
+            create_test_token("0x1111111111111111111111111111111111111111", "TKN1"),
+            create_test_token("0x2222222222222222222222222222222222222222", "TKN2"),
+        ];
+        let pool_states = HashMap::from([(
+            VENUE.to_string(),
+            Box::new(FeedMockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+        )]);
+        let pool =
+            HashMap::from([(VENUE.to_string(), create_test_component(VENUE, tokens.clone()))]);
+        feed.handle_tycho_message(Update::new(12345, pool_states, pool))
+            .await
+            .unwrap();
+        let mut book_component = create_test_component(VENUE, tokens);
+        book_component.protocol_system = "rfq:test".to_string();
+        let book_update = |added: Vec<ProtocolComponent>, removed: Vec<String>| {
+            let mut states = HashMap::new();
+            if !added.is_empty() {
+                states.insert(
+                    VENUE.to_string(),
+                    Box::new(FeedMockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                );
+            }
+            BookUpdate {
+                protocol_system: "rfq:test".to_string(),
+                added,
+                removed,
+                updated: vec![],
+                states,
+            }
+        };
+
+        feed.handle_book_update(book_update(vec![book_component], vec![]))
+            .await
+            .unwrap();
+        feed.handle_book_update(book_update(vec![], vec![VENUE.to_string()]))
+            .await
+            .unwrap();
+
+        let data = market_data.read().await;
+        let held = data.get_component(VENUE).unwrap();
+        assert_eq!(held.protocol_system, "uniswap_v2");
+        assert_eq!(
+            data.get_simulation_state(VENUE)
+                .unwrap()
+                .fee(),
+            1.0
+        );
     }
 
     #[tokio::test]
