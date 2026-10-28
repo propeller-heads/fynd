@@ -1885,6 +1885,45 @@ mod tests {
         }
     }
 
+    /// With connector list {B}, the route through X exists only when the request requires X, and
+    /// then it is the only route.
+    #[rstest::rstest]
+    #[case::not_required(false, "ab")]
+    #[case::required(true, "ax")]
+    #[tokio::test]
+    async fn test_required_token_passes_connector_list(
+        #[case] require_x: bool,
+        #[case] first_pool: &str,
+    ) {
+        let a = token_with_decimals(0x01, "A", 18);
+        let b = token_with_decimals(0x02, "B", 18);
+        let x = token_with_decimals(0x03, "X", 18);
+        let y = token_with_decimals(0x04, "Y", 18);
+        let (market, gm) = setup_market_weighted_boxed(vec![
+            ("ab", &a, &b, Box::new(MockProtocolSim::new(3.0)) as Box<dyn ProtocolSim>),
+            ("by", &b, &y, Box::new(MockProtocolSim::new(3.0))),
+            ("ax", &a, &x, Box::new(MockProtocolSim::new(2.0))),
+            ("xy", &x, &y, Box::new(MockProtocolSim::new(2.0))),
+        ]);
+        let order = whole_weth_order(&a.address, &y.address, 1);
+        let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
+        let request = SolveRequest::new(gm.graph(), market, &order)
+            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+        let algorithm = WaterFillAlgorithm::with_config(
+            AlgorithmConfig::new(1, 3, Duration::from_millis(5000), None)
+                .unwrap()
+                .with_connector_tokens([b.address.clone()]),
+        )
+        .unwrap();
+
+        let result = algorithm
+            .find_best_route(request)
+            .await
+            .unwrap();
+
+        assert_eq!(result.route().swaps()[0].component_id(), first_pool);
+    }
+
     /// A component whose math panics mid-simulation must be skipped like any failing component,
     /// not unwind through the solver worker thread. The panicking component advertises huge depth
     /// so discovery ranks it first and the bulk fill loops actually simulate it.

@@ -1590,6 +1590,41 @@ mod tests {
         assert!(intermediates.contains(&c), "C should be allowed");
     }
 
+    /// With connector list {B}, C passes only as a required token: `A -> C -> D` is found when C
+    /// is required and absent otherwise.
+    #[rstest]
+    #[case::not_required(false, false)]
+    #[case::required(true, true)]
+    fn test_required_token_passes_connector_list(
+        #[case] require_c: bool,
+        #[case] expects_route_through_c: bool,
+    ) {
+        let (a, b, c, d) = addrs();
+        let m = diamond_graph();
+        let filter = GraphQueryFilter {
+            min_hops: 1,
+            max_hops: 2,
+            connector_tokens: Some(FxHashSet::from_iter([b])),
+        };
+        let required = if require_c { vec![c] } else { vec![] };
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(required);
+        let search = RouteSearch { bounds: &filter, exclusions: &exclusions };
+
+        let routes = all_ids(
+            m.graph()
+                .paths_between(&a, &d, search)
+                .unwrap()
+                .iter()
+                .flat_map(|token_path| {
+                    m.graph()
+                        .expand_path(token_path, None, &exclusions)
+                })
+                .collect(),
+        );
+
+        assert_eq!(routes.contains(&vec!["ac", "cd"]), expects_route_through_c);
+    }
+
     #[test]
     fn test_connector_tokens_allows_endpoints_even_if_not_listed() {
         // Allowlist contains neither token_in nor token_out, but a 1-hop route should still work.
