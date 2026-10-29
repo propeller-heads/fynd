@@ -84,3 +84,26 @@ pub fn prices_feed(
     }
     builder.build()
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::padded(" https://x ", Some("https://x"))]
+    #[case::blank("  ", None)]
+    fn test_credentials_endpoint_whitespace(#[case] url: &str, #[case] expected: Option<&str>) {
+        let args = MetricArgs { api_key: Some("k".into()), api_url: Some(url.into()) };
+
+        let credentials = args.credentials().ok();
+
+        assert_eq!(
+            credentials
+                .and_then(|c| c.base_url)
+                .as_deref(),
+            expected
+        );
+    }
+}

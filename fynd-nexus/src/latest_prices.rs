@@ -208,3 +208,101 @@ pub fn spawn_snapshot_age_reports(streams: Vec<Arc<LatestPrices>>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    const EPOCH: u64 = 7;
+
+    fn latest_prices() -> LatestPrices {
+        LatestPrices::new(Chain::Base, RfqVenue::Hashflow, EPOCH)
+    }
+
+    fn message(latest_prices: &LatestPrices) -> NexusMessage<Value> {
+        let latest = latest_prices
+            .current()
+            .expect("the stream has a message");
+        NexusMessage::decode(std::str::from_utf8(&latest.encoded).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn test_new_stream() {
+        let latest_prices = latest_prices();
+
+        assert!(!latest_prices.has_prices());
+        assert!(latest_prices.current().is_none());
+    }
+
+    #[test]
+    fn test_seq_grows_with_every_change_and_not_otherwise() {
+        let latest_prices = latest_prices();
+        let at = Utc::now();
+
+        latest_prices.publish(&json!({"n": 1}), at);
+        latest_prices.publish(&json!({"n": 2}), at);
+        latest_prices.withdraw();
+        latest_prices.withdraw();
+        latest_prices.publish(&json!({"n": 3}), at);
+
+        let NexusMessage { seq, body: MessageBody::Snapshot { data, as_of }, .. } =
+            message(&latest_prices)
+        else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!((seq, data, as_of), (4, json!({"n": 3}), at));
+    }
+
+    #[test]
+    fn test_withdraw_before_first_snapshot() {
+        let latest_prices = latest_prices();
+
+        latest_prices.withdraw();
+
+        assert!(!latest_prices.has_prices());
+        assert_eq!(message(&latest_prices), NexusMessage::new(EPOCH, 1, MessageBody::Withdrawn));
+    }
+
+    #[test]
+    fn test_etag_follows_epoch_and_seq() {
+        let latest_prices = latest_prices();
+        latest_prices.publish(&json!({}), Utc::now());
+        let first = latest_prices.current().unwrap();
+        latest_prices.publish(&json!({}), Utc::now());
+        let second = latest_prices.current().unwrap();
+
+        assert_eq!(first.etag(), "\"7-1\"");
+        assert_eq!(second.etag(), "\"7-2\"");
+    }
+
+    #[test]
+    fn test_snapshot_age_gauge_keeps_counting_while_not_serving() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let latest_prices = latest_prices();
+        let now = Utc::now();
+        let age_gauge = || {
+            let (_, _, _, value) = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .find(|(key, ..)| key.key().name() == "nexus_snapshot_age_seconds")
+                .expect("the gauge is set");
+            let DebugValue::Gauge(value) = value else { panic!("expected a gauge") };
+            value.into_inner()
+        };
+
+        metrics::with_local_recorder(&recorder, || {
+            latest_prices.publish(&json!({}), now - chrono::Duration::seconds(2));
+            latest_prices.report_snapshot_age(now);
+            assert_eq!(age_gauge(), 2.0);
+
+            latest_prices.withdraw();
+            latest_prices.report_snapshot_age(now + chrono::Duration::seconds(10));
+            assert_eq!(age_gauge(), 12.0);
+        });
+    }
+}
