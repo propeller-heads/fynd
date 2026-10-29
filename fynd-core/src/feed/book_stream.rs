@@ -9,25 +9,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    str::FromStr,
     sync::Arc,
 };
 
-use alloy::primitives::Address;
 use futures::StreamExt as _;
 use itertools::Itertools;
 use tracing::{debug, info, warn};
 use tycho_simulation::{
-    book::{
-        all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
-        BookFeedEvent, BookFeedStreams, BookSnapshot, ReceivedAt,
-    },
-    pamm::protocols::metric::feed::MetricFeedBuilder,
+    book::{BookFeedConfig, BookFeedEvent, BookFeedStreams, BookSnapshot, ReceivedAt},
     protocol::models::ProtocolComponent,
-    rfq::protocols::{
-        bebop::feed::BebopFeedBuilder, hashflow::feed::HashflowFeedBuilder,
-        liquorice::feed::LiquoriceFeedBuilder, native::feed::NativeFeedBuilder,
-    },
     snapshot_feed::{
         errors::FeedError, SnapshotFeed, SnapshotFeedEvent, SnapshotFeedOutcome,
         SnapshotFeedStreams,
@@ -37,7 +27,7 @@ use tycho_simulation::{
 };
 
 use super::{
-    book_venues::{BookVenue, BookVenueEntry},
+    book_venues::{open_book_feed, BookVenueContext, BookVenueEntry},
     external_liquidity::{
         liquidity_snapshot_from_books, ExternalLiquidityConfig, LiquidityComponent,
         LiquiditySnapshot,
@@ -183,20 +173,15 @@ impl BookStream {
             return Ok(None);
         }
 
-        // Metric reports each pool's USD TVL itself; the other venues price their books' TVL in
-        // the chain's USD stablecoins, so only they need a chain that has a curated set.
-        let usd_quote_tokens = || {
-            usd_stablecoins_for_chain(chain)
-                .map(Arc::new)
-                .ok_or_else(|| {
-                    DataFeedError::Config(format!(
-                        "book feeds price their books in USD stablecoins, and none are known for \
-                         {chain}"
-                    ))
-                })
+        let context = BookVenueContext {
+            book_config: BookFeedConfig {
+                chain,
+                tokens: Arc::new(tokens),
+                min_tvl_usd: config.min_tvl,
+            },
+            aggregate_rfqs: config.aggregate_rfqs,
         };
-        let book_config =
-            BookFeedConfig { chain, tokens: Arc::new(tokens), min_tvl_usd: config.min_tvl };
+        let book_config = &context.book_config;
 
         let external_config = ExternalLiquidityConfig {
             chain,
@@ -213,98 +198,9 @@ impl BookStream {
         for source in external_liquidity {
             source.open(external_config.clone(), &mut books.external)?;
         }
-        for entry in entries {
-            let name = entry.name;
-            match entry.venue {
-                BookVenue::Bebop => {
-                    let mut builder = BebopFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("BEBOP_KEY")?,
-                    );
-                    if let Some(address) = optional_address_env("BEBOP_ORIGIN_ADDRESS")? {
-                        builder = builder.origin_address(address);
-                    }
-                    if let Some(target) = optional_address_env("BEBOP_ORIGIN_TARGET")? {
-                        builder = builder.origin_target(target);
-                    }
-                    if let Ok(source) = std::env::var("BEBOP_ORIGIN_SOURCE") {
-                        builder = builder.origin_source(source);
-                    }
-                    if config.aggregate_rfqs {
-                        builder = builder.all_pairs();
-                    }
-                    if entry.uses_fallback_router {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(name, feed);
-                }
-                BookVenue::Hashflow => {
-                    let mut builder = HashflowFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("HASHFLOW_USER")?,
-                        get_env("HASHFLOW_KEY")?,
-                    );
-                    if config.aggregate_rfqs {
-                        builder = builder.all_pairs(QuoteRule::OncePerMaker);
-                    }
-                    if entry.uses_fallback_router {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(name, feed);
-                }
-                BookVenue::Metric => {
-                    let mut builder =
-                        MetricFeedBuilder::new(book_config.clone(), get_env("METRIC_API_KEY")?);
-                    if let Some(base_url) = trimmed_non_empty(std::env::var("METRIC_API_URL").ok())
-                    {
-                        builder = builder.base_url(base_url);
-                    }
-                    if entry.uses_fallback_router {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(name, feed);
-                }
-                BookVenue::Native => {
-                    let mut builder = NativeFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("NATIVE_API_KEY")?,
-                    );
-                    if entry.uses_fallback_router {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(name, feed);
-                }
-                BookVenue::Liquorice => {
-                    let mut builder = LiquoriceFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("LIQUORICE_USER")?,
-                        get_env("LIQUORICE_KEY")?,
-                    );
-                    if entry.uses_fallback_router {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(name, feed);
-                }
-            }
+        for entry in &entries {
+            let feed = open_book_feed(entry, &context)?;
+            books.add_feed(entry.name, feed);
         }
         Ok((!books.feeds.is_empty() || !books.external.is_empty()).then_some(books))
     }
@@ -521,31 +417,6 @@ fn reject_name_clash(
         }
     }
     Ok(())
-}
-
-fn get_env(var: &str) -> Result<String, DataFeedError> {
-    std::env::var(var).map_err(|_| DataFeedError::Config(format!("{var} env var not set")))
-}
-
-/// Trims an optional environment value and treats an empty one as absent.
-fn trimmed_non_empty(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_string())
-    })
-}
-
-/// The address `var` holds, or `None` when it is unset.
-///
-/// A set-but-unparseable value is a configuration error rather than an absent address: Bebop
-/// identifies the caller by these, so silently quoting as nobody is worse than refusing to start.
-fn optional_address_env(var: &str) -> Result<Option<Bytes>, DataFeedError> {
-    let Ok(value) = std::env::var(var) else {
-        return Ok(None);
-    };
-    Address::from_str(value.trim())
-        .map(|address| Some(Bytes::from(address.into_array())))
-        .map_err(|e| DataFeedError::Config(format!("{var} is not an address: {e}")))
 }
 
 #[cfg(test)]
@@ -1030,16 +901,5 @@ mod tests {
         };
 
         assert!(message.contains(expected), "{message}");
-    }
-
-    #[test]
-    fn test_trimmed_non_empty() {
-        assert_eq!(trimmed_non_empty(None), None);
-        assert_eq!(trimmed_non_empty(Some(String::new())), None);
-        assert_eq!(trimmed_non_empty(Some("  \t".to_string())), None);
-        assert_eq!(
-            trimmed_non_empty(Some(" https://metric.example/ ".to_string())),
-            Some("https://metric.example/".to_string())
-        );
     }
 }
