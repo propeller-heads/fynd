@@ -112,55 +112,23 @@ impl<D: DeserializeOwned> NexusMessage<D> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use num_bigint::BigUint;
     use rstest::rstest;
     use serde_json::json;
     use tycho_simulation::{
-        book::{Levels, PriceLevel},
         pamm::protocols::metric::{
             MetricBidAskResponse, MetricMetadata, MetricPoolPrice, MetricPrices,
         },
-        rfq::protocols::{
-            bebop::{BebopBook, BebopPrices},
-            hashflow::{HashflowMarketMakerLevels, HashflowPair, HashflowPrices},
-        },
+        rfq::protocols::bebop::BebopPrices,
         tycho_core::Bytes,
     };
 
-    use super::*;
+    use super::{
+        rfq::test_support::{bebop_prices, hashflow_prices},
+        *,
+    };
 
     const EPOCH: u64 = 1_761_550_000_000;
-
-    fn levels(price: f64, quantity: f64) -> Levels {
-        Levels::new(vec![PriceLevel { price, quantity }]).unwrap()
-    }
-
-    fn bebop_prices(bid: f64, ask: f64) -> BebopPrices {
-        BebopPrices {
-            pairs: vec![BebopBook {
-                base: Bytes::from([0xc0; 20]),
-                quote: Bytes::from([0xa0; 20]),
-                last_update_ts: 1_761_550_000_123,
-                bids: levels(bid, 0.325717),
-                asks: levels(ask, 0.325717),
-            }],
-        }
-    }
-
-    fn hashflow_prices() -> HashflowPrices {
-        let pair = HashflowPair {
-            base_token: Bytes::from([0xc0; 20]),
-            quote_token: Bytes::from([0xa0; 20]),
-        };
-        HashflowPrices {
-            levels_by_maker: HashMap::from([(
-                "mm1".to_string(),
-                vec![HashflowMarketMakerLevels { pair, levels: levels(2999.1, 1.5) }],
-            )]),
-        }
-    }
 
     fn metric_prices() -> MetricPrices {
         MetricPrices {
@@ -206,15 +174,15 @@ mod tests {
         assert_eq!(round_trip(&message), message);
     }
 
-    #[test]
-    fn test_round_trip_typed_snapshots() {
-        let bebop = snapshot(bebop_prices(3000.5, 3001.5));
-        let hashflow = snapshot(hashflow_prices());
-        let metric = snapshot(metric_prices());
-
-        assert_eq!(round_trip(&bebop), bebop);
-        assert_eq!(round_trip(&hashflow), hashflow);
-        assert_eq!(round_trip(&metric), metric);
+    #[rstest]
+    #[case::bebop(snapshot(bebop_prices(3000.5)))]
+    #[case::hashflow(snapshot(hashflow_prices()))]
+    #[case::metric_with_extreme_amounts(snapshot(metric_prices()))]
+    fn test_round_trip_typed_snapshots<D>(#[case] message: NexusMessage<D>)
+    where
+        D: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        assert_eq!(round_trip(&message), message);
     }
 
     #[rstest]
@@ -223,14 +191,14 @@ mod tests {
     #[case::smallest_subnormal(f64::from_bits(1))]
     #[case::next_after_round(f64::from_bits(3000.0f64.to_bits() + 1))]
     fn test_round_trip_price_precision(#[case] price: f64) {
-        let message = snapshot(bebop_prices(price, price));
+        let message = snapshot(bebop_prices(price));
 
         let MessageBody::Snapshot { data, .. } = round_trip(&message).body else {
             panic!("a snapshot must decode as a snapshot");
         };
 
         assert_eq!(data.pairs[0].bids[0].price.to_bits(), price.to_bits());
-        assert_eq!(data.pairs[0].asks[0].price.to_bits(), price.to_bits());
+        assert_eq!(data.pairs[0].asks[0].price.to_bits(), (price + 1.0).to_bits());
     }
 
     #[rstest]
