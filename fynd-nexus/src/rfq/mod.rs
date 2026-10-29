@@ -172,3 +172,121 @@ pub fn spawn_prices_feed(latest_prices: Arc<LatestPrices>, credentials: RfqCrede
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn args(bebop: bool, hashflow: bool, metric: bool) -> RfqArgs {
+        RfqArgs {
+            bebop: BebopArgs { key: bebop.then(|| "bebop-secret".to_string()) },
+            hashflow: HashflowArgs {
+                user: hashflow.then(|| "user".to_string()),
+                key: hashflow.then(|| "hashflow-secret".to_string()),
+            },
+            metric: MetricArgs {
+                api_key: metric.then(|| "metric-secret".to_string()),
+                api_url: None,
+            },
+        }
+    }
+
+    #[rstest]
+    #[case::all_set(args(true, true, true), RfqVenue::ALL.to_vec(), None)]
+    #[case::unlisted_venues_need_nothing(
+        args(true, false, false),
+        vec![RfqVenue::Bebop],
+        None
+    )]
+    #[case::bebop(args(false, true, true), RfqVenue::ALL.to_vec(), Some("BEBOP_KEY"))]
+    #[case::hashflow(
+        args(true, false, true),
+        RfqVenue::ALL.to_vec(),
+        Some("HASHFLOW_USER and HASHFLOW_KEY")
+    )]
+    #[case::hashflow_key_only_missing(
+        hashflow_user_only(),
+        vec![RfqVenue::Hashflow],
+        Some("HASHFLOW_USER and HASHFLOW_KEY")
+    )]
+    #[case::metric(args(true, true, false), RfqVenue::ALL.to_vec(), Some("METRIC_API_KEY"))]
+    fn test_required_credentials(
+        #[case] args: RfqArgs,
+        #[case] venues: Vec<RfqVenue>,
+        #[case] missing: Option<&str>,
+    ) {
+        let result = require_credentials(&venues, &args);
+
+        match missing {
+            None => assert_eq!(result.map(|found| found.len()).ok(), Some(venues.len())),
+            Some(variable) => assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains(variable)),
+        }
+    }
+
+    fn hashflow_user_only() -> RfqArgs {
+        let mut args = args(true, true, true);
+        args.hashflow.key = None;
+        args
+    }
+
+    #[test]
+    fn test_args_debug_secret_redaction() {
+        let shown = format!("{:?}", args(true, true, true));
+
+        for secret in ["bebop-secret", "hashflow-secret", "metric-secret"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+    }
+
+    #[rstest]
+    #[case::bebop_ethereum(RfqVenue::Bebop, Chain::Ethereum, true)]
+    #[case::bebop_base(RfqVenue::Bebop, Chain::Base, true)]
+    #[case::bebop_unichain(RfqVenue::Bebop, Chain::Unichain, false)]
+    #[case::metric_arbitrum(RfqVenue::Metric, Chain::Arbitrum, true)]
+    #[case::metric_unichain(RfqVenue::Metric, Chain::Unichain, false)]
+    #[case::hashflow_anywhere(RfqVenue::Hashflow, Chain::Unichain, true)]
+    fn test_venues_support_their_chains(
+        #[case] venue: RfqVenue,
+        #[case] chain: Chain,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(supports_chain(venue, chain), expected);
+    }
+
+    #[test]
+    fn test_streams_skip_venues_that_do_not_support_the_chain_and_repeated_venues() {
+        let credentials = require_credentials(
+            &[RfqVenue::Hashflow, RfqVenue::Bebop, RfqVenue::Metric, RfqVenue::Hashflow],
+            &args(true, true, true),
+        )
+        .unwrap_or_default();
+
+        let streams = streams_to_serve(Chain::Unichain, &credentials).unwrap();
+
+        let venues: Vec<_> = streams
+            .iter()
+            .map(RfqCredentials::venue)
+            .collect();
+        assert_eq!(venues, [RfqVenue::Hashflow]);
+    }
+
+    #[test]
+    fn test_streams_fail_when_no_venue_supports_the_chain() {
+        let credentials =
+            require_credentials(&[RfqVenue::Bebop, RfqVenue::Metric], &args(true, true, true))
+                .unwrap_or_default();
+
+        let error = streams_to_serve(Chain::Unichain, &credentials)
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert_eq!(error, "none of the listed venues (bebop, metric) supports unichain");
+    }
+}

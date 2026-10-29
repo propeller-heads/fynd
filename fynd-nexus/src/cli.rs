@@ -35,3 +35,61 @@ pub struct Cli {
     #[command(flatten)]
     pub rfq: RfqArgs,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_without_chain() {
+        assert!(Cli::try_parse_from(["fynd-nexus"]).is_err());
+    }
+
+    #[test]
+    fn test_parse_defaults() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "base"]).unwrap();
+
+        assert_eq!(cli.chain, Chain::Base);
+        assert_eq!(cli.venues, RfqVenue::ALL);
+        assert_eq!((cli.http_port, cli.metrics_port), (3000, 9898));
+    }
+
+    #[test]
+    fn test_parse_unknown_venue() {
+        let result = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "bebop,liquorice",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_venue_credential_flags() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--bebop-key",
+            "b",
+            "--hashflow-user",
+            "u",
+            "--hashflow-key",
+            "k",
+            "--metric-api-key",
+            "m",
+            "--metric-api-url",
+            "https://metric.example",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.rfq.bebop.key.as_deref(), Some("b"));
+        assert_eq!(cli.rfq.hashflow.user.as_deref(), Some("u"));
+        assert_eq!(cli.rfq.hashflow.key.as_deref(), Some("k"));
+        assert_eq!(cli.rfq.metric.api_key.as_deref(), Some("m"));
+        assert_eq!(cli.rfq.metric.api_url.as_deref(), Some("https://metric.example"));
+    }
+}
