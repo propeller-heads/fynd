@@ -16,7 +16,7 @@ use tycho_simulation::{
 use super::{most_liquid::DepthAndPrice, NoPathReason};
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
-    derived::types::TokenGasPrices,
+    derived::types::{gas_cost_in_token, TokenGasPrices},
     feed::market_data::{MarketData, MarketDataView, MarketState},
     graph::{GraphError, Path, RouteSearch, TokenPath, TopologyGraph},
     types::{ComponentId, Route, RouteResult, Swap},
@@ -202,17 +202,13 @@ pub fn simulate_pool_path<D>(
         .clone();
 
     let net_amount_out = if let Some(last_swap) = route.swaps().last() {
-        let gas_cost_wei = route.total_gas() * &gas_price;
-
         // Convert gas cost to output token terms using token prices. Without a price the output
         // amount stands as-is, which is what happens before derived data has been computed.
-        match token_prices.and_then(|prices| prices.get(last_swap.token_out())) {
-            Some(price) => {
-                BigInt::from(output_amount) -
-                    BigInt::from(gas_cost_wei * &price.numerator / &price.denominator)
-            }
-            None => BigInt::from(output_amount),
-        }
+        let gas_cost = token_prices
+            .and_then(|prices| prices.get(last_swap.token_out()))
+            .and_then(|price| gas_cost_in_token(&route.total_gas(), &gas_price, price))
+            .unwrap_or_default();
+        BigInt::from(output_amount) - BigInt::from(gas_cost)
     } else {
         BigInt::from(output_amount)
     };
@@ -272,6 +268,7 @@ pub fn fetch_gas_price(view: &MarketState) -> Result<BigUint, AlgorithmError> {
 mod tests {
     use num_bigint::BigUint;
     use rstest::rstest;
+    use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
 
     use super::*;
     use crate::{
@@ -441,6 +438,48 @@ mod tests {
         assert_eq!(*result.route().swaps()[0].amount_in(), BigUint::from(100u64));
         assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64)); // 100 * 2
         assert_eq!(result.route().swaps()[0].component_id(), "component1");
+    }
+
+    #[test]
+    fn test_simulate_path_fractional_gas_cost() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_gas(1),
+        )]);
+        let filter = hops(1, 1);
+        let path = find_paths(
+            manager.graph(),
+            &token_a.address,
+            &token_b.address,
+            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        // 1 gas at the fixture's 100 wei costs 10^-10 B raw units: floor charges 0, ceiling 1.
+        let prices: TokenGasPrices = [(
+            token_b.address.clone(),
+            Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) },
+        )]
+        .into_iter()
+        .collect();
+
+        let result = simulate_pool_path(
+            &path,
+            market_read(&market).base_market_state(),
+            Some(&prices),
+            BigUint::from(100u64),
+        )
+        .unwrap();
+
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64));
+        assert_eq!(*result.net_amount_out(), BigInt::from(199));
     }
 
     #[test]

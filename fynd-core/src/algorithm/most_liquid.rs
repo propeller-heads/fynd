@@ -35,7 +35,10 @@ use crate::{
         sim_guard::GuardedProtocolSim,
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
-    derived::{computation::ComputationRequirements, types::TokenGasPrices},
+    derived::{
+        computation::ComputationRequirements,
+        types::{gas_cost_in_token, TokenGasPrices},
+    },
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
         GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
@@ -255,7 +258,7 @@ fn swap_on_route(
         gas += swap.gas_estimate();
     }
 
-    amount_out - BigInt::from(gas * gas_price * &price.numerator / &price.denominator)
+    amount_out - BigInt::from(gas_cost_in_token(&gas, gas_price, price).unwrap_or_default())
 }
 
 /// Algorithm that selects routes based on expected output after gas.
@@ -349,10 +352,9 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
             }
         };
 
-        // Normalize depth from raw token_in units to gas token units.
-        // TokenGasPrices stores Price { numerator, denominator } where
-        // numerator/denominator = "token units per gas token unit".
-        // To convert to gas token: depth_gas = raw_depth * denominator / numerator.
+        // Normalize depth from token_in raw units to native gas raw units. TokenGasPrices stores
+        // Price { numerator, denominator } with numerator/denominator = token raw units per
+        // native gas raw unit, so depth_native = raw_depth * denominator / numerator.
         let depth = match derived
             .token_prices()
             .and_then(|p| p.get(&token_in.address))
@@ -666,13 +668,10 @@ impl MostLiquidAlgorithm {
                     },
                     true,
                 )?;
-                let net = match token_out_gas_price {
-                    Some(price) => {
-                        let cost = &paid.gas * gas_price * &price.numerator / &price.denominator;
-                        BigInt::from(paid.amount_out.clone()) - BigInt::from(cost)
-                    }
-                    None => BigInt::from(paid.amount_out.clone()),
-                };
+                let cost = token_out_gas_price
+                    .and_then(|price| gas_cost_in_token(&paid.gas, gas_price, price))
+                    .unwrap_or_default();
+                let net = BigInt::from(paid.amount_out.clone()) - BigInt::from(cost);
                 Some(PoolQuote { paid, net })
             })
             .map_err(|FailedLegIx(leg_ix)| MostLiquidError::HopNotTradable {
@@ -682,13 +681,12 @@ impl MostLiquidAlgorithm {
 
         // The route pays out in its last leg's output token, so that is the token its gas is
         // charged in.
-        let net_amount_out = match legs.last().and_then(|leg| leg.data.2) {
-            Some(price) => {
-                let cost = scored.gas * ctx.gas_price * &price.numerator / &price.denominator;
-                BigInt::from(scored.amount_out) - BigInt::from(cost)
-            }
-            None => BigInt::from(scored.amount_out),
-        };
+        let cost = legs
+            .last()
+            .and_then(|leg| leg.data.2)
+            .and_then(|price| gas_cost_in_token(&scored.gas, ctx.gas_price, price))
+            .unwrap_or_default();
+        let net_amount_out = BigInt::from(scored.amount_out) - BigInt::from(cost);
 
         Ok(SolvedRoute { hops: scored.hops, net_amount_out })
     }
@@ -1614,6 +1612,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_best_route_fractional_gas_cost() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) = setup_market_weighted(vec![(
+            "component1",
+            &token_a,
+            &token_b,
+            MockProtocolSim::new(2.0).with_gas(1),
+        )]);
+        // 1 gas at the fixture's 100 wei costs 10^-10 B raw units: floor charges 0, ceiling 1.
+        let mut derived = DerivedData::new();
+        derived.set_token_prices(
+            [(
+                token_b.address.clone(),
+                Price { numerator: BigUint::from(1u8), denominator: BigUint::from(10u64).pow(12) },
+            )]
+            .into_iter()
+            .collect(),
+            vec![],
+            1,
+        );
+        let derived = std::sync::Arc::new(tokio::sync::RwLock::new(derived));
+        let order = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let result = MostLiquidAlgorithm::new()
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_derived(derived),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(*result.route().swaps()[0].amount_out(), BigUint::from(200u64));
+        assert_eq!(result.net_amount_out(), &BigInt::from(199));
+    }
+
+    #[tokio::test]
     async fn test_find_best_route_insufficient_liquidity() {
         // Component has limited liquidity (1000 wei) but we try to swap ONE_ETH
         let token_a = token(0x01, "A");
@@ -1627,7 +1661,8 @@ mod tests {
         )]);
 
         let algorithm = MostLiquidAlgorithm::new();
-        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell); // More than 1000 wei liquidity
+        // More than the component's 1000 wei of liquidity.
+        let order = order(&token_a, &token_b, ONE_ETH, OrderSide::Sell);
 
         let result = algorithm
             .find_best_route(SolveRequest::new(manager.graph(), market, &order))

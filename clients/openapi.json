@@ -1022,7 +1022,7 @@
           },
           "gas_token": {
             "type": "string",
-            "description": "The gas token address (e.g. WETH).",
+            "description": "The routable gas token the prices are relative to: the native asset's wrapper (e.g.\nWETH), or on a chain whose native balance is also an ERC-20 (Arc's USDC), that ERC-20.",
             "example": "0x0000000000000000000000000000000000000000"
           },
           "prices": {
@@ -1030,7 +1030,7 @@
             "items": {
               "$ref": "#/components/schemas/TokenPriceEntry"
             },
-            "description": "Per-token mid prices relative to the native gas token, sorted by token address.\n\nA token the gas token cannot reach, or that cannot be sold back, is absent."
+            "description": "Per-token mid prices relative to the routable gas token (`gas_token`), sorted by token\naddress.\n\nA token the gas token cannot reach, or that cannot be sold back, is absent."
           },
           "spot_prices": {
             "type": [

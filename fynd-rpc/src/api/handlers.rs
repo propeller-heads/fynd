@@ -385,7 +385,8 @@ pub async fn get_prices(
     let mut prices = Vec::new();
     let mut skipped_tokens = 0usize;
     for (address, price) in snapshot.token_prices.iter() {
-        match price_to_decimal_string(&price.numerator, &price.denominator) {
+        let routable_price = state.gas_token.to_routable_units(price);
+        match price_to_decimal_string(&routable_price.numerator, &routable_price.denominator) {
             Some(price) => prices.push(TokenPriceEntry { token: address.clone(), price }),
             None => {
                 debug!(
@@ -458,7 +459,7 @@ pub async fn get_prices(
 
     let response = PricesResponse {
         prices,
-        gas_token: state.gas_token.clone(),
+        gas_token: state.gas_token.address().clone(),
         data_status: DataStatus {
             tycho: TychoDataStatus {
                 head: tycho_status.head.into(),
@@ -569,6 +570,7 @@ pub async fn get_tokens(
         &token_registry,
         depths.as_ref(),
         Some(token_prices.as_ref()),
+        &state.gas_token,
     );
 
     let cache = TokensCache { key, entries: std::sync::Arc::new(entries) };
@@ -610,6 +612,8 @@ mod tests {
         feed::market_data::MarketData,
         worker_pool_router::{config::WorkerPoolRouterConfig, WorkerPoolRouter},
     };
+    #[cfg(feature = "experimental")]
+    use num_bigint::BigUint;
     use serde_json::Value;
     use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
     use tycho_simulation::tycho_common::{models::Chain, Bytes};
@@ -868,7 +872,7 @@ mod tests {
             #[cfg(feature = "experimental")]
             derived_data,
             #[cfg(feature = "experimental")]
-            tycho_simulation::tycho_common::models::Address::from([0u8; 20]),
+            fynd_core::types::gas_token_config(&Chain::Ethereum).unwrap(),
             #[cfg(feature = "experimental")]
             market_data,
         )
@@ -1027,15 +1031,12 @@ mod tests {
     }
 
     // The pricing pass cannot fail as a whole, so its first run sets the block even when
-    // nothing but the gas token (priced 1:1 unconditionally) is in the map. That is a landed
-    // answer: on a market where no pool trades the gas token, the one-entry map is the honest
-    // response, and a 503 would never clear.
+    // nothing but the gas token (priced at its unit scale, with no route) is in the map. That is a
+    // landed answer: on a market where no pool trades the gas token, the one-entry map is the
+    // honest response, and a 503 would never clear.
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_with_only_the_gas_token_priced() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let state = make_test_state();
         seed_tycho_head(&state).await;
         {
@@ -1067,12 +1068,75 @@ mod tests {
         assert_eq!(body["prices"].as_array().map(Vec::len), Some(1), "body was: {body}");
     }
 
+    /// Arc's unit scale: 10^6 routable USDC raw units per 10^18 native raw units.
+    #[cfg(feature = "experimental")]
+    fn arc_scale() -> Price {
+        Price { numerator: BigUint::from(1_000_000u64), denominator: BigUint::from(10u8).pow(18) }
+    }
+
+    /// A native-unit price worth `factor` routable units per routable gas-token unit on Arc.
+    #[cfg(feature = "experimental")]
+    fn arc_price(factor: u8) -> Price {
+        let scale = arc_scale();
+        Price { numerator: scale.numerator * factor, denominator: scale.denominator }
+    }
+
+    // The unit scale comes from the chain's configuration, never from the gas token's own entry:
+    // an altered or missing entry changes no other token's price.
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_prices_handler_arc_units() {
+        let mut state = make_test_state();
+        state.gas_token = fynd_core::types::gas_token_config(&Chain::Arc).unwrap();
+        let gas_token = state.gas_token.address().clone();
+        seed_tycho_head(&state).await;
+        let state = web::Data::new(state);
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .route("/v1/prices", web::get().to(super::get_prices)),
+        )
+        .await;
+
+        for gas_token_price in [None, Some(arc_scale()), Some(arc_price(7))] {
+            let mut token_prices: fynd_core::derived::TokenGasPrices =
+                [(test_addr(0x0b), arc_price(2))]
+                    .into_iter()
+                    .collect();
+            token_prices.extend(gas_token_price.map(|price| (gas_token.clone(), price)));
+            state
+                .derived_data
+                .write()
+                .await
+                .set_token_prices(token_prices, vec![], 19_000_000);
+
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/v1/prices")
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), 200);
+            let body = body_json(resp).await;
+            let token_price = body["prices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| {
+                    entry["token"]
+                        .as_str()
+                        .unwrap()
+                        .eq_ignore_ascii_case(&test_addr(0x0b).to_string())
+                })
+                .unwrap_or_else(|| panic!("token 0x0b missing: {body}"));
+            assert_eq!(token_price["price"], "2", "body was: {body}");
+        }
+    }
+
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_returns_200_once_a_token_is_priced() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let state = make_test_state();
         seed_tycho_head(&state).await;
         {
@@ -1179,8 +1243,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_applies_limit_boundaries() {
-        use num_bigint::BigUint;
-
         let state = make_test_state();
         seed_tycho_head(&state).await;
         let token = test_addr(1);
@@ -1279,7 +1341,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_prices_handler_serializes_decimal_strings() {
-        let gas_token = "0x0000000000000000000000000000000000000001";
         // (address, numerator, denominator, expected decimal string), pre-sorted by address
         // because the handler sorts entries for a deterministic wire order.
         let cases = [
@@ -1287,9 +1348,8 @@ mod tests {
             ("0x0000000000000000000000000000000000000008", 5, 1_000_000_000_000, "0.000000000005"),
             ("0x0000000000000000000000000000000000000018", 1500, 1, "1500"),
         ];
-        let mut state = make_test_state();
-        state.gas_token =
-            tycho_simulation::tycho_common::models::Address::from_str(gas_token).unwrap();
+        let state = make_test_state();
+        let gas_token = state.gas_token.address().to_string();
         seed_tycho_head(&state).await;
         let mut token_prices = rustc_hash::FxHashMap::default();
         for (address, numerator, denominator) in
@@ -1322,7 +1382,7 @@ mod tests {
         assert!(body["gas_token"]
             .as_str()
             .unwrap()
-            .eq_ignore_ascii_case(gas_token));
+            .eq_ignore_ascii_case(&gas_token));
         let response_prices = body["prices"].as_array().unwrap();
         assert_eq!(response_prices.len(), cases.len());
         for (entry, (address, _, _, expected_price)) in response_prices.iter().zip(cases) {
@@ -1342,6 +1402,7 @@ mod tests {
         let mut token_prices = rustc_hash::FxHashMap::default();
         let valid = tycho_simulation::tycho_common::models::Address::from([1u8; 20]);
         token_prices.insert(valid.clone(), Price::new(1u8.into(), 2u8.into()));
+        token_prices.insert(state.gas_token.address().clone(), Price::new(1u8.into(), 1u8.into()));
         // Struct literal because Price::new panics on a zero numerator — this state is
         // constructor-unreachable, and the skip path is exercised defensively.
         token_prices.insert(
@@ -1377,7 +1438,7 @@ mod tests {
         .await;
 
         let prices = body["prices"].as_array().unwrap();
-        assert_eq!(prices.len(), 1);
+        assert_eq!(prices.len(), 2, "body was: {body}");
         assert!(prices[0]["token"]
             .as_str()
             .unwrap()
@@ -1432,9 +1493,6 @@ mod tests {
     #[cfg(feature = "experimental")]
     #[actix_web::test]
     async fn test_tokens_handler_returns_ranked_graph_tokens() {
-        use num_bigint::BigUint;
-        use tycho_simulation::tycho_core::simulation::protocol_sim::Price;
-
         let addr = test_addr;
         let state = make_test_state();
         {
@@ -1560,6 +1618,62 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    // The ranked-tokens case above with Arc's gas token: prices arrive in native units and the
+    // handler converts them back, so liquidity is unchanged. Unconverted, it would be 2e14 and
+    // 1e14.
+    #[cfg(feature = "experimental")]
+    #[actix_web::test]
+    async fn test_tokens_handler_arc_units() {
+        let addr = test_addr;
+        let mut state = make_test_state();
+        state.gas_token = fynd_core::types::gas_token_config(&Chain::Arc).unwrap();
+        {
+            let mut market = state.market_data.write().await;
+            market.upsert_tokens([test_token(0x0a, "WETH", 18), test_token(0x0b, "USDC", 6)]);
+            market.upsert_components([test_component("c1", &[0x0a, 0x0b])]);
+        }
+        {
+            let mut store = state.derived_data.write().await;
+            store.set_token_prices(
+                [(addr(0x0a), arc_scale()), (addr(0x0b), arc_price(2))]
+                    .into_iter()
+                    .collect(),
+                vec![],
+                19_000_000,
+            );
+            store.set_component_depths(
+                [
+                    (("c1".to_string(), addr(0x0a), addr(0x0b)), BigUint::from(100u32)),
+                    (("c1".to_string(), addr(0x0b), addr(0x0a)), BigUint::from(400u32)),
+                ]
+                .into_iter()
+                .collect(),
+                vec![],
+                19_000_000,
+            );
+        }
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .route("/v1/tokens", web::get().to(super::get_tokens)),
+        )
+        .await;
+        let body: Value = test::call_and_read_body_json(
+            &app,
+            test::TestRequest::get()
+                .uri("/v1/tokens")
+                .to_request(),
+        )
+        .await;
+
+        let tokens = body["tokens"].as_array().unwrap();
+        assert_eq!(tokens[0]["symbol"], "USDC", "body was: {body}");
+        assert_eq!(tokens[0]["liquidity"], 200.0, "body was: {body}");
+        assert_eq!(tokens[1]["symbol"], "WETH", "body was: {body}");
+        assert_eq!(tokens[1]["liquidity"], 100.0, "body was: {body}");
     }
 
     #[cfg(feature = "experimental")]
