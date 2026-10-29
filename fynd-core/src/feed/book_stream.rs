@@ -554,6 +554,73 @@ mod tests {
         assert!(update.removed.is_empty());
     }
 
+    const NEXUS_URL: &str = "http://127.0.0.1:1";
+
+    fn open_shared(
+        chain: Chain,
+        entries: &[&str],
+        url: &str,
+    ) -> Result<Option<BookStream>, DataFeedError> {
+        let protocols = entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0)
+                .nexus_url(url.to_string());
+        BookStream::open(&config, HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_open_reads_venues_from_nexus() {
+        std::env::remove_var("METRIC_API_KEY");
+
+        let books = open_shared(Chain::Base, &["rfq:metric"], NEXUS_URL)
+            .unwrap_or_else(|e| panic!("rfq:metric on base should open: {e}"));
+
+        assert_eq!(
+            books
+                .expect("the entry names a book venue")
+                .feeds
+                .labels()
+                .collect::<Vec<_>>(),
+            ["rfq:metric"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_keeps_native_direct() {
+        std::env::remove_var("NATIVE_API_KEY");
+
+        let Err(err) = open_shared(Chain::Ethereum, &["rfq:native"], NEXUS_URL) else {
+            panic!("expected rfq:native to need its own credentials");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("NATIVE_API_KEY"),
+            "got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_invalid_nexus_url() {
+        let url = "ws://fynd-nexus:3000";
+        let Err(err) = open_shared(Chain::Base, &["rfq:metric"], url) else {
+            panic!("expected {url} to be rejected");
+        };
+
+        assert!(matches!(err, DataFeedError::Config(_)), "got {err}");
+        assert!(err.to_string().contains("http://"), "got {err}");
+    }
+
+    #[test]
+    fn test_open_without_book_venues_with_invalid_nexus_url() {
+        let books = open_shared(Chain::Ethereum, &["uniswap_v3"], "not a url").unwrap();
+
+        assert!(books.is_none());
+    }
+
     #[test]
     fn test_keep_valid_components() {
         let mut components = Vec::new();
