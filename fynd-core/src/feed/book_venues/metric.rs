@@ -92,3 +92,19 @@ fn trimmed_non_empty(value: Option<String>) -> Option<String> {
         (!value.is_empty()).then(|| value.to_string())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trimmed_non_empty() {
+        assert_eq!(trimmed_non_empty(None), None);
+        assert_eq!(trimmed_non_empty(Some(String::new())), None);
+        assert_eq!(trimmed_non_empty(Some("  \t".to_string())), None);
+        assert_eq!(
+            trimmed_non_empty(Some(" https://metric.example/ ".to_string())),
+            Some("https://metric.example/".to_string())
+        );
+    }
+}
