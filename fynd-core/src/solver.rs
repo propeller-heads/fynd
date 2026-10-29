@@ -570,6 +570,7 @@ pub struct FyndBuilder {
     max_sync_lag: Duration,
     aggregate_rfqs: bool,
     external_liquidity: Vec<ExternalLiquidity>,
+    nexus_url: Option<String>,
     pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
@@ -620,6 +621,7 @@ impl FyndBuilder {
             max_sync_lag: defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
             external_liquidity: Vec::new(),
+            nexus_url: None,
             pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
@@ -772,6 +774,15 @@ impl FyndBuilder {
     {
         self.external_liquidity
             .push(ExternalLiquidity::new(protocol_system.into(), make_feed));
+        self
+    }
+
+    /// Reads Bebop, Hashflow and Metric prices from the `fynd-nexus` service at `url`, such
+    /// as `http://fynd-nexus:3000`, instead of connecting to those venues (default: connect
+    /// directly). Native and Liquorice always connect directly. The books are still built here,
+    /// and firm quotes still go straight to the venue.
+    pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
+        self.nexus_url = Some(url.into());
         self
     }
 
@@ -1096,6 +1107,10 @@ impl FyndBuilder {
         .aggregate_rfqs(self.aggregate_rfqs)
         .external_liquidity(self.external_liquidity);
 
+        let tycho_feed_config = match self.nexus_url {
+            Some(url) => tycho_feed_config.nexus_url(url),
+            None => tycho_feed_config,
+        };
         let tycho_feed_config = match self.tycho_subscription_buffer_size {
             Some(size) => tycho_feed_config.subscription_buffer_size(size),
             None => tycho_feed_config,

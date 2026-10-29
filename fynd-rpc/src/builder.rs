@@ -288,6 +288,14 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Reads Bebop, Hashflow and Metric prices from the `fynd-nexus` service at `url`, such
+    /// as `http://fynd-nexus:3000`, instead of connecting to those venues (default: connect
+    /// directly). Native and Liquorice always connect directly.
+    pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
+        self.fynd_builder = self.fynd_builder.nexus_url(url);
+        self
+    }
+
     /// Sets how far from the gas token the token pricing pass reaches. Leaving this unset keeps
     /// the computation's default.
     pub fn set_pricing_max_hops(mut self, max_hops: usize) -> Self {

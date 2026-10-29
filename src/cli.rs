@@ -184,6 +184,13 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub aggregate_rfqs: bool,
 
+    /// Read Bebop, Hashflow and Metric prices from Fynd Nexus instead of
+    /// connecting to those venues, e.g. http://fynd-nexus:3000, the instance of this pod's
+    /// chain. Applies to their `rfq:` and `fallback:rfq:` entries in --protocols; Native and
+    /// Liquorice always connect directly.
+    #[arg(long, env)]
+    pub nexus_url: Option<String>,
+
     /// Enable price guard validation against external price sources.
     /// Disabled by default.
     #[arg(long)]

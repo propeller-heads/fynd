@@ -1,7 +1,5 @@
 //! The pod's connection to a `fynd-nexus` service.
 
-#![expect(dead_code, reason = "BookStream opens a client in a later commit")]
-
 use reqwest::Url;
 
 use super::rfq::{RfqAssembler, RfqPricesFeed};
