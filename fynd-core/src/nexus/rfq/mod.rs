@@ -116,3 +116,108 @@ fn max_snapshot_age(venue: RfqVenue) -> Option<Duration> {
         RfqVenue::Metric => MetricFeedBuilder::default_feed_config().max_snapshot_age,
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use serde_json::json;
+
+    use super::{test_support::*, *};
+
+    #[test]
+    fn test_venue_names() {
+        for venue in RfqVenue::ALL {
+            assert_eq!(venue.name().parse(), Ok(venue));
+            assert_eq!(venue.to_string(), venue.name());
+        }
+        assert_eq!("liquorice".parse::<RfqVenue>(), Err(UnknownRfqVenue("liquorice".to_string())));
+    }
+
+    #[test]
+    fn test_prices_path() {
+        assert_eq!(prices_path(RfqVenue::Metric), "/v1/rfq/metric");
+    }
+
+    #[rstest]
+    #[case::bebop(RfqAssembler::Bebop(bebop_assembler()), RfqVenue::Bebop)]
+    #[case::hashflow(RfqAssembler::Hashflow(hashflow_assembler()), RfqVenue::Hashflow)]
+    #[case::metric(RfqAssembler::Metric(metric_assembler()), RfqVenue::Metric)]
+    fn test_assembler_venue(#[case] assembler: RfqAssembler, #[case] venue: RfqVenue) {
+        assert_eq!(assembler.venue(), venue);
+    }
+
+    #[rstest]
+    #[case::bebop(RfqAssembler::Bebop(bebop_assembler()), bebop_json(), bebop_books())]
+    #[case::hashflow(
+        RfqAssembler::Hashflow(hashflow_assembler()),
+        hashflow_json(),
+        hashflow_books()
+    )]
+    #[case::metric(RfqAssembler::Metric(metric_assembler()), metric_json(), metric_books())]
+    fn test_shared_and_direct_book_assembly(
+        #[case] assembler: RfqAssembler,
+        #[case] data: serde_json::Value,
+        #[case] direct: HashMap<String, Book>,
+    ) {
+        let books = assembler.books(data).unwrap();
+
+        assert!(!direct.is_empty());
+        assert_same_books(&books, &direct);
+        assert_same_prices(&books, &direct);
+    }
+
+    #[rstest]
+    #[case::bebop_given_metric(RfqAssembler::Bebop(bebop_assembler()), metric_json())]
+    #[case::hashflow_given_bebop(RfqAssembler::Hashflow(hashflow_assembler()), bebop_json())]
+    #[case::metric_given_hashflow(RfqAssembler::Metric(metric_assembler()), hashflow_json())]
+    #[case::bebop_given_nothing(RfqAssembler::Bebop(bebop_assembler()), json!(null))]
+    fn test_books_reject_another_venues_prices(
+        #[case] assembler: RfqAssembler,
+        #[case] data: serde_json::Value,
+    ) {
+        assert!(assembler.books(data).is_err());
+    }
+
+    fn bebop_books() -> HashMap<String, Book> {
+        bebop_assembler().books(bebop_prices(3000.5))
+    }
+
+    fn hashflow_books() -> HashMap<String, Book> {
+        hashflow_assembler().books(hashflow_prices())
+    }
+
+    fn metric_books() -> HashMap<String, Book> {
+        metric_assembler().books(metric_prices())
+    }
+
+    fn bebop_json() -> serde_json::Value {
+        serde_json::to_value(bebop_prices(3000.5)).unwrap()
+    }
+
+    fn hashflow_json() -> serde_json::Value {
+        serde_json::to_value(hashflow_prices()).unwrap()
+    }
+
+    fn metric_json() -> serde_json::Value {
+        serde_json::to_value(metric_prices()).unwrap()
+    }
+
+    fn assert_same_books(books: &HashMap<String, Book>, direct: &HashMap<String, Book>) {
+        assert_eq!(books.len(), direct.len());
+        for (id, book) in direct {
+            let decoded = books
+                .get(id)
+                .expect("expected the assembled books to contain this component id");
+            assert_eq!(decoded.component, book.component);
+        }
+    }
+
+    fn assert_same_prices(books: &HashMap<String, Book>, direct: &HashMap<String, Book>) {
+        for (id, book) in direct {
+            assert_eq!(amount_out(&books[id]), amount_out(book));
+        }
+    }
+}

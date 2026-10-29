@@ -57,3 +57,35 @@ impl NexusClient {
         RfqPricesFeed::new(&self.base_url, self.http.clone(), assembler)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::http("http://fynd-nexus:3000")]
+    #[case::https("https://shared.example.com")]
+    #[case::trailing_slash("http://fynd-nexus:3000/")]
+    fn test_new_http_url(#[case] url: &str) {
+        assert!(NexusClient::new(url).is_ok());
+    }
+
+    #[rstest]
+    #[case::websocket("ws://shared:3000")]
+    #[case::no_scheme("shared:3000")]
+    #[case::empty("")]
+    #[case::no_host("http://")]
+    fn test_new_invalid_url(#[case] url: &str) {
+        let error = NexusClient::new(url).unwrap_err();
+
+        assert!(matches!(error, NexusError::InvalidUrl { .. }), "got {error}");
+        assert!(
+            error
+                .to_string()
+                .contains("http:// or https://"),
+            "got {error}"
+        );
+    }
+}
