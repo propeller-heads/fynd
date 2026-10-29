@@ -1,4 +1,20 @@
 
+## [0.118.1](https://github.com/propeller-heads/fynd/compare/0.118.0...0.118.1) (2026-10-29)
+
+### Features
+
+* **feed:** register aero_basic, aero_cl and pancakeswap_infinity_cl ([dcb511d](https://github.com/propeller-heads/fynd/commit/dcb511d6dc25926e890ddbbad6e51cbc93b7fef1))
+* **core:** support shared-balance native gas assets ([8245b2a](https://github.com/propeller-heads/fynd/commit/8245b2a941565d07713a81707f5a9de416a70fb2))
+
+### Bug Fixes
+
+* **core:** scale fallback gas prices by token decimals ([366bf15](https://github.com/propeller-heads/fynd/commit/366bf15b562bb4bcda275ef470b904ca999fc57a))
+* apply shared-balance gas review feedback ([eabf014](https://github.com/propeller-heads/fynd/commit/eabf014a910c7908a6b1ecbcc74b2257f9c838a2))
+* **core:** address native gas review feedback ([2ffa738](https://github.com/propeller-heads/fynd/commit/2ffa7387f70f6d12aeaec7754e2f2d72f3f3aeb5))
+* **core:** preserve exact gas charges in routes ([095fa2d](https://github.com/propeller-heads/fynd/commit/095fa2d607bea0d7ef38cb4b62df28090fb88eb8))
+* **rpc:** preserve routable gas-token price units ([8df8148](https://github.com/propeller-heads/fynd/commit/8df81483735077fd227bb07d0ebe101b8cac8071))
+
+
 ## [0.118.0](https://github.com/propeller-heads/fynd/compare/0.117.0...0.118.0) (2026-10-29)
 
 ### Features
