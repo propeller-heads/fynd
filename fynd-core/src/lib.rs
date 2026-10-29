@@ -40,6 +40,8 @@ pub mod feed;
 /// Graph management for algorithms. Provides [`GraphManager`](graph::GraphManager)
 /// trait and the reusable [`PetgraphStableDiGraphManager`](graph::PetgraphStableDiGraphManager).
 pub mod graph;
+/// State that pods share through a `fynd-nexus` service, and the messages that carry it.
+pub mod nexus;
 /// Post-processors that change the route a pool's algorithm returns: the [`RoutePostProcessor`]
 /// trait and the [`PostProcessorRegistry`] of factories a caller registers.
 pub mod post_process;
