@@ -21,7 +21,10 @@
 //! Requires the Ekubo `user_data` support added in `tycho-execution` 0.338.0 (the workspace pins
 //! `>= 0.338.0`). All byte layouts and the EIP-712 digest are mirrored from the Ekubo contracts.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    sync::atomic::{AtomicU32, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use alloy::{
     primitives::{keccak256, Address, B256, U256},
@@ -32,11 +35,11 @@ use num_traits::ToPrimitive;
 use tracing::warn;
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
-use crate::{
-    bps,
-    encoding::{now_unix_secs, DEFAULT_DEADLINE_WINDOW_SECS},
-    SolveError, Swap,
-};
+use crate::{bps, SolveError, Swap};
+
+/// Validity window of the exclusive-swap signature, in seconds. Well under the Ekubo extension's
+/// 30-day cap.
+const DEFAULT_DEADLINE_WINDOW_SECS: u32 = 120;
 
 /// Environment variable holding the pool controller's private key (hex, with or without `0x`).
 pub(crate) const ENV_CONTROLLER_KEY: &str = "EXCLUSIVE_SWAP_CONTROLLER_KEY";
@@ -279,6 +282,23 @@ impl ExclusiveSwapSigner {
         user_data.extend_from_slice(&signature.as_bytes());
         Ok(Bytes::from(user_data))
     }
+}
+
+/// Current Unix time in seconds, for the deadline the exclusive-swap signature carries.
+///
+/// # Errors
+/// Errors when the system clock reads before the Unix epoch. A fallback timestamp would be signed
+/// into a payload the router rejects on every submission, so the encode fails instead.
+fn now_unix_secs() -> Result<u64, SolveError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|_| {
+            SolveError::FailedEncoding(
+                "system clock is before the Unix epoch, cannot compute a signing deadline"
+                    .to_string(),
+            )
+        })
 }
 
 /// Packs a `SignedSwapMeta` word: `[255..224]` deadline(u32), `[223..192]` fee(u32, 0.32 fixed
@@ -937,6 +957,33 @@ mod tests {
         // meta starts after the fee(8) prefix; its low 128 bits carry the locker's last 16 bytes.
         let meta = B256::from_slice(&user_data.as_ref()[8..40]);
         assert_eq!(&meta.as_slice()[16..32], &LOCKER.as_slice()[4..20]);
+    }
+
+    /// The deadline is the signing time plus the window: meta bits [255..224], so the first four
+    /// meta bytes after the fee(8) prefix.
+    #[test]
+    fn test_payload_deadline_window() {
+        let signer = ExclusiveSwapSigner::new(
+            CONTROLLER_KEY.parse().unwrap(),
+            1,
+            0,
+            DEFAULT_DEADLINE_WINDOW_SECS,
+            LOCKER,
+        );
+        let window = u64::from(DEFAULT_DEADLINE_WINDOW_SECS);
+
+        let before = now_unix_secs().unwrap();
+        let user_data = signer
+            .build_user_data(&signed_swap(Some(990_000)), 0.03)
+            .unwrap();
+        let after = now_unix_secs().unwrap();
+
+        let deadline = u64::from(u32::from_be_bytes(
+            user_data.as_ref()[8..12]
+                .try_into()
+                .unwrap(),
+        ));
+        assert!((before + window..=after + window).contains(&deadline), "deadline {deadline}");
     }
 
     #[test]

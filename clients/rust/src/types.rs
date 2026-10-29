@@ -179,9 +179,7 @@ impl ClientFeeParams {
     /// - `swaps_hash`: keccak256 of the encoded swaps bytes — use [`FeeBreakdown::swaps_hash`].
     ///
     /// The type hash, domain (`TychoRouter`/`1`), and field order must match
-    /// `TychoRouterV3.CLIENT_FEE_TYPEHASH`. The same shape is encoded via `sol!` in
-    /// `fynd-core/src/encoding/disable_slippage_taking.rs` for server-side signing; keep both in
-    /// sync if the contract type changes.
+    /// `TychoRouterV3.CLIENT_FEE_TYPEHASH`; update it if the contract type changes.
     #[allow(clippy::too_many_arguments)]
     pub fn eip712_signing_hash(
         &self,
@@ -1595,6 +1593,35 @@ mod tests {
         assert_eq!(fee.receiver, sample_fee_receiver());
         assert_eq!(fee.max_contribution, BigUint::ZERO);
         assert_eq!(fee.deadline, 1_893_456_000);
+    }
+
+    /// Pins the hash to a fixed vector. The vector was computed with an alloy `sol!` `ClientFee`
+    /// and with a separately hand-built hash, which agreed. A change to the type string, the domain
+    /// or the field order changes the hash, and the router would reject every client fee
+    /// signature.
+    #[test]
+    fn test_client_fee_signing_hash_vector() {
+        let fee = ClientFeeParams::zero(Bytes::from(vec![0x11; 20]), 1_700_000_000);
+        let swaps_hash = alloy::primitives::keccak256([0x01u8, 0x02, 0x03]).0;
+
+        let hash = fee
+            .eip712_signing_hash(
+                1,
+                &Bytes::from(vec![0x99; 20]),
+                &BigUint::from(1_000u64),
+                &Bytes::from(vec![0xaa; 20]),
+                &Bytes::from(vec![0xbb; 20]),
+                &BigUint::from(990u64),
+                &BigUint::from(980u64),
+                &Bytes::from(vec![0xcc; 20]),
+                &swaps_hash,
+            )
+            .unwrap();
+
+        assert_eq!(
+            alloy::primitives::hex::encode(hash),
+            "a0fda65d33fef585662c1ea0fb71a1effd0dafe1a3a422aa30544c8eb4409bb0"
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { keccak256 } from 'viem';
 import {
   clientFeeSigningHash,
   patchClientFeeSignature,
@@ -30,6 +31,32 @@ function baseSwap(): ClientFeeSwapContext {
 }
 
 describe('clientFeeSigningHash', () => {
+  // Computed with an alloy `sol!` `ClientFee` and a separately hand-built hash, which agreed. The
+  // Rust client pins the same vector, so a change to the type string, the domain or the field
+  // order in either client fails here.
+  it('matches the reference vector', () => {
+    const hash = clientFeeSigningHash(
+      {
+        bps: 0,
+        receiver: `0x${'11'.repeat(20)}` as Address,
+        maxContribution: 0n,
+        deadline: 1700000000,
+      },
+      1,
+      `0x${'99'.repeat(20)}` as Address,
+      {
+        amountIn: 1000n,
+        tokenIn: `0x${'aa'.repeat(20)}` as Address,
+        tokenOut: `0x${'bb'.repeat(20)}` as Address,
+        expectedAmountOut: 990n,
+        minAmountOut: 980n,
+        receiver: `0x${'cc'.repeat(20)}` as Address,
+        swapsHash: keccak256('0x010203'),
+      }
+    );
+    expect(hash).toBe('0xa0fda65d33fef585662c1ea0fb71a1effd0dafe1a3a422aa30544c8eb4409bb0');
+  });
+
   it('returns a 0x-prefixed 66-char hex string', () => {
     const hash = clientFeeSigningHash(baseParams(), 1, ROUTER, baseSwap());
     expect(hash).toMatch(/^0x[0-9a-f]{64}$/);

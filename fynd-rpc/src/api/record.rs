@@ -31,7 +31,7 @@ use crate::api::{
 
 /// Version of the record layout. Bump it when a field is added, removed or changes meaning, so a
 /// reader can tell records of different layouts apart.
-pub const SCHEMA_VERSION: u16 = 1;
+pub const SCHEMA_VERSION: u16 = 2;
 
 /// One answered quote request, as the collector receives it.
 #[must_use]
@@ -491,10 +491,7 @@ mod tests {
         expect(&value, &["chain", "served_at", "schema_version", "client", "request", "outcome"]);
         expect(&value["client"], &["user_identity", "user_plan", "client_version"]);
         let request = &value["request"];
-        expect(
-            request,
-            &["orders", "options", "exclusive_access", "disable_slippage_taking", "encoding"],
-        );
+        expect(request, &["orders", "options", "exclusive_access", "encoding"]);
         expect(&request["orders"][0], &["token_in", "token_out", "amount", "side"]);
         expect(&request["options"], &["timeout_ms", "min_responses", "max_gas", "route_filter"]);
         expect(&request["options"]["route_filter"], &["exclude_pools"]);
@@ -568,7 +565,7 @@ mod tests {
     fn test_record_solved_quote() {
         let value = solved_record();
         assert_eq!(value["chain"], "ethereum");
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert_eq!(
             value["client"],
             json!({
@@ -752,7 +749,6 @@ mod tests {
             "in {}",
             value["request"]
         );
-        assert_eq!(value["request"]["disable_slippage_taking"], false);
     }
 
     /// The replay log reads its request from the record, so the two must agree.

@@ -2,8 +2,8 @@
 //! replay-capture log emitted by the `/v1/quote` handler.
 
 use fynd_core::{
-    types::RouteRejection, EncodingOptions, ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest,
-    QuoteStatus, RouteConstraints, SolveError,
+    types::RouteRejection, ExclusiveAccess, NoPathReason, OrderSide, QuoteRequest, QuoteStatus,
+    RouteConstraints, SolveError,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -94,22 +94,18 @@ impl ReplayRouteFilter {
 
 /// Owned, routing-essential view of a whole quote request.
 ///
-/// Captured (the fields that determine the route): per order `token_in`,
-/// `token_out`, `amount`, `side`; plus the solve options `timeout_ms`,
-/// `min_responses`, `max_gas`, `route_filter`; plus `exclusive_access` — the access the
-/// authenticating proxy granted, which decides the worker pool allocation —
-/// and `disable_slippage_taking`, which decides what the encoder signs into
-/// the calldata. Everything else is dropped: the rest of `encoding_options`
-/// (slippage / transfer type / price guard, and every Permit2 / client-fee
-/// **signature**), the server-generated order `id`, and `sender` / `receiver`
-/// (routing-irrelevant and PII). Built from an explicit allowlist, so no
-/// request field can leak into the logs.
+/// Captured (the fields that determine the route): per order `token_in`, `token_out`, `amount`,
+/// `side`; plus the solve options `timeout_ms`, `min_responses`, `max_gas`, `route_filter`; plus
+/// `exclusive_access` — the access the authenticating proxy granted, which decides the worker pool
+/// allocation. Everything else is dropped: the rest of `encoding_options` (slippage / transfer
+/// type / price guard, and every Permit2 / client-fee **signature**), the server-generated order
+/// `id`, and `sender` / `receiver` (routing-irrelevant and PII). Built from an explicit allowlist,
+/// so no request field can leak into the logs.
 ///
-/// This is NOT a full [`QuoteRequest`] — it omits the required `sender`, so a
-/// replay harness supplies a placeholder sender before re-issuing. Neither
-/// `exclusive_access` nor `disable_slippage_taking` is a body field either: a
-/// harness re-sends each as its proxy-injected header. An outcome that
-/// depended on `price_guard` may not reproduce on replay.
+/// This is NOT a full [`QuoteRequest`] — it omits the required `sender`, so a replay harness
+/// supplies a placeholder sender before re-issuing. `exclusive_access` is not a body field: a
+/// harness re-sends it as the proxy-injected `x-exclusive-access` header. An outcome that depended
+/// on `price_guard` may not reproduce on replay.
 ///
 /// These field names are also the request half of the quote record's wire format, which
 /// `RequestRecord` flattens this type into. Renaming one is a collector-visible change, so it
@@ -121,7 +117,6 @@ pub struct ReplayRequest {
     orders: Vec<ReplayOrder>,
     options: ReplayOptions,
     exclusive_access: bool,
-    disable_slippage_taking: bool,
 }
 
 impl ReplayRequest {
@@ -152,9 +147,6 @@ impl ReplayRequest {
                 route_filter: ReplayRouteFilter::capture(options.route_filter()),
             },
             exclusive_access: access == ExclusiveAccess::Granted,
-            disable_slippage_taking: options
-                .encoding_options()
-                .is_some_and(EncodingOptions::disable_slippage_taking),
         }
     }
 
@@ -464,7 +456,7 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["orders", "options", "exclusive_access", "disable_slippage_taking"]
+            ["orders", "options", "exclusive_access"]
                 .into_iter()
                 .collect(),
             "a new field would leak into replay logs; json: {json}"
@@ -552,29 +544,6 @@ mod tests {
         let json = replay_json(request_with_signatures(), access);
         let value: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["exclusive_access"], expected, "json was: {json}");
-    }
-
-    #[rstest]
-    #[case::enabled(true)]
-    #[case::disabled(false)]
-    fn test_capture_records_disable_slippage_taking(#[case] enabled: bool) {
-        let request: fynd_core::QuoteRequest = request_with_signatures().into();
-        let encoding = request
-            .options()
-            .encoding_options()
-            .expect("encoding options present")
-            .clone()
-            .with_disable_slippage_taking(enabled);
-        let options = request
-            .options()
-            .clone()
-            .with_encoding_options(encoding);
-        let request = request.with_options(options);
-
-        let json = ReplayRequest::capture(&request, ExclusiveAccess::Denied).to_json();
-
-        let value: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["disable_slippage_taking"], enabled, "json was: {json}");
     }
 
     #[test]
