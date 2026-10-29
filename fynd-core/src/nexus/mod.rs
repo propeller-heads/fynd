@@ -3,6 +3,9 @@
 //! The service holds one connection per source and keeps the latest state of each in memory. Pods
 //! poll it over HTTP. Each response carries a [`NexusMessage`] as JSON.
 
+pub(crate) mod client;
+pub mod rfq;
+
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
