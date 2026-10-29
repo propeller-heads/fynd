@@ -1,4 +1,11 @@
 
+## [0.118.0](https://github.com/propeller-heads/fynd/compare/0.117.0...0.118.0) (2026-10-29)
+
+### Features
+
+* remove disable-slippage-taking ([5aacf7f](https://github.com/propeller-heads/fynd/commit/5aacf7fce9a3b1ef981e7c64df08d4d31816cca5))
+
+
 ## [0.117.0](https://github.com/propeller-heads/fynd/compare/0.116.3...0.117.0) (2026-10-28)
 
 ### Features
