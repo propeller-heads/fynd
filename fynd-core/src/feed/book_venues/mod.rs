@@ -333,4 +333,65 @@ mod tests {
             .check_supported(chain)
             .unwrap();
     }
+
+    fn context(nexus: Option<NexusClient>) -> BookVenueContext {
+        BookVenueContext {
+            book_config: BookFeedConfig {
+                chain: Chain::Ethereum,
+                tokens: Arc::new(Default::default()),
+                min_tvl_usd: 0.0,
+            },
+            aggregate_rfqs: false,
+            nexus,
+        }
+    }
+
+    fn feed_kind(feed: &BookVenueFeed) -> &'static str {
+        match feed {
+            BookVenueFeed::Bebop(_) => "bebop",
+            BookVenueFeed::Hashflow(_) => "hashflow",
+            BookVenueFeed::Metric(_) => "metric",
+            BookVenueFeed::Native(_) => "native",
+            BookVenueFeed::Liquorice(_) => "liquorice",
+            BookVenueFeed::SharedRfq(_) => "shared",
+        }
+    }
+
+    #[rstest]
+    #[case::bebop_direct("rfq:bebop", false, "bebop")]
+    #[case::bebop_shared("rfq:bebop", true, "shared")]
+    #[case::hashflow_direct("rfq:hashflow", false, "hashflow")]
+    #[case::hashflow_shared("rfq:hashflow", true, "shared")]
+    #[case::metric_direct("rfq:metric", false, "metric")]
+    #[case::metric_shared("rfq:metric", true, "shared")]
+    #[case::native_direct("rfq:native", false, "native")]
+    #[case::native_with_nexus("rfq:native", true, "native")]
+    #[case::liquorice_direct("rfq:liquorice", false, "liquorice")]
+    #[case::liquorice_with_nexus("rfq:liquorice", true, "liquorice")]
+    #[tokio::test]
+    async fn test_open_book_feed(
+        #[case] name: &str,
+        #[case] with_nexus: bool,
+        #[case] expected: &str,
+    ) {
+        for (var, value) in [
+            ("BEBOP_KEY", "test-key"),
+            ("HASHFLOW_USER", "test-user"),
+            ("HASHFLOW_KEY", "test-key"),
+            ("METRIC_API_KEY", "test-key"),
+            ("NATIVE_API_KEY", "test-key"),
+            ("LIQUORICE_USER", "test-user"),
+            ("LIQUORICE_KEY", "test-key"),
+        ] {
+            std::env::set_var(var, value);
+        }
+        let client = with_nexus.then(|| NexusClient::new("http://127.0.0.1:1").unwrap());
+        let protocols = protocols(&[name]);
+        let entries = BookVenueEntry::parse_all(&protocols).unwrap();
+
+        let feed = open_book_feed(&entries[0], &context(client))
+            .unwrap_or_else(|e| panic!("{name} should open: {e}"));
+
+        assert_eq!(feed_kind(&feed), expected);
+    }
 }
