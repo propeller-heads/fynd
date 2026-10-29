@@ -7,6 +7,7 @@ use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
         protocol::{
+            aero_basic::state::AeroBasicState,
             aerodrome_slipstreams::state::AerodromeSlipstreamsState,
             aerodrome_v1::state::AerodromeV1State,
             balancer_v3::BalancerV3State,
@@ -466,6 +467,9 @@ fn register_exchange(
             // provider.
             builder.exchange::<CurveState>("vm:curve", tvl_filter.clone(), Some(curve_filter))
         }
+        "pancakeswap_infinity_cl" => {
+            builder.exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
+        }
         "uniswap_v4_hooks" => builder.exchange::<UniswapV4State>(
             "uniswap_v4_hooks",
             tvl_filter.clone(),
@@ -495,6 +499,7 @@ fn register_exchange(
         "aerodrome_v1" => {
             builder.exchange::<AerodromeV1State>("aerodrome_v1", tvl_filter.clone(), None)
         }
+        "aero_basic" => builder.exchange::<AeroBasicState>("aero_basic", tvl_filter.clone(), None),
         "aerodrome_slipstreams" => builder.exchange::<AerodromeSlipstreamsState>(
             "aerodrome_slipstreams",
             tvl_filter.clone(),
@@ -508,6 +513,11 @@ fn register_exchange(
             tvl_filter.clone(),
             None,
         ),
+        "aero_cl" => {
+            // AERO v1.1 CL pools are Slipstream pools; the decoder reads their swap hook's fee
+            // settings from the hook attributes only `aero_cl` components carry.
+            builder.exchange::<AerodromeSlipstreamsState>("aero_cl", tvl_filter.clone(), None)
+        }
         "up_v3" => {
             // Up is a Slipstream fork: its pools carry the same `tick_spacing` and
             // `default_fee` static attributes Aerodrome's decoder reads.
@@ -1119,6 +1129,9 @@ mod tests {
             "up_v3",
             "uniswap_v4_hooks",
             "gigadex_v3",
+            "aero_basic",
+            "aero_cl",
+            "pancakeswap_infinity_cl",
         ];
         let skipped = skipped_unknown_protocols(&robinhood_protocols);
         assert!(
@@ -1135,6 +1148,9 @@ mod tests {
     #[case::sky("sky")]
     #[case::lido_v4("lido_v4")]
     #[case::etherfi("etherfi")]
+    #[case::aero_basic("aero_basic")]
+    #[case::aero_cl("aero_cl")]
+    #[case::pancakeswap_infinity_cl("pancakeswap_infinity_cl")]
     fn test_register_exchange_supports_protocol(#[case] protocol: &str) {
         let skipped = skipped_unknown_protocols(&[protocol]);
         assert!(skipped.is_empty(), "expected {protocol} to register, but got {skipped:?}");
@@ -1351,9 +1367,9 @@ mod tests {
 
     #[rstest::rstest]
     #[case::native_off_executor_chains(Chain::Polygon, "rfq:native")]
-    #[case::native_via_fallback_router(Chain::Ethereum, "fallback:rfq:native")]
+    #[case::native_via_fallback_router(Chain::Unichain, "fallback:rfq:native")]
     #[case::liquorice_off_ethereum(Chain::Base, "rfq:liquorice")]
-    #[case::liquorice_via_fallback_router(Chain::Ethereum, "fallback:rfq:liquorice")]
+    #[case::liquorice_via_fallback_router(Chain::Base, "fallback:rfq:liquorice")]
     #[case::metric_direct_on_ethereum(Chain::Ethereum, "rfq:metric")]
     fn test_open_book_without_executor(#[case] chain: Chain, #[case] entry: &str) {
         let Err(err) = open_book_stream(chain, &[entry]) else {
