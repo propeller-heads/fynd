@@ -1,7 +1,9 @@
 //! RFQ prices shared between pods: the venues a `fynd-nexus` service holds a connection
 //! for, and the feed that turns their prices into books.
 
-pub(crate) mod feed;
+mod feed;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support;
 
 use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 
@@ -116,9 +118,6 @@ fn max_snapshot_age(venue: RfqVenue) -> Option<Duration> {
         RfqVenue::Metric => MetricFeedBuilder::default_feed_config().max_snapshot_age,
     }
 }
-
-#[cfg(test)]
-pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests {
