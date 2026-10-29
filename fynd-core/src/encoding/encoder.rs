@@ -1078,11 +1078,11 @@ impl Encoder {
         let fee_on_output = fee_rates.on_output() as u64;
         let fee_on_client_fee = fee_rates.on_client_fee() as u64;
 
-        if scaled_client_fee + fee_on_output > max_fee_units {
+        if scaled_client_fee + fee_on_output >= max_fee_units {
             return Err(EncodingError::FatalError(format!(
                 "client fee ({client_fee_bps} bps) plus router fee on output \
-                 ({fee_on_output} fee units) exceed the {max_fee_units} fee-unit cap (100%); \
-                 the router would revert"
+                 ({fee_on_output} fee units) reach the {max_fee_units} fee-unit cap (100%); \
+                 nothing would be left for the receiver"
             )));
         }
         if fee_on_client_fee > max_fee_units {
@@ -2336,6 +2336,17 @@ mod tests {
         fn test_calculate_fee_breakdown_fee_too_high() {
             // 100% client fee plus any router fee on output exceeds the maximum.
             let rates = FeeRates::new(1, 0, FEE_SCALE);
+
+            let result =
+                Encoder::calculate_fee_breakdown(&BigUint::from(1_000_000u64), 10_000, 0.0, rates);
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_calculate_fee_breakdown_fees_take_everything() {
+            // A 100% client fee alone leaves nothing for the receiver.
+            let rates = FeeRates::new(0, 0, FEE_SCALE);
 
             let result =
                 Encoder::calculate_fee_breakdown(&BigUint::from(1_000_000u64), 10_000, 0.0, rates);
