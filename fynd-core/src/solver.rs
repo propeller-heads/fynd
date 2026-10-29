@@ -26,6 +26,7 @@ use tycho_simulation::evm::stream::BlockStepController;
 use tycho_simulation::tycho_ethereum::gas::{BlockGasPrice, GasPrice};
 use tycho_simulation::{
     evm::pending::PendingBlockProcessor,
+    snapshot_feed::{errors::FeedError, SnapshotFeed},
     tycho_common::{models::Chain, traits::TxDeltaIndexer, Bytes},
     tycho_core::models::Address,
     tycho_ethereum::rpc::EthereumRpcClient,
@@ -39,7 +40,9 @@ use crate::{
     },
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
+        book_stream::ExternalLiquidity,
         events::{MarketEvent, MarketEventHandler},
+        external_liquidity::{ExternalLiquidityConfig, LiquiditySnapshot},
         gas::GasPriceFetcher,
         market_data::MarketData,
         metrics_sampler::MetricsSampler,
@@ -565,6 +568,7 @@ pub struct FyndBuilder {
     tycho_subscription_buffer_size: Option<usize>,
     max_sync_lag: Duration,
     aggregate_rfqs: bool,
+    external_liquidity: Vec<ExternalLiquidity>,
     pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
@@ -614,6 +618,7 @@ impl FyndBuilder {
             tycho_subscription_buffer_size: None,
             max_sync_lag: defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
+            external_liquidity: Vec::new(),
             pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
@@ -722,6 +727,50 @@ impl FyndBuilder {
     /// (default: `false`). Metric, Native and Liquorice always stream per pair.
     pub fn aggregate_rfqs(mut self, enabled: bool) -> Self {
         self.aggregate_rfqs = enabled;
+        self
+    }
+
+    /// Adds external liquidity: components from a source outside Tycho and `--protocols`, such
+    /// as a venue the caller integrates itself.
+    ///
+    /// `protocol_system` names the source and is the protocol system of every component it
+    /// publishes, as `rfq:bebop` is for the built-in Bebop venue. `make_feed` receives an
+    /// [`ExternalLiquidityConfig`] with the same chain, token universe and TVL floor as the
+    /// built-in RFQ venues. The feed it returns publishes [`LiquiditySnapshot`]s: each one is
+    /// every component the source serves, with its state; the state can be any
+    /// [`ProtocolSim`](tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim)
+    /// that quotes without chain state. Fynd adds, refreshes and removes components to match each
+    /// published set. Every component must be executable: its protocol system needs an executor
+    /// on the configured chain.
+    ///
+    /// The prefix of `protocol_system` decides how Fynd treats the components:
+    /// - `fallback:` makes them pAMMs. A graph leaves one out when no fallback candidate pool
+    ///   exists for its swap directions, and token gas pricing ignores them.
+    /// - `rfq:` puts them under the RFQ swap replacer and the RFQ encoding-failure handling, and
+    ///   token gas pricing ignores them. `fallback:rfq:` gets both treatments.
+    ///
+    /// Fynd drops, with a warning, each component whose protocol system differs from
+    /// `protocol_system` or that has a token outside the token universe. It also drops one whose
+    /// id the market already holds under another protocol system.
+    ///
+    /// The market feed fails at startup, with a configuration error, if `make_feed` returns an
+    /// error, if two sources share a `protocol_system`, or if a `--protocols` entry has the same
+    /// name as the source.
+    ///
+    /// `make_feed` runs each time the market feed opens its book feeds, so again after every
+    /// restart of the market feed. A feed that panics ends the whole market feed, the Tycho
+    /// stream included.
+    pub fn with_external_liquidity<M, F>(
+        mut self,
+        protocol_system: impl Into<String>,
+        make_feed: M,
+    ) -> Self
+    where
+        M: Fn(ExternalLiquidityConfig) -> Result<F, FeedError> + Send + Sync + 'static,
+        F: SnapshotFeed<Snapshot = LiquiditySnapshot, Error = FeedError>,
+    {
+        self.external_liquidity
+            .push(ExternalLiquidity::new(protocol_system.into(), make_feed));
         self
     }
 
@@ -1043,7 +1092,8 @@ impl FyndBuilder {
         .blocklisted_components(self.blocklisted_components)
         .partial_blocks(self.partial_blocks)
         .max_sync_lag(self.max_sync_lag)
-        .aggregate_rfqs(self.aggregate_rfqs);
+        .aggregate_rfqs(self.aggregate_rfqs)
+        .external_liquidity(self.external_liquidity);
 
         let tycho_feed_config = match self.tycho_subscription_buffer_size {
             Some(size) => tycho_feed_config.subscription_buffer_size(size),
