@@ -160,7 +160,7 @@ use crate::{
         protocol_registry::is_rfq_protocol,
     },
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    types::{ComponentId, ComponentTopology, Order, OrderSide, RouteExclusions},
+    types::{ComponentId, ComponentTopology, Order, OrderSide, ResolvedRouteConstraints},
 };
 
 /// Whether pricing leaves `component` out of its graph.
@@ -440,7 +440,7 @@ impl<'a> PricingPassState<'a> {
             gas_node,
             gas_node,
             algorithm.max_hops(),
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
         );
         Self {
             algorithm,

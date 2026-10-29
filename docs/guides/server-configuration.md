@@ -267,7 +267,7 @@ Use `fynd derive-connector-tokens` to generate a ranked list for your chain from
 fynd derive-connector-tokens --chain Ethereum --top-n 10 --output toml
 ```
 
-The command scores every token by pool count and outputs a ready-to-paste TOML snippet. Run `fynd derive-connector-tokens --help` for all options.
+The command ranks every token by pool count and by backed TVL (pool TVL that native-backed tokens vouch for, so self-priced spam pools do not count) and outputs a ready-to-paste TOML snippet. Run `fynd derive-connector-tokens --help` for all options.
 
 > **Tradeoff:** A narrower allowlist reduces reversion risk but may also reduce route quality — routes through unlisted tokens are never explored. For most chains, 5–10 highly liquid tokens cover the vast majority of pairs.
 

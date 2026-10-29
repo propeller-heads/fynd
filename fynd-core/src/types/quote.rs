@@ -83,21 +83,23 @@ impl QuoteRequest {
     }
 }
 
-/// What a caller names to keep out of a route: pools, protocol systems and tokens.
+/// What a caller names to keep out of a route (pools, protocol systems and tokens) and the tokens
+/// every route must pass through.
 ///
-/// This is the request's own words. A solve reads [`RouteExclusions`] instead, which
+/// This is the request's own words. A solve reads [`ResolvedRouteConstraints`] instead, which
 /// [`crate::feed::market_data::MarketState::resolve_route_filter`] builds from this by replacing
 /// each protocol system with the pools that system holds.
 ///
-/// Empty by default, so nothing is excluded unless the request names it.
+/// Empty by default, so nothing is excluded or required unless the request names it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RouteExclusionFilter {
+pub struct RouteConstraints {
     excluded_pools: FxHashSet<ComponentId>,
     excluded_protocols: FxHashSet<String>,
     excluded_tokens: FxHashSet<Address>,
+    required_tokens: FxHashSet<Address>,
 }
 
-impl RouteExclusionFilter {
+impl RouteConstraints {
     /// Excludes these pools, by component id.
     #[must_use]
     pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
@@ -116,6 +118,13 @@ impl RouteExclusionFilter {
         self
     }
 
+    /// Keeps only the excluded protocol systems for which `keep` returns true.
+    #[must_use]
+    pub fn retain_excluded_protocols(mut self, keep: impl FnMut(&String) -> bool) -> Self {
+        self.excluded_protocols.retain(keep);
+        self
+    }
+
     /// Excludes routes that pass through these tokens.
     #[must_use]
     pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
@@ -123,12 +132,23 @@ impl RouteExclusionFilter {
         self
     }
 
-    /// Whether nothing is excluded, so a caller can skip the checks.
+    /// Requires every route to pass through every one of these tokens.
+    ///
+    /// The order's input and output tokens count as passed, so listing either adds no constraint.
+    /// A required token may be an intermediate even when a pool's connector tokens leave it out.
+    #[must_use]
+    pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.required_tokens.extend(tokens);
+        self
+    }
+
+    /// Whether nothing is excluded or required, so a caller can skip the checks.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.excluded_pools.is_empty() &&
             self.excluded_protocols.is_empty() &&
-            self.excluded_tokens.is_empty()
+            self.excluded_tokens.is_empty() &&
+            self.required_tokens.is_empty()
     }
 
     /// The pools excluded, by component id.
@@ -148,28 +168,66 @@ impl RouteExclusionFilter {
     pub fn excluded_tokens(&self) -> &FxHashSet<Address> {
         &self.excluded_tokens
     }
+
+    /// The tokens every route must pass through.
+    #[must_use]
+    pub fn required_tokens(&self) -> &FxHashSet<Address> {
+        &self.required_tokens
+    }
+
+    /// Checks that no token is both required and excluded, which no route could satisfy.
+    ///
+    /// # Errors
+    ///
+    /// [`RouteConstraintsError::RequiredTokenExcluded`] when a token is both required and
+    /// excluded.
+    pub fn validate(&self) -> Result<(), RouteConstraintsError> {
+        match self
+            .required_tokens
+            .intersection(&self.excluded_tokens)
+            .next()
+        {
+            Some(token) => {
+                Err(RouteConstraintsError::RequiredTokenExcluded { token: token.clone() })
+            }
+            None => Ok(()),
+        }
+    }
 }
 
-/// The pools and tokens one solve must not use, with every protocol system already
-/// replaced by its pools.
+/// Why a [`RouteConstraints`] fails validation.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum RouteConstraintsError {
+    /// A token is in both the required and the excluded tokens.
+    #[error("token {token} is both required and excluded")]
+    RequiredTokenExcluded {
+        /// The token named in both sets.
+        token: Address,
+    },
+}
+
+/// The resolved constraints of one solve: the pools and tokens it must not use, with every
+/// protocol system already replaced by its pools, and the tokens every token path must visit.
 ///
 /// A graph knows a pool by its component id, so a search reads this rather than the
-/// [`RouteExclusionFilter`] the caller wrote. An algorithm honours it while it searches and
+/// [`RouteConstraints`] the caller wrote. An algorithm honours it while it searches and
 /// simulates, and the worker checks the route it gets back.
 ///
-/// A token here is excluded as an intermediate only: the order's own two tokens stay allowed,
-/// because every route touches them.
+/// The order's own two tokens are exempt from both sets, because every route touches them: an
+/// excluded token is excluded as an intermediate only, and a required token counts as visited
+/// when it is one of them.
 ///
 /// Every solve also excludes the pools of protocols the market marks out of sync; see
 /// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RouteExclusions {
+pub struct ResolvedRouteConstraints {
     pub(crate) pools: FxHashSet<ComponentId>,
     pub(crate) tokens: FxHashSet<Address>,
+    pub(crate) required_tokens: FxHashSet<Address>,
     pub(crate) unsynced_pools: Arc<FxHashSet<ComponentId>>,
 }
 
-impl RouteExclusions {
+impl ResolvedRouteConstraints {
     /// Excludes these pools, by component id.
     #[must_use]
     #[cfg(any(test, feature = "test-utils"))]
@@ -183,6 +241,14 @@ impl RouteExclusions {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
         self.tokens.extend(tokens);
+        self
+    }
+
+    /// Requires routes to pass through every one of these tokens.
+    #[must_use]
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.required_tokens.extend(tokens);
         self
     }
 
@@ -215,6 +281,26 @@ impl RouteExclusions {
     #[must_use]
     pub fn excludes_token(&self, token: &Address) -> bool {
         self.tokens.contains(token)
+    }
+
+    /// The tokens every route must pass through.
+    #[must_use]
+    pub fn required_tokens(&self) -> &FxHashSet<Address> {
+        &self.required_tokens
+    }
+
+    /// Whether a token path, endpoints included, visits every required token.
+    ///
+    /// Always true when no token is required.
+    #[must_use]
+    pub fn visits_all_required_tokens<'a>(
+        &self,
+        path: impl IntoIterator<Item = &'a Address>,
+    ) -> bool {
+        let visited: FxHashSet<&Address> = path.into_iter().collect();
+        self.required_tokens
+            .iter()
+            .all(|token| visited.contains(token))
     }
 }
 
@@ -251,7 +337,7 @@ pub struct QuoteOptions {
     /// Filled from `options.route_filter` on the wire. Skipped during JSON serialization — the
     /// wire type owns the request shape.
     #[serde(skip)]
-    route_filter: RouteExclusionFilter,
+    route_filter: RouteConstraints,
 }
 
 impl QuoteOptions {
@@ -292,7 +378,7 @@ impl QuoteOptions {
     }
 
     /// Excludes the pools, protocol systems and tokens this filter names.
-    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+    pub fn with_route_filter(mut self, filter: RouteConstraints) -> Self {
         self.route_filter = filter;
         self
     }
@@ -335,12 +421,12 @@ impl QuoteOptions {
 
     /// Returns what this request excludes from a route. Empty unless one was set.
     #[must_use]
-    pub fn route_filter(&self) -> &RouteExclusionFilter {
+    pub fn route_filter(&self) -> &RouteConstraints {
         &self.route_filter
     }
 }
 
-type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<RouteExclusions>)>>>;
+type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<ResolvedRouteConstraints>)>>>;
 
 /// Parameters for a single solve operation.
 ///
@@ -353,7 +439,7 @@ pub struct SolveParams {
     state_label: Option<StateLabel>,
     /// Liquidity the request will not route through. Resolved against the market by the worker,
     /// which is where the protocol systems it names become pools.
-    route_filter: RouteExclusionFilter,
+    route_filter: RouteConstraints,
     /// Whether the caller may use exclusive liquidity. Public-only pools hand it to their
     /// post-processors.
     exclusive_access: ExclusiveAccess,
@@ -388,7 +474,7 @@ impl Default for SolveParams {
     fn default() -> Self {
         Self {
             state_label: None,
-            route_filter: RouteExclusionFilter::default(),
+            route_filter: RouteConstraints::default(),
             exclusive_access: ExclusiveAccess::default(),
             exclusion_cache: Arc::new(Mutex::new(None)),
         }
@@ -403,7 +489,7 @@ impl SolveParams {
     }
 
     /// Excludes the pools, protocol systems and tokens this filter names.
-    pub fn with_route_filter(mut self, filter: RouteExclusionFilter) -> Self {
+    pub fn with_route_filter(mut self, filter: RouteConstraints) -> Self {
         self.route_filter = filter;
         self.exclusion_cache = Arc::new(Mutex::new(None));
         self
@@ -421,7 +507,7 @@ impl SolveParams {
     }
 
     /// Returns what the request excludes from a route. Empty unless one was set.
-    pub fn route_filter(&self) -> &RouteExclusionFilter {
+    pub fn route_filter(&self) -> &RouteConstraints {
         &self.route_filter
     }
 
@@ -438,8 +524,8 @@ impl SolveParams {
     pub(crate) fn cache_exclusions_for_test(
         &self,
         generation: u64,
-        exclusions: RouteExclusions,
-    ) -> Arc<RouteExclusions> {
+        exclusions: ResolvedRouteConstraints,
+    ) -> Arc<ResolvedRouteConstraints> {
         let exclusions = Arc::new(exclusions);
         *self.exclusion_cache.lock().unwrap() = Some((generation, exclusions.clone()));
         exclusions
@@ -456,7 +542,7 @@ mod solve_params_tests {
         let clone = params.clone();
         let exclusions = params.cache_exclusions_for_test(
             7,
-            RouteExclusions::default().with_pools(["pool".to_string()]),
+            ResolvedRouteConstraints::default().with_pools(["pool".to_string()]),
         );
         let cached = clone
             .cached_exclusions()
@@ -617,11 +703,6 @@ pub struct EncodingOptions {
     /// Client fee configuration. When absent, no client fee is charged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_fee_params: Option<ClientFeeParams>,
-    /// Attach server-signed zero-fee client params so the FeeCalculator applies the deployment
-    /// signer's positive-slippage exemption. Defaults to `false`. When `client_fee_params` are
-    /// also set, encoding prefers the explicit client fee.
-    #[serde(default)]
-    disable_slippage_taking: bool,
     /// Per-request price guard configuration. Defaults to disabled.
     #[serde(default)]
     price_guard: PriceGuardConfig,
@@ -659,7 +740,6 @@ impl EncodingOptions {
             permit: None,
             permit2_signature: None,
             client_fee_params: None,
-            disable_slippage_taking: false,
             price_guard: PriceGuardConfig::default(),
             simulate: false,
             calldata_watermark: None,
@@ -783,25 +863,6 @@ impl EncodingOptions {
     /// Returns the client fee params, if set.
     pub fn client_fee_params(&self) -> Option<&ClientFeeParams> {
         self.client_fee_params.as_ref()
-    }
-
-    /// Sets whether the encoder attaches server-signed zero-fee client params.
-    pub fn with_disable_slippage_taking(mut self, disable_slippage_taking: bool) -> Self {
-        self.disable_slippage_taking = disable_slippage_taking;
-        self
-    }
-
-    /// Returns whether disable-slippage-taking encoding is requested.
-    pub fn disable_slippage_taking(&self) -> bool {
-        self.disable_slippage_taking
-    }
-
-    /// Whether encoding should attach server-signed zero-fee client params.
-    ///
-    /// Explicit [`Self::client_fee_params`] take precedence over the API-key default, so this
-    /// returns `false` when both are set.
-    pub fn applies_disable_slippage_taking(&self) -> bool {
-        self.disable_slippage_taking && self.client_fee_params.is_none()
     }
 
     /// Validates the options a caller sets.
@@ -2684,6 +2745,100 @@ mod tests {
         )
     }
 
+    #[rstest]
+    #[case::none_required(&[], &[0x01, 0x02], true)]
+    #[case::through_required(&[0x09], &[0x01, 0x09, 0x02], true)]
+    #[case::every_one_visited(&[0x08, 0x09], &[0x01, 0x08, 0x09, 0x02], true)]
+    #[case::one_of_two_missing(&[0x08, 0x09], &[0x01, 0x09, 0x02], false)]
+    #[case::endpoint_and_intermediate(&[0x01, 0x09], &[0x01, 0x09, 0x02], true)]
+    #[case::endpoint_and_missing(&[0x01, 0x09], &[0x01, 0x03, 0x02], false)]
+    #[case::avoids_required(&[0x09], &[0x01, 0x03, 0x02], false)]
+    #[case::input_is_required(&[0x01], &[0x01, 0x03, 0x02], true)]
+    #[case::output_is_required(&[0x02], &[0x01, 0x03, 0x02], true)]
+    fn test_visits_all_required_tokens(
+        #[case] required: &[u8],
+        #[case] path: &[u8],
+        #[case] expected: bool,
+    ) {
+        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(
+            required
+                .iter()
+                .map(|&byte| token(byte, "T").address),
+        );
+        let path: Vec<Address> = path
+            .iter()
+            .map(|&byte| token(byte, "T").address)
+            .collect();
+
+        assert_eq!(exclusions.visits_all_required_tokens(&path), expected);
+    }
+
+    #[test]
+    fn test_route_filter_with_only_required_tokens() {
+        let filter = RouteConstraints::default().with_required_tokens([token(0x09, "X").address]);
+
+        assert!(!filter.is_empty());
+    }
+
+    #[test]
+    fn test_exclusions_with_only_required_tokens_exclude_nothing() {
+        let exclusions =
+            ResolvedRouteConstraints::default().with_required_tokens([token(0x09, "X").address]);
+
+        assert!(exclusions.is_empty());
+    }
+
+    #[test]
+    fn test_retain_excluded_protocols_keeps_the_rest_of_the_filter() {
+        let pool = "pool".to_string();
+        let tokens = [token(0x08, "E").address, token(0x09, "X").address];
+        let filter = RouteConstraints::default()
+            .with_excluded_pools([pool.clone()])
+            .with_excluded_tokens([tokens[0].clone()])
+            .with_required_tokens([tokens[1].clone()])
+            .with_excluded_protocols(["uniswap_v2".to_string(), "bebop".to_string()]);
+
+        let retained = filter.retain_excluded_protocols(|protocol| protocol != "bebop");
+
+        let expected = RouteConstraints::default()
+            .with_excluded_pools([pool])
+            .with_excluded_tokens([tokens[0].clone()])
+            .with_required_tokens([tokens[1].clone()])
+            .with_excluded_protocols(["uniswap_v2".to_string()]);
+        assert_eq!(retained, expected);
+    }
+
+    #[rstest]
+    #[case::no_overlap(&[0x08], &[0x09], None)]
+    #[case::overlap(&[0x08, 0x09], &[0x09], Some(0x09))]
+    #[case::nothing_required(&[], &[0x09], None)]
+    #[case::nothing_excluded(&[0x09], &[], None)]
+    fn test_route_filter_validate(
+        #[case] required: &[u8],
+        #[case] excluded: &[u8],
+        #[case] overlap: Option<u8>,
+    ) {
+        let addresses = |bytes: &[u8]| -> Vec<Address> {
+            bytes
+                .iter()
+                .map(|&byte| token(byte, "T").address)
+                .collect()
+        };
+        let filter = RouteConstraints::default()
+            .with_required_tokens(addresses(required))
+            .with_excluded_tokens(addresses(excluded));
+
+        let result = filter.validate();
+
+        match (overlap, result) {
+            (None, Ok(())) => {}
+            (Some(byte), Err(RouteConstraintsError::RequiredTokenExcluded { token })) => {
+                assert_eq!(token, make_address(byte));
+            }
+            (expected, result) => panic!("expected overlap {expected:?}, got {result:?}"),
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Order Tests
     // -------------------------------------------------------------------------
@@ -3339,18 +3494,6 @@ mod tests {
             1_893_456_000u64,
             Bytes::from(vec![0xAB; 65]),
         )
-    }
-
-    #[test]
-    fn test_encoding_options_disable_slippage_taking_precedence() {
-        let with_client_fee = EncodingOptions::new(0.01)
-            .with_client_fee_params(make_client_fee_params())
-            .with_disable_slippage_taking(true);
-        assert!(with_client_fee.disable_slippage_taking());
-        assert!(!with_client_fee.applies_disable_slippage_taking());
-
-        let flag_only = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
-        assert!(flag_only.applies_disable_slippage_taking());
     }
 
     #[test]

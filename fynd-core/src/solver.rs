@@ -1224,7 +1224,8 @@ impl FyndBuilder {
 
             solver_pool_handles.push(
                 SolverPoolHandle::new(worker_pool.name(), task_handle)
-                    .with_liquidity_scope(pool_scope),
+                    .with_liquidity_scope(pool_scope)
+                    .with_supports_required_tokens(worker_pool.supports_required_tokens()),
             );
             worker_pools.push(worker_pool);
         }
@@ -1749,7 +1750,10 @@ impl Solver {
                 .configure(pool_cfg.algorithm(), named)?
                 .build(market_data.clone(), Arc::clone(&derived_data), pool_event_rx, derived_rx)?;
 
-            solver_pool_handles.push(SolverPoolHandle::new(worker_pool.name(), task_handle));
+            solver_pool_handles.push(
+                SolverPoolHandle::new(worker_pool.name(), task_handle)
+                    .with_supports_required_tokens(worker_pool.supports_required_tokens()),
+            );
             max_timeout_ms = max_timeout_ms.max(pool_cfg.timeout_ms());
             worker_pools.push(worker_pool);
         }

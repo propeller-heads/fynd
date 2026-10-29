@@ -81,6 +81,7 @@ function toWireRouteFilter(filter: RouteFilter): WireRouteFilter {
             ? {exclude_protocols: filter.excludeProtocols}
             : {}),
         ...(filter.excludeTokens !== undefined ? {exclude_tokens: filter.excludeTokens} : {}),
+        ...(filter.requireTokens !== undefined ? {require_tokens: filter.requireTokens} : {}),
     };
 }
 

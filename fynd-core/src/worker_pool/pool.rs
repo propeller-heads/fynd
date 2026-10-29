@@ -25,8 +25,8 @@ use crate::{
     types::internal::SolveTask,
     worker_pool::{
         registry::{
-            spawn_workers_generic, AlgorithmSpawner, SpawnWorkersParams, UnknownAlgorithmError,
-            DEFAULT_ALGORITHM,
+            spawn_workers_generic, AlgorithmSpawner, SpawnWorkersParams, SpawnedWorkers,
+            UnknownAlgorithmError, DEFAULT_ALGORITHM,
         },
         task_queue::{TaskQueue, TaskQueueConfig, TaskQueueHandle},
     },
@@ -93,6 +93,8 @@ pub struct WorkerPool {
     algorithm: String,
     /// Handles to worker threads.
     workers: Vec<JoinHandle<()>>,
+    /// Whether this pool's algorithm honours the route filter's required tokens.
+    supports_required_tokens: bool,
     /// Shutdown signal sender.
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -150,7 +152,8 @@ impl WorkerPool {
             algorithm_exclude_protocols,
             post_processor_factories,
         };
-        let workers = config.spawner.spawn(params)?;
+        let SpawnedWorkers { handles: workers, supports_required_tokens } =
+            config.spawner.spawn(params)?;
 
         info!(
             name = %name,
@@ -159,7 +162,7 @@ impl WorkerPool {
             "worker pool spawned"
         );
 
-        Ok(Self { name, algorithm, workers, shutdown_tx })
+        Ok(Self { name, algorithm, workers, supports_required_tokens, shutdown_tx })
     }
 
     /// Returns the worker pool name.
@@ -170,6 +173,16 @@ impl WorkerPool {
     /// Returns the algorithm name for this worker pool.
     pub fn algorithm(&self) -> &str {
         &self.algorithm
+    }
+
+    /// Returns whether this worker pool's algorithm honours the route filter's required tokens.
+    ///
+    /// Pass it to [`SolverPoolHandle::with_supports_required_tokens`] when building the handle.
+    ///
+    /// [`SolverPoolHandle::with_supports_required_tokens`]:
+    ///     crate::SolverPoolHandle::with_supports_required_tokens
+    pub fn supports_required_tokens(&self) -> bool {
+        self.supports_required_tokens
     }
 
     /// Returns the number of workers.

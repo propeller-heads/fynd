@@ -59,6 +59,8 @@ describe('FyndError.fromWireError', () => {
     'ZERO_AMOUNT',
     'INVALID_SLIPPAGE',
     'CLIENT_FEE_TOO_HIGH',
+    'REQUIRED_TOKEN_EXCLUDED',
+    'REQUIRED_TOKENS_NOT_SUPPORTED',
   ])('maps validation code %s as a known, non-retryable code', (code) => {
     const err = FyndError.fromWireError({ code, error: 'invalid request' });
     expect(err.code).toBe(code);

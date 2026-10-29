@@ -38,7 +38,10 @@ timeout_ms = 500
 
 # Example: connector_tokens restricts intermediate hops to trusted, liquid tokens,
 # reducing on-chain reversion risk. Absent = all tokens reachable (default behaviour).
-# Run `fynd derive-connector-tokens --top-n 10` to generate a fresh list for your chain.
+# Run `fynd derive-connector-tokens --top-n 10` to generate a fresh list for your chain: the top
+# `--top-n` tokens by pool count plus the top `--top-n-tvl` (default `--top-n`) by backed TVL (pool
+# TVL capped at twice the native value of the trusted tokens it holds, minus the token's largest
+# pool), and the native and wrapped native tokens.
 # Lists below were derived on 2026-05-13.
 #
 # --- Ethereum mainnet ---

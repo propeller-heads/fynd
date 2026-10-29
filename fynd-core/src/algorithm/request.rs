@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::{
     derived::SharedDerivedDataRef,
     feed::market_data::{MarketData, StateLabel},
-    types::{quote::RouteExclusions, Order},
+    types::{quote::ResolvedRouteConstraints, Order},
 };
 
 /// A [`SolveRequest`] taken apart, so an algorithm owns the market and the derived data.
@@ -21,7 +21,7 @@ pub struct SolveParts<'a, G> {
     /// The derived data the algorithm declared it needs.
     pub derived: Option<SharedDerivedDataRef>,
     /// The pools and tokens this solve must not use.
-    pub exclusions: Arc<RouteExclusions>,
+    pub exclusions: Arc<ResolvedRouteConstraints>,
 }
 
 /// One order to solve, and everything the algorithm reads to solve it.
@@ -31,7 +31,7 @@ pub struct SolveRequest<'a, G> {
     order: &'a Order,
     label: Option<StateLabel>,
     derived: Option<SharedDerivedDataRef>,
-    exclusions: Arc<RouteExclusions>,
+    exclusions: Arc<ResolvedRouteConstraints>,
 }
 
 impl<'a, G> SolveRequest<'a, G> {
@@ -56,7 +56,7 @@ impl<'a, G> SolveRequest<'a, G> {
             order,
             label: None,
             derived: None,
-            exclusions: Arc::new(RouteExclusions::default()),
+            exclusions: Arc::new(ResolvedRouteConstraints::default()),
         }
     }
 
@@ -77,12 +77,15 @@ impl<'a, G> SolveRequest<'a, G> {
 
     /// Liquidity this solve must not route through.
     #[must_use]
-    pub fn with_exclusions(mut self, exclusions: RouteExclusions) -> Self {
+    pub fn with_exclusions(mut self, exclusions: ResolvedRouteConstraints) -> Self {
         self.exclusions = Arc::new(exclusions);
         self
     }
 
-    pub(crate) fn with_shared_exclusions(mut self, exclusions: Arc<RouteExclusions>) -> Self {
+    pub(crate) fn with_shared_exclusions(
+        mut self,
+        exclusions: Arc<ResolvedRouteConstraints>,
+    ) -> Self {
         self.exclusions = exclusions;
         self
     }
@@ -113,7 +116,7 @@ impl<'a, G> SolveRequest<'a, G> {
     }
 
     /// The pools and tokens this solve request must not use.
-    pub fn exclusions(&self) -> &RouteExclusions {
+    pub fn exclusions(&self) -> &ResolvedRouteConstraints {
         &self.exclusions
     }
 }

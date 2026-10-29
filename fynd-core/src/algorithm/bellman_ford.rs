@@ -54,7 +54,7 @@ use crate::{
     },
     feed::market_data::{MarketData, MarketState},
     graph::{petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
-    types::{ComponentId, Order, Route, RouteExclusions, RouteResult, Swap},
+    types::{ComponentId, Order, ResolvedRouteConstraints, Route, RouteResult, Swap},
 };
 
 /// One BFS walk's yield: the part of the graph a solve may route through.
@@ -110,7 +110,7 @@ impl BellmanFordContext {
             (token_in_node, Some(token_out_node)),
             Some(hops_to_token_out),
             max_hops,
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
         ) else {
             return false;
         };
@@ -319,7 +319,7 @@ impl BellmanFordAlgorithm {
         let token_in_node = token_in_node?;
         // Pricing walks carry no request, so nothing is excluded and the source stands in for
         // both exempt endpoints.
-        let exclusions = RouteExclusions::default();
+        let exclusions = ResolvedRouteConstraints::default();
         let hops_to_targets = prune_toward.map(|_| {
             Self::get_hops_to_reach_any(
                 graph,
@@ -991,7 +991,7 @@ impl BellmanFordAlgorithm {
         token_in: NodeIndex,
         token_out: NodeIndex,
         max_hops: usize,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Option<Subgraph<'a>> {
         // Walked from the destination along outgoing edges, not incoming ones. Every pool in this
         // graph is entered as a pair of opposite edges, so the two walks cover the same tokens and
@@ -1017,7 +1017,7 @@ impl BellmanFordAlgorithm {
         endpoints: (NodeIndex, Option<NodeIndex>),
         hops_to_token_out: Option<&FxHashMap<NodeIndex, usize>>,
         max_hops: usize,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> Option<Subgraph<'a>> {
         let (token_in, token_out) = endpoints;
         let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
@@ -1087,7 +1087,7 @@ impl BellmanFordAlgorithm {
         graph: &StableDiGraph<()>,
         edge: EdgeReference<'_, EdgeData<()>>,
         endpoints: (NodeIndex, NodeIndex),
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> bool {
         !exclusions.excludes_pool(&edge.weight().component_id) &&
             exclusions
@@ -1102,7 +1102,7 @@ impl BellmanFordAlgorithm {
         token_in: NodeIndex,
         token_out: NodeIndex,
         max_hops: usize,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> FxHashMap<NodeIndex, usize> {
         Self::get_hops_to_reach_any(graph, [token_out], (token_in, token_out), max_hops, exclusions)
     }
@@ -1116,7 +1116,7 @@ impl BellmanFordAlgorithm {
         sources: impl IntoIterator<Item = NodeIndex>,
         endpoints: (NodeIndex, NodeIndex),
         max_hops: usize,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
     ) -> FxHashMap<NodeIndex, usize> {
         let mut hops_to_reach: FxHashMap<NodeIndex, usize> = FxHashMap::default();
         let mut frontier = Vec::new();
@@ -1324,9 +1324,12 @@ mod tests {
         ]);
         let order = order(&a, &c, 1000, OrderSide::Sell);
         let result = bf_algorithm(2, 1000)
-            .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
-                RouteExclusions::default().with_tokens([a.address.clone(), c.address.clone()]),
-            ))
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market, &order).with_exclusions(
+                    ResolvedRouteConstraints::default()
+                        .with_tokens([a.address.clone(), c.address.clone()]),
+                ),
+            )
             .await
             .unwrap();
         assert_eq!(result.route().swaps().len(), 2);
@@ -1347,10 +1350,9 @@ mod tests {
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let result = bf_algorithm(2, 1000)
-            .find_best_route(
-                SolveRequest::new(manager.graph(), market, &ord)
-                    .with_exclusions(RouteExclusions::default().with_pools(["best".to_string()])),
-            )
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_exclusions(
+                ResolvedRouteConstraints::default().with_pools(["best".to_string()]),
+            ))
             .await
             .unwrap();
 
@@ -1390,7 +1392,7 @@ mod tests {
             node(&token_a.address),
             node(&token_c.address),
             2,
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
         )
         .unwrap();
 
@@ -1459,7 +1461,7 @@ mod tests {
             node(&token_a.address),
             node(&token_c.address),
             2,
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
         )
         .unwrap();
 
@@ -1512,7 +1514,7 @@ mod tests {
                 (node(&token_g.address), None),
                 None,
                 2,
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
             )
             .unwrap();
 
@@ -1918,7 +1920,7 @@ mod tests {
             gas_node,
             gas_node,
             3,
-            &RouteExclusions::default(),
+            &ResolvedRouteConstraints::default(),
         );
         assert!(
             ctx.reroot_toward(graph, node_of(&token_c.address), gas_node, &hops_to_gas, 3),

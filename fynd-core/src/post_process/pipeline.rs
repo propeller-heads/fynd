@@ -220,7 +220,7 @@ mod tests {
         algorithm::test_utils::{order, setup_market_weighted, token},
         derived::{DerivedData, SharedDerivedDataRef},
         post_process::test_utils::{route_result, with_net_amount_out, MockPostProcessor},
-        types::{Order, OrderSide, RouteExclusions},
+        types::{Order, OrderSide, ResolvedRouteConstraints},
     };
 
     const POOL: &str = "test_pool";
@@ -230,7 +230,7 @@ mod tests {
         order: Order,
         market: MarketData,
         derived: SharedDerivedDataRef,
-        exclusions: RouteExclusions,
+        exclusions: ResolvedRouteConstraints,
     }
 
     impl Fixture {
@@ -239,7 +239,7 @@ mod tests {
                 order: order(&token(0x01, "A"), &token(0x02, "B"), 100, OrderSide::Sell),
                 market: setup_market_weighted(Vec::new()).0,
                 derived: DerivedData::new_shared(),
-                exclusions: RouteExclusions::default(),
+                exclusions: ResolvedRouteConstraints::default(),
             }
         }
 

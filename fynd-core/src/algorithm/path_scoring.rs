@@ -26,7 +26,7 @@ use tracing::trace;
 use crate::{
     algorithm::{most_liquid::DepthAndPrice, swap_cache::SwapResult},
     graph::{EdgeData, TokenPath, TopologyGraph, INLINE_EDGES},
-    types::{ComponentId, RouteExclusions},
+    types::{ComponentId, ResolvedRouteConstraints},
 };
 
 /// What one pool paid for one input amount, on one token pair.
@@ -248,7 +248,7 @@ pub(crate) fn simulate_token_path<'g, D, T>(
 fn heuristic_score(
     graph: &TopologyGraph<DepthAndPrice>,
     token_path: &[NodeIndex],
-    exclusions: &RouteExclusions,
+    exclusions: &ResolvedRouteConstraints,
 ) -> Option<f64> {
     if token_path.len() < 2 {
         return None;
@@ -295,7 +295,7 @@ fn heuristic_score(
 pub(crate) fn rank_by_heuristic(
     graph: &TopologyGraph<DepthAndPrice>,
     token_paths: Vec<TokenPath>,
-    exclusions: &RouteExclusions,
+    exclusions: &ResolvedRouteConstraints,
 ) -> Vec<(TokenPath, f64)> {
     let mut scored: Vec<(TokenPath, f64)> = token_paths
         .into_iter()
@@ -330,8 +330,8 @@ mod tests {
         use super::*;
 
         /// Every pool of the A->B pair in `parallel_graph`.
-        fn every_pool_excluded() -> RouteExclusions {
-            RouteExclusions::default().with_pools([
+        fn every_pool_excluded() -> ResolvedRouteConstraints {
+            ResolvedRouteConstraints::default().with_pools([
                 "ab1".to_string(),
                 "ab2".to_string(),
                 "ab3".to_string(),
@@ -354,12 +354,12 @@ mod tests {
             let unmeasured = heuristic_score(
                 graph,
                 &[node(&a), node(&b), node(&c)],
-                &RouteExclusions::default(),
+                &ResolvedRouteConstraints::default(),
             );
 
             assert_eq!(unmeasured, Some(0.0), "an unmeasured hop scores zero, not None");
             assert!(
-                heuristic_score(graph, &[node(&a), node(&b)], &RouteExclusions::default())
+                heuristic_score(graph, &[node(&a), node(&b)], &ResolvedRouteConstraints::default())
                     .is_some_and(|measured| measured > 0.0),
                 "a fully measured sequence still outranks it"
             );
@@ -381,11 +381,11 @@ mod tests {
             let node = |address: &Address| graph.get_token_ix(address).unwrap();
             let path = [node(&a), node(&b)];
 
-            let deep = heuristic_score(graph, &path, &RouteExclusions::default()).unwrap();
+            let deep = heuristic_score(graph, &path, &ResolvedRouteConstraints::default()).unwrap();
             let without_deep_pool = heuristic_score(
                 graph,
                 &path,
-                &RouteExclusions::default().with_pools(["ab1".to_string()]),
+                &ResolvedRouteConstraints::default().with_pools(["ab1".to_string()]),
             )
             .unwrap();
 

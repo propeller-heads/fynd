@@ -18,7 +18,6 @@ use crate::api::prices::{
 #[cfg(feature = "experimental")]
 use crate::api::tokens::{build_token_entries, TokensCache, TokensQuery, TokensResponse};
 use crate::api::{
-    disable_slippage_taking,
     error::{ErrorResponse, RequestValidationError},
     exclusive_access, jit_router,
     middleware::ClientInfo,
@@ -58,7 +57,8 @@ pub(crate) fn configure_routes(
 /// # Errors
 ///
 /// - 400 Bad Request: Invalid request format
-/// - 422 Unprocessable Entity: No routes found
+/// - 422 Unprocessable Entity: The request could not be filled: no route, encoding failed, or
+///   `require_tokens` not supported; see `code`
 /// - 503 Service Unavailable: Queue full or service overloaded
 /// - 503 Service Unavailable: Queue full, service overloaded, or quote timeout
 #[utoipa::path(
@@ -69,7 +69,7 @@ pub(crate) fn configure_routes(
     responses(
         (status = 200, description = "Quote completed", body = dto::Quote),
         (status = 400, description = "Invalid request", body = ErrorResponse),
-        (status = 422, description = "No route found", body = ErrorResponse),
+        (status = 422, description = "The request could not be filled: no route, encoding failed, or require_tokens not supported; see `code`", body = ErrorResponse),
         (status = 503, description = "Service unavailable", body = ErrorResponse),
         (status = 503, description = "Queue full, overloaded, stale data, or timeout", body = ErrorResponse),
     )
@@ -82,10 +82,6 @@ pub async fn quote(
 ) -> Result<HttpResponse, ApiError> {
     let access = exclusive_access::from_headers(http_request.headers());
     let core_request = validate_quote_request(request.into_inner())?;
-    let core_request = disable_slippage_taking::apply(
-        core_request,
-        disable_slippage_taking::from_headers(http_request.headers()),
-    );
     let core_request =
         jit_router::apply(core_request, jit_router::from_headers(http_request.headers()));
     let request_record = RequestRecord::capture(&core_request, access);
@@ -126,8 +122,9 @@ pub async fn quote(
 /// # Errors
 ///
 /// [`ApiError::InvalidRequest`] naming the rule the request broke: no orders, an order that fails
-/// [`fynd_core::Order::validate`], or encoding options that fail
-/// [`fynd_core::EncodingOptions::validate`].
+/// [`fynd_core::Order::validate`], encoding options that fail
+/// [`fynd_core::EncodingOptions::validate`], or a route filter that fails
+/// [`fynd_core::RouteConstraints::validate`].
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
@@ -148,6 +145,15 @@ pub fn validate_quote_request(
         encoding_options
             .validate()
             .map_err(RequestValidationError::from)?;
+    }
+    if let Err(fynd_core::RouteConstraintsError::RequiredTokenExcluded { token }) = core_request
+        .options()
+        .route_filter()
+        .validate()
+    {
+        return Err(
+            RequestValidationError::RequiredTokenExcluded { token: token.to_string() }.into()
+        );
     }
     Ok(core_request)
 }
@@ -634,6 +640,7 @@ mod tests {
 
         const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
         const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+        const DAI: &str = "0x6B175474E89094C44Da98b954EedeAC495271d0F";
 
         fn dto_order_for(token_in: &str, token_out: &str, amount: &str) -> dto::Order {
             serde_json::from_value(serde_json::json!({
@@ -731,6 +738,35 @@ mod tests {
             }));
 
             assert_eq!(rejection_code(request), "CLIENT_FEE_TOO_HIGH");
+        }
+
+        /// The validator rejects required tokens that are also excluded and accepts required
+        /// tokens that are not excluded.
+        #[rstest]
+        #[case::overlap(&[DAI], &[DAI], Some("REQUIRED_TOKEN_EXCLUDED"))]
+        #[case::overlap_in_lists(&[USDC, DAI], &[DAI, WETH], Some("REQUIRED_TOKEN_EXCLUDED"))]
+        #[case::disjoint(&[DAI], &[USDC], None)]
+        #[case::only_required(&[DAI], &[], None)]
+        fn test_validate_quote_request_checks_required_tokens(
+            #[case] required: &[&str],
+            #[case] excluded: &[&str],
+            #[case] rejection: Option<&str>,
+        ) {
+            let request: dto::QuoteRequest = serde_json::from_value(serde_json::json!({
+                "orders": [dto_order()],
+                "options": {"route_filter": {
+                    "require_tokens": required,
+                    "exclude_tokens": excluded
+                }}
+            }))
+            .expect("valid request json");
+
+            match rejection {
+                Some(code) => assert_eq!(rejection_code(request), code),
+                None => {
+                    validate_quote_request(request).expect("the route filter is satisfiable");
+                }
+            }
         }
 
         #[test]

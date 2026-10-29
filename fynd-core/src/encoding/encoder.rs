@@ -24,9 +24,6 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 
 use crate::{
     encoding::{
-        disable_slippage_taking::{
-            DisableSlippageTakingSigner, SwapIntent, ENV_DISABLE_SLIPPAGE_TAKING_KEY,
-        },
         exclusive_swap::ExclusiveSwapSigner,
         hooks::SolutionHook,
         router_call::{RouterCall, RouterLayout},
@@ -76,8 +73,6 @@ pub struct Encoder {
     router_fees: SharedRouterFees,
     /// Signs exclusive legs. `None` disables signing (no controller key configured).
     exclusive_swap_signer: Option<Arc<ExclusiveSwapSigner>>,
-    /// Signs disable-slippage-taking client fee params. `None` disables it (no key configured).
-    disable_slippage_taking_signer: Option<Arc<DisableSlippageTakingSigner>>,
     /// Bytes appended to every encoded transaction's calldata to tag its origin. Trailing
     /// calldata beyond the ABI-encoded arguments is ignored by the EVM, so the tag is free of
     /// on-chain effect. `None` (the default) appends nothing. A request that carries its own
@@ -313,14 +308,6 @@ impl Encoder {
             Some(router) => ExclusiveSwapSigner::from_env(chain.id(), router)?.map(Arc::new),
             None => None,
         };
-        // The router is the EIP-712 verifying contract for `ClientFee`, so without one there is
-        // nothing to sign for.
-        let disable_slippage_taking_signer = match &router_address {
-            Some(router) => {
-                DisableSlippageTakingSigner::from_env(chain.id(), router)?.map(Arc::new)
-            }
-            None => None,
-        };
         Ok(Self {
             tycho_encoder,
             chain,
@@ -328,7 +315,6 @@ impl Encoder {
             jit_router_address: None,
             router_fees: SharedRouterFees::default(),
             exclusive_swap_signer,
-            disable_slippage_taking_signer,
             calldata_watermark: None,
         })
     }
@@ -361,18 +347,6 @@ impl Encoder {
     #[must_use]
     pub fn with_exclusive_swap_signer(mut self, signer: ExclusiveSwapSigner) -> Self {
         self.exclusive_swap_signer = Some(Arc::new(signer));
-        self
-    }
-
-    /// Overrides the disable-slippage-taking signer, replacing whatever was read from the
-    /// environment. Test-only: deployments configure the key through the environment.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn with_disable_slippage_taking_signer(
-        mut self,
-        signer: DisableSlippageTakingSigner,
-    ) -> Self {
-        self.disable_slippage_taking_signer = Some(Arc::new(signer));
         self
     }
 
@@ -484,7 +458,7 @@ impl Encoder {
         encoding_options: &EncodingOptions,
         router_fees: &RouterFees,
     ) -> Result<PreparedSolution, SolveError> {
-        let fee_client = self.fee_client(encoding_options, quote)?;
+        let fee_client = Self::fee_client(encoding_options, quote);
         let fee_rates = router_fees.fees_for(&fee_client);
         let fee_breakdown = Self::calculate_fee_breakdown(
             quote.amount_out(),
@@ -589,17 +563,6 @@ impl Encoder {
         }
         let call = RouterCall::decode(encoded_solution.function_signature(), calldata)?;
         let swaps = call.swaps().as_ref();
-        // Temporary: remove once disable-slippage-taking moves out of fynd-core into a calldata
-        // hook (ENG-6417). Until then fynd-core signs it before the hook, over the old swaps.
-        if encoding_options.applies_disable_slippage_taking() && swaps != encoded_solution.swaps() {
-            return Err(SolveError::FailedEncoding(
-                "the calldata hook changed the swaps bytes, but fynd-core signs the \
-                 disable-slippage-taking client fee before the hook runs, so that signature \
-                 would no longer match; turn off disable_slippage_taking and sign the zero-fee \
-                 client fee in the hook"
-                    .to_string(),
-            ));
-        }
         let fee_breakdown = if encoding_options
             .client_fee_params()
             .is_some()
@@ -731,33 +694,13 @@ impl Encoder {
     }
 
     /// Predicts which client address the on-chain FeeCalculator will charge fees for, so the
-    /// fee math matches the contract: the client fee receiver when fee params are set, the
-    /// signer's address for disable-slippage-taking encoding, and otherwise the order sender
-    /// (the contract falls back to `tx.origin`, and the sender is the best available guess
-    /// for it).
-    ///
-    /// # Errors
-    /// Errors when disable-slippage-taking is requested but no signing key is configured.
-    fn fee_client(
-        &self,
-        encoding_options: &EncodingOptions,
-        quote: &OrderQuote,
-    ) -> Result<Bytes, SolveError> {
-        if encoding_options.applies_disable_slippage_taking() {
-            let signer = self
-                .disable_slippage_taking_signer
-                .as_ref()
-                .ok_or_else(|| {
-                    SolveError::FailedEncoding(format!(
-                        "disable-slippage-taking encoding requested but no signing key is \
-                         configured (set {ENV_DISABLE_SLIPPAGE_TAKING_KEY})"
-                    ))
-                })?;
-            return Ok(Bytes::from(signer.receiver().as_slice()));
-        }
-        Ok(encoding_options
+    /// fee math matches the contract: the client fee receiver when fee params are set, otherwise
+    /// the order sender. Without fee params the contract charges `tx.origin`, and the sender is
+    /// the best guess for it.
+    fn fee_client(encoding_options: &EncodingOptions, quote: &OrderQuote) -> Bytes {
+        encoding_options
             .client_fee_params()
-            .map_or_else(|| quote.sender().clone(), |f| f.receiver().clone()))
+            .map_or_else(|| quote.sender().clone(), |f| f.receiver().clone())
     }
 
     /// Stamps controller-signed `user_data` onto each exclusive leg of `solution`.
@@ -868,10 +811,6 @@ impl Encoder {
             (None, vec![])
         };
 
-        // Read ahead of the client fee params below: the disable-slippage-taking signature covers
-        // the swap bytes.
-        let swaps = encoded_solution.swaps();
-
         let client_fee_params = if let Some(fee) = encoding_options.client_fee_params() {
             // The router takes the client fee in the FeeCalculator's fee units, while Fynd's
             // API expresses it in legacy basis points.
@@ -899,41 +838,11 @@ impl Encoder {
                     sig
                 },
             )
-        } else if encoding_options.applies_disable_slippage_taking() {
-            // Zero-fee params naming this deployment's signer as the router fee client. The
-            // signature covers the exact calldata values, so it is computed here where they
-            // are final; nothing is left for the caller to patch.
-            let signer = self
-                .disable_slippage_taking_signer
-                .as_ref()
-                .ok_or_else(|| {
-                    EncodingError::FatalError(format!(
-                        "disable-slippage-taking encoding requested but no signing key is \
-                         configured (set {ENV_DISABLE_SLIPPAGE_TAKING_KEY})"
-                    ))
-                })?;
-            let signed = signer
-                .sign_client_fee(&SwapIntent {
-                    amount_in,
-                    token_in,
-                    token_out,
-                    expected_amount_out,
-                    min_amount_out,
-                    receiver,
-                    swaps,
-                })
-                .map_err(|e| EncodingError::FatalError(e.to_string()))?;
-            (
-                0u32,
-                signer.receiver(),
-                U256::ZERO,
-                U256::from(signed.deadline),
-                signed.signature.to_vec(),
-            )
         } else {
             (0u32, Address::ZERO, U256::ZERO, U256::MAX, vec![])
         };
 
+        let swaps = encoded_solution.swaps();
         let fn_sig = encoded_solution.function_signature();
 
         let layout = RouterLayout::of(fn_sig).ok_or_else(|| {
@@ -1105,7 +1014,7 @@ impl Encoder {
         let client_fee_bps = encoding_options
             .client_fee_params()
             .map_or(0, |f| f.bps());
-        let fee_client = self.fee_client(encoding_options, quote)?;
+        let fee_client = Self::fee_client(encoding_options, quote);
         let fee_rates = self
             .router_fees
             .snapshot()
@@ -1224,7 +1133,7 @@ impl From<EncodingError> for SolveError {
 
 #[cfg(test)]
 mod tests {
-    use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes, Signature, B256};
+    use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes, B256};
     use num_bigint::BigUint;
     use rstest::rstest;
     use rustc_hash::FxHashMap;
@@ -1242,10 +1151,8 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         encoding::{
-            disable_slippage_taking::router_signing_hash,
             hooks::{CalldataHook, SolutionHook},
             router_fees::RouterFees,
-            DEFAULT_DEADLINE_WINDOW_SECS,
         },
         BlockInfo, OrderQuote, QuoteStatus,
     };
@@ -1353,7 +1260,6 @@ mod tests {
             jit_router_address: None,
             router_fees,
             exclusive_swap_signer: None,
-            disable_slippage_taking_signer: None,
             calldata_watermark: None,
         }
     }
@@ -2169,22 +2075,6 @@ mod tests {
         )
     }
 
-    const DISABLE_SLIPPAGE_TAKING_KEY: &str =
-        "0x3333333333333333333333333333333333333333333333333333333333333333";
-    const SIGNER_CHAIN_ID: u64 = 1;
-    const SIGNER_ROUTER: EvmAddress = EvmAddress::repeat_byte(0x99);
-
-    fn disable_slippage_taking_signer() -> DisableSlippageTakingSigner {
-        DisableSlippageTakingSigner::new(
-            DISABLE_SLIPPAGE_TAKING_KEY
-                .parse()
-                .unwrap(),
-            SIGNER_CHAIN_ID,
-            SIGNER_ROUTER,
-            DEFAULT_DEADLINE_WINDOW_SECS,
-        )
-    }
-
     /// FeeCalculator precision used in these tests: 100% = 100,000,000 fee units.
     const FEE_SCALE: u64 = 100_000_000;
 
@@ -2277,148 +2167,6 @@ mod tests {
             let length_word = U256::from_be_slice(&calldata[offset - 32..offset]);
             assert_eq!(length_word, U256::from(contract_sig.len()));
             assert_eq!(&calldata[offset..offset + contract_sig.len()], &contract_sig[..]);
-        }
-    }
-
-    mod disable_slippage_taking {
-        use super::*;
-
-        #[tokio::test]
-        async fn test_encode_disable_slippage_taking() {
-            let signer = disable_slippage_taking_signer();
-            let signer_address = signer.receiver();
-            let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
-            let quote = make_order_quote(1_000_000_000)
-                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
-            let opts = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
-
-            let result = encoder
-                .encode(vec![quote], opts)
-                .await
-                .unwrap();
-
-            let tx = result[0].transaction().unwrap();
-            // The signature is final at encode time, so there is nothing for the caller to patch.
-            assert!(tx
-                .client_fee_signature_offset()
-                .is_none());
-            let (
-                amount_in,
-                token_in,
-                token_out,
-                expected_amount_out,
-                min_amount_out,
-                receiver,
-                client_fee,
-                swaps,
-            ) = <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
-            let (fee_units, fee_receiver, max_contribution, deadline, signature) = client_fee;
-
-            assert_eq!(fee_units, 0, "the params must carry no fee");
-            assert_eq!(fee_receiver, signer_address);
-            assert_eq!(max_contribution, U256::ZERO);
-
-            // The embedded signature must recover to the signer over a hash rebuilt from the
-            // decoded calldata, proving the encoder signed the values it actually encoded.
-            let signing_hash = router_signing_hash(
-                fee_receiver,
-                &SwapIntent {
-                    amount_in,
-                    token_in,
-                    token_out,
-                    expected_amount_out,
-                    min_amount_out,
-                    receiver,
-                    swaps: &swaps,
-                },
-                deadline.to::<u64>(),
-                SIGNER_CHAIN_ID,
-                SIGNER_ROUTER,
-            );
-            let recovered = Signature::try_from(signature.as_ref())
-                .unwrap()
-                .recover_address_from_prehash(&signing_hash)
-                .unwrap();
-            assert_eq!(recovered, signer_address);
-        }
-
-        #[tokio::test]
-        async fn test_encode_disable_slippage_taking_without_signer() {
-            let encoder = real_encoder();
-            let quote = make_order_quote(990)
-                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
-            let opts = EncodingOptions::new(0.01).with_disable_slippage_taking(true);
-
-            let err = encoder
-                .prepare_solution(&quote, &opts, &encoder.router_fees().snapshot())
-                .expect_err("encoding must fail without a signing key");
-            assert!(
-                err.to_string()
-                    .contains(ENV_DISABLE_SLIPPAGE_TAKING_KEY),
-                "error must name the missing env var, got {err:?}"
-            );
-
-            let result = encoder
-                .encode(vec![quote], opts)
-                .await
-                .expect("a failing order is reported on the order, not on the call");
-            assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
-            assert!(result[0].transaction().is_none());
-        }
-
-        #[tokio::test]
-        async fn test_encode_client_fee_params_precedence() {
-            let signer = disable_slippage_taking_signer();
-            let signer_receiver = signer.receiver();
-            let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
-            let quote = make_order_quote(990)
-                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
-            let client_fee = make_client_fee(100);
-            let client_receiver = bytes_to_address(client_fee.receiver()).unwrap();
-            let opts = EncodingOptions::new(0.01)
-                .with_client_fee_params(client_fee)
-                .with_disable_slippage_taking(true);
-
-            let result = encoder
-                .encode(vec![quote], opts)
-                .await
-                .unwrap();
-
-            let tx = result[0].transaction().unwrap();
-            assert!(tx
-                .client_fee_signature_offset()
-                .is_some());
-            let (_, _, _, _, _, _, client_fee, _) =
-                <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
-            let (fee_units, fee_receiver, _, _, _) = client_fee;
-
-            assert_ne!(fee_units, 0, "explicit client fee bps must be encoded");
-            assert_eq!(fee_receiver, client_receiver);
-            assert_ne!(fee_receiver, signer_receiver);
-        }
-
-        #[tokio::test]
-        async fn test_encode_disable_slippage_taking_fee_rates() {
-            let signer = disable_slippage_taking_signer();
-            let signer_client = Bytes::from(signer.receiver().as_slice());
-            let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
-            // Default 1% router fee on output; the signer's address pays no router fees at all.
-            let custom = FxHashMap::from_iter([(signer_client, (0u32, 0u32))]);
-            encoder
-                .router_fees()
-                .set(RouterFees::new(FEE_SCALE, 1_000_000, 20_000_000, custom));
-            let quote = make_order_quote(1_000_000_000)
-                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
-            let opts = EncodingOptions::new(0.0).with_disable_slippage_taking(true);
-
-            let result = encoder
-                .encode(vec![quote], opts)
-                .await
-                .unwrap();
-
-            let breakdown = result[0].fee_breakdown().unwrap();
-            assert_eq!(*breakdown.router_fee(), BigUint::ZERO);
-            assert_eq!(*breakdown.client_fee(), BigUint::ZERO);
         }
     }
 
@@ -3120,59 +2868,6 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_solution_hook_with_disable_slippage_taking() {
-            let signer = disable_slippage_taking_signer();
-            let signer_address = signer.receiver();
-            let encoder = real_encoder().with_disable_slippage_taking_signer(signer);
-            let quote = make_order_quote(1_000_000_000)
-                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
-            let hook = SetExpectedAmountOut(BigUint::from(1_500_000_000u64));
-            let opts = EncodingOptions::new(0.01)
-                .with_disable_slippage_taking(true)
-                .with_solution_hook(Arc::new(hook));
-
-            let result = encoder
-                .encode(vec![quote], opts)
-                .await
-                .unwrap();
-
-            let tx = result[0].transaction().unwrap();
-            let (
-                amount_in,
-                token_in,
-                token_out,
-                expected_amount_out,
-                min_amount_out,
-                receiver,
-                client_fee,
-                swaps,
-            ) = <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
-            let (_, fee_receiver, _, deadline, signature) = client_fee;
-            assert_eq!(expected_amount_out, U256::from(1_500_000_000u64));
-            // The signature must cover the hooked amounts, or the router rejects the swap.
-            let signing_hash = router_signing_hash(
-                fee_receiver,
-                &SwapIntent {
-                    amount_in,
-                    token_in,
-                    token_out,
-                    expected_amount_out,
-                    min_amount_out,
-                    receiver,
-                    swaps: &swaps,
-                },
-                deadline.to::<u64>(),
-                SIGNER_CHAIN_ID,
-                SIGNER_ROUTER,
-            );
-            let recovered = Signature::try_from(signature.as_ref())
-                .unwrap()
-                .recover_address_from_prehash(&signing_hash)
-                .unwrap();
-            assert_eq!(recovered, signer_address);
-        }
-
-        #[tokio::test]
         async fn test_calldata_hook_with_watermark() {
             let encoder = real_encoder();
             let signature = [0xAB; 65];
@@ -3374,25 +3069,6 @@ mod tests {
             };
             assert_eq!(swaps_hash(&with_hook[0]), keccak256(&swaps).0);
             assert_ne!(swaps_hash(&with_hook[0]), swaps_hash(&without_hook[0]));
-        }
-
-        #[tokio::test]
-        async fn test_calldata_hook_changes_swaps_with_disable_slippage_taking() {
-            let encoder = real_encoder()
-                .with_disable_slippage_taking_signer(disable_slippage_taking_signer());
-            let quote = make_order_quote(1_000_000_000)
-                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
-            let opts = EncodingOptions::new(0.01)
-                .with_disable_slippage_taking(true)
-                .with_calldata_hook(Arc::new(ChangeSwapsByte));
-
-            let result = encoder
-                .encode(vec![quote], opts)
-                .await
-                .expect("a rejected hook edit is reported on its quote, not on the call");
-
-            assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
-            assert!(result[0].transaction().is_none());
         }
     }
 

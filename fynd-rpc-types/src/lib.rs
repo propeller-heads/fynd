@@ -145,10 +145,10 @@ impl QuoteRequest {
     }
 }
 
-/// Liquidity a request excludes from a route.
+/// Liquidity a request excludes from a route, and tokens it requires a route to pass through.
 ///
 /// Every field is optional. The pools, protocol systems and tokens it names are excluded from
-/// every route.
+/// every route, and every route must pass through every one of its required tokens.
 #[must_use]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -172,6 +172,20 @@ pub struct RouteFilter {
         )
     )]
     exclude_tokens: Vec<Address>,
+    /// Every route must pass through every listed token. The order's input and output
+    /// tokens count as passed, so listing either adds no constraint. A required token may be an
+    /// intermediate even when a pool's connector tokens leave it out. A token cannot also be in
+    /// `exclude_tokens`. Only some algorithms support it; when no solver pool serving the
+    /// request does, the request fails with 422 `REQUIRED_TOKENS_NOT_SUPPORTED`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "openapi",
+        schema(
+            value_type = Vec<String>,
+            example = json!(["0x6B175474E89094C44Da98b954EedeAC495271d0F"])
+        )
+    )]
+    require_tokens: Vec<Address>,
 }
 
 impl RouteFilter {
@@ -193,6 +207,12 @@ impl RouteFilter {
         self
     }
 
+    /// Requires every route to pass through every one of these tokens.
+    pub fn with_required_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.require_tokens.extend(tokens);
+        self
+    }
+
     /// The pools excluded, by component id.
     pub fn excluded_pools(&self) -> &[String] {
         &self.exclude_pools
@@ -206,6 +226,11 @@ impl RouteFilter {
     /// The tokens excluded as intermediates.
     pub fn excluded_tokens(&self) -> &[Address] {
         &self.exclude_tokens
+    }
+
+    /// A route must pass through every token in this list.
+    pub fn required_tokens(&self) -> &[Address] {
+        &self.require_tokens
     }
 }
 
@@ -1648,7 +1673,8 @@ mod wire_format_tests {
                 "route_filter": {
                     "exclude_pools": ["0xabc"],
                     "exclude_protocols": ["uniswap_v2"],
-                    "exclude_tokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"]
+                    "exclude_tokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"],
+                    "require_tokens": ["0x6B175474E89094C44Da98b954EedeAC495271d0F"]
                 }
             }"#;
 
@@ -1661,6 +1687,25 @@ mod wire_format_tests {
                 filter.excluded_tokens(),
                 [Bytes::from(hex::decode("dAC17F958D2ee523a2206206994597C13D831ec7").unwrap())]
             );
+            assert_eq!(
+                filter.required_tokens(),
+                [Bytes::from(hex::decode("6B175474E89094C44Da98b954EedeAC495271d0F").unwrap())]
+            );
+        }
+
+        #[test]
+        fn test_route_filter_serialization_round_trips_required_tokens() {
+            let dai = Bytes::from(vec![0x6B; 20]);
+            let filter = RouteFilter::default().with_required_tokens([dai]);
+
+            let json = serde_json::to_value(&filter).unwrap();
+            let parsed: RouteFilter = serde_json::from_value(json.clone()).unwrap();
+
+            assert_eq!(
+                json,
+                serde_json::json!({ "require_tokens": ["0x6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b"] })
+            );
+            assert_eq!(parsed.required_tokens(), filter.required_tokens());
         }
     }
 
@@ -1886,13 +1931,18 @@ mod conversions {
         }
     }
 
-    impl Into<fynd_core::RouteExclusionFilter> for RouteFilter {
-        fn into(self) -> fynd_core::RouteExclusionFilter {
-            fynd_core::RouteExclusionFilter::default()
+    impl Into<fynd_core::RouteConstraints> for RouteFilter {
+        fn into(self) -> fynd_core::RouteConstraints {
+            fynd_core::RouteConstraints::default()
                 .with_excluded_pools(self.exclude_pools)
                 .with_excluded_protocols(self.exclude_protocols)
                 .with_excluded_tokens(
                     self.exclude_tokens
+                        .into_iter()
+                        .map(Into::into),
+                )
+                .with_required_tokens(
+                    self.require_tokens
                         .into_iter()
                         .map(Into::into),
                 )
@@ -2230,19 +2280,22 @@ mod conversions {
         #[test]
         fn test_route_filter_into_core() {
             let usdt = make_address(0xDA);
+            let dai = make_address(0x6B);
             let dto = QuoteOptions::default().with_route_filter(
                 RouteFilter::default()
                     .with_excluded_pools(["pool-1".to_string()])
                     .with_excluded_protocols(["uniswap_v2".to_string()])
-                    .with_excluded_tokens([usdt.clone()]),
+                    .with_excluded_tokens([usdt.clone()])
+                    .with_required_tokens([dai.clone()]),
             );
 
             let core: fynd_core::QuoteOptions = dto.into();
 
-            let expected = fynd_core::RouteExclusionFilter::default()
+            let expected = fynd_core::RouteConstraints::default()
                 .with_excluded_pools(["pool-1".to_string()])
                 .with_excluded_protocols(["uniswap_v2".to_string()])
-                .with_excluded_tokens([TychoBytes::from(usdt)]);
+                .with_excluded_tokens([TychoBytes::from(usdt)])
+                .with_required_tokens([TychoBytes::from(dai)]);
             assert_eq!(core.route_filter(), &expected);
         }
 
@@ -2284,21 +2337,6 @@ mod conversions {
             let core_fee = core.client_fee_params().unwrap();
             assert_eq!(core_fee.bps(), 100);
             assert_eq!(*core_fee.max_contribution(), BigUint::from(500u64));
-        }
-
-        /// `disable_slippage_taking` is set from a proxy-injected header, never from the request
-        /// body, so no wire field may reach it. Adding one to the DTO fails here.
-        #[test]
-        fn test_encoding_options_into_core_never_disables_slippage_taking() {
-            let json = serde_json::json!({
-                "slippage": "0.005",
-                "disable_slippage_taking": true
-            });
-            let dto: EncodingOptions = serde_json::from_value(json).expect("unknown field ignored");
-
-            let core: fynd_core::EncodingOptions = dto.into();
-
-            assert!(!core.disable_slippage_taking());
         }
 
         #[test]

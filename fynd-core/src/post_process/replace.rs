@@ -431,6 +431,8 @@ pub(super) struct ReplacementSolver<'a, F> {
     evaluator: RouteEvaluator<'a>,
     swaps: Vec<Swap>,
     finder: F,
+    /// Tokens the request requires. No target may drop one from the route.
+    required_tokens: FxHashSet<Address>,
 }
 
 impl<'a, F: ReplacementFinder> ReplacementSolver<'a, F> {
@@ -463,7 +465,11 @@ impl<'a, F: ReplacementFinder> ReplacementSolver<'a, F> {
             total_in: request.order().amount().clone(),
             original_amount_out,
         };
-        Some(Self { evaluator, swaps: liquidity.swaps, finder })
+        let required_tokens = request
+            .exclusions()
+            .required_tokens()
+            .clone();
+        Some(Self { evaluator, swaps: liquidity.swaps, finder, required_tokens })
     }
 
     /// Applies the best replacement until none raises the net amount out, the search has run one
@@ -517,7 +523,7 @@ impl<'a, F: ReplacementFinder> ReplacementSolver<'a, F> {
     fn best_route(&self, route_swaps: &[Swap], current_net: &BigInt) -> Option<CandidateRoute> {
         let mut best: Option<CandidateRoute> = None;
         let mut best_net = current_net.clone();
-        for target in build_targets(route_swaps) {
+        for target in build_targets(route_swaps, &self.required_tokens) {
             for swap in &self.swaps {
                 if !self
                     .finder
@@ -565,8 +571,9 @@ fn replace_target_swaps<'a>(
     ordered
 }
 
-/// Returns replacement targets for individual swaps, followed by targets for segments.
-fn build_targets(swaps: &[Swap]) -> Vec<ReplacementTarget> {
+/// Returns replacement targets for individual swaps, followed by targets for segments that keep
+/// every token in `required_tokens` on the route.
+fn build_targets(swaps: &[Swap], required_tokens: &FxHashSet<Address>) -> Vec<ReplacementTarget> {
     let mut targets = Vec::new();
     for (index, swap) in swaps.iter().enumerate() {
         targets.push(ReplacementTarget {
@@ -576,8 +583,32 @@ fn build_targets(swaps: &[Swap]) -> Vec<ReplacementTarget> {
             split: *swap.split(),
         });
     }
-    targets.extend(build_segment_targets(swaps));
+    for target in build_segment_targets(swaps) {
+        if !drops_required_token(swaps, &target, required_tokens) {
+            targets.push(target);
+        }
+    }
     targets
+}
+
+/// Whether replacing `target` removes a token in `required_tokens` from the route: one of the
+/// replaced swaps touches it, and it is not an end of the target.
+fn drops_required_token(
+    swaps: &[Swap],
+    target: &ReplacementTarget,
+    required_tokens: &FxHashSet<Address>,
+) -> bool {
+    for &index in &target.replaced_indices {
+        for token in [swaps[index].token_in(), swaps[index].token_out()] {
+            if token != &target.token_in &&
+                token != &target.token_out &&
+                required_tokens.contains(token)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One target for each pair of cut tokens with more than one swap in the segment between them.

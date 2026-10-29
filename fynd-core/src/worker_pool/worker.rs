@@ -13,9 +13,13 @@ use std::{
 };
 
 use num_bigint::{BigInt, BigUint};
+use rustc_hash::FxHashSet;
 use tokio::sync::{broadcast, Notify};
 use tracing::{debug, error, info, warn};
-use tycho_simulation::{tycho_common::models::protocol::ProtocolComponent, tycho_core::Bytes};
+use tycho_simulation::{
+    tycho_common::models::{protocol::ProtocolComponent, Address},
+    tycho_core::Bytes,
+};
 
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
@@ -35,7 +39,7 @@ use crate::{
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
     post_process::{PostProcessRequest, PostProcessors, ProcessedRoute, RoutePostProcessor},
-    types::{internal::SolveTask, Route, RouteExclusionFilter, RouteExclusions, RouteResult},
+    types::{internal::SolveTask, ResolvedRouteConstraints, Route, RouteConstraints, RouteResult},
     worker_pool_router::{ExclusiveAccess, LiquidityScope},
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -64,7 +68,7 @@ fn should_drop_component(
         is_excluded_protocol(exclude_protocols, component)
 }
 
-/// The exclusions this request resolves to against `view`, resolved once and shared.
+/// The constraints this request resolves to against `view`, resolved once and shared.
 ///
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The answer depends on the market's
@@ -72,7 +76,10 @@ fn should_drop_component(
 /// generation changes.
 ///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
-fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<RouteExclusions> {
+fn resolve_exclusions(
+    view: &MarketDataView<'_>,
+    params: &SolveParams,
+) -> Arc<ResolvedRouteConstraints> {
     let generation = view
         .base_market_state()
         .exclusion_generation();
@@ -108,8 +115,8 @@ fn resolve_exclusions(view: &MarketDataView<'_>, params: &SolveParams) -> Arc<Ro
 fn check_route(
     route: &Route,
     order: &Order,
-    filter: &RouteExclusionFilter,
-    exclusions: &RouteExclusions,
+    filter: &RouteConstraints,
+    exclusions: &ResolvedRouteConstraints,
 ) -> Result<(), String> {
     route
         .validate()
@@ -130,11 +137,12 @@ fn check_route(
 
 /// Check every leg, including split branches, against the original request filter. Reading
 /// protocol systems from the returned components also covers pools added after exclusions were
-/// resolved. The order's endpoints remain allowed by intermediate-token exclusions.
+/// resolved. The order's endpoints remain allowed by intermediate-token exclusions, and every
+/// token path of the route must pass through every required token.
 fn validate_route_filter(
     route: &Route,
     order: &Order,
-    filter: &RouteExclusionFilter,
+    filter: &RouteConstraints,
 ) -> Result<(), String> {
     if filter.is_empty() {
         return Ok(());
@@ -165,7 +173,44 @@ fn validate_route_filter(
             }
         }
     }
+    if route_bypasses_required_tokens(route, order, filter.required_tokens()) {
+        return Err("route reaches the output token without passing through every required token"
+            .to_string());
+    }
     Ok(())
+}
+
+/// Whether `route` contains a path from the order's input token to its output token that skips
+/// at least one required token.
+///
+/// A required input or output token is passed by every path and adds no constraint.
+fn route_bypasses_required_tokens(
+    route: &Route,
+    order: &Order,
+    required_tokens: &FxHashSet<Address>,
+) -> bool {
+    required_tokens
+        .iter()
+        .filter(|&token| token != order.token_in() && token != order.token_out())
+        .any(|token| reaches_output_avoiding(route, order, token))
+}
+
+/// Whether the route's swaps lead from the order's input token to its output token without
+/// passing through `avoided`.
+///
+/// Traverses the swaps as a graph, so a split branch that skips `avoided` is found.
+fn reaches_output_avoiding(route: &Route, order: &Order, avoided: &Address) -> bool {
+    let mut reached = FxHashSet::from_iter([order.token_in()]);
+    let mut frontier = vec![order.token_in()];
+    while let Some(token) = frontier.pop() {
+        for swap in route.swaps() {
+            let next = swap.token_out();
+            if swap.token_in() == token && next != avoided && reached.insert(next) {
+                frontier.push(next);
+            }
+        }
+    }
+    reached.contains(order.token_out())
 }
 
 /// Records per-worker-pool queue metrics at task pickup: how long the task waited in the
@@ -699,7 +744,7 @@ where
         &self,
         order: &Order,
         params: &SolveParams,
-        exclusions: &RouteExclusions,
+        exclusions: &ResolvedRouteConstraints,
         deadline: Instant,
         result: RouteResult,
     ) -> (RouteResult, Vec<String>) {
@@ -770,6 +815,16 @@ where
         params: SolveParams,
         deadline: Instant,
     ) -> Result<SingleOrderQuote, SolveError> {
+        if !params
+            .route_filter()
+            .required_tokens()
+            .is_empty() &&
+            !A::SUPPORTS_REQUIRED_TOKENS
+        {
+            debug!(order_id = %order.id(), "algorithm does not support required tokens");
+            return Err(SolveError::RequiredTokensNotSupported);
+        }
+
         let start_time = Instant::now();
 
         // Log order details once at entry
@@ -1328,7 +1383,7 @@ mod tests {
         post_process::test_utils::{direct_swap, swap_through, MockPostProcessor},
         tests::metrics::recorded_metrics,
         types::{
-            ComponentId, ComponentTopology, OrderSide, Route, RouteExclusionFilter, RouteRejection,
+            ComponentId, ComponentTopology, OrderSide, Route, RouteConstraints, RouteRejection,
             RouteResult, Swap,
         },
         AlgorithmError,
@@ -1470,6 +1525,8 @@ mod tests {
         type GraphType = StableDiGraph<DepthAndPrice>;
         type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
 
+        const SUPPORTS_REQUIRED_TOKENS: bool = true;
+
         fn name(&self) -> &str {
             "filter_ignoring_mock"
         }
@@ -1490,54 +1547,113 @@ mod tests {
         }
     }
 
-    #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
-    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
-    #[case::protocol_prefix(RouteExclusionFilter::default().with_excluded_protocols(["uniswap:".to_string()]), None)]
-    #[case::intermediate(RouteExclusionFilter::default().with_excluded_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
-    #[case::empty(RouteExclusionFilter::default(), None)]
-    #[case::unrelated(RouteExclusionFilter::default().with_excluded_pools(["other".to_string()]).with_excluded_protocols(["other".to_string()]).with_excluded_tokens([token(0x04, "D").address]), None)]
-    #[case::endpoints(RouteExclusionFilter::default().with_excluded_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
-    #[tokio::test]
-    async fn test_quote_enforces_route_filter(
-        #[case] filter: RouteExclusionFilter,
-        #[case] rejection: Option<&str>,
-        #[values(false, true)] split: bool,
-    ) {
+    fn a_to_c_swap(
+        id: &str,
+        token_in: &tycho_simulation::tycho_common::models::token::Token,
+        token_out: &tycho_simulation::tycho_common::models::token::Token,
+        amount_in: u64,
+        amount_out: u64,
+    ) -> Swap {
+        Swap::new(
+            id.to_string(),
+            "uniswap_v2".to_string(),
+            token_in.address.clone(),
+            token_out.address.clone(),
+            BigUint::from(amount_in),
+            BigUint::from(amount_out),
+            BigUint::from(1u64),
+            component(id, &[token_in.clone(), token_out.clone()]),
+            Box::new(MockProtocolSim::new(2.0)),
+        )
+    }
+
+    /// A route from A to C through B. When `split` is true, half goes directly to C and half goes
+    /// through B.
+    fn a_to_c_route(split: bool) -> Route {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");
         let token_c = token(0x03, "C");
-        let make_swap = |id: &str,
-                         token_in: &tycho_simulation::tycho_common::models::token::Token,
-                         token_out: &tycho_simulation::tycho_common::models::token::Token,
-                         amount_in: u64,
-                         amount_out: u64| {
-            Swap::new(
-                id.to_string(),
-                "uniswap_v2".to_string(),
-                token_in.address.clone(),
-                token_out.address.clone(),
-                BigUint::from(amount_in),
-                BigUint::from(amount_out),
-                BigUint::from(1u64),
-                component(id, &[token_in.clone(), token_out.clone()]),
-                Box::new(MockProtocolSim::new(2.0)),
-            )
-        };
         let swaps = if split {
             vec![
-                make_swap("direct", &token_a, &token_c, 50, 40).with_split(0.5),
-                make_swap("p1", &token_a, &token_b, 50, 45),
-                make_swap("p2", &token_b, &token_c, 45, 40),
+                a_to_c_swap("direct", &token_a, &token_c, 50, 40).with_split(0.5),
+                a_to_c_swap("p1", &token_a, &token_b, 50, 45),
+                a_to_c_swap("p2", &token_b, &token_c, 45, 40),
             ]
         } else {
             vec![
-                make_swap("p1", &token_a, &token_b, 100, 90),
-                make_swap("p2", &token_b, &token_c, 90, 80),
+                a_to_c_swap("p1", &token_a, &token_b, 100, 90),
+                a_to_c_swap("p2", &token_b, &token_c, 90, 80),
             ]
         };
         let route = Route::new(swaps, FxHashMap::default()).unwrap();
         route.validate().unwrap();
+        route
+    }
+
+    /// A route from A to C through D only.
+    fn a_to_c_route_through_d() -> Route {
+        let token_a = token(0x01, "A");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let swaps = vec![
+            a_to_c_swap("a_to_d", &token_a, &token_d, 100, 90),
+            a_to_c_swap("d_to_c", &token_d, &token_c, 90, 80),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
+    /// A route from A to C through B and then D.
+    fn a_to_c_route_through_b_then_d() -> Route {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let swaps = vec![
+            a_to_c_swap("a_to_b", &token_a, &token_b, 100, 90),
+            a_to_c_swap("b_to_d", &token_b, &token_d, 90, 80),
+            a_to_c_swap("d_to_c", &token_d, &token_c, 80, 70),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
+    /// A route from A to C that splits in half between a branch through B and one through D.
+    fn a_to_c_route_through_b_and_d() -> Route {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let token_c = token(0x03, "C");
+        let token_d = token(0x04, "D");
+        let swaps = vec![
+            a_to_c_swap("via_b_in", &token_a, &token_b, 50, 45).with_split(0.5),
+            a_to_c_swap("via_d_in", &token_a, &token_d, 50, 45),
+            a_to_c_swap("via_b_out", &token_b, &token_c, 45, 40),
+            a_to_c_swap("via_d_out", &token_d, &token_c, 45, 40),
+        ];
+        let route = Route::new(swaps, FxHashMap::default()).unwrap();
+        route.validate().unwrap();
+        route
+    }
+
+    #[rstest]
+    #[case::pool(RouteConstraints::default().with_excluded_pools(["p2".to_string()]), Some("excluded pool p2"))]
+    #[case::protocol(RouteConstraints::default().with_excluded_protocols(["uniswap_v2".to_string()]), Some("excluded protocol uniswap_v2"))]
+    #[case::protocol_prefix(RouteConstraints::default().with_excluded_protocols(["uniswap:".to_string()]), None)]
+    #[case::intermediate(RouteConstraints::default().with_excluded_tokens([token(0x02, "B").address]), Some("excluded intermediate token"))]
+    #[case::empty(RouteConstraints::default(), None)]
+    #[case::unrelated(RouteConstraints::default().with_excluded_pools(["other".to_string()]).with_excluded_protocols(["other".to_string()]).with_excluded_tokens([token(0x04, "D").address]), None)]
+    #[case::endpoints(RouteConstraints::default().with_excluded_tokens([token(0x01, "A").address, token(0x03, "C").address]), None)]
+    #[tokio::test]
+    async fn test_quote_enforces_route_filter(
+        #[case] filter: RouteConstraints,
+        #[case] rejection: Option<&str>,
+        #[values(false, true)] split: bool,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_c = token(0x03, "C");
+        let route = a_to_c_route(split);
         // The returned pools are absent from this market: protocol validation must inspect the
         // actual route rather than relying on the pool IDs resolved before the algorithm ran.
         let (market, _) = setup_market_weighted(vec![]);
@@ -1559,6 +1675,89 @@ mod tests {
             (None, Ok(quote)) => assert_eq!(quote.order().status(), QuoteStatus::Success),
             (expected, result) => panic!("expected rejection {expected:?}, got {result:?}"),
         }
+    }
+
+    /// Every branch of the route must pass through every required token. The split route has one
+    /// branch straight from A to C; the two-branch route splits between B and D.
+    #[rstest]
+    #[case::through_required(a_to_c_route(false), &[0x02], None)]
+    #[case::split_branch_skips_required(a_to_c_route(true), &[0x02], Some("required token"))]
+    #[case::required_unvisited(a_to_c_route(false), &[0x04], Some("required token"))]
+    #[case::one_of_two_visited(a_to_c_route(false), &[0x04, 0x02], Some("required token"))]
+    #[case::other_of_two_visited(a_to_c_route_through_d(), &[0x04, 0x02], Some("required token"))]
+    #[case::both_on_one_path(a_to_c_route_through_b_then_d(), &[0x02, 0x04], None)]
+    #[case::endpoint_and_intermediate(a_to_c_route(false), &[0x01, 0x02], None)]
+    #[case::endpoint_and_intermediate_skipped(a_to_c_route(true), &[0x01, 0x02], Some("required token"))]
+    #[case::input_required(a_to_c_route(true), &[0x01], None)]
+    #[case::output_required(a_to_c_route(true), &[0x03], None)]
+    #[case::each_branch_has_one_of_two(
+        a_to_c_route_through_b_and_d(),
+        &[0x02, 0x04],
+        Some("required token")
+    )]
+    #[case::one_branch_skips_required(
+        a_to_c_route_through_b_and_d(),
+        &[0x02],
+        Some("required token")
+    )]
+    #[tokio::test]
+    async fn test_quote_enforces_required_tokens(
+        #[case] route: Route,
+        #[case] required: &[u8],
+        #[case] rejection: Option<&str>,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_c = token(0x03, "C");
+        let filter = RouteConstraints::default().with_required_tokens(
+            required
+                .iter()
+                .map(|&byte| token(byte, "R").address),
+        );
+        let (market, _) = setup_market_weighted(vec![]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            FilterIgnoringAlgorithm(route),
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_c, 100, OrderSide::Sell);
+
+        let result = worker
+            .quote(&ord, SolveParams::default().with_route_filter(filter), far_deadline())
+            .await;
+
+        match (rejection, result) {
+            (Some(expected), Err(SolveError::AlgorithmError(msg))) => {
+                assert!(msg.contains(expected), "unexpected message: {msg}");
+            }
+            (None, Ok(quote)) => assert_eq!(quote.order().status(), QuoteStatus::Success),
+            (expected, result) => panic!("expected rejection {expected:?}, got {result:?}"),
+        }
+    }
+
+    /// The worker rejects required tokens before calling an unsupported algorithm; calling
+    /// `InvalidRouteAlgorithm` would instead produce an invalid-route error.
+    #[tokio::test]
+    async fn test_quote_required_tokens_with_unsupported_algorithm() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            InvalidRouteAlgorithm,
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let filter = RouteConstraints::default().with_required_tokens([token_b.address]);
+
+        let result = worker
+            .quote(&ord, SolveParams::default().with_route_filter(filter), far_deadline())
+            .await;
+
+        assert!(matches!(result, Err(SolveError::RequiredTokensNotSupported)), "{result:?}");
     }
 
     /// Always fails, with an error message listing the pools the worker resolved the request's
@@ -1680,7 +1879,7 @@ mod tests {
 
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
         let params = SolveParams::default().with_route_filter(
-            RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v2".to_string()]),
+            RouteConstraints::default().with_excluded_protocols(["uniswap_v2".to_string()]),
         );
 
         let result = worker
@@ -1952,7 +2151,7 @@ mod tests {
     /// be in place before the quote.
     async fn quote_pamm_route_against(
         market: MarketData,
-        filter: RouteExclusionFilter,
+        filter: RouteConstraints,
     ) -> Result<SingleOrderQuote, SolveError> {
         let derived = DerivedData::new_shared();
         let mut worker =
@@ -1997,10 +2196,10 @@ mod tests {
     /// The request's filter reaches the pool a pAMM leg settles through, so excluding every
     /// candidate, by pool or by protocol, leaves the leg no fallback.
     #[rstest]
-    #[case::pool(RouteExclusionFilter::default().with_excluded_pools([FALLBACK_POOL.to_string()]))]
-    #[case::protocol(RouteExclusionFilter::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
+    #[case::pool(RouteConstraints::default().with_excluded_pools([FALLBACK_POOL.to_string()]))]
+    #[case::protocol(RouteConstraints::default().with_excluded_protocols(["uniswap_v3".to_string()]))]
     #[tokio::test]
-    async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteExclusionFilter) {
+    async fn test_quote_pamm_route_with_excluded_fallback(#[case] filter: RouteConstraints) {
         let result =
             quote_pamm_route_against(market_with_unpriceable_fallback_pool(), filter).await;
 
@@ -2047,7 +2246,7 @@ mod tests {
     async fn test_quote_pamm_route_without_fallback_pool() {
         let (market, _) = setup_market_weighted(vec![]);
 
-        let result = quote_pamm_route_against(market, RouteExclusionFilter::default()).await;
+        let result = quote_pamm_route_against(market, RouteConstraints::default()).await;
 
         assert!(
             matches!(
@@ -2064,7 +2263,7 @@ mod tests {
     async fn test_quote_pamm_route_with_unpriceable_fallback() {
         let result = quote_pamm_route_against(
             market_with_unpriceable_fallback_pool(),
-            RouteExclusionFilter::default(),
+            RouteConstraints::default(),
         )
         .await;
 
@@ -3212,7 +3411,7 @@ mod tests {
         let params = SolveParams::default()
             .with_state_label("overlay".to_string())
             .with_route_filter(
-                RouteExclusionFilter::default().with_excluded_pools(["unused".to_string()]),
+                RouteConstraints::default().with_excluded_pools(["unused".to_string()]),
             );
 
         worker
@@ -3281,7 +3480,7 @@ mod tests {
                     .collect(),
             );
         let params = SolveParams::default().with_route_filter(
-            RouteExclusionFilter::default().with_excluded_protocols(
+            RouteConstraints::default().with_excluded_protocols(
                 request_excluded
                     .iter()
                     .map(ToString::to_string),

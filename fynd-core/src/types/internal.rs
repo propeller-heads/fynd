@@ -233,6 +233,13 @@ pub enum SolveError {
     #[error("all routes exceed the requested max_gas")]
     MaxGasExceeded,
 
+    /// The request requires tokens, and no worker pool serving it supports that.
+    ///
+    /// The router fails the request with it when every pool serving it lacks support; a worker
+    /// returns it for its own pool.
+    #[error("no solver pool serving this request supports route_filter.require_tokens")]
+    RequiredTokensNotSupported,
+
     /// Data required for solving was not available (e.g. gas price, token prices).
     #[error("required data missing: {0}")]
     MissingData(String),
@@ -307,6 +314,7 @@ impl SolveError {
             SolveError::FailedEncoding(_) => "encoding_failed",
             SolveError::EncodingUnavailable(_) => "encoding_unavailable",
             SolveError::MaxGasExceeded => "max_gas_exceeded",
+            SolveError::RequiredTokensNotSupported => "required_tokens_not_supported",
             SolveError::MissingData(_) => "missing_data",
             SolveError::SimulationFailed(_) => "simulation_failed",
         }
@@ -324,6 +332,7 @@ mod tests {
     #[case(SolveError::NoRouteFound { order_id: "o1".to_string(), reason: None }, "no_route")]
     #[case(SolveError::QueueFull, "queue_full")]
     #[case(SolveError::MaxGasExceeded, "max_gas_exceeded")]
+    #[case(SolveError::RequiredTokensNotSupported, "required_tokens_not_supported")]
     #[case(SolveError::AlgorithmError("boom".to_string()), "algorithm_error")]
     #[case(SolveError::MissingData("gas".to_string()), "missing_data")]
     #[case(SolveError::SimulationFailed("revert".to_string()), "simulation_failed")]

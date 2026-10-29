@@ -194,6 +194,16 @@ pub trait Algorithm: Send + Sync {
     /// This allows the solver to automatically create the appropriate graph manager.
     type GraphManager: GraphManager<Self::GraphType> + Default;
 
+    /// Whether this algorithm honours the route filter's required tokens.
+    ///
+    /// An algorithm that sets it must only return routes in which every flow from the input
+    /// token to the output token passes through every one of
+    /// [`SolveRequest::exclusions`]'s required tokens (a required endpoint counts as passed);
+    /// the worker rejects routes that do not. The router does not send an order that requires
+    /// tokens to a pool whose algorithm sets `false`, and the worker fails the order on that
+    /// pool without solving.
+    const SUPPORTS_REQUIRED_TOKENS: bool = false;
+
     /// Returns the algorithm's name.
     fn name(&self) -> &str;
 
