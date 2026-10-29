@@ -30,7 +30,13 @@ use tycho_simulation::{
 };
 
 use super::DataFeedError;
-use crate::feed::protocol_registry::parse_rfq_entries;
+use crate::{
+    feed::protocol_registry::parse_rfq_entries,
+    nexus::{
+        client::NexusClient,
+        rfq::{RfqAssembler, RfqPricesFeed},
+    },
+};
 
 /// A market-maker venue whose books Fynd builds from the venue's own prices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +121,9 @@ pub(crate) struct BookVenueContext {
     pub(crate) book_config: BookFeedConfig,
     /// Whether Bebop and Hashflow stream as one component for all their pairs.
     pub(crate) aggregate_rfqs: bool,
+    /// Optional client for shared Bebop, Hashflow and Metric prices. Without this client, each
+    /// feed connects directly to its venue.
+    pub(crate) nexus: Option<NexusClient>,
 }
 
 /// The feed of one book venue that [`BookStream`] runs: the venue's own connection, or `SharedRfq`
@@ -127,6 +136,7 @@ pub(crate) enum BookVenueFeed {
     Metric(MetricFeed),
     Native(NativeFeed),
     Liquorice(LiquoriceFeed),
+    SharedRfq(RfqPricesFeed),
 }
 
 impl SnapshotFeed for BookVenueFeed {
@@ -143,11 +153,16 @@ impl SnapshotFeed for BookVenueFeed {
             Self::Metric(feed) => feed.run(publisher).boxed(),
             Self::Native(feed) => feed.run(publisher).boxed(),
             Self::Liquorice(feed) => feed.run(publisher).boxed(),
+            Self::SharedRfq(feed) => feed.run(publisher).boxed(),
         }
     }
 }
 
 /// Builds the feed that serves `entry`, reading the venue's credentials from the environment.
+///
+/// With a nexus client in `context`, Bebop, Hashflow and Metric build their books from the
+/// service's prices; Metric then needs no API key. Native and Liquorice always connect to the
+/// venue.
 ///
 /// # Errors
 ///
@@ -162,17 +177,34 @@ pub(crate) fn open_book_feed(
         BookVenue::Bebop => {
             let env = bebop::BebopEnv::read()?;
             let assembler = bebop::assembler(context, entry, &env)?;
-            BookVenueFeed::Bebop(bebop::direct_feed(context, &env, assembler)?)
+            match &context.nexus {
+                Some(client) => {
+                    BookVenueFeed::SharedRfq(client.rfq_prices_feed(RfqAssembler::Bebop(assembler)))
+                }
+                None => BookVenueFeed::Bebop(bebop::direct_feed(context, &env, assembler)?),
+            }
         }
         BookVenue::Hashflow => {
             let env = hashflow::HashflowEnv::read()?;
             let assembler = hashflow::assembler(context, entry, &env)?;
-            BookVenueFeed::Hashflow(hashflow::direct_feed(context, &env, assembler)?)
+            match &context.nexus {
+                Some(client) => BookVenueFeed::SharedRfq(
+                    client.rfq_prices_feed(RfqAssembler::Hashflow(assembler)),
+                ),
+                None => BookVenueFeed::Hashflow(hashflow::direct_feed(context, &env, assembler)?),
+            }
         }
         BookVenue::Metric => {
-            let env = metric::MetricEnv::read()?;
             let assembler = metric::assembler(context, entry);
-            BookVenueFeed::Metric(metric::direct_feed(context, &env, assembler)?)
+            match &context.nexus {
+                Some(client) => BookVenueFeed::SharedRfq(
+                    client.rfq_prices_feed(RfqAssembler::Metric(assembler)),
+                ),
+                None => {
+                    let env = metric::MetricEnv::read()?;
+                    BookVenueFeed::Metric(metric::direct_feed(context, &env, assembler)?)
+                }
+            }
         }
         BookVenue::Native => BookVenueFeed::Native(native::direct_feed(context, entry)?),
         BookVenue::Liquorice => BookVenueFeed::Liquorice(liquorice::direct_feed(context, entry)?),

@@ -36,6 +36,7 @@ use super::{
 };
 use crate::{
     feed::protocol_registry::{matches_streamed_system, RfqEntry},
+    nexus::client::NexusClient,
     types::ComponentId,
 };
 
@@ -150,14 +151,17 @@ impl BookStream {
     /// USD amount — unlike the native-token threshold the Tycho component filter takes. With
     /// `config.aggregate_rfqs`, Bebop and Hashflow each stream as one component for all their
     /// pairs. External sources get an [`ExternalLiquidityConfig`] with the same chain, tokens and
-    /// floor.
+    /// floor. With `config.nexus_url`, Bebop, Hashflow and Metric get their prices from
+    /// that service instead of from the venue, and Metric needs no API key. Native and Liquorice
+    /// connect directly either way.
     ///
     /// # Errors
     ///
     /// Returns [`DataFeedError::Config`] if a venue's credentials are missing from the
-    /// environment, if the chain has no curated USD stablecoin set to price built-in venues'
-    /// books against, if external liquidity cannot be built, if two sources share a name, or if a
-    /// source has the name of a `--protocols` entry.
+    /// environment, if the nexus URL is not an HTTP URL, if the chain has no curated USD
+    /// stablecoin set to price built-in venues' books against, if external liquidity cannot be
+    /// built, if two sources share a name, or if a source has the name of a `--protocols`
+    /// entry.
     pub fn open(
         config: &TychoFeedConfig,
         tokens: HashMap<Bytes, Token>,
@@ -173,6 +177,12 @@ impl BookStream {
             return Ok(None);
         }
 
+        let nexus = config
+            .nexus_url
+            .as_deref()
+            .map(NexusClient::new)
+            .transpose()
+            .map_err(|e| DataFeedError::Config(e.to_string()))?;
         let context = BookVenueContext {
             book_config: BookFeedConfig {
                 chain,
@@ -180,6 +190,7 @@ impl BookStream {
                 min_tvl_usd: config.min_tvl,
             },
             aggregate_rfqs: config.aggregate_rfqs,
+            nexus,
         };
         let book_config = &context.book_config;
 
