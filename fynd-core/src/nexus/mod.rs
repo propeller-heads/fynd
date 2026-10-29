@@ -106,3 +106,197 @@ impl<D: DeserializeOwned> NexusMessage<D> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use num_bigint::BigUint;
+    use rstest::rstest;
+    use serde_json::json;
+    use tycho_simulation::{
+        book::{Levels, PriceLevel},
+        pamm::protocols::metric::{
+            MetricBidAskResponse, MetricMetadata, MetricPoolPrice, MetricPrices,
+        },
+        rfq::protocols::{
+            bebop::{BebopBook, BebopPrices},
+            hashflow::{HashflowMarketMakerLevels, HashflowPair, HashflowPrices},
+        },
+        tycho_core::Bytes,
+    };
+
+    use super::*;
+
+    const EPOCH: u64 = 1_761_550_000_000;
+
+    fn levels(price: f64, quantity: f64) -> Levels {
+        Levels::new(vec![PriceLevel { price, quantity }]).unwrap()
+    }
+
+    fn bebop_prices(bid: f64, ask: f64) -> BebopPrices {
+        BebopPrices {
+            pairs: vec![BebopBook {
+                base: Bytes::from([0xc0; 20]),
+                quote: Bytes::from([0xa0; 20]),
+                last_update_ts: 1_761_550_000_123,
+                bids: levels(bid, 0.325717),
+                asks: levels(ask, 0.325717),
+            }],
+        }
+    }
+
+    fn hashflow_prices() -> HashflowPrices {
+        let pair = HashflowPair {
+            base_token: Bytes::from([0xc0; 20]),
+            quote_token: Bytes::from([0xa0; 20]),
+        };
+        HashflowPrices {
+            levels_by_maker: HashMap::from([(
+                "mm1".to_string(),
+                vec![HashflowMarketMakerLevels { pair, levels: levels(2999.1, 1.5) }],
+            )]),
+        }
+    }
+
+    fn metric_prices() -> MetricPrices {
+        MetricPrices {
+            pools: vec![MetricPoolPrice {
+                metadata: MetricMetadata {
+                    pool_address: Bytes::from([0x11; 20]),
+                    token0: Bytes::from([0xc0; 20]),
+                    token1: Bytes::from([0xa0; 20]),
+                    tvl_fiat: Some(1_234_567.89),
+                    pause_level: Some(0),
+                },
+                bid_ask: MetricBidAskResponse {
+                    bid_adj: BigUint::from(u128::MAX),
+                    ask_adj: BigUint::from(1u8),
+                    total_token0_available: Some(BigUint::from(7u8)),
+                    total_token1_available: None,
+                    server_ts: 1_761_550_000,
+                    price_provider_status: Some("healthy".to_string()),
+                    depth: Default::default(),
+                },
+            }],
+        }
+    }
+
+    fn snapshot<D>(data: D) -> NexusMessage<D> {
+        let as_of = "2026-10-27T09:00:00.123456Z"
+            .parse()
+            .unwrap();
+        NexusMessage::new(EPOCH, 42, MessageBody::Snapshot { as_of, data })
+    }
+
+    fn round_trip<D>(message: &NexusMessage<D>) -> NexusMessage<D>
+    where
+        D: Serialize + DeserializeOwned,
+    {
+        NexusMessage::decode(&message.encode().unwrap()).unwrap()
+    }
+
+    #[rstest]
+    #[case::snapshot(snapshot(json!({"x": [1, 2.5, null]})))]
+    #[case::withdrawn(NexusMessage::new(EPOCH, 43, MessageBody::Withdrawn))]
+    fn test_round_trip_each_message_type(#[case] message: NexusMessage<serde_json::Value>) {
+        assert_eq!(round_trip(&message), message);
+    }
+
+    #[test]
+    fn test_round_trip_typed_snapshots() {
+        let bebop = snapshot(bebop_prices(3000.5, 3001.5));
+        let hashflow = snapshot(hashflow_prices());
+        let metric = snapshot(metric_prices());
+
+        assert_eq!(round_trip(&bebop), bebop);
+        assert_eq!(round_trip(&hashflow), hashflow);
+        assert_eq!(round_trip(&metric), metric);
+    }
+
+    #[rstest]
+    #[case::widened_f32(f64::from(3000.1f32))]
+    #[case::sum_of_decimals(0.1 + 0.2)]
+    #[case::smallest_subnormal(f64::from_bits(1))]
+    #[case::next_after_round(f64::from_bits(3000.0f64.to_bits() + 1))]
+    fn test_round_trip_price_precision(#[case] price: f64) {
+        let message = snapshot(bebop_prices(price, price));
+
+        let MessageBody::Snapshot { data, .. } = round_trip(&message).body else {
+            panic!("a snapshot must decode as a snapshot");
+        };
+
+        assert_eq!(data.pairs[0].bids[0].price.to_bits(), price.to_bits());
+        assert_eq!(data.pairs[0].asks[0].price.to_bits(), price.to_bits());
+    }
+
+    #[rstest]
+    #[case::snapshot(
+        snapshot(json!({"x": 1})),
+        json!({
+            "v": 1,
+            "type": "snapshot",
+            "epoch": EPOCH,
+            "seq": 42,
+            "as_of": "2026-10-27T09:00:00.123456Z",
+            "data": {"x": 1}
+        })
+    )]
+    #[case::withdrawn(
+        NexusMessage::new(7, 3, MessageBody::Withdrawn),
+        json!({"v": 1, "type": "withdrawn", "epoch": 7, "seq": 3})
+    )]
+    fn test_encoded_json_shape(
+        #[case] message: NexusMessage<serde_json::Value>,
+        #[case] expected: serde_json::Value,
+    ) {
+        let text = message.encode().unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(value, expected);
+    }
+
+    #[rstest]
+    #[case::newer(r#"{"v":2,"type":"withdrawn","epoch":1,"seq":1}"#, 2)]
+    #[case::zero(r#"{"v":0,"type":"withdrawn","epoch":1,"seq":1}"#, 0)]
+    #[case::unreadable_body(r#"{"v":9,"type":"something_new","payload":[1]}"#, 9)]
+    fn test_decode_unknown_version(#[case] text: &str, #[case] version: u32) {
+        let error = NexusMessage::<serde_json::Value>::decode(text).unwrap_err();
+
+        let MessageError::UnsupportedVersion { found, supported } = error else {
+            panic!("expected an unsupported version error, got {error}");
+        };
+        assert_eq!((found, supported), (version, PROTOCOL_VERSION));
+    }
+
+    #[rstest]
+    #[case::not_json("not json")]
+    #[case::no_version(r#"{"type":"withdrawn","epoch":1,"seq":1}"#)]
+    #[case::unknown_type(r#"{"v":1,"type":"goodbye","epoch":1,"seq":1}"#)]
+    #[case::no_epoch(r#"{"v":1,"type":"withdrawn","seq":1}"#)]
+    #[case::snapshot_without_data(
+        r#"{"v":1,"type":"snapshot","epoch":1,"seq":1,"as_of":"2026-10-27T09:00:00Z"}"#
+    )]
+    #[case::snapshot_with_bad_timestamp(
+        r#"{"v":1,"type":"snapshot","epoch":1,"seq":1,"as_of":"yesterday","data":1}"#
+    )]
+    fn test_decode_malformed_message(#[case] text: &str) {
+        assert!(matches!(
+            NexusMessage::<serde_json::Value>::decode(text),
+            Err(MessageError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn test_decode_snapshot_with_wrong_data_shape() {
+        let text = snapshot(json!({"not": "prices"}))
+            .encode()
+            .unwrap();
+
+        assert!(matches!(
+            NexusMessage::<BebopPrices>::decode(&text),
+            Err(MessageError::Malformed(_))
+        ));
+    }
+}
