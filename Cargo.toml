@@ -101,6 +101,7 @@ members = [
     "fynd-core",
     "fynd-rpc",
     "fynd-rpc-types",
+    "fynd-nexus",
     "clients/rust",
     "tools/benchmark",
     "tools/common",

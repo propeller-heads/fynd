@@ -1,0 +1,37 @@
+[package]
+name = "fynd-nexus"
+version.workspace = true
+edition = "2021"
+description = "Holds the RFQ venue connections that Fynd pods would otherwise each open, and serves the latest prices to them"
+license-file = "../LICENSE.md"
+repository.workspace = true
+readme = "README.md"
+
+[dependencies]
+fynd-core.workspace = true
+tycho-simulation.workspace = true
+actix-web.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+futures.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+fynd-core = { workspace = true, features = ["test-utils"] }
+rstest.workspace = true
+tokio-stream.workspace = true
+reqwest.workspace = true
+metrics-util.workspace = true
+
+[[bin]]
+name = "fynd-nexus"
+path = "src/main.rs"
