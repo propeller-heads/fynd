@@ -5,6 +5,8 @@ use tycho_simulation::tycho_common::models::Chain;
 
 /// Book feeds: market-maker venues streaming price levels over their own connection.
 pub(crate) mod book_stream;
+/// The book venues Fynd can run, and the feed each one opens.
+pub(crate) mod book_venues;
 /// Per-worker component filtering: which components reach one worker's graph.
 pub(crate) mod component_filter;
 /// Market events broadcast by the Tycho feed on every block update.

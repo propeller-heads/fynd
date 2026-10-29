@@ -22,13 +22,11 @@ use tycho_simulation::{
         all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
         BookFeedEvent, BookFeedStreams, BookSnapshot, ReceivedAt,
     },
-    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    pamm::protocols::metric::feed::MetricFeedBuilder,
     protocol::models::ProtocolComponent,
     rfq::protocols::{
-        bebop::{self, feed::BebopFeedBuilder},
-        hashflow::{self, feed::HashflowFeedBuilder},
-        liquorice::{self, feed::LiquoriceFeedBuilder},
-        native::{self, feed::NativeFeedBuilder},
+        bebop::feed::BebopFeedBuilder, hashflow::feed::HashflowFeedBuilder,
+        liquorice::feed::LiquoriceFeedBuilder, native::feed::NativeFeedBuilder,
     },
     snapshot_feed::{
         errors::FeedError, SnapshotFeed, SnapshotFeedEvent, SnapshotFeedOutcome,
@@ -39,6 +37,7 @@ use tycho_simulation::{
 };
 
 use super::{
+    book_venues::{BookVenue, BookVenueEntry},
     external_liquidity::{
         liquidity_snapshot_from_books, ExternalLiquidityConfig, LiquidityComponent,
         LiquiditySnapshot,
@@ -46,9 +45,7 @@ use super::{
     when_configured, DataFeedError, TychoFeedConfig,
 };
 use crate::{
-    feed::protocol_registry::{
-        matches_streamed_system, parse_rfq_entries, require_executor, RfqEntry, METRIC_CHAINS,
-    },
+    feed::protocol_registry::{matches_streamed_system, RfqEntry},
     types::ComponentId,
 };
 
@@ -178,44 +175,11 @@ impl BookStream {
         let chain = config.chain;
         let external_liquidity = &config.external_liquidity;
         reject_name_clash(&config.protocols, external_liquidity)?;
-        let mut venues = Vec::new();
-        for (entry, venue) in parse_rfq_entries(&config.protocols)? {
-            match venue.protocol() {
-                bebop::PROTOCOL_SYSTEM => {
-                    // The feed supports more chains than Tycho's execution registry. Reject
-                    // deployments that could publish books Fynd cannot encode.
-                    require_executor(chain, entry)?;
-                }
-                hashflow::PROTOCOL_SYSTEM => {
-                    // Hashflow's feed builder accepts any chain with a numeric id and defers
-                    // venue support to its first poll. Reject a deployment that could publish
-                    // books Fynd cannot encode before starting any feed tasks.
-                    require_executor(chain, entry)?;
-                }
-                metric::PROTOCOL_SYSTEM => {
-                    if !METRIC_CHAINS.contains(&chain) {
-                        return Err(DataFeedError::Config(format!(
-                            "{entry} is only served on {}, but this feed runs on {chain}",
-                            METRIC_CHAINS
-                                .iter()
-                                .map(|chain| chain.to_string())
-                                .collect_vec()
-                                .join(", ")
-                        )));
-                    }
-                    require_executor(chain, entry)?;
-                }
-                native::PROTOCOL_SYSTEM | liquorice::PROTOCOL_SYSTEM => {
-                    require_executor(chain, entry)?;
-                }
-                unknown => {
-                    warn!("Skipping unknown book protocol system: {unknown}");
-                    continue;
-                }
-            }
-            venues.push((entry, venue));
+        let entries = BookVenueEntry::parse_all(&config.protocols)?;
+        for entry in &entries {
+            entry.check_supported(chain)?;
         }
-        if venues.is_empty() && external_liquidity.is_empty() {
+        if entries.is_empty() && external_liquidity.is_empty() {
             return Ok(None);
         }
 
@@ -249,9 +213,10 @@ impl BookStream {
         for source in external_liquidity {
             source.open(external_config.clone(), &mut books.external)?;
         }
-        for (entry, venue) in venues {
-            match venue.protocol() {
-                bebop::PROTOCOL_SYSTEM => {
+        for entry in entries {
+            let name = entry.name;
+            match entry.venue {
+                BookVenue::Bebop => {
                     let mut builder = BebopFeedBuilder::new(
                         book_config.clone(),
                         usd_quote_tokens()?,
@@ -269,15 +234,15 @@ impl BookStream {
                     if config.aggregate_rfqs {
                         builder = builder.all_pairs();
                     }
-                    if venue.uses_fallback_router() {
+                    if entry.uses_fallback_router {
                         builder = builder.with_fallback_router();
                     }
                     let feed = builder
                         .build()
                         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
+                    books.add_feed(name, feed);
                 }
-                hashflow::PROTOCOL_SYSTEM => {
+                BookVenue::Hashflow => {
                     let mut builder = HashflowFeedBuilder::new(
                         book_config.clone(),
                         usd_quote_tokens()?,
@@ -287,60 +252,58 @@ impl BookStream {
                     if config.aggregate_rfqs {
                         builder = builder.all_pairs(QuoteRule::OncePerMaker);
                     }
-                    if venue.uses_fallback_router() {
+                    if entry.uses_fallback_router {
                         builder = builder.with_fallback_router();
                     }
                     let feed = builder
                         .build()
                         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
+                    books.add_feed(name, feed);
                 }
-                metric::PROTOCOL_SYSTEM => {
+                BookVenue::Metric => {
                     let mut builder =
                         MetricFeedBuilder::new(book_config.clone(), get_env("METRIC_API_KEY")?);
                     if let Some(base_url) = trimmed_non_empty(std::env::var("METRIC_API_URL").ok())
                     {
                         builder = builder.base_url(base_url);
                     }
-                    if venue.uses_fallback_router() {
+                    if entry.uses_fallback_router {
                         builder = builder.with_fallback_router();
                     }
                     let feed = builder
                         .build()
                         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
+                    books.add_feed(name, feed);
                 }
-                native::PROTOCOL_SYSTEM => {
+                BookVenue::Native => {
                     let mut builder = NativeFeedBuilder::new(
                         book_config.clone(),
                         usd_quote_tokens()?,
                         get_env("NATIVE_API_KEY")?,
                     );
-                    if venue.uses_fallback_router() {
+                    if entry.uses_fallback_router {
                         builder = builder.with_fallback_router();
                     }
                     let feed = builder
                         .build()
                         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
+                    books.add_feed(name, feed);
                 }
-                liquorice::PROTOCOL_SYSTEM => {
+                BookVenue::Liquorice => {
                     let mut builder = LiquoriceFeedBuilder::new(
                         book_config.clone(),
                         usd_quote_tokens()?,
                         get_env("LIQUORICE_USER")?,
                         get_env("LIQUORICE_KEY")?,
                     );
-                    if venue.uses_fallback_router() {
+                    if entry.uses_fallback_router {
                         builder = builder.with_fallback_router();
                     }
                     let feed = builder
                         .build()
                         .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
+                    books.add_feed(name, feed);
                 }
-                // Every unknown entry was removed during preflight above.
-                _ => unreachable!("preflight retained an unknown book protocol"),
             }
         }
         Ok((!books.feeds.is_empty() || !books.external.is_empty()).then_some(books))
