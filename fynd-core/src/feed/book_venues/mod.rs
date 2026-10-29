@@ -200,3 +200,105 @@ fn get_env(var: &str) -> Result<String, DataFeedError> {
 fn stream_error(error: FeedError) -> DataFeedError {
     DataFeedError::StreamError(error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    fn protocols(entries: &[&str]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect()
+    }
+
+    #[rstest]
+    #[case::bebop("rfq:bebop", BookVenue::Bebop)]
+    #[case::hashflow("rfq:hashflow", BookVenue::Hashflow)]
+    #[case::metric("rfq:metric", BookVenue::Metric)]
+    #[case::native("rfq:native", BookVenue::Native)]
+    #[case::liquorice("rfq:liquorice", BookVenue::Liquorice)]
+    fn test_parse_all_direct_entry(#[case] name: &str, #[case] venue: BookVenue) {
+        let protocols = protocols(&[name]);
+
+        let entries = BookVenueEntry::parse_all(&protocols).unwrap();
+
+        assert_eq!(entries, [BookVenueEntry { name, venue, uses_fallback_router: false }]);
+    }
+
+    #[test]
+    fn test_parse_all_fallback_entry() {
+        let protocols = protocols(&["fallback:rfq:metric"]);
+
+        let entries = BookVenueEntry::parse_all(&protocols).unwrap();
+
+        assert_eq!(
+            entries,
+            [BookVenueEntry {
+                name: "fallback:rfq:metric",
+                venue: BookVenue::Metric,
+                uses_fallback_router: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_parse_all_skips_unknown_venues_and_other_entries() {
+        let protocols =
+            protocols(&["uniswap_v3", "rfq:unknown", "rfq:bebop", "fallback:fermiswap"]);
+
+        let entries = BookVenueEntry::parse_all(&protocols).unwrap();
+
+        let names: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(names, ["rfq:bebop"]);
+    }
+
+    #[test]
+    fn test_parse_all_direct_and_fallback_entries_for_one_venue() {
+        let protocols = protocols(&["rfq:bebop", "fallback:rfq:bebop"]);
+
+        let Err(DataFeedError::Config(message)) = BookVenueEntry::parse_all(&protocols) else {
+            panic!("both forms of one venue must be rejected");
+        };
+
+        assert!(message.contains("both with and without the 'fallback:' prefix"), "{message}");
+    }
+
+    #[rstest]
+    #[case::metric_chain_list("rfq:metric", Chain::Unichain, "only served on ethereum, base")]
+    #[case::bebop_executor("rfq:bebop", Chain::Bsc, "rfq:bebop has no executor on bsc")]
+    #[case::metric_executor("rfq:metric", Chain::Bsc, "rfq:metric has no executor on bsc")]
+    #[case::native_executor("rfq:native", Chain::Polygon, "rfq:native has no executor on polygon")]
+    fn test_check_supported_unsupported_chain(
+        #[case] name: &str,
+        #[case] chain: Chain,
+        #[case] expected: &str,
+    ) {
+        let protocols = protocols(&[name]);
+        let entries = BookVenueEntry::parse_all(&protocols).unwrap();
+
+        let Err(DataFeedError::Config(message)) = entries[0].check_supported(chain) else {
+            panic!("{name} must be rejected on {chain}");
+        };
+
+        assert!(message.contains(expected), "{message}");
+    }
+
+    #[rstest]
+    #[case::bebop("rfq:bebop", Chain::Ethereum)]
+    #[case::metric_via_fallback_router("fallback:rfq:metric", Chain::Ethereum)]
+    #[case::hashflow("rfq:hashflow", Chain::Ethereum)]
+    fn test_check_supported_supported_chain(#[case] name: &str, #[case] chain: Chain) {
+        let protocols = protocols(&[name]);
+        let entries = BookVenueEntry::parse_all(&protocols).unwrap();
+
+        entries[0]
+            .check_supported(chain)
+            .unwrap();
+    }
+}
