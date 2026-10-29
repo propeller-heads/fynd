@@ -25,10 +25,13 @@ use tycho_simulation::{
     tycho_core::Bytes,
 };
 
-pub(crate) const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-pub(crate) const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+/// WETH on Ethereum.
+pub const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+/// USDC on Ethereum.
+pub const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-pub(crate) fn token(address: &str, symbol: &str, decimals: u32) -> Token {
+/// A token with `decimals`, tradable in the books of these tests.
+pub fn token(address: &str, symbol: &str, decimals: u32) -> Token {
     let address: Bytes = address.parse().unwrap();
     Token::new(&address, symbol, decimals, 0, &[Some(10_000)], Chain::Ethereum, 100)
 }
@@ -45,13 +48,15 @@ fn usd_quote_tokens() -> HashSet<Bytes> {
     HashSet::from([USDC.parse::<Bytes>().unwrap()])
 }
 
-pub(crate) fn bebop_assembler() -> BebopBookAssembler {
+/// A Bebop assembler for WETH and USDC.
+pub fn bebop_assembler() -> BebopBookAssembler {
     BebopBookAssemblerBuilder::new(book_config(), usd_quote_tokens(), "test-key".to_string())
         .build()
         .unwrap()
 }
 
-pub(crate) fn hashflow_assembler() -> HashflowBookAssembler {
+/// A Hashflow assembler for WETH and USDC.
+pub fn hashflow_assembler() -> HashflowBookAssembler {
     HashflowBookAssemblerBuilder::new(
         book_config(),
         usd_quote_tokens(),
@@ -62,7 +67,8 @@ pub(crate) fn hashflow_assembler() -> HashflowBookAssembler {
     .unwrap()
 }
 
-pub(crate) fn metric_assembler() -> MetricBookAssembler {
+/// A Metric assembler for WETH and USDC.
+pub fn metric_assembler() -> MetricBookAssembler {
     MetricBookAssemblerBuilder::new(book_config()).build()
 }
 
@@ -70,7 +76,8 @@ fn levels(price: f64) -> Levels {
     Levels::new(vec![PriceLevel { price, quantity: 5.0 }]).unwrap()
 }
 
-pub(crate) fn bebop_prices(bid: f64) -> BebopPrices {
+/// Bebop prices for WETH and USDC with the given `bid`; the ask is one above.
+pub fn bebop_prices(bid: f64) -> BebopPrices {
     BebopPrices {
         pairs: vec![BebopBook {
             base: WETH.parse().unwrap(),
@@ -82,7 +89,8 @@ pub(crate) fn bebop_prices(bid: f64) -> BebopPrices {
     }
 }
 
-pub(crate) fn hashflow_prices() -> HashflowPrices {
+/// Hashflow prices for WETH and USDC from one maker.
+pub fn hashflow_prices() -> HashflowPrices {
     let pair =
         HashflowPair { base_token: WETH.parse().unwrap(), quote_token: USDC.parse().unwrap() };
     HashflowPrices {
@@ -93,7 +101,8 @@ pub(crate) fn hashflow_prices() -> HashflowPrices {
     }
 }
 
-pub(crate) fn metric_prices() -> MetricPrices {
+/// Metric prices for WETH and USDC from one pool.
+pub fn metric_prices() -> MetricPrices {
     MetricPrices {
         pools: vec![MetricPoolPrice {
             metadata: MetricMetadata {
@@ -130,7 +139,7 @@ fn depth_bin(price: u32) -> serde_json::Value {
 }
 
 /// The USDC amount returned by selling five WETH through `book`.
-pub(crate) fn amount_out(book: &Book) -> BigUint {
+pub fn amount_out(book: &Book) -> BigUint {
     let weth = token(WETH, "WETH", 18);
     let usdc = token(USDC, "USDC", 6);
     book.state
