@@ -1,15 +1,36 @@
 //! The book venues Fynd can run: the `rfq:` entries of `--protocols`.
+//!
+//! Each venue has a module of its own with its environment variables, its checks, its book
+//! settings and its own connection. This file holds the two places that choose between venues:
+//! [`BookVenueEntry::check_supported`] and [`open_book_feed`].
 
-use itertools::Itertools;
+mod bebop;
+mod hashflow;
+mod liquorice;
+/// Metric, and the chains it is served on.
+pub mod metric;
+mod native;
+
+use std::{collections::HashSet, future::Future, sync::Arc};
+
+use futures::FutureExt as _;
 use tracing::warn;
 use tycho_simulation::{
-    pamm::protocols::metric,
-    rfq::protocols::{bebop, hashflow, liquorice, native},
+    book::{quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookSnapshot, ReceivedAt},
+    pamm::protocols::metric::{self as metric_protocol, feed::MetricFeed},
+    rfq::protocols::{
+        bebop::{self as bebop_protocol, feed::BebopFeed},
+        hashflow::{self as hashflow_protocol, feed::HashflowFeed},
+        liquorice::{self as liquorice_protocol, feed::LiquoriceFeed},
+        native::{self as native_protocol, feed::NativeFeed},
+    },
+    snapshot_feed::{errors::FeedError, Publisher, SnapshotFeed},
     tycho_common::models::Chain,
+    tycho_core::Bytes,
 };
 
 use super::DataFeedError;
-use crate::feed::protocol_registry::{parse_rfq_entries, require_executor, METRIC_CHAINS};
+use crate::feed::protocol_registry::parse_rfq_entries;
 
 /// A market-maker venue whose books Fynd builds from the venue's own prices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,11 +46,11 @@ impl BookVenue {
     /// The venue behind an `rfq:<venue>` protocol system, or `None` when Fynd runs no such venue.
     fn from_protocol_system(protocol_system: &str) -> Option<Self> {
         match protocol_system {
-            bebop::PROTOCOL_SYSTEM => Some(Self::Bebop),
-            hashflow::PROTOCOL_SYSTEM => Some(Self::Hashflow),
-            metric::PROTOCOL_SYSTEM => Some(Self::Metric),
-            native::PROTOCOL_SYSTEM => Some(Self::Native),
-            liquorice::PROTOCOL_SYSTEM => Some(Self::Liquorice),
+            bebop_protocol::PROTOCOL_SYSTEM => Some(Self::Bebop),
+            hashflow_protocol::PROTOCOL_SYSTEM => Some(Self::Hashflow),
+            metric_protocol::PROTOCOL_SYSTEM => Some(Self::Metric),
+            native_protocol::PROTOCOL_SYSTEM => Some(Self::Native),
+            liquorice_protocol::PROTOCOL_SYSTEM => Some(Self::Liquorice),
             _ => None,
         }
     }
@@ -78,27 +99,104 @@ impl<'a> BookVenueEntry<'a> {
     /// [`DataFeedError::Config`] when the venue is not served on `chain` or has no executor there.
     pub(crate) fn check_supported(&self, chain: Chain) -> Result<(), DataFeedError> {
         match self.venue {
-            // The feed supports more chains than Tycho's execution registry. Reject deployments
-            // that could publish books Fynd cannot encode.
-            BookVenue::Bebop => require_executor(chain, self.name),
-            // Hashflow's feed builder accepts any chain with a numeric id and defers venue
-            // support to its first poll, so the executor is checked here instead.
-            BookVenue::Hashflow => require_executor(chain, self.name),
-            BookVenue::Native | BookVenue::Liquorice => require_executor(chain, self.name),
-            BookVenue::Metric => {
-                if !METRIC_CHAINS.contains(&chain) {
-                    return Err(DataFeedError::Config(format!(
-                        "{} is only served on {}, but this feed runs on {chain}",
-                        self.name,
-                        METRIC_CHAINS
-                            .iter()
-                            .map(|chain| chain.to_string())
-                            .collect_vec()
-                            .join(", ")
-                    )));
-                }
-                require_executor(chain, self.name)
-            }
+            BookVenue::Bebop => bebop::check_supported(chain, self),
+            BookVenue::Hashflow => hashflow::check_supported(chain, self),
+            BookVenue::Metric => metric::check_supported(chain, self),
+            BookVenue::Native => native::check_supported(chain, self),
+            BookVenue::Liquorice => liquorice::check_supported(chain, self),
         }
     }
+}
+
+/// The settings every venue's feed is built with: the book settings, the `--aggregate-rfqs`
+/// layout and the optional nexus client.
+pub(crate) struct BookVenueContext {
+    /// The chain, tokens and TVL floor the books are built from.
+    pub(crate) book_config: BookFeedConfig,
+    /// Whether Bebop and Hashflow stream as one component for all their pairs.
+    pub(crate) aggregate_rfqs: bool,
+}
+
+/// The feed of one book venue that [`BookStream`] runs: the venue's own connection, or `SharedRfq`
+/// for prices polled from Fynd Nexus.
+///
+/// [`BookStream`]: super::book_stream::BookStream
+pub(crate) enum BookVenueFeed {
+    Bebop(BebopFeed),
+    Hashflow(HashflowFeed),
+    Metric(MetricFeed),
+    Native(NativeFeed),
+    Liquorice(LiquoriceFeed),
+}
+
+impl SnapshotFeed for BookVenueFeed {
+    type Snapshot = BookSnapshot<ReceivedAt>;
+    type Error = FeedError;
+
+    fn run(
+        self,
+        publisher: Publisher<Self::Snapshot>,
+    ) -> impl Future<Output = Result<(), FeedError>> + Send + 'static {
+        match self {
+            Self::Bebop(feed) => feed.run(publisher).boxed(),
+            Self::Hashflow(feed) => feed.run(publisher).boxed(),
+            Self::Metric(feed) => feed.run(publisher).boxed(),
+            Self::Native(feed) => feed.run(publisher).boxed(),
+            Self::Liquorice(feed) => feed.run(publisher).boxed(),
+        }
+    }
+}
+
+/// Builds the feed that serves `entry`, reading the venue's credentials from the environment.
+///
+/// # Errors
+///
+/// [`DataFeedError::Config`] when a credential is missing or the chain has no USD stablecoins to
+/// price the venue's books against, and [`DataFeedError::StreamError`] when the venue's feed
+/// cannot be built.
+pub(crate) fn open_book_feed(
+    entry: &BookVenueEntry,
+    context: &BookVenueContext,
+) -> Result<BookVenueFeed, DataFeedError> {
+    Ok(match entry.venue {
+        BookVenue::Bebop => {
+            let env = bebop::BebopEnv::read()?;
+            let assembler = bebop::assembler(context, entry, &env)?;
+            BookVenueFeed::Bebop(bebop::direct_feed(context, &env, assembler)?)
+        }
+        BookVenue::Hashflow => {
+            let env = hashflow::HashflowEnv::read()?;
+            let assembler = hashflow::assembler(context, entry, &env)?;
+            BookVenueFeed::Hashflow(hashflow::direct_feed(context, &env, assembler)?)
+        }
+        BookVenue::Metric => {
+            let env = metric::MetricEnv::read()?;
+            let assembler = metric::assembler(context, entry);
+            BookVenueFeed::Metric(metric::direct_feed(context, &env, assembler)?)
+        }
+        BookVenue::Native => BookVenueFeed::Native(native::direct_feed(context, entry)?),
+        BookVenue::Liquorice => BookVenueFeed::Liquorice(liquorice::direct_feed(context, entry)?),
+    })
+}
+
+/// The chain's USD stablecoins, which Bebop, Hashflow, Native and Liquorice price their books'
+/// TVL in. Metric reports each pool's USD TVL itself, so only the others need a chain that has a
+/// curated set.
+fn usd_quote_tokens(context: &BookVenueContext) -> Result<Arc<HashSet<Bytes>>, DataFeedError> {
+    let chain = context.book_config.chain;
+    usd_stablecoins_for_chain(chain)
+        .map(Arc::new)
+        .ok_or_else(|| {
+            DataFeedError::Config(format!(
+                "book feeds price their books in USD stablecoins, and none are known for {chain}"
+            ))
+        })
+}
+
+fn get_env(var: &str) -> Result<String, DataFeedError> {
+    std::env::var(var).map_err(|_| DataFeedError::Config(format!("{var} env var not set")))
+}
+
+fn stream_error(error: FeedError) -> DataFeedError {
+    DataFeedError::StreamError(error.to_string())
 }

@@ -132,15 +132,6 @@ fn uniswap_v4_hook_filter(component: &ComponentWithState) -> bool {
 /// elsewhere.
 const PRICE_LEVEL_STREAM_CHAIN: Chain = Chain::Ethereum;
 
-/// The chains Fynd serves Metric on through its book feed.
-///
-/// An `rfq:metric` or `fallback:rfq:metric` entry on any other chain is rejected at registration.
-/// Each entry must also have its own executor in tycho-execution's `executor_addresses.json`, or
-/// its legs would price from the book feed and then fail to encode: Ethereum and BSC have only the
-/// fallback executor.
-pub(crate) const METRIC_CHAINS: &[Chain] =
-    &[Chain::Ethereum, Chain::Base, Chain::Robinhood, Chain::Bsc, Chain::Arbitrum, Chain::Polygon];
-
 /// The price level stream venue that is Metric.
 ///
 /// On Ethereum, Metric is served both by the price level stream (`pricelevelstream:metric`,
@@ -800,7 +791,9 @@ mod tests {
     use tycho_simulation::price_level_stream::config::PRICE_LEVEL_STREAM_FAMILY;
 
     use super::*;
-    use crate::feed::{book_stream::BookStream, TychoFeedConfig};
+    use crate::feed::{
+        book_stream::BookStream, book_venues::metric::METRIC_CHAINS, TychoFeedConfig,
+    };
 
     #[rstest]
     #[case::rfq("rfq:bebop", true)]
