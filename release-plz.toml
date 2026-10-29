@@ -51,6 +51,9 @@ release = false
 [[package]]
 name = "record-market"
 release = false
+[[package]]
+name = "fynd-nexus"
+release = false
 
 [changelog]
 header = ""
