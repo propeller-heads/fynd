@@ -473,6 +473,18 @@ impl TychoFeed {
             sync_states,
             ..
         } = msg;
+        // These maps are keyed by the id as the indexer emitted it, which can be checksum-cased
+        // (rocketpool's is). The market keys components by `component.id.to_string()`, which is
+        // lowercase.
+        let removed_components: HashMap<ComponentId, ProtocolComponent> = removed_components
+            .into_iter()
+            .map(|(id, component)| (id.to_lowercase(), component))
+            .collect();
+        let updated_or_new_states: HashMap<ComponentId, Box<dyn ProtocolSim>> =
+            updated_or_new_states
+                .into_iter()
+                .map(|(id, state)| (id.to_lowercase(), state))
+                .collect();
 
         // Tycho re-sends an aggregated RFQ venue as a new pair on every poll. It stays here, as a
         // state update, unless the upsert finds it new or reshaped.
@@ -1137,6 +1149,93 @@ mod tests {
                 removed_components: vec![component_id.to_string()],
                 updated_components: Vec::new(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_checksum_cased_component_id() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let mut event_rx = feed.subscribe();
+
+        let tycho_id = "0xae78736Cd615f374D3085123A210448E74Fc6393";
+        let market_id = "0xae78736cd615f374d3085123a210448e74fc6393";
+        let token1 = create_test_token("0x1111111111111111111111111111111111111111", "TKN1");
+        let token2 = create_test_token("0x2222222222222222222222222222222222222222", "TKN2");
+        let component = create_test_component(tycho_id, vec![token1.clone(), token2.clone()]);
+        let state_with_fee =
+            |fee: f64| Box::new(FeedMockProtocolSim::new(fee)) as Box<dyn ProtocolSim>;
+
+        let update = Update::new(
+            12345,
+            HashMap::from([(tycho_id.to_string(), state_with_fee(1.0))]),
+            HashMap::from([(tycho_id.to_string(), component.clone())]),
+        );
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to add component");
+        {
+            let data = market_data.read().await;
+            assert!(data.get_component(market_id).is_some());
+            let state = data
+                .get_simulation_state(market_id)
+                .expect("the state should be stored under the component's market id");
+            assert_eq!(state.fee(), 1.0);
+        }
+
+        let update = Update::new(
+            12346,
+            HashMap::from([(tycho_id.to_string(), state_with_fee(2.0))]),
+            HashMap::new(),
+        );
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to update state");
+        {
+            let data = market_data.read().await;
+            let state = data
+                .get_simulation_state(market_id)
+                .expect("the updated state should replace the stored one");
+            assert_eq!(state.fee(), 2.0);
+            assert!(data
+                .get_simulation_state(tycho_id)
+                .is_none());
+        }
+
+        let update = Update::new(12347, HashMap::new(), HashMap::new())
+            .set_removed_pairs(HashMap::from([(tycho_id.to_string(), component)]));
+        feed.handle_tycho_message(update)
+            .await
+            .expect("Failed to remove component");
+        assert!(market_data
+            .read()
+            .await
+            .get_component(market_id)
+            .is_none());
+
+        let events: Vec<MarketEvent> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert_eq!(
+            events,
+            vec![
+                MarketEvent::MarketUpdated {
+                    added_components: FxHashMap::from_iter([(
+                        market_id.to_string(),
+                        vec![token1.address, token2.address].into()
+                    )]),
+                    removed_components: Vec::new(),
+                    updated_components: Vec::new(),
+                },
+                MarketEvent::MarketUpdated {
+                    added_components: FxHashMap::default(),
+                    removed_components: Vec::new(),
+                    updated_components: vec![market_id.to_string()],
+                },
+                MarketEvent::MarketUpdated {
+                    added_components: FxHashMap::default(),
+                    removed_components: vec![market_id.to_string()],
+                    updated_components: Vec::new(),
+                },
+            ]
         );
     }
 
