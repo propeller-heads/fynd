@@ -23,7 +23,7 @@ use tycho_simulation::{
     },
     protocol::models::{ProtocolComponent, Update},
     tycho_client::feed::component_tracker::ComponentFilter,
-    tycho_common::{simulation::protocol_sim::ProtocolSim, traits::TxDeltaIndexer, Bytes},
+    tycho_common::{simulation::protocol_sim::ProtocolSim, traits::TxDeltaIndexer},
     utils::load_all_tokens,
 };
 
@@ -473,14 +473,17 @@ impl TychoFeed {
             sync_states,
             ..
         } = msg;
+        // These maps are keyed by the id as the indexer emitted it, which can be checksum-cased
+        // (rocketpool's is). The market keys components by `component.id.to_string()`, which is
+        // lowercase.
         let removed_components: HashMap<ComponentId, ProtocolComponent> = removed_components
             .into_iter()
-            .map(|(id, component)| (market_component_id(id), component))
+            .map(|(id, component)| (id.to_lowercase(), component))
             .collect();
         let updated_or_new_states: HashMap<ComponentId, Box<dyn ProtocolSim>> =
             updated_or_new_states
                 .into_iter()
-                .map(|(id, state)| (market_component_id(id), state))
+                .map(|(id, state)| (id.to_lowercase(), state))
                 .collect();
 
         // Tycho re-sends an aggregated RFQ venue as a new pair on every poll. It stays here, as a
@@ -707,22 +710,6 @@ fn drop_foreign_components(
         });
     }
     removed.retain(|id| held_elsewhere(id).is_none());
-}
-
-/// The id the market stores a Tycho component under: `component.id.to_string()`, which is
-/// lowercase hex.
-///
-/// An [`Update`] keys `states` and `removed_pairs` by the id string exactly as the indexer emitted
-/// it, and some indexers emit checksum-cased ids (rocketpool's is
-/// `0xae78736Cd615f374D3085123A210448E74Fc6393`). Without this, such a component's state is
-/// stored under a key that its topology never looks up.
-fn market_component_id(tycho_id: String) -> ComponentId {
-    match tycho_id.parse::<Bytes>() {
-        Ok(id) => id.to_string(),
-        // tycho-simulation cannot build a component from a non-hex id, so no topology entry
-        // exists to match; keep the key as given.
-        Err(_) => tycho_id,
-    }
 }
 
 /// Converts a streamed component into the market's representation without stripping the `0x`
