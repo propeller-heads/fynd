@@ -1,4 +1,16 @@
 
+## [0.118.2](https://github.com/propeller-heads/fynd/compare/0.118.1...0.118.2) (2026-10-30)
+
+### Features
+
+* **feed:** register rocketpool ([98a2379](https://github.com/propeller-heads/fynd/commit/98a2379f081f1f1785af4c837e7328799f8f7b6b))
+
+### Bug Fixes
+
+* **feed:** key Tycho states by the market's component id ([7765c42](https://github.com/propeller-heads/fynd/commit/7765c4207d5dd390bf9ce869ce58edd39ccac513))
+* **core:** fail a quote whose fees reach 100% of the output ([a1d8102](https://github.com/propeller-heads/fynd/commit/a1d8102e71feeb23c45ab86afa3b4181da5788c1))
+
+
 ## [0.118.1](https://github.com/propeller-heads/fynd/compare/0.118.0...0.118.1) (2026-10-29)
 
 ### Features
