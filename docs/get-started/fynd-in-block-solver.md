@@ -75,6 +75,8 @@ On the Fynd InBlock dashboard (coming soon), you can compare each original route
 
 Re-routing is free for traders, builders and aggregators.
 
+Gas overhead, compared with a direct `TychoRouterV3` call of the same route, is \~28k gas (if the original route ran) and \~68k gas (if a new route ran) on Ethereum Mainnet. At October 2026 prices, it's \~$0.004 and \~$0.010, respectively.
+
 A share of the extra output from improved routes goes to the builder and the protocol. If there is no surplus, nobody is paid and you swap as usual.
 
 ## Contract addresses
