@@ -27,6 +27,7 @@ use tycho_simulation::{
             pancakeswap_v2::state::PancakeswapV2State,
             ramses_v3::state::RamsesV3State,
             ring_swap_v2::state::RingSwapV2State,
+            rocketpool::state::RocketpoolState,
             sky::state::SkyState,
             uniswap_v2::state::UniswapV2State,
             uniswap_v3::state::UniswapV3State,
@@ -542,6 +543,7 @@ fn register_exchange(
         }
         "sky" => builder.exchange::<SkyState>("sky", tvl_filter.clone(), None),
         "lido_v4" => builder.exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None),
+        "rocketpool" => builder.exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None),
         "etherfi" => builder.exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None),
         "lunarbase" => builder.exchange::<LunarBaseState>("lunarbase", tvl_filter.clone(), None),
         _ => return Registration::NoDecoder(builder),
@@ -1151,6 +1153,7 @@ mod tests {
     #[case::aero_basic("aero_basic")]
     #[case::aero_cl("aero_cl")]
     #[case::pancakeswap_infinity_cl("pancakeswap_infinity_cl")]
+    #[case::rocketpool("rocketpool")]
     fn test_register_exchange_supports_protocol(#[case] protocol: &str) {
         let skipped = skipped_unknown_protocols(&[protocol]);
         assert!(skipped.is_empty(), "expected {protocol} to register, but got {skipped:?}");
@@ -1450,14 +1453,14 @@ mod tests {
             "exclusive:ekubo_v3",
             "rfq:bebop",
             "pricelevelstream:fermiswap",
-            "rocketpool",
+            "not_a_protocol",
         ]
         .map(String::from)
         .to_vec();
 
         let systems = select_decodable_systems(Chain::Ethereum, &entries).expect("valid entries");
 
-        // The prefix is stripped, the non-Tycho entries are dropped, and rocketpool has no
+        // The prefix is stripped, the non-Tycho entries are dropped, and not_a_protocol has no
         // decoder in fynd.
         assert_eq!(systems, ["uniswap_v3", "ekubo_v3"]);
     }
