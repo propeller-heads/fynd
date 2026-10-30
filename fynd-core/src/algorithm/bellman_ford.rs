@@ -25,7 +25,6 @@
 
 use std::{
     cmp::Ordering,
-    collections::VecDeque,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -54,7 +53,7 @@ use crate::{
         types::{gas_cost_in_token, SpotPrices, TokenGasPrices},
     },
     feed::market_data::{MarketData, MarketState},
-    graph::{petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
+    graph::{is_native_wrap, petgraph::StableDiGraph, EdgeData, PetgraphStableDiGraphManager},
     types::{ComponentId, Order, ResolvedRouteConstraints, Route, RouteResult, Swap},
 };
 
@@ -584,6 +583,8 @@ impl BellmanFordAlgorithm {
         let mut predecessor: Vec<Option<(NodeIndex, ComponentId)>> = vec![None; ctx.max_idx];
         let mut edge_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
         let mut cumul_gas: Vec<BigUint> = vec![BigUint::ZERO; ctx.max_idx];
+        // Hops on each node's best path that count against `max_hops`: all but the native wrap.
+        let mut pool_hops: Vec<usize> = vec![0; ctx.max_idx];
 
         amount[ctx.token_in_node.index()] = amount_in.clone();
 
@@ -610,7 +611,9 @@ impl BellmanFordAlgorithm {
         let mut active_nodes: Vec<NodeIndex> = vec![ctx.token_in_node];
         let mut timed_out = false;
 
-        for round in 0..self.max_hops {
+        // A route holds at most one wrap, which is free, so it can take one round more than
+        // `max_hops`.
+        for round in 0..=self.max_hops {
             if start.elapsed() >= self.timeout {
                 debug!(round, "timeout during relaxation");
                 timed_out = true;
@@ -637,6 +640,12 @@ impl BellmanFordAlgorithm {
 
                     // Single predecessor walk: skip if target token or component already in path
                     if Self::path_has_conflict(u, *v, component_id, &predecessor) {
+                        continue;
+                    }
+
+                    let candidate_pool_hops =
+                        pool_hops[u_idx] + usize::from(!is_native_wrap(component_id));
+                    if candidate_pool_hops > self.max_hops {
                         continue;
                     }
 
@@ -738,6 +747,7 @@ impl BellmanFordAlgorithm {
                         predecessor[v_idx] = Some((u, component_id.clone()));
                         edge_gas[v_idx] = result.gas;
                         cumul_gas[v_idx] = candidate_cumul_gas;
+                        pool_hops[v_idx] = candidate_pool_hops;
                         next_active.insert(*v);
                     }
                 }
@@ -1044,55 +1054,69 @@ impl BellmanFordAlgorithm {
         let mut token_nodes: FxHashSet<NodeIndex> = FxHashSet::default();
         let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
         let mut visited_nodes = FxHashSet::default();
-        let mut queued_nodes = VecDeque::new();
-
         visited_nodes.insert(token_in);
         token_nodes.insert(token_in);
-        queued_nodes.push_back((token_in, 0usize));
+        let mut level = vec![token_in];
 
-        while let Some((node, depth_walked)) = queued_nodes.pop_front() {
-            if depth_walked >= max_hops {
-                continue;
-            }
-            for edge in graph.edges(node) {
-                let next_token = edge.target();
+        // A wrap costs no hop, so each level first follows its wraps and then its other edges.
+        for depth_walked in 0..=max_hops {
+            let mut next_level = Vec::new();
+            for wraps_only in [true, false] {
+                let mut index = 0;
+                while let Some(&node) = level.get(index) {
+                    index += 1;
+                    for edge in graph.edges(node) {
+                        let component_id = &edge.weight().component_id;
+                        let is_wrap = is_native_wrap(component_id);
+                        if is_wrap != wraps_only || (!is_wrap && depth_walked >= max_hops) {
+                            continue;
+                        }
+                        let next_token = edge.target();
 
-                // Without a destination there is no second endpoint to exempt; the source
-                // stands in for both.
-                if !Self::can_cross(
-                    graph,
-                    edge,
-                    (token_in, token_out.unwrap_or(token_in)),
-                    exclusions,
-                ) {
-                    continue;
-                }
+                        // Without a destination there is no second endpoint to exempt; the
+                        // source stands in for both.
+                        if !Self::can_cross(
+                            graph,
+                            edge,
+                            (token_in, token_out.unwrap_or(token_in)),
+                            exclusions,
+                        ) {
+                            continue;
+                        }
 
-                if let Some(hops_to_token_out) = &hops_to_token_out {
-                    // Taking this edge spends one hop; the rest have to be enough to finish the
-                    // route.
-                    let Some(&hops_left) = hops_to_token_out.get(&next_token) else {
-                        // token_out is not reachable from next_token within the hop budget.
-                        continue;
-                    };
+                        if let Some(hops_to_token_out) = &hops_to_token_out {
+                            // Taking a non-wrap edge spends one hop; the rest have to be
+                            // enough to finish the route.
+                            let Some(&hops_left) = hops_to_token_out.get(&next_token) else {
+                                // token_out is not reachable from next_token within the hop
+                                // budget.
+                                continue;
+                            };
 
-                    if depth_walked + 1 + hops_left > max_hops {
-                        // Finishing the route from next_token would take more hops than are left.
-                        continue;
+                            if depth_walked + usize::from(!is_wrap) + hops_left > max_hops {
+                                // Finishing the route from next_token would take more hops
+                                // than are left.
+                                continue;
+                            }
+                        }
+
+                        adj.entry(node)
+                            .or_default()
+                            .push((next_token, component_id.clone()));
+                        component_ids.insert(component_id);
+                        token_nodes.insert(next_token);
+
+                        if visited_nodes.insert(next_token) {
+                            if is_wrap {
+                                level.push(next_token);
+                            } else {
+                                next_level.push(next_token);
+                            }
+                        }
                     }
                 }
-
-                let component_id = &edge.weight().component_id;
-                adj.entry(node)
-                    .or_default()
-                    .push((next_token, component_id.clone()));
-                component_ids.insert(component_id);
-                token_nodes.insert(next_token);
-
-                if visited_nodes.insert(next_token) {
-                    queued_nodes.push_back((next_token, depth_walked + 1));
-                }
             }
+            level = next_level;
         }
 
         if adj.is_empty() {
@@ -1144,12 +1168,21 @@ impl BellmanFordAlgorithm {
             hops_to_reach.insert(source, 0);
             frontier.push(source);
         }
+        Self::extend_through_wraps(
+            graph,
+            &mut frontier,
+            &mut hops_to_reach,
+            0,
+            endpoints,
+            exclusions,
+        );
         for depth in 1..=max_hops {
             let mut next = Vec::new();
             for node in frontier {
                 for edge in graph.edges(node) {
                     let neighbor = edge.target();
-                    if hops_to_reach.contains_key(&neighbor) ||
+                    if is_native_wrap(&edge.weight().component_id) ||
+                        hops_to_reach.contains_key(&neighbor) ||
                         !Self::can_cross(graph, edge, endpoints, exclusions)
                     {
                         continue;
@@ -1158,10 +1191,45 @@ impl BellmanFordAlgorithm {
                     next.push(neighbor);
                 }
             }
+            Self::extend_through_wraps(
+                graph,
+                &mut next,
+                &mut hops_to_reach,
+                depth,
+                endpoints,
+                exclusions,
+            );
             frontier = next;
         }
 
         hops_to_reach
+    }
+
+    /// Adds to `frontier` every node a native wrap reaches from it, at the same `depth`, since a
+    /// wrap does not count as a hop.
+    fn extend_through_wraps(
+        graph: &StableDiGraph<()>,
+        frontier: &mut Vec<NodeIndex>,
+        hops_to_reach: &mut FxHashMap<NodeIndex, usize>,
+        depth: usize,
+        endpoints: (NodeIndex, NodeIndex),
+        exclusions: &ResolvedRouteConstraints,
+    ) {
+        let mut index = 0;
+        while let Some(&node) = frontier.get(index) {
+            index += 1;
+            for edge in graph.edges(node) {
+                let neighbor = edge.target();
+                if !is_native_wrap(&edge.weight().component_id) ||
+                    hops_to_reach.contains_key(&neighbor) ||
+                    !Self::can_cross(graph, edge, endpoints, exclusions)
+                {
+                    continue;
+                }
+                hops_to_reach.insert(neighbor, depth);
+                frontier.push(neighbor);
+            }
+        }
     }
 
     /// Computes net_amount_out by subtracting gas costs from the output amount.

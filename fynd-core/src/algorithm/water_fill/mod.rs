@@ -76,7 +76,10 @@ use crate::{
         types::{gas_cost_in_token, TokenGasPrices},
     },
     feed::market_data::{MarketDataView, MarketState},
-    graph::{EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph, TopologyGraphManager},
+    graph::{
+        is_native_wrap, EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph,
+        TopologyGraphManager,
+    },
     types::{ComponentId, Order, RouteResult},
     AlgorithmError,
 };
@@ -1366,7 +1369,8 @@ where
         amount_out: order.amount().clone(),
     }];
 
-    for _depth in 0..cfg.search.bounds.max_hops {
+    // A route holds at most one wrap, which is free, so it can take one step more than `max_hops`.
+    for _depth in 0..=cfg.search.bounds.max_hops {
         if cfg.deadline.expired() || frontier.is_empty() {
             break;
         }
@@ -1437,10 +1441,10 @@ fn expand_candidate_state<'a, W>(
             path: path.clone(),
             amount_out: candidate.amount_out,
         };
-        if candidate.target == target && path.len() >= cfg.search.bounds.min_hops {
+        if candidate.target == target && path.pool_hops() >= cfg.search.bounds.min_hops {
             found.push((path.clone(), path_state.amount_out.clone()));
         }
-        if path.len() < cfg.search.bounds.max_hops {
+        if path.len() <= cfg.search.bounds.max_hops {
             next_by_node
                 .entry(candidate.target)
                 .or_default()
@@ -1596,6 +1600,12 @@ fn can_extend_path<W>(
         return false;
     }
     if next_addr == cfg.source_token {
+        return false;
+    }
+    // Past `max_hops` pool hops, only the free wrap can still extend the path.
+    if !is_native_wrap(&edge.component_id) &&
+        state.path.non_wrap_hops() >= cfg.search.bounds.max_hops
+    {
         return false;
     }
     cfg.search

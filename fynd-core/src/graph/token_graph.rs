@@ -15,7 +15,10 @@ use smallvec::SmallVec;
 use tracing::debug;
 use tycho_simulation::tycho_common::models::Address;
 
-use super::{EdgeData, GraphError, GraphManager, Path, RouteSearch, INLINE_EDGES, INLINE_TOKENS};
+use super::{
+    is_native_wrap, EdgeData, GraphError, GraphManager, Path, RouteSearch, INLINE_EDGES,
+    INLINE_TOKENS,
+};
 use crate::{
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
@@ -68,6 +71,15 @@ impl<D> PairEdge<D> {
 
 /// A route as a sequence of tokens, before the pools serving each leg are chosen.
 pub type TokenPath = SmallVec<[NodeIndex; INLINE_TOKENS]>;
+
+/// Whether a step along a token pair spends a hop or is the free native wrap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    /// Any pool but the native wrap. Counts as a hop.
+    Trade,
+    /// The native wrap. Does not count as a hop.
+    Wrap,
+}
 
 /// The pools of one leg a solve may use.
 ///
@@ -123,11 +135,22 @@ pub struct TopologyGraph<D> {
 
 impl<D> TopologyGraph<D> {
     /// The pools trading `from` for `to`, empty if the pair is not connected.
+    ///
+    /// On the pair the native wrap serves, only the wrap: it pays 1:1, and the search counts the
+    /// step as free, so another pool there would be a hop the search did not count.
     pub fn pools_between(&self, from: NodeIndex, to: NodeIndex) -> &[EdgeData<D>] {
-        self.pair_index
+        let pools: &[EdgeData<D>] = self
+            .pair_index
             .get(&(from, to))
             .and_then(|&edge| self.graph.edge_weight(edge))
-            .map_or(&[], PairEdge::pools)
+            .map_or(&[], PairEdge::pools);
+        match pools
+            .iter()
+            .position(|pool| is_native_wrap(&pool.component_id))
+        {
+            Some(wrap) => &pools[wrap..=wrap],
+            None => pools,
+        }
     }
 
     /// The pools trading `from` for `to` that this solve may use.
@@ -155,23 +178,34 @@ impl<D> TopologyGraph<D> {
         )
     }
 
-    /// Whether the pair trades `from` for `to` through a pool this solve may use.
-    ///
-    /// `false` for a pair the graph does not hold, and for one whose every pool the request
-    /// excludes. Either way the pair does not connect its two tokens for this search.
-    fn pair_has_allowed_pool(
+    /// Whether the pair trades `from` for `to` through a pool this solve may use that is not the
+    /// native wrap. Taking it spends a hop.
+    fn pair_has_allowed_trade(
         &self,
         from: NodeIndex,
         to: NodeIndex,
         exclusions: &ResolvedRouteConstraints,
     ) -> bool {
-        let pools = self.pools_between(from, to);
-        if exclusions.is_empty() {
-            return !pools.is_empty();
-        }
-        pools
+        self.pools_between(from, to)
             .iter()
-            .any(|pool| !exclusions.excludes_pool(&pool.component_id))
+            .any(|pool| {
+                !is_native_wrap(&pool.component_id) && !exclusions.excludes_pool(&pool.component_id)
+            })
+    }
+
+    /// Whether the pair wraps or unwraps `from` into `to` through the native wrap, unless the
+    /// request excludes it. Taking it spends no hop.
+    fn pair_has_allowed_wrap(
+        &self,
+        from: NodeIndex,
+        to: NodeIndex,
+        exclusions: &ResolvedRouteConstraints,
+    ) -> bool {
+        self.pools_between(from, to)
+            .iter()
+            .any(|pool| {
+                is_native_wrap(&pool.component_id) && !exclusions.excludes_pool(&pool.component_id)
+            })
     }
 
     /// The node holding `token`, or `None` if the market has no such token.
@@ -364,6 +398,11 @@ impl<D> TopologyGraph<D> {
     ///
     /// Searching one length at a time keeps shorter routes ahead of longer ones in the result.
     ///
+    /// Lengths count pool hops: a native wrap rides along in the level of the sequence it extends.
+    /// The same token sequence can then be built with the wrap on the head side and on the tail
+    /// side, so joined sequences are deduplicated. A route that is only the wrap has no level to
+    /// join on and is added directly.
+    ///
     /// Consecutive lengths ask for the same half-walks -- lengths 3 and 4 both take a 2-hop head,
     /// lengths 4 and 5 both take a 2-hop tail -- so each side is walked once to its deepest and
     /// every length reads the level it needs.
@@ -382,6 +421,11 @@ impl<D> TopologyGraph<D> {
         let mut midpoint_index: Vec<Option<FxHashMap<NodeIndex, Vec<TokenPath>>>> =
             vec![None; tail_levels.len()];
         let mut token_paths = Vec::new();
+        let mut seen: FxHashSet<TokenPath> = FxHashSet::default();
+
+        if filter.min_hops == 1 && self.pair_has_allowed_wrap(from, to, search.exclusions) {
+            token_paths.push(TokenPath::from_slice(&[from, to]));
+        }
 
         for length in filter.min_hops..=filter.max_hops {
             let head_hops = length.div_ceil(2);
@@ -428,7 +472,9 @@ impl<D> TopologyGraph<D> {
 
                     let mut joined = TokenPath::from_slice(head);
                     joined.extend_from_slice(&tail[1..]);
-                    token_paths.push(joined);
+                    if seen.insert(joined.clone()) {
+                        token_paths.push(joined);
+                    }
                 }
             }
         }
@@ -436,8 +482,12 @@ impl<D> TopologyGraph<D> {
         token_paths
     }
 
-    /// The token sequences leaving `start`, one level per hop count: index `k` holds every
-    /// sequence of exactly `k` edges, up to `hops`. Level 0 is `start` on its own.
+    /// The token sequences leaving `start`, one level per pool-hop count: index `k` holds every
+    /// sequence of exactly `k` hops that are not a native wrap, up to `hops`. Level 0 is `start`
+    /// on its own, plus `start` wrapped.
+    ///
+    /// A sequence extended by a wrap stays in its level, since the wrap is free. A route holds at
+    /// most one wrap, because it never visits a token twice.
     ///
     /// Walking breadth-first produces every level on the way to the deepest, so they are all kept
     /// rather than the deepest alone.
@@ -451,30 +501,21 @@ impl<D> TopologyGraph<D> {
         endpoints: (NodeIndex, NodeIndex),
         search: RouteSearch<'_>,
     ) -> Vec<Vec<TokenPath>> {
-        let (from, to) = endpoints;
         let mut levels = vec![vec![TokenPath::from_slice(&[start])]];
 
-        for hop in 0..hops {
+        for hop in 0..=hops {
+            let mut wrapped = Vec::new();
+            for sequence in &levels[hop] {
+                self.extend_sequence(sequence, StepKind::Wrap, endpoints, search, &mut wrapped);
+            }
+            levels[hop].extend(wrapped);
+
+            if hop == hops {
+                break;
+            }
             let mut next = Vec::new();
             for sequence in &levels[hop] {
-                let Some(&last) = sequence.last() else {
-                    continue;
-                };
-                for neighbor in self.neighbors(last) {
-                    if sequence.contains(&neighbor) {
-                        continue;
-                    }
-                    if !search.allows_token(&self[neighbor], (&self[from], &self[to])) {
-                        continue;
-                    }
-                    if !self.pair_has_allowed_pool(last, neighbor, search.exclusions) {
-                        continue;
-                    }
-
-                    let mut extended = TokenPath::from_slice(sequence);
-                    extended.push(neighbor);
-                    next.push(extended);
-                }
+                self.extend_sequence(sequence, StepKind::Trade, endpoints, search, &mut next);
             }
             levels.push(next);
         }
@@ -482,47 +523,101 @@ impl<D> TopologyGraph<D> {
         levels
     }
 
+    /// Pushes onto `out` each way `sequence` can take one more step of the given kind.
+    fn extend_sequence(
+        &self,
+        sequence: &TokenPath,
+        kind: StepKind,
+        endpoints: (NodeIndex, NodeIndex),
+        search: RouteSearch<'_>,
+        out: &mut Vec<TokenPath>,
+    ) {
+        let (from, to) = endpoints;
+        let Some(&last) = sequence.last() else {
+            return;
+        };
+        for neighbor in self.neighbors(last) {
+            if sequence.contains(&neighbor) {
+                continue;
+            }
+            if !search.allows_token(&self[neighbor], (&self[from], &self[to])) {
+                continue;
+            }
+            if !self.pair_allows_step(last, neighbor, kind, search.exclusions) {
+                continue;
+            }
+
+            let mut extended = TokenPath::from_slice(sequence);
+            extended.push(neighbor);
+            out.push(extended);
+        }
+    }
+
+    /// Whether the pair offers a pool of this kind that the request does not exclude.
+    fn pair_allows_step(
+        &self,
+        from: NodeIndex,
+        to: NodeIndex,
+        kind: StepKind,
+        exclusions: &ResolvedRouteConstraints,
+    ) -> bool {
+        match kind {
+            StepKind::Trade => self.pair_has_allowed_trade(from, to, exclusions),
+            StepKind::Wrap => self.pair_has_allowed_wrap(from, to, exclusions),
+        }
+    }
+
     /// Token sequences that begin and end on the same token.
     ///
     /// Such a route closes a cycle, so it has no midpoint to split on -- both halves would have to
     /// start and end on that token, which the no-revisit rule forbids. Searched from the one end
     /// instead, with the closing hop exempt from that rule.
+    ///
+    /// Each sequence carries its pool-hop count, so a native wrap, used at most once, is a step
+    /// that costs no hop.
     fn circular_token_paths(&self, target: NodeIndex, search: RouteSearch<'_>) -> Vec<TokenPath> {
         let filter = search.bounds;
         let mut token_paths = Vec::new();
-        let mut frontier = vec![TokenPath::from_slice(&[target])];
+        let mut frontier = vec![(TokenPath::from_slice(&[target]), 0usize)];
 
-        for hops in 1..=filter.max_hops {
+        for _ in 0..=filter.max_hops {
             let mut next = Vec::new();
-            for sequence in &frontier {
+            for (sequence, pool_hops) in &frontier {
                 let Some(&last) = sequence.last() else {
                     continue;
                 };
+                let used_wrap = sequence.len() - 1 > *pool_hops;
                 for neighbor in self.neighbors(last) {
-                    if !self.pair_has_allowed_pool(last, neighbor, search.exclusions) {
-                        continue;
-                    }
-                    if neighbor == target {
-                        if hops >= filter.min_hops {
-                            let mut closed = TokenPath::from_slice(sequence);
-                            closed.push(neighbor);
-                            token_paths.push(closed);
+                    let steps = [(StepKind::Trade, pool_hops + 1), (StepKind::Wrap, *pool_hops)];
+                    for (kind, new_hops) in steps {
+                        if new_hops > filter.max_hops ||
+                            (kind == StepKind::Wrap && used_wrap) ||
+                            !self.pair_allows_step(last, neighbor, kind, search.exclusions)
+                        {
+                            continue;
                         }
-                        // A closed cycle is a finished route. Walking on from it would put the
-                        // start token in the middle of a longer one, which is not a route the
-                        // executor can take.
-                        continue;
-                    }
-                    if sequence.contains(&neighbor) {
-                        continue;
-                    }
-                    if !search.allows_token(&self[neighbor], (&self[target], &self[target])) {
-                        continue;
-                    }
+                        if neighbor == target {
+                            if new_hops.max(1) >= filter.min_hops {
+                                let mut closed = TokenPath::from_slice(sequence);
+                                closed.push(neighbor);
+                                token_paths.push(closed);
+                            }
+                            // A closed cycle is a finished route. Walking on from it would put
+                            // the start token in the middle of a longer one, which is not a
+                            // route the executor can take.
+                            continue;
+                        }
+                        if sequence.contains(&neighbor) {
+                            continue;
+                        }
+                        if !search.allows_token(&self[neighbor], (&self[target], &self[target])) {
+                            continue;
+                        }
 
-                    let mut extended = TokenPath::from_slice(sequence);
-                    extended.push(neighbor);
-                    next.push(extended);
+                        let mut extended = TokenPath::from_slice(sequence);
+                        extended.push(neighbor);
+                        next.push((extended, new_hops));
+                    }
                 }
             }
             frontier = next;
