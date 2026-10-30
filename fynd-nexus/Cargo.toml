@@ -6,6 +6,8 @@ description = "Holds the RFQ venue connections that Fynd pods would otherwise ea
 license-file = "../LICENSE.md"
 repository.workspace = true
 readme = "README.md"
+# Integration tests are dev-only; excluding them keeps the published crate lean.
+exclude = ["tests/"]
 
 [dependencies]
 fynd-core.workspace = true

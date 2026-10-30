@@ -9,8 +9,9 @@
 #
 # release=false does not decide what reaches crates.io. Nothing here publishes (publish=false
 # above); release.yaml publishes the list it names on the release event. fynd-test-fixtures,
-# fynd-tools-common and fynd-bench-harness are on that list, because fynd-labs depends on them
-# and a git dependency there would put a second copy of fynd-core in its build.
+# fynd-tools-common, fynd-bench-harness and fynd-nexus are on that list, because
+# fynd-labs depends on them and a git dependency there would put a second copy of fynd-core in
+# its build.
 #
 # A published crate must not be release=false. release-plz rewrites the `version` of the
 # workspace dependency entries only for the packages it releases; an entry it skips keeps its
@@ -50,9 +51,6 @@ name = "fynd-gas-audit"
 release = false
 [[package]]
 name = "record-market"
-release = false
-[[package]]
-name = "fynd-nexus"
 release = false
 
 [changelog]

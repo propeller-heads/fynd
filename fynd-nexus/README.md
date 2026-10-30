@@ -32,6 +32,9 @@ BEBOP_KEY=... HASHFLOW_USER=... HASHFLOW_KEY=... METRIC_API_KEY=... \
 | `--metric-api-key` | `METRIC_API_KEY` | | Metric API key. |
 | `--metric-api-url` | `METRIC_API_URL` | Metric's public endpoint | Another Metric deployment. |
 
+Another binary can start the service with `fynd_nexus::run(Cli::parse())`, where `Cli` is
+`fynd_nexus::cli::Cli`, after it sets up logging.
+
 A listed venue without its credentials fails startup. The service has no authentication and it
 serves prices only: expose it inside the cluster.
 
