@@ -13,6 +13,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 pub use token_graph::{PairEdge, TokenGraph, TokenPath, TopologyGraph, TopologyGraphManager};
 use tycho_simulation::{
+    evm::protocol::native_wrapper::state::NATIVE_WRAPPER_ID,
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
     tycho_core::models::token::Token,
 };
@@ -22,6 +23,13 @@ use crate::{
     feed::market_data::MarketDataView,
     types::{ComponentId, ComponentTopology, ResolvedRouteConstraints},
 };
+
+/// Whether this component is the injected native-to-wrapped swap.
+///
+/// A wrap is not a trade, so routes do not count it against their hop limits.
+pub(crate) fn is_native_wrap(component_id: &ComponentId) -> bool {
+    component_id == NATIVE_WRAPPER_ID
+}
 
 /// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
 /// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a
@@ -79,6 +87,23 @@ impl<'a, D> Path<'a, D> {
     /// Returns the number of hops in the path.
     pub fn len(&self) -> usize {
         self.edge_data.len()
+    }
+
+    /// Returns the number of hops that count against `max_hops`: every edge except the native
+    /// wrap, and at least 1 for a route that is only a wrap.
+    pub fn pool_hops(&self) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+        self.non_wrap_hops().max(1)
+    }
+
+    /// Returns the number of edges that are not the native wrap.
+    pub fn non_wrap_hops(&self) -> usize {
+        self.edge_data
+            .iter()
+            .filter(|edge| !is_native_wrap(&edge.component_id))
+            .count()
     }
 
     /// Returns true if the path has no hops.
