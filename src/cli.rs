@@ -376,6 +376,23 @@ mod cli_tests {
         assert_eq!(args.max_sync_lag_secs, 30);
     }
 
+    #[rstest::rstest]
+    #[case::default(&[], false)]
+    #[case::flag(&["--exclude-nexus-unhealthy-pools"], true)]
+    fn test_arg_parsing_exclude_nexus_unhealthy_pools(
+        #[case] flags: &[&str],
+        #[case] expected: bool,
+    ) {
+        let mut argv = vec!["fynd", "serve", "--tycho-api-key", "test-key"];
+        argv.extend_from_slice(flags);
+        let cli = Cli::try_parse_from(argv).expect("parse errored");
+
+        let Commands::Serve(args) = cli.command else {
+            panic!("expected Serve command");
+        };
+        assert_eq!(args.exclude_nexus_unhealthy_pools, expected);
+    }
+
     #[test]
     fn test_arg_parsing_default_worker_pools() {
         let cli = Cli::try_parse_from(vec!["fynd", "serve", "--tycho-api-key", "test-key"])

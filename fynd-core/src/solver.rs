@@ -2061,6 +2061,35 @@ mod tests {
         assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
     }
 
+    /// The poller asks the service for the set, so there must be a service to ask. It is caught at
+    /// build time, not when the first poll fails.
+    #[rstest::rstest]
+    #[case::no_url(None, "needs a fynd-nexus service")]
+    #[case::invalid_url(Some("ftp://shared"), "must be an http:// or https:// URL")]
+    fn test_build_exclude_unhealthy_pools_needs_a_valid_nexus_url(
+        #[case] nexus_url: Option<&str>,
+        #[case] message: &str,
+    ) {
+        let mut builder = FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+        .algorithm("most_liquid")
+        .exclude_nexus_unhealthy_pools(true);
+        if let Some(url) = nexus_url {
+            builder = builder.nexus_url(url);
+        }
+
+        let Err(error) = builder.build() else {
+            panic!("excluding unhealthy pools without a usable nexus URL must not build");
+        };
+
+        assert!(error.to_string().contains(message), "got: {error}");
+    }
+
     /// A pool budget above the router deadline cannot take effect for a request that does not
     /// raise its own `timeout_ms`: the router stops waiting first.
     #[test]

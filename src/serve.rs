@@ -615,3 +615,50 @@ mod watermark_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod nexus_exclusion_tests {
+    use clap::Parser;
+
+    use super::check_nexus_exclusion;
+    use crate::cli::{Cli, Commands, ServeArgs};
+
+    fn serve_args(flags: &[&str]) -> ServeArgs {
+        let mut argv = vec!["fynd", "serve", "--tycho-api-key", "test-key"];
+        argv.extend_from_slice(flags);
+        let Commands::Serve(args) = Cli::try_parse_from(argv)
+            .expect("parse errored")
+            .command
+        else {
+            panic!("expected Serve command");
+        };
+        *args
+    }
+
+    #[test]
+    fn test_exclusion_without_nexus_url_is_refused() {
+        let args = serve_args(&["--exclude-nexus-unhealthy-pools"]);
+
+        let error = check_nexus_exclusion(&args).expect_err("no service to ask");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--nexus-url"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn test_exclusion_with_nexus_url_is_accepted() {
+        let args =
+            serve_args(&["--exclude-nexus-unhealthy-pools", "--nexus-url", "http://nexus:3000"]);
+
+        assert!(check_nexus_exclusion(&args).is_ok());
+    }
+
+    #[test]
+    fn test_no_exclusion_needs_no_nexus_url() {
+        assert!(check_nexus_exclusion(&serve_args(&[])).is_ok());
+    }
+}
