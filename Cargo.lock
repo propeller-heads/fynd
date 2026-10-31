@@ -3622,6 +3622,7 @@ dependencies = [
  "clap",
  "futures 0.3.32",
  "fynd-core",
+ "fynd-rpc",
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util 0.20.4",
