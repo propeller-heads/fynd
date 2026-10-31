@@ -177,3 +177,242 @@ fn log_changes(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    use super::*;
+    use crate::nexus::{MessageBody, NexusMessage};
+
+    const EPOCH: u64 = 1_761_550_000_000;
+
+    fn timings() -> PollTimings {
+        PollTimings {
+            poll_interval: Duration::from_millis(2),
+            request_timeout: Duration::from_secs(5),
+            max_backoff: Duration::from_millis(4),
+            max_snapshot_age: None,
+        }
+    }
+
+    fn component(id: &str, cause: ExclusionCause) -> ExcludedComponent {
+        ExcludedComponent {
+            id: id.to_string(),
+            protocol_system: "uniswap_v2".to_string(),
+            cause,
+            since: "2026-10-27T09:00:00Z".parse().unwrap(),
+            reason: "reverted".to_string(),
+        }
+    }
+
+    fn snapshot(seq: u64, components: Vec<ExcludedComponent>) -> ResponseTemplate {
+        // `as_of` is a day old: the age of a snapshot must not matter to the poller.
+        let as_of = Utc::now() - chrono::Duration::days(1);
+        let data = serde_json::to_value(ExcludedComponents { components }).unwrap();
+        let message = NexusMessage::new(EPOCH, seq, MessageBody::Snapshot { as_of, data });
+        ResponseTemplate::new(200).set_body_string(message.encode().unwrap())
+    }
+
+    fn withdrawn(seq: u64) -> ResponseTemplate {
+        let message = NexusMessage::<serde_json::Value>::new(EPOCH, seq, MessageBody::Withdrawn);
+        ResponseTemplate::new(200).set_body_string(message.encode().unwrap())
+    }
+
+    async fn serve(response: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        respond(&server, response).await;
+        server
+    }
+
+    async fn respond(server: &MockServer, response: ResponseTemplate) {
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/components/excluded"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn poller_of(server: &MockServer, max_unconfirmed_age: Duration) -> UnhealthyPoolsPoller {
+        UnhealthyPoolsPoller::with_timings(
+            &server.uri(),
+            reqwest::Client::new(),
+            MarketData::new_shared(),
+            max_unconfirmed_age,
+            timings(),
+        )
+    }
+
+    async fn excluded_in_market(poller: &UnhealthyPoolsPoller) -> Vec<String> {
+        let mut ids: Vec<_> = poller
+            .market
+            .read()
+            .await
+            .base_market_state()
+            .unhealthy_pools()
+            .iter()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_sets_the_unhealthy_pools_in_lowercase() {
+        let server = serve(snapshot(
+            1,
+            vec![
+                component("0xABCDEF", ExclusionCause::Broken),
+                component("0x123456", ExclusionCause::Inaccurate),
+            ],
+        ))
+        .await;
+        let mut poller = poller_of(&server, DEFAULT_MAX_UNCONFIRMED_AGE);
+
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+
+        assert_eq!(excluded_in_market(&poller).await, ["0x123456", "0xabcdef"]);
+    }
+
+    #[tokio::test]
+    async fn test_a_pool_that_leaves_the_set_is_routable_again() {
+        let server = serve(snapshot(1, vec![component("0xaa", ExclusionCause::Broken)])).await;
+        let mut poller = poller_of(&server, DEFAULT_MAX_UNCONFIRMED_AGE);
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+        respond(&server, snapshot(2, vec![component("0xbb", ExclusionCause::Broken)])).await;
+
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+
+        assert_eq!(excluded_in_market(&poller).await, ["0xbb"]);
+    }
+
+    #[tokio::test]
+    async fn test_a_withdrawal_frees_every_pool() {
+        let server = serve(snapshot(1, vec![component("0xaa", ExclusionCause::Broken)])).await;
+        let mut poller = poller_of(&server, DEFAULT_MAX_UNCONFIRMED_AGE);
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+        respond(&server, withdrawn(2)).await;
+
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+
+        assert!(excluded_in_market(&poller)
+            .await
+            .is_empty());
+    }
+
+    /// The service has no state after a restart, until its first probes finish.
+    #[tokio::test]
+    async fn test_an_empty_answer_frees_every_pool() {
+        let server = serve(snapshot(1, vec![component("0xaa", ExclusionCause::Broken)])).await;
+        let mut poller = poller_of(&server, DEFAULT_MAX_UNCONFIRMED_AGE);
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+        respond(&server, ResponseTemplate::new(204)).await;
+
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+
+        assert!(excluded_in_market(&poller)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_failed_polls_keep_the_last_set_until_the_service_is_unheard_for_too_long() {
+        let server = serve(snapshot(1, vec![component("0xaa", ExclusionCause::Broken)])).await;
+        let mut poller = poller_of(&server, Duration::from_millis(50));
+        let mut last_heard = Instant::now();
+        poller
+            .poll_and_apply(&mut last_heard)
+            .await;
+        respond(&server, ResponseTemplate::new(500)).await;
+
+        poller
+            .poll_and_apply(&mut last_heard)
+            .await;
+        assert_eq!(excluded_in_market(&poller).await, ["0xaa"], "a short silence keeps the set");
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        poller
+            .poll_and_apply(&mut last_heard)
+            .await;
+        assert!(
+            excluded_in_market(&poller)
+                .await
+                .is_empty(),
+            "a long silence frees the pools"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_an_unchanged_answer_keeps_the_set_however_old_the_snapshot() {
+        let server = serve(snapshot(1, vec![component("0xaa", ExclusionCause::Broken)])).await;
+        let mut poller = poller_of(&server, Duration::from_millis(30));
+        let mut last_heard = Instant::now();
+        poller
+            .poll_and_apply(&mut last_heard)
+            .await;
+        respond(&server, ResponseTemplate::new(304)).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        poller
+            .poll_and_apply(&mut last_heard)
+            .await;
+
+        assert_eq!(excluded_in_market(&poller).await, ["0xaa"]);
+    }
+
+    #[tokio::test]
+    async fn test_gauge_counts_pools_per_cause() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let server = serve(snapshot(
+            1,
+            vec![
+                component("0xaa", ExclusionCause::Broken),
+                component("0xbb", ExclusionCause::Broken),
+                component("0xcc", ExclusionCause::Inaccurate),
+            ],
+        ))
+        .await;
+        let mut poller = poller_of(&server, DEFAULT_MAX_UNCONFIRMED_AGE);
+
+        poller
+            .poll_and_apply(&mut Instant::now())
+            .await;
+
+        let mut counts = Vec::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            if let (true, DebugValue::Gauge(count)) =
+                (key.key().name() == "nexus_excluded_pools", value)
+            {
+                let cause = key
+                    .key()
+                    .labels()
+                    .find(|label| label.key() == "cause")
+                    .map(|label| label.value().to_string());
+                counts.push((cause.unwrap(), count.into_inner()));
+            }
+        }
+        counts.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(counts, [("broken".to_string(), 2.0), ("inaccurate".to_string(), 1.0)]);
+    }
+}
