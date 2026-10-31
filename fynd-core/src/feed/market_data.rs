@@ -434,13 +434,17 @@ pub struct MarketState {
     /// The components of `unsynced_protocols`, shared with every request's
     /// [`ResolvedRouteConstraints`].
     unsynced_pools: Arc<FxHashSet<ComponentId>>,
+    /// Pools the `fynd-nexus` service reports as unhealthy, excluded from routing like
+    /// `unsynced_pools`; see [`MarketState::set_unhealthy_pools`]. Shared with every request's
+    /// [`ResolvedRouteConstraints`].
+    unhealthy_pools: Arc<FxHashSet<ComponentId>>,
     /// The components of each protocol system, maintained on upsert/remove so a quote that
     /// excludes a protocol names that system's pools without scanning the component map, and so
     /// the metrics sampler can count them without one either.
     components_by_protocol: FxHashMap<String, FxHashSet<ComponentId>>,
-    /// Changes when a component is added or removed or `unsynced_protocols` changes, the two
-    /// things a resolved [`ResolvedRouteConstraints`] depends on. Not when a component's state
-    /// changes.
+    /// Changes when a component is added or removed, `unsynced_protocols` changes, or
+    /// `unhealthy_pools` changes: the things a resolved [`ResolvedRouteConstraints`] depends on.
+    /// Not when a component's state changes.
     exclusion_generation: u64,
 }
 
@@ -481,6 +485,7 @@ impl MarketState {
             tokens: filter.excluded_tokens().clone(),
             required_tokens: filter.required_tokens().clone(),
             unsynced_pools: Arc::clone(&self.unsynced_pools),
+            unhealthy_pools: Arc::clone(&self.unhealthy_pools),
         }
     }
 
@@ -496,6 +501,7 @@ impl MarketState {
             last_updated: None,
             unsynced_protocols: FxHashSet::default(),
             unsynced_pools: Arc::default(),
+            unhealthy_pools: Arc::default(),
             components_by_protocol: FxHashMap::default(),
             exclusion_generation: 0,
         }
@@ -521,6 +527,35 @@ impl MarketState {
     pub fn is_unsynced_pool(&self, component_id: &str) -> bool {
         self.unsynced_pools
             .contains(component_id)
+    }
+
+    /// Whether the `fynd-nexus` service reports this component as unhealthy, so routing skips
+    /// it.
+    pub fn is_unhealthy_pool(&self, component_id: &str) -> bool {
+        self.unhealthy_pools
+            .contains(component_id)
+    }
+
+    /// Returns the pools the `fynd-nexus` service reports as unhealthy.
+    pub fn unhealthy_pools(&self) -> &FxHashSet<ComponentId> {
+        &self.unhealthy_pools
+    }
+
+    /// Replaces the pools excluded from routing as unhealthy, and returns whether the set
+    /// changed.
+    ///
+    /// The exclusion generation only moves when the set differs from the current one, so an
+    /// unchanged report does not invalidate the exclusions requests have resolved. An id for a
+    /// component the market does not hold is kept: the component may arrive later.
+    pub fn set_unhealthy_pools(&mut self, pools: FxHashSet<ComponentId>) -> bool {
+        if *self.unhealthy_pools == pools {
+            return false;
+        }
+        self.unhealthy_pools = Arc::new(pools);
+        self.exclusion_generation = self
+            .exclusion_generation
+            .wrapping_add(1);
+        true
     }
 
     /// Returns the block info for the last update.
@@ -867,6 +902,7 @@ impl MarketState {
             last_updated: self.last_updated.clone(),
             unsynced_protocols: self.unsynced_protocols.clone(),
             unsynced_pools: Arc::clone(&self.unsynced_pools),
+            unhealthy_pools: Arc::clone(&self.unhealthy_pools),
             components_by_protocol,
             exclusion_generation: self.exclusion_generation,
         }
