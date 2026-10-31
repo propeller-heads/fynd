@@ -57,3 +57,104 @@ impl ExcludedPublisher {
         self.stream.withdraw();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use fynd_core::nexus::{MessageBody, NexusMessage};
+    use tycho_simulation::evm::tycho_models::Chain;
+
+    use super::*;
+    use crate::{
+        monitor::component_health::{HealthThresholds, Observation},
+        stream_kind::StreamKind,
+    };
+
+    const THRESHOLDS: HealthThresholds =
+        HealthThresholds { broken_after: 1, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+
+    struct Fixture {
+        stream: Arc<LatestStream>,
+        store: Arc<HealthStore>,
+        publisher: ExcludedPublisher,
+    }
+
+    fn fixture() -> Fixture {
+        let stream =
+            Arc::new(LatestStream::new(Chain::Ethereum, StreamKind::ExcludedComponents, 1));
+        let store = Arc::new(HealthStore::new(THRESHOLDS, Default::default()));
+        let publisher =
+            ExcludedPublisher::new(Arc::clone(&stream), Arc::clone(&store), MonitorClock::new());
+        Fixture { stream, store, publisher }
+    }
+
+    fn seq(stream: &LatestStream) -> u64 {
+        stream
+            .current()
+            .map_or(0, |message| message.seq)
+    }
+
+    fn revert(reason: &str, block: u64) -> Observation {
+        Observation::PoolReverted { block, reason: reason.to_string() }
+    }
+
+    #[test]
+    fn test_first_sync_publishes_even_an_empty_set() {
+        let fixture = fixture();
+
+        fixture.publisher.sync();
+
+        let message = fixture.stream.current().unwrap();
+        let decoded: NexusMessage<ExcludedComponents> =
+            NexusMessage::decode(std::str::from_utf8(&message.encoded).unwrap()).unwrap();
+        let MessageBody::Snapshot { data, .. } = decoded.body else {
+            panic!("expected a snapshot");
+        };
+        assert!(data.components.is_empty());
+    }
+
+    #[test]
+    fn test_publishes_only_when_the_set_or_a_cause_changes() {
+        let fixture = fixture();
+        let now = Utc::now();
+        fixture
+            .store
+            .track("0xa", "uniswap_v3", now);
+        fixture.publisher.sync();
+        let after_empty = seq(&fixture.stream);
+
+        fixture.publisher.sync();
+        let unchanged = seq(&fixture.stream);
+        fixture
+            .store
+            .record("0xa", revert("PoolEmpty", 1), now);
+        fixture.publisher.sync();
+        let after_broken = seq(&fixture.stream);
+        fixture
+            .store
+            .record("0xa", revert("OtherError", 2), now);
+        fixture.publisher.sync();
+        let after_new_reason = seq(&fixture.stream);
+        fixture.store.reset_one("0xa", now);
+        fixture.publisher.sync();
+        let after_reset = seq(&fixture.stream);
+
+        assert_eq!(
+            (after_empty, unchanged, after_broken, after_new_reason, after_reset),
+            (1, 1, 2, 2, 3)
+        );
+    }
+
+    #[test]
+    fn test_publishes_again_after_a_withdrawal() {
+        let fixture = fixture();
+        fixture.publisher.sync();
+
+        fixture.publisher.withdraw();
+        assert!(!fixture.stream.is_serving());
+        fixture.publisher.sync();
+
+        assert!(fixture.stream.is_serving());
+        assert_eq!(seq(&fixture.stream), 3);
+    }
+}
