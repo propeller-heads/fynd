@@ -332,7 +332,7 @@ mod tests {
 
         assert_eq!(count, 2);
         assert!(store.excluded().is_empty());
-        assert!(!store.has_probed_components());
+        assert!(!store.has_verdicts());
     }
 
     #[test]
