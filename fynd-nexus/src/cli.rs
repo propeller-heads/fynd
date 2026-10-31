@@ -14,11 +14,13 @@ pub struct Cli {
     #[arg(long, env = "CHAIN")]
     pub chain: Chain,
 
-    /// Venues to connect to, comma separated. Leave it empty to run the health monitor alone.
+    /// Venues to connect to, comma separated. Pass the flag with no value to run the health
+    /// monitor alone.
     #[arg(
         long,
         env = "VENUES",
         value_delimiter = ',',
+        num_args = 0..,
         default_values_t = RfqVenue::ALL
     )]
     pub venues: Vec<RfqVenue>,
