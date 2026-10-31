@@ -34,3 +34,20 @@ impl fmt::Display for StreamKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::rfq(StreamKind::Rfq(RfqVenue::Bebop), "bebop", "venue")]
+    #[case::components(StreamKind::ExcludedComponents, "excluded_components", "stream")]
+    fn test_name_and_label(#[case] kind: StreamKind, #[case] name: &str, #[case] key: &str) {
+        let label = kind.label();
+
+        assert_eq!(kind.to_string(), name);
+        assert_eq!((label.key(), label.value()), (key, name));
+    }
+}
