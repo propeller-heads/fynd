@@ -1,8 +1,14 @@
 //! The pod's connection to a `fynd-nexus` service.
 
+use std::time::Duration;
+
 use reqwest::Url;
 
-use super::price_levels::{PriceLevelsAssembler, PriceLevelsFeed};
+use super::{
+    components::UnhealthyPoolsPoller,
+    price_levels::{PriceLevelsAssembler, PriceLevelsFeed},
+};
+use crate::feed::market_data::MarketData;
 
 /// Errors when creating a [`NexusClient`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -54,6 +60,22 @@ impl NexusClient {
     /// A feed of one venue's price levels, built by `assembler` from the prices the service serves.
     pub fn price_levels_feed(&self, assembler: PriceLevelsAssembler) -> PriceLevelsFeed {
         PriceLevelsFeed::new(&self.connection_url, self.http.clone(), assembler)
+    }
+
+    /// A poller that keeps the excluded pools of `market` in step with the components the
+    /// service reports as unhealthy. See [`UnhealthyPoolsPoller`] for when it excludes nothing;
+    /// `max_unconfirmed_age` is how long the service may stay silent before then.
+    pub fn unhealthy_pools_poller(
+        &self,
+        market: MarketData,
+        max_unconfirmed_age: Duration,
+    ) -> UnhealthyPoolsPoller {
+        UnhealthyPoolsPoller::new(
+            &self.connection_url,
+            self.http.clone(),
+            market,
+            max_unconfirmed_age,
+        )
     }
 }
 
