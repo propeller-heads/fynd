@@ -92,7 +92,9 @@ pub use replay::{replay_route, ReplayError, RouteReplay};
 // `rustc-hash` version itself.
 pub use rustc_hash;
 pub use simulation::simulator::{SimulationBlock, SimulationPurpose};
-pub use solver::{FyndBuilder, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError};
+pub use solver::{
+    FyndBuilder, MarketFeed, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError,
+};
 /// Processes ephemeral pending bundles against live Tycho market state. Obtained by calling
 /// [`FyndBuilder::build_with_pending`](solver::FyndBuilder::build_with_pending).
 pub use tycho_simulation::evm::pending::PendingBlockProcessor;
