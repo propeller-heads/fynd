@@ -4,6 +4,7 @@
 //! poll it over HTTP. Each response carries a [`NexusMessage`](crate::nexus::NexusMessage) as JSON.
 
 pub mod client;
+pub mod components;
 pub mod price_levels;
 
 use chrono::{DateTime, Utc};
