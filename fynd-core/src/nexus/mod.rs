@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod components;
+pub(crate) mod poller;
 pub mod price_levels;
 
 use chrono::{DateTime, Utc};
