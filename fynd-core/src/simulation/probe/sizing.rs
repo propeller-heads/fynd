@@ -164,3 +164,180 @@ fn usd_reference<'a>(market: &MarketState, prices: &'a TokenGasPrices) -> Option
     let decimals = market.get_token(address)?.decimals;
     Some((decimals, prices.get(address)?))
 }
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use rustc_hash::FxHashMap;
+
+    use super::*;
+    use crate::algorithm::test_utils::{addr, component, token, token_with_decimals};
+
+    const ONE_ETH: u128 = 1_000_000_000_000_000_000;
+
+    fn price(tokens_per_eth: u128) -> Price {
+        Price { numerator: BigUint::from(tokens_per_eth), denominator: BigUint::from(ONE_ETH) }
+    }
+
+    /// WETH at 1, USDC (6 decimals) at 2,000 per ETH, and X (18 decimals) at 1,000 per ETH, so
+    /// that ETH is 2,000 USD and X is 2 USD.
+    fn market_and_prices() -> (MarketState, TokenGasPrices) {
+        let weth = token(0x01, "WETH");
+        let usdc = token_with_decimals(0x02, "USDC", 6);
+        let x = token(0x03, "X");
+        let mut market = MarketState::new();
+        market.upsert_components([component("pool", &[x.clone(), usdc.clone()])]);
+        market.upsert_tokens([weth, usdc, x]);
+        let prices = TokenGasPrices::from_iter([
+            (addr(0x01), price(ONE_ETH)),
+            (addr(0x02), price(2_000_000_000)),
+            (addr(0x03), price(1_000 * ONE_ETH)),
+        ]);
+        (market, prices)
+    }
+
+    fn derived_with(prices: TokenGasPrices, depths: &[(&str, u8, u8, u128)]) -> DerivedData {
+        let mut derived = DerivedData::new();
+        derived.set_token_prices(prices, vec![], 1);
+        let depths = depths
+            .iter()
+            .map(|(pool, token_in, token_out, depth)| {
+                ((pool.to_string(), addr(*token_in), addr(*token_out)), BigUint::from(*depth))
+            })
+            .collect::<FxHashMap<_, _>>();
+        derived.set_component_depths(depths, vec![], 1);
+        derived
+    }
+
+    fn sizer() -> ProbeSizer {
+        ProbeSizer::new(500.0, 0.01).unwrap()
+    }
+
+    #[rstest]
+    #[case::weth(0x01, ONE_ETH / 4)]
+    #[case::usdc(0x02, 500_000_000)]
+    #[case::x(0x03, 250 * ONE_ETH)]
+    fn test_amount_in_is_the_usd_value(#[case] token_in: u8, #[case] expected: u128) {
+        let (market, prices) = market_and_prices();
+        let derived = derived_with(prices, &[]);
+
+        let amount = sizer()
+            .amount_in(&market, &derived, "pool", &addr(token_in), &addr(0x09))
+            .unwrap();
+
+        assert_eq!(amount, BigUint::from(expected));
+    }
+
+    #[rstest]
+    #[case::below_the_cap(100_000 * ONE_ETH, 250 * ONE_ETH)]
+    #[case::at_the_cap(25_000 * ONE_ETH, 250 * ONE_ETH)]
+    #[case::above_the_cap(100 * ONE_ETH, ONE_ETH)]
+    fn test_amount_in_is_capped_by_the_depth(#[case] depth: u128, #[case] expected: u128) {
+        let (market, prices) = market_and_prices();
+        let derived = derived_with(prices, &[("pool", 0x03, 0x02, depth)]);
+
+        let amount = sizer()
+            .amount_in(&market, &derived, "pool", &addr(0x03), &addr(0x02))
+            .unwrap();
+
+        assert_eq!(amount, BigUint::from(expected));
+    }
+
+    #[test]
+    fn test_amount_in_ignores_the_depth_of_another_direction() {
+        let (market, prices) = market_and_prices();
+        let derived = derived_with(prices, &[("pool", 0x02, 0x03, 1)]);
+
+        let amount = sizer()
+            .amount_in(&market, &derived, "pool", &addr(0x03), &addr(0x02))
+            .unwrap();
+
+        assert_eq!(amount, BigUint::from(250 * ONE_ETH));
+    }
+
+    #[test]
+    fn test_amount_in_prefers_the_most_trusted_stablecoin_of_the_best_quality() {
+        let (mut market, mut prices) = market_and_prices();
+        // A copy of USDC with a wrong price and poor quality, and a USDT that ranks lower.
+        let mut fake = token_with_decimals(0x04, "USDC", 6);
+        fake.quality = 50;
+        let usdt = token_with_decimals(0x05, "USDT", 6);
+        market.upsert_tokens([fake, usdt]);
+        prices.insert(addr(0x04), price(1_000_000_000));
+        prices.insert(addr(0x05), price(1_000_000_000));
+        let derived = derived_with(prices, &[]);
+
+        let amount = sizer()
+            .amount_in(&market, &derived, "pool", &addr(0x01), &addr(0x02))
+            .unwrap();
+
+        assert_eq!(amount, BigUint::from(ONE_ETH / 4));
+    }
+
+    #[test]
+    fn test_amount_in_without_prices() {
+        let (market, _) = market_and_prices();
+
+        let error = sizer()
+            .amount_in(&market, &DerivedData::new(), "pool", &addr(0x03), &addr(0x02))
+            .unwrap_err();
+
+        assert_eq!(error, SizingError::PricesNotReady);
+    }
+
+    #[test]
+    fn test_amount_in_without_a_priced_stablecoin() {
+        let (market, mut prices) = market_and_prices();
+        prices.remove(&addr(0x02));
+        let derived = derived_with(prices, &[]);
+
+        let error = sizer()
+            .amount_in(&market, &derived, "pool", &addr(0x03), &addr(0x02))
+            .unwrap_err();
+
+        assert_eq!(error, SizingError::NoUsdReference);
+    }
+
+    #[test]
+    fn test_amount_in_of_an_unpriced_token() {
+        let (market, prices) = market_and_prices();
+        let derived = derived_with(prices, &[]);
+
+        let error = sizer()
+            .amount_in(&market, &derived, "pool", &addr(0x09), &addr(0x02))
+            .unwrap_err();
+
+        assert_eq!(error, SizingError::Unpriced(addr(0x09).to_string()));
+    }
+
+    #[test]
+    fn test_amount_in_with_no_depth_left() {
+        let (market, prices) = market_and_prices();
+        let derived = derived_with(prices, &[("pool", 0x03, 0x02, 0)]);
+
+        let error = sizer()
+            .amount_in(&market, &derived, "pool", &addr(0x03), &addr(0x02))
+            .unwrap_err();
+
+        assert_eq!(error, SizingError::AmountIsZero(addr(0x03).to_string()));
+    }
+
+    #[rstest]
+    #[case::zero_usd(0.0, 0.01)]
+    #[case::negative_usd(-5.0, 0.01)]
+    #[case::fraction_of_a_cent(0.001, 0.01)]
+    #[case::nan_usd(f64::NAN, 0.01)]
+    #[case::infinite_usd(f64::INFINITY, 0.01)]
+    #[case::zero_share(500.0, 0.0)]
+    #[case::negative_share(500.0, -0.1)]
+    #[case::share_above_one(500.0, 1.5)]
+    #[case::nan_share(500.0, f64::NAN)]
+    fn test_new_rejects(#[case] usd: f64, #[case] depth_share: f64) {
+        assert!(ProbeSizer::new(usd, depth_share).is_err());
+    }
+
+    #[test]
+    fn test_new_accepts_the_whole_depth() {
+        assert!(ProbeSizer::new(0.01, 1.0).is_ok());
+    }
+}
