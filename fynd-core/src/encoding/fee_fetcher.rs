@@ -114,22 +114,32 @@ impl RouterFeeFetcher {
         loop {
             ticker.tick().await;
 
-            match self.fetch_fees().await {
-                Ok(fees) => {
-                    info!(
-                        custom_clients = fees.custom_client_count(),
-                        "router fees refreshed from on-chain FeeCalculator"
-                    );
-                    self.shared_fees.set(fees);
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "failed to refresh router fees from chain; keeping previous values"
-                    );
-                }
+            if let Err(e) = self.refresh().await {
+                warn!(
+                    error = %e,
+                    "failed to refresh router fees from chain; keeping previous values"
+                );
             }
         }
+    }
+
+    /// Reads the fee configuration from chain once and stores it.
+    ///
+    /// A caller that needs the real fees before its first encode awaits this before starting
+    /// [`run`](Self::run).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterFeeFetchError::Call`] if a contract call fails. The stored fees are then
+    /// left as they were.
+    pub async fn refresh(&self) -> Result<(), RouterFeeFetchError> {
+        let fees = self.fetch_fees().await?;
+        info!(
+            custom_clients = fees.custom_client_count(),
+            "router fees refreshed from on-chain FeeCalculator"
+        );
+        self.shared_fees.set(fees);
+        Ok(())
     }
 
     /// Reads the full fee configuration from chain: the precision scale, default fees, and
