@@ -35,8 +35,8 @@ use tycho_simulation::{
 use crate::{
     algorithm::{AlgorithmConfig, AlgorithmError, AlgorithmRegistry},
     derived::{
-        registry::ErasedComputation, ComputationManager, ComputationManagerConfig,
-        DerivedComputation, SharedDerivedDataRef,
+        events::DerivedDataEvent, registry::ErasedComputation, ComputationManager,
+        ComputationManagerConfig, DerivedComputation, SharedDerivedDataRef,
     },
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
@@ -532,6 +532,20 @@ struct CustomPoolEntry {
     liquidity_scope: Option<LiquidityScope>,
     /// Applies the custom algorithm to a `WorkerPoolBuilder`.
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
+}
+
+/// The market half of the pipeline, produced by [`FyndBuilder::assemble_market`].
+struct MarketParts {
+    market_data: MarketData,
+    tycho_feed: TychoFeed,
+    gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
+    computation_manager: ComputationManager,
+    derived_data: SharedDerivedDataRef,
+    derived_event_tx: broadcast::Sender<DerivedDataEvent>,
+    computation_event_rx: broadcast::Receiver<MarketEvent>,
+    computation_shutdown_tx: broadcast::Sender<()>,
+    computation_shutdown_rx: broadcast::Receiver<()>,
+    market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
 /// All components produced by [`FyndBuilder::assemble_components`], consumed by
@@ -1076,6 +1090,93 @@ impl FyndBuilder {
         Ok(self)
     }
 
+    /// Constructs the market components that both [`build`](Self::build) and
+    /// [`build_market`](Self::build_market) need: the Tycho feed, the gas price fetcher and the
+    /// computation manager with its derived data.
+    ///
+    /// Takes the settings it consumes out of the builder, which the caller no longer reads.
+    fn assemble_market(&mut self) -> Result<MarketParts, SolverBuildError> {
+        let market_data = MarketData::new_shared();
+
+        let tycho_feed_config = TychoFeedConfig::new(
+            std::mem::take(&mut self.tycho_url),
+            self.chain,
+            self.tycho_api_key.take(),
+            self.tycho_use_tls,
+            std::mem::take(&mut self.protocols),
+            self.min_tvl,
+        )
+        .tvl_buffer_ratio(self.tvl_buffer_ratio)
+        .reconnect_delay(self.reconnect_delay)
+        .min_token_quality(self.min_token_quality)
+        .traded_n_days_ago(self.traded_n_days_ago)
+        .blocklisted_components(std::mem::take(&mut self.blocklisted_components))
+        .partial_blocks(self.partial_blocks)
+        .max_sync_lag(self.max_sync_lag)
+        .aggregate_rfqs(self.aggregate_rfqs)
+        .external_liquidity(std::mem::take(&mut self.external_liquidity));
+
+        let tycho_feed_config = match self.nexus_url.take() {
+            Some(url) => tycho_feed_config.nexus_url(url),
+            None => tycho_feed_config,
+        };
+        let tycho_feed_config = match self.tycho_subscription_buffer_size {
+            Some(size) => tycho_feed_config.subscription_buffer_size(size),
+            None => tycho_feed_config,
+        };
+
+        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
+            .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
+
+        let gas_price_fetcher =
+            GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
+
+        let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
+        let market_event_tx = tycho_feed.event_sender();
+
+        let mut computation_config = ComputationManagerConfig::new()
+            .with_chain_gas_token(&self.chain)
+            .map_err(|_| SolverBuildError::GasToken)?
+            .with_max_hop(self.pricing_max_hops);
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
+        // ComputationManager::new returns a broadcast receiver that we don't need here —
+        // workers subscribe via computation_manager.event_sender() below.
+        let (mut computation_manager, _) =
+            ComputationManager::new(computation_config, market_data.clone())
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+        for computation in std::mem::take(&mut self.computations) {
+            computation_manager
+                .register_boxed(computation)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+        }
+
+        let derived_data: SharedDerivedDataRef = computation_manager.store();
+        let derived_event_tx = computation_manager.event_sender();
+
+        // Subscribe event channels before spawning (one for the computation manager + one per
+        // worker pool)
+        let computation_event_rx = tycho_feed.subscribe();
+        let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
+
+        Ok(MarketParts {
+            market_data,
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            derived_data,
+            derived_event_tx,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            market_event_tx,
+        })
+    }
+
     /// Constructs all components shared between [`build`](Self::build) and
     /// [`build_with_pending`](Self::build_with_pending).
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
@@ -1117,82 +1218,32 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let market_data = MarketData::new_shared();
-
-        let unhealthy_pools_poller =
-            match (self.exclude_nexus_unhealthy_pools, self.nexus_url.as_deref()) {
-                (true, Some(url)) => Some(
-                    NexusClient::new(url)?
-                        .unhealthy_pools_poller(market_data.clone(), DEFAULT_MAX_UNCONFIRMED_AGE),
-                ),
-                (true, None) => return Err(SolverBuildError::NexusUrlMissing),
-                (false, _) => None,
-            };
-
-        let tycho_feed_config = TychoFeedConfig::new(
-            self.tycho_url,
-            self.chain,
-            self.tycho_api_key,
-            self.tycho_use_tls,
-            self.protocols,
-            self.min_tvl,
-        )
-        .tvl_buffer_ratio(self.tvl_buffer_ratio)
-        .reconnect_delay(self.reconnect_delay)
-        .min_token_quality(self.min_token_quality)
-        .traded_n_days_ago(self.traded_n_days_ago)
-        .blocklisted_components(self.blocklisted_components)
-        .partial_blocks(self.partial_blocks)
-        .max_sync_lag(self.max_sync_lag)
-        .aggregate_rfqs(self.aggregate_rfqs)
-        .external_liquidity(self.external_liquidity);
-
-        let tycho_feed_config = match self.nexus_url {
-            Some(url) => tycho_feed_config.nexus_url(url),
-            None => tycho_feed_config,
-        };
-        let tycho_feed_config = match self.tycho_subscription_buffer_size {
-            Some(size) => tycho_feed_config.subscription_buffer_size(size),
-            None => tycho_feed_config,
+        let unhealthy_pools_url = match (self.exclude_nexus_unhealthy_pools, &self.nexus_url) {
+            (true, Some(url)) => Some(url.clone()),
+            (true, None) => return Err(SolverBuildError::NexusUrlMissing),
+            (false, _) => None,
         };
 
-        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
-            .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
+        let MarketParts {
+            market_data,
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            derived_data,
+            derived_event_tx,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            market_event_tx,
+        } = self.assemble_market()?;
 
-        let gas_price_fetcher =
-            GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
-
-        let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
-        let market_event_tx = tycho_feed.event_sender();
-
-        let mut computation_config = ComputationManagerConfig::new()
-            .with_chain_gas_token(&self.chain)
-            .map_err(|_| SolverBuildError::GasToken)?
-            .with_max_hop(self.pricing_max_hops);
-        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
-            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
-        }
-        if let Some(interval) = self.pricing_min_pass_interval {
-            computation_config = computation_config.with_pricing_min_pass_interval(interval);
-        }
-        // ComputationManager::new returns a broadcast receiver that we don't need here —
-        // workers subscribe via computation_manager.event_sender() below.
-        let (mut computation_manager, _) =
-            ComputationManager::new(computation_config, market_data.clone())
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        for computation in self.computations {
-            computation_manager
-                .register_boxed(computation)
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        }
-
-        let derived_data: SharedDerivedDataRef = computation_manager.store();
-        let derived_event_tx = computation_manager.event_sender();
-
-        // Subscribe event channels before spawning (one for the computation manager + one per
-        // worker pool)
-        let computation_event_rx = tycho_feed.subscribe();
-        let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
+        let unhealthy_pools_poller = match unhealthy_pools_url {
+            Some(url) => Some(
+                NexusClient::new(&url)?
+                    .unhealthy_pools_poller(market_data.clone(), DEFAULT_MAX_UNCONFIRMED_AGE),
+            ),
+            None => None,
+        };
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
