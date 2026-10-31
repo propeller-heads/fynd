@@ -50,6 +50,10 @@ use crate::{
         DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    nexus::{
+        client::{NexusClient, NexusError},
+        components::{UnhealthyPoolsPoller, DEFAULT_MAX_UNCONFIRMED_AGE},
+    },
     post_process::{
         registry::check_post_processor_order, PostProcessorOrderError, PostProcessorRegistry,
         UnknownPostProcessorError,
@@ -398,6 +402,15 @@ pub enum SolverBuildError {
     /// The quote simulator could not be created (e.g. malformed RPC URL).
     #[error("failed to create quote simulator: {0}")]
     QuoteSimulator(String),
+    /// Excluding the pools `fynd-nexus` reports as unhealthy was requested without a nexus URL.
+    #[error(
+        "excluding unhealthy pools needs a fynd-nexus service to ask: set the nexus URL, e.g. \
+         http://fynd-nexus:3000"
+    )]
+    NexusUrlMissing,
+    /// The `fynd-nexus` client could not be created (e.g. malformed URL).
+    #[error(transparent)]
+    Nexus(#[from] NexusError),
     /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
@@ -540,6 +553,7 @@ struct MarketServices {
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     metrics_sampler: MetricsSampler,
+    unhealthy_pools_poller: Option<UnhealthyPoolsPoller>,
 }
 
 /// All components produced by [`FyndBuilder::assemble_components`], consumed by
@@ -585,6 +599,7 @@ pub struct FyndBuilder {
     aggregate_rfqs: bool,
     external_liquidity: Vec<ExternalLiquidity>,
     nexus_url: Option<String>,
+    exclude_nexus_unhealthy_pools: bool,
     pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
@@ -636,6 +651,7 @@ impl FyndBuilder {
             aggregate_rfqs: false,
             external_liquidity: Vec::new(),
             nexus_url: None,
+            exclude_nexus_unhealthy_pools: false,
             pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
@@ -797,6 +813,20 @@ impl FyndBuilder {
     /// and firm quotes still go straight to the venue.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
         self.nexus_url = Some(url.into());
+        self
+    }
+
+    /// Skips the pools the `fynd-nexus` service reports as unhealthy when solving (default:
+    /// `false`).
+    ///
+    /// The service probes each component on chain and reports the ones that revert or pay less
+    /// than their state predicts. The solver polls that set from the service set with
+    /// [`nexus_url`](Self::nexus_url) and routes through those pools again once they recover. It
+    /// fails open: it excludes nothing until the service reports a set, nor when the service
+    /// withdraws it or stays silent for too long. The build fails with
+    /// [`SolverBuildError::NexusUrlMissing`] when no `nexus_url` is set.
+    pub fn exclude_nexus_unhealthy_pools(mut self, enabled: bool) -> Self {
+        self.exclude_nexus_unhealthy_pools = enabled;
         self
     }
 
@@ -1139,6 +1169,7 @@ impl FyndBuilder {
             computation_manager,
             computation_event_rx,
             metrics_sampler,
+            unhealthy_pools_poller: None,
         };
         Ok((stores, services))
     }
@@ -1184,7 +1215,20 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let (stores, services) = self.assemble_market()?;
+        let unhealthy_pools_url = match (self.exclude_nexus_unhealthy_pools, &self.nexus_url) {
+            (true, Some(url)) => Some(url.clone()),
+            (true, None) => return Err(SolverBuildError::NexusUrlMissing),
+            (false, _) => None,
+        };
+
+        let (stores, mut services) = self.assemble_market()?;
+        if let Some(url) = unhealthy_pools_url {
+            services.unhealthy_pools_poller =
+                Some(NexusClient::new(&url)?.unhealthy_pools_poller(
+                    stores.market_data.clone(),
+                    DEFAULT_MAX_UNCONFIRMED_AGE,
+                ));
+        }
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
@@ -1387,8 +1431,8 @@ impl FyndBuilder {
     ///
     /// It uses the same settings as [`build`](Self::build): the Tycho connection, protocols, TVL
     /// floor, blocklist, the nexus URL for shared price levels, the pricing limits and the
-    /// registered computations. Worker pool, encoder, simulation and price guard
-    /// settings have no effect. Call it inside a Tokio runtime.
+    /// registered computations. Worker pool, encoder, simulation, price guard and
+    /// unhealthy-pool settings have no effect. Call it inside a Tokio runtime.
     ///
     /// # Errors
     ///
@@ -1561,7 +1605,8 @@ impl MarketServices {
     /// Spawns the Tycho feed, the gas price fetcher, the metrics sampler and the computation
     /// manager.
     ///
-    /// `run_feed` chooses how the Tycho feed runs.
+    /// `run_feed` chooses how the Tycho feed runs. The poller of excluded pools, when there is
+    /// one, runs inside the feed task so that it stops with the feed.
     fn start<F, Fut>(self, run_feed: F) -> MarketTasks
     where
         F: FnOnce(TychoFeed) -> Fut,
@@ -1573,14 +1618,24 @@ impl MarketServices {
             computation_manager,
             computation_event_rx,
             metrics_sampler,
+            unhealthy_pools_poller,
         } = self;
         let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
 
         let feed = run_feed(tycho_feed);
         let feed_handle = tokio::spawn(async move {
-            if let Err(e) = feed.await {
-                metrics::counter!("tycho_feed_failures_total").increment(1);
-                tracing::error!(error = %e, "tycho feed error");
+            let feed = async {
+                if let Err(e) = feed.await {
+                    metrics::counter!("tycho_feed_failures_total").increment(1);
+                    tracing::error!(error = %e, "tycho feed error");
+                }
+            };
+            match unhealthy_pools_poller {
+                Some(poller) => tokio::select! {
+                    () = feed => {},
+                    () = poller.run() => {},
+                },
+                None => feed.await,
             }
         });
         let gas_price_handle = tokio::spawn(async move {

@@ -296,6 +296,15 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Skips the pools the `fynd-nexus` service at [`nexus_url`](Self::nexus_url) reports as
+    /// unhealthy when solving (default: `false`). The build fails when no nexus URL is set.
+    pub fn exclude_nexus_unhealthy_pools(mut self, enabled: bool) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .exclude_nexus_unhealthy_pools(enabled);
+        self
+    }
+
     /// Sets how far from the gas token the token pricing pass reaches. Leaving this unset keeps
     /// the computation's default.
     pub fn set_pricing_max_hops(mut self, max_hops: usize) -> Self {
