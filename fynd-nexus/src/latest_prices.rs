@@ -1,4 +1,4 @@
-//! The latest message of each venue's stream, kept in memory for the API to serve.
+//! The latest message of each stream, kept in memory for the API to serve.
 
 use std::{
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard},
@@ -7,10 +7,12 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use fynd_core::nexus::{price_levels::PriceLevelVenue, MessageBody, NexusMessage};
+use fynd_core::nexus::{MessageBody, NexusMessage};
 use metrics::{gauge, histogram, Label};
 use serde::Serialize;
 use tycho_simulation::evm::tycho_models::Chain;
+
+use crate::stream_kind::StreamKind;
 
 /// How often the snapshot age gauges are refreshed.
 const AGE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
@@ -81,21 +83,21 @@ struct StreamRecord {
 /// Only the stream's feed runner publishes or withdraws.
 pub struct LatestPrices {
     chain: Chain,
-    venue: PriceLevelVenue,
+    kind: StreamKind,
     run_id: u64,
     latest: RwLock<StreamRecord>,
 }
 
 impl LatestPrices {
-    /// The stream of `venue` on the chain the service serves, with no snapshot yet. `run_id`
+    /// The stream of `kind` on the chain the service serves, with no snapshot yet. `run_id`
     /// identifies this run of the service.
-    pub fn new(chain: Chain, venue: PriceLevelVenue, run_id: u64) -> Self {
+    pub fn new(chain: Chain, kind: StreamKind, run_id: u64) -> Self {
         let latest = StreamRecord {
             seq: 0,
             encoded: None,
             state: StreamState::AwaitingSnapshot { started_at: Utc::now() },
         };
-        Self { chain, venue, run_id, latest: RwLock::new(latest) }
+        Self { chain, kind, run_id, latest: RwLock::new(latest) }
     }
 
     /// The chain the service serves.
@@ -103,17 +105,15 @@ impl LatestPrices {
         self.chain
     }
 
-    /// The venue this stream serves.
-    pub fn venue(&self) -> PriceLevelVenue {
-        self.venue
+    /// What this stream carries.
+    pub fn kind(&self) -> StreamKind {
+        self.kind
     }
 
-    /// The `chain` and `venue` label values every metric of this stream carries.
+    /// The `chain` label and the label of the stream's kind, which every metric of this stream
+    /// carries.
     pub fn labels(&self) -> Vec<Label> {
-        vec![
-            Label::new("chain", self.chain.to_string()),
-            Label::new("venue", self.venue.to_string()),
-        ]
+        vec![Label::new("chain", self.chain.to_string()), self.kind.label()]
     }
 
     /// The latest message, or `None` while no snapshot has arrived in this run.
@@ -212,6 +212,7 @@ pub fn spawn_snapshot_age_reports(streams: Vec<Arc<LatestPrices>>) {
 
 #[cfg(test)]
 mod tests {
+    use fynd_core::nexus::price_levels::PriceLevelVenue;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use serde_json::{json, Value};
 
@@ -220,7 +221,7 @@ mod tests {
     const RUN_ID: u64 = 7;
 
     fn latest_prices() -> LatestPrices {
-        LatestPrices::new(Chain::Base, PriceLevelVenue::Hashflow, RUN_ID)
+        LatestPrices::new(Chain::Base, StreamKind::PriceLevels(PriceLevelVenue::Hashflow), RUN_ID)
     }
 
     fn message(latest_prices: &LatestPrices) -> NexusMessage<Value> {
