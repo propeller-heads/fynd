@@ -14,5 +14,6 @@ pub mod feed_runner;
 pub mod latest_prices;
 pub mod rfq;
 pub mod service;
+pub mod stream_kind;
 
 pub use service::run;

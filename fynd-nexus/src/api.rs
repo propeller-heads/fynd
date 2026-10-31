@@ -12,34 +12,34 @@ use actix_web::{
 use fynd_core::nexus::rfq::RfqVenue;
 use serde_json::json;
 
-use crate::latest_prices::LatestPrices;
+use crate::{latest_prices::LatestPrices, stream_kind::StreamKind};
 
-/// The streams this service serves, by venue.
+/// The streams this service serves, by kind.
 pub struct Streams {
-    by_venue: HashMap<RfqVenue, Arc<LatestPrices>>,
+    by_kind: HashMap<StreamKind, Arc<LatestPrices>>,
 }
 
 impl Streams {
     /// A set of streams.
     pub fn new(streams: impl IntoIterator<Item = Arc<LatestPrices>>) -> Self {
         Self {
-            by_venue: streams
+            by_kind: streams
                 .into_iter()
-                .map(|stream| (stream.venue(), stream))
+                .map(|stream| (stream.kind(), stream))
                 .collect(),
         }
     }
 
     /// Every stream, in no particular order.
     pub fn all(&self) -> impl Iterator<Item = &Arc<LatestPrices>> {
-        self.by_venue.values()
+        self.by_kind.values()
     }
 
     fn find(&self, venue: &str) -> Result<Arc<LatestPrices>, actix_web::Error> {
         let not_served = || ErrorNotFound(format!("no stream for venue '{venue}'"));
         let venue = RfqVenue::from_str(venue).map_err(|_| not_served())?;
-        self.by_venue
-            .get(&venue)
+        self.by_kind
+            .get(&StreamKind::Rfq(venue))
             .cloned()
             .ok_or_else(not_served)
     }
@@ -71,7 +71,7 @@ async fn health(streams: web::Data<Streams>) -> impl Responder {
     let mut serving = Vec::new();
     let mut all = Vec::new();
     for stream in streams.all() {
-        let name = stream.venue().to_string();
+        let name = stream.kind().to_string();
         if stream.has_prices() {
             serving.push(name.clone());
         }

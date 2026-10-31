@@ -15,6 +15,7 @@ use crate::{
     cli::Cli,
     latest_prices::{spawn_snapshot_age_reports, LatestPrices},
     rfq,
+    stream_kind::StreamKind,
 };
 
 /// Byte sizes for `nexus_message_bytes`: from a withdrawal up to a full Bebop book.
@@ -71,7 +72,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     for venue_credentials in to_start {
         let venue = venue_credentials.venue();
         info!(%venue, "starting stream");
-        let latest_prices = Arc::new(LatestPrices::new(cli.chain, venue, epoch));
+        let latest_prices = Arc::new(LatestPrices::new(cli.chain, StreamKind::Rfq(venue), epoch));
         rfq::spawn_prices_feed(Arc::clone(&latest_prices), venue_credentials);
         streams.push(latest_prices);
     }
