@@ -120,3 +120,109 @@ pub async fn watch_liveness(
         stalled = now_stalled;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use fynd_core::nexus::{MessageBody, NexusMessage};
+    use tycho_simulation::evm::tycho_models::Chain;
+
+    use super::*;
+    use crate::{
+        latest_stream::LatestStream,
+        monitor::{
+            component_health::HealthThresholds, health_store::HealthStore,
+            monitor_clock::MonitorClock,
+        },
+        stream_kind::StreamKind,
+    };
+
+    const MINUTE: Duration = Duration::from_secs(60);
+
+    #[tokio::test(start_paused = true)]
+    async fn test_stall_after_five_minutes_at_a_fast_rate() {
+        let liveness = ProbeLiveness::new(Duration::from_millis(500));
+
+        tokio::time::advance(MIN_STALL - MINUTE).await;
+        assert!(!liveness.is_stalled());
+        tokio::time::advance(MINUTE * 2).await;
+
+        assert!(liveness.is_stalled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_stall_after_ten_intervals_at_a_slow_rate() {
+        let liveness = ProbeLiveness::new(MINUTE);
+
+        tokio::time::advance(MINUTE * 9).await;
+        assert!(!liveness.is_stalled());
+        tokio::time::advance(MINUTE * 2).await;
+
+        assert!(liveness.is_stalled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_probes_and_idle_rounds_count_as_progress() {
+        let liveness = ProbeLiveness::new(Duration::from_millis(500));
+        tokio::time::advance(MINUTE * 4).await;
+
+        liveness.record_probe();
+        tokio::time::advance(MINUTE * 4).await;
+        assert!(!liveness.is_stalled());
+        liveness.record_idle();
+        tokio::time::advance(MINUTE * 4).await;
+        assert!(!liveness.is_stalled());
+        tokio::time::advance(MINUTE * 2).await;
+
+        assert!(liveness.is_stalled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_idle_rounds_do_not_reset_the_age_of_the_last_probe() {
+        let liveness = ProbeLiveness::new(Duration::from_millis(500));
+        liveness.record_probe();
+
+        tokio::time::advance(MINUTE).await;
+        liveness.record_idle();
+
+        assert_eq!(liveness.since_last_probe(), MINUTE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_watcher_withdraws_while_stalled_and_publishes_again_on_recovery() {
+        let stream =
+            Arc::new(LatestStream::new(Chain::Ethereum, StreamKind::ExcludedComponents, 1));
+        let store = Arc::new(HealthStore::new(
+            HealthThresholds { broken_after: 1, inaccurate_after: 3, inaccuracy_bps: 100.0 },
+            Default::default(),
+        ));
+        store.track("0xa", "uniswap_v3", Utc::now());
+        let publisher = Arc::new(ExcludedPublisher::new(
+            Arc::clone(&stream),
+            Arc::clone(&store),
+            MonitorClock::new(),
+        ));
+        publisher.sync();
+        let liveness = Arc::new(ProbeLiveness::new(Duration::from_millis(500)));
+        tokio::spawn(watch_liveness(
+            Arc::clone(&liveness),
+            Arc::clone(&publisher),
+            "ethereum".to_string(),
+        ));
+
+        tokio::time::sleep(MIN_STALL - MINUTE).await;
+        let before_stall = stream.is_serving();
+        tokio::time::sleep(MINUTE * 2).await;
+        let during_stall = stream.is_serving();
+        let withdrawn: NexusMessage<serde_json::Value> =
+            NexusMessage::decode(std::str::from_utf8(&stream.current().unwrap().encoded).unwrap())
+                .unwrap();
+        liveness.record_probe();
+        tokio::time::sleep(WATCH_INTERVAL * 2).await;
+
+        assert!(before_stall);
+        assert!(!during_stall);
+        assert!(matches!(withdrawn.body, MessageBody::Withdrawn));
+        assert!(stream.is_serving());
+    }
+}
