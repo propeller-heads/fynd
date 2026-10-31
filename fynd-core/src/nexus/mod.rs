@@ -4,6 +4,7 @@
 //! poll it over HTTP. Each response carries a [`NexusMessage`] as JSON.
 
 pub mod client;
+pub(crate) mod poller;
 pub mod rfq;
 
 use chrono::{DateTime, Utc};
