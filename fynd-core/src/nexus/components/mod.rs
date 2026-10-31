@@ -5,7 +5,10 @@
 //! through, inside a [`NexusMessage`](super::NexusMessage). The message carries
 //! [`ExcludedComponents`] as its snapshot data.
 
+mod feed;
+
 use chrono::{DateTime, Utc};
+pub use feed::{UnhealthyPoolsPoller, DEFAULT_MAX_UNCONFIRMED_AGE};
 use serde::{Deserialize, Serialize};
 
 use crate::ComponentId;
