@@ -101,10 +101,24 @@ pub(crate) enum PollError {
 pub(crate) enum Polled<U> {
     /// The service answered with a message to apply.
     Update(U),
-    /// The service answered, with nothing new to apply.
+    /// The service answered, with nothing new to apply: its message is the one already applied,
+    /// or a replay or a stale snapshot of it.
     Unchanged,
+    /// The service answered that it has no state for the stream, such as after a restart.
+    Empty,
     /// The poll failed. It was logged and counted.
     Failed,
+}
+
+impl<U> Polled<U> {
+    /// The update, if the poll came back with one.
+    #[cfg(test)]
+    pub(crate) fn update(self) -> Option<U> {
+        match self {
+            Self::Update(update) => Some(update),
+            Self::Unchanged | Self::Empty | Self::Failed => None,
+        }
+    }
 }
 
 /// Polls one stream of a `fynd-nexus` service. Hands each new message to the applier, and drops
@@ -155,13 +169,9 @@ impl<A: StreamApplier> StreamPoller<A> {
     pub(crate) async fn poll_once(&mut self) -> Polled<A::Update> {
         self.wait_for_next_poll().await;
         match self.poll().await {
-            Ok(Some(update)) => {
+            Ok(polled) => {
                 self.failed_polls = 0;
-                Polled::Update(update)
-            }
-            Ok(None) => {
-                self.failed_polls = 0;
-                Polled::Unchanged
+                polled
             }
             Err(error) => {
                 self.record_failure(&error);
@@ -194,9 +204,8 @@ impl<A: StreamApplier> StreamPoller<A> {
         );
     }
 
-    /// Asks the service for the current message and applies it. Returns `None` when the service
-    /// has nothing new, and the update when it has.
-    pub(crate) async fn poll(&mut self) -> Result<Option<A::Update>, PollError> {
+    /// Asks the service for the current message and applies it.
+    pub(crate) async fn poll(&mut self) -> Result<Polled<A::Update>, PollError> {
         let mut request = self
             .http
             .get(&self.url)
@@ -207,7 +216,8 @@ impl<A: StreamApplier> StreamPoller<A> {
         let response = request.send().await?;
         match response.status() {
             StatusCode::OK => {}
-            StatusCode::NOT_MODIFIED | StatusCode::NO_CONTENT => return Ok(None),
+            StatusCode::NOT_MODIFIED => return Ok(Polled::Unchanged),
+            StatusCode::NO_CONTENT => return Ok(Polled::Empty),
             status => return Err(PollError::Status(status)),
         }
         let etag = response
@@ -219,7 +229,7 @@ impl<A: StreamApplier> StreamPoller<A> {
         let message = NexusMessage::<serde_json::Value>::decode(&text)?;
         let update = self.apply_message(message)?;
         self.etag = etag;
-        Ok(update)
+        Ok(update.map_or(Polled::Unchanged, Polled::Update))
     }
 
     pub(crate) fn apply_message(
