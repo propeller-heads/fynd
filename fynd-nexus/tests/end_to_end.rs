@@ -17,7 +17,7 @@ use fynd_core::nexus::{
 use fynd_nexus::{
     api::{self, Streams},
     feed_runner::run_feed,
-    latest_prices::LatestPrices,
+    latest_stream::LatestStream,
     stream_kind::StreamKind,
 };
 use tokio::time::timeout;
@@ -44,7 +44,7 @@ struct Service {
 /// Starts a service with `run_id` on `address` and prepares `attempts` feeds. Starts the first feed
 /// immediately and each remaining feed after its predecessor ends.
 fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
-    let latest_prices = Arc::new(LatestPrices::new(
+    let latest_stream = Arc::new(LatestStream::new(
         Chain::Ethereum,
         StreamKind::PriceLevels(PriceLevelVenue::Bebop),
         run_id,
@@ -57,9 +57,9 @@ fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
         scripted.push(Ok(feed));
     }
     let attempts = Attempts::new(scripted);
-    tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), Duration::from_millis(100)));
+    tokio::spawn(run_feed(latest_stream.clone(), attempts.starter(), Duration::from_millis(100)));
 
-    let (server, address) = api::bind(Arc::new(Streams::new([latest_prices])), address).unwrap();
+    let (server, address) = api::bind(Arc::new(Streams::new([latest_stream])), address).unwrap();
     let handle = server.handle();
     tokio::spawn(server);
     Service { address, handle, feed_controls }
