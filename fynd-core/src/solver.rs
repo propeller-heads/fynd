@@ -2301,6 +2301,49 @@ mod tests {
         assert!(error.to_string().contains(message), "got: {error}");
     }
 
+    fn market_builder(rpc_url: &str) -> FyndBuilder {
+        FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            rpc_url,
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+    }
+
+    /// The market starts without any worker pool, and reports not ready until a block arrives.
+    #[tokio::test]
+    async fn test_build_market_without_pools() {
+        let market = market_builder("https://example.invalid")
+            .build_market()
+            .expect("a market needs no worker pool");
+
+        let ready = market
+            .wait_until_ready(Duration::from_millis(20))
+            .await;
+        let mut events = market.subscribe_market_events();
+
+        assert!(ready.is_err(), "no block has arrived");
+        assert!(events.try_recv().is_err());
+        assert_eq!(market.chain(), Chain::Ethereum);
+        assert!(market
+            .market_data()
+            .read()
+            .await
+            .last_updated()
+            .is_none());
+        market.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_build_market_invalid_rpc_url() {
+        let Err(error) = market_builder("not a url").build_market() else {
+            panic!("an invalid RPC URL must not build");
+        };
+
+        assert!(matches!(error, SolverBuildError::RpcClient(_)), "got: {error:?}");
+    }
+
     /// A pool budget above the router deadline cannot take effect for a request that does not
     /// raise its own `timeout_ms`: the router stops waiting first.
     #[test]
