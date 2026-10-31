@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod cli;
+pub mod components_api;
 pub mod feed_runner;
 pub mod latest_stream;
 pub mod monitor;
