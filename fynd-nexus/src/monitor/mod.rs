@@ -9,6 +9,7 @@
 //! components stream, and [`probe_liveness`] withdraws it when probing stalls.
 
 pub mod component_checker;
+pub mod component_gauges;
 pub mod component_health;
 pub mod component_prober;
 pub mod excluded_publisher;
