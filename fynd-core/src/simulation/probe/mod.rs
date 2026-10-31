@@ -21,6 +21,8 @@
 //! ```
 
 mod blame;
+#[cfg(test)]
+mod fixtures;
 mod sizing;
 mod swap;
 
@@ -258,5 +260,236 @@ fn outcome_of(quote: &OrderQuote, attempt: SimulationAttempt) -> ProbeOutcome {
         }
         SimulationAttempt::Failure { reason } => ProbeOutcome::SetupFailed { reason },
         SimulationAttempt::BlockUnavailable { .. } => ProbeOutcome::BlockUnavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::{
+        primitives::{Address, Bytes as EvmBytes, U256},
+        providers::ProviderBuilder,
+        rpc::types::simulate::{SimCallResult, SimulatedBlock},
+        sol_types::SolError,
+    };
+    use serde_json::{json, Value};
+    use tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim;
+    use wiremock::{Match, Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    use super::*;
+    use crate::{
+        algorithm::test_utils::{component_with_protocol, token, MockProtocolSim},
+        simulation::{
+            probe::fixtures::{derived, market, sizer, BLOCK},
+            revert::SolidityErrors,
+        },
+    };
+
+    /// What 500 USDC buy in the fixture market.
+    const EXPECTED_OUT: u128 = 250_000_000_000_000_000;
+
+    /// The fallback router fee: 1,000 of 100,000,000 fee units of the output.
+    const ROUTER_FEE: u128 = EXPECTED_OUT / 100_000;
+
+    /// Answers `eth_simulateV1` only when it runs on `block`, so that a probe on another block gets
+    /// no answer and fails.
+    struct SimulatesOn {
+        block: String,
+        answer: Result<Value, &'static str>,
+    }
+
+    impl Match for SimulatesOn {
+        fn matches(&self, request: &Request) -> bool {
+            let Ok(body) = serde_json::from_slice::<Value>(&request.body) else { return false };
+            body["method"] == "eth_simulateV1" && body["params"][1] == self.block.as_str()
+        }
+    }
+
+    impl Respond for SimulatesOn {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let id = serde_json::from_slice::<Value>(&request.body)
+                .map(|body| body["id"].clone())
+                .unwrap_or_default();
+            let body = match &self.answer {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Err(message) => {
+                    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": message}})
+                }
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        }
+    }
+
+    fn call_result(return_data: Vec<u8>, status: bool) -> Value {
+        let block = SimulatedBlock::<alloy::rpc::types::Block> {
+            inner: Default::default(),
+            calls: vec![SimCallResult {
+                return_data: EvmBytes::from(return_data),
+                gas_used: 123_456,
+                status,
+                ..Default::default()
+            }],
+        };
+        json!([block])
+    }
+
+    fn paid(amount: u128) -> Value {
+        call_result(
+            U256::from(amount)
+                .to_be_bytes::<32>()
+                .to_vec(),
+            true,
+        )
+    }
+
+    fn real_encoder() -> Encoder {
+        let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+            .add_default_encoders(None)
+            .unwrap();
+        Encoder::new(Chain::Ethereum, registry).unwrap()
+    }
+
+    /// Probes the fixture market's swap against a node that answers `answer` when asked to
+    /// simulate on `block`.
+    async fn probe_answered(block: u64, answer: Result<Value, &'static str>) -> ProbeOutcome {
+        let swap =
+            ProbeSwap::plan(&market(), &derived(), &sizer(), super::fixtures::POOL, 0).unwrap();
+        probe_swap_answered(swap, block, answer).await
+    }
+
+    async fn probe_swap_answered(
+        swap: ProbeSwap,
+        block: u64,
+        answer: Result<Value, &'static str>,
+    ) -> ProbeOutcome {
+        let server = MockServer::start().await;
+        Mock::given(SimulatesOn { block: format!("{block:#x}"), answer: answer.clone() })
+            .respond_with(SimulatesOn { block: String::new(), answer })
+            .mount(&server)
+            .await;
+        // The sender is funded natively when the probe's token is the chain's native one.
+        let native = Address::repeat_byte(0x01);
+        let simulator = QuoteSimulator::with_provider(
+            ProviderBuilder::default().connect_http(server.uri().parse().unwrap()),
+            native,
+            Duration::from_secs(5),
+        )
+        .with_block(SimulationBlock::Quote)
+        .with_block_time(Duration::from_millis(1));
+
+        ComponentProbe::new(real_encoder(), simulator)
+            .probe(swap)
+            .await
+    }
+
+    fn deviation_of(outcome: ProbeOutcome) -> f64 {
+        let ProbeOutcome::Executed { deviation_bps, .. } = outcome else {
+            panic!("expected an executed probe, got {outcome:?}");
+        };
+        deviation_bps
+    }
+
+    #[tokio::test]
+    async fn test_probe_of_a_healthy_component_reads_no_deviation() {
+        let outcome = probe_answered(BLOCK, Ok(paid(EXPECTED_OUT - ROUTER_FEE))).await;
+
+        let ProbeOutcome::Executed { amount_out, gas_used, deviation_bps } = outcome else {
+            panic!("expected an executed probe, got {outcome:?}");
+        };
+        assert_eq!(amount_out, BigUint::from(EXPECTED_OUT - ROUTER_FEE));
+        assert_eq!(gas_used, 123_456);
+        assert!(deviation_bps.abs() < 0.01, "got {deviation_bps}");
+    }
+
+    #[tokio::test]
+    async fn test_probe_reads_a_shortfall_as_negative_bps() {
+        let paid_out = (EXPECTED_OUT - ROUTER_FEE) * 98 / 100;
+
+        let deviation = deviation_of(probe_answered(BLOCK, Ok(paid(paid_out))).await);
+
+        assert!((deviation + 200.0).abs() < 0.01, "got {deviation}");
+    }
+
+    #[tokio::test]
+    async fn test_probe_reads_a_surplus_as_positive_bps() {
+        let paid_out = (EXPECTED_OUT - ROUTER_FEE) * 101 / 100;
+
+        let deviation = deviation_of(probe_answered(BLOCK, Ok(paid(paid_out))).await);
+
+        assert!((deviation - 100.0).abs() < 0.01, "got {deviation}");
+    }
+
+    /// The node answers only for the block the state belongs to, so a probe that ran elsewhere
+    /// would come back as a failure.
+    #[tokio::test]
+    async fn test_probe_runs_on_the_block_of_the_state() {
+        let outcome = probe_answered(BLOCK + 1, Ok(paid(EXPECTED_OUT))).await;
+
+        assert!(matches!(outcome, ProbeOutcome::SetupFailed { .. }), "got {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn test_probe_revert_of_the_pool() {
+        let revert =
+            SolidityErrors::Error { reason: "ds-math-sub-underflow".to_string() }.abi_encode();
+
+        let outcome = probe_answered(BLOCK, Ok(call_result(revert, false))).await;
+
+        let ProbeOutcome::Reverted { reason, blame } = outcome else {
+            panic!("expected a revert, got {outcome:?}");
+        };
+        assert!(reason.contains("ds-math-sub-underflow"), "got {reason}");
+        assert_eq!(blame, RevertBlame::Pool);
+    }
+
+    #[tokio::test]
+    async fn test_probe_revert_of_a_token() {
+        // The selector of `TransferFromFailed()`.
+        let revert = vec![0x79, 0x39, 0xf4, 0x24];
+
+        let outcome = probe_answered(BLOCK, Ok(call_result(revert, false))).await;
+
+        let ProbeOutcome::Reverted { reason, blame } = outcome else {
+            panic!("expected a revert, got {outcome:?}");
+        };
+        assert!(reason.contains("TransferFromFailed"), "got {reason}");
+        assert_eq!(blame, RevertBlame::Token);
+    }
+
+    #[tokio::test]
+    async fn test_probe_when_the_node_lacks_the_block() {
+        let outcome = probe_answered(BLOCK, Err("header not found")).await;
+
+        assert_eq!(outcome, ProbeOutcome::BlockUnavailable);
+    }
+
+    #[tokio::test]
+    async fn test_probe_when_the_node_fails() {
+        let outcome = probe_answered(BLOCK, Err("internal error")).await;
+
+        let ProbeOutcome::SetupFailed { reason } = outcome else {
+            panic!("expected a setup failure, got {outcome:?}");
+        };
+        assert!(reason.contains("internal error"), "got {reason}");
+    }
+
+    #[tokio::test]
+    async fn test_probe_that_does_not_encode() {
+        // The swap encoder needs the pool id to be an address.
+        let (usdc, weth) = (token(0x01, "USDC"), token(0x02, "WETH"));
+        let mut market = market();
+        market.upsert_components([component_with_protocol(
+            "not-an-address",
+            "uniswap_v2",
+            &[usdc, weth],
+        )]);
+        market.update_states([(
+            "not-an-address".to_string(),
+            Box::new(MockProtocolSim::new(0.0005)) as Box<dyn ProtocolSim>,
+        )]);
+        let swap = ProbeSwap::plan(&market, &derived(), &sizer(), "not-an-address", 0).unwrap();
+
+        let outcome = probe_swap_answered(swap, BLOCK, Ok(paid(EXPECTED_OUT))).await;
+
+        assert!(matches!(outcome, ProbeOutcome::SetupFailed { .. }), "got {outcome:?}");
     }
 }

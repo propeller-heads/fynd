@@ -227,3 +227,162 @@ impl ProbeSwap {
         .expect("a route of one swap is not empty")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rustc_hash::FxHashSet;
+    use tycho_simulation::{
+        tycho_client::feed::{BlockHeader, SynchronizerState},
+        tycho_common::simulation::protocol_sim::ProtocolSim,
+    };
+
+    use super::*;
+    use crate::{
+        algorithm::test_utils::{addr, component_with_protocol, token, MockProtocolSim},
+        feed::exclusivity::mark_exclusive,
+        simulation::probe::fixtures::{derived, market, sizer, BLOCK, POOL},
+    };
+
+    #[test]
+    fn test_plan_sizes_and_prices_a_direction() {
+        let swap = ProbeSwap::plan(&market(), &derived(), &sizer(), POOL, 0).unwrap();
+
+        // USDC -> WETH: 500 USDC at 0.0005 WETH per USDC is 0.25 WETH.
+        assert_eq!(swap.component_id(), POOL);
+        assert_eq!(swap.protocol_system(), "uniswap_v2");
+        assert_eq!(swap.token_in(), &addr(0x01));
+        assert_eq!(swap.token_out(), &addr(0x02));
+        assert_eq!(swap.amount_in(), &BigUint::from(500_000_000u64));
+        assert_eq!(swap.expected_out(), &BigUint::from(250_000_000_000_000_000u64));
+        assert_eq!(swap.block().number(), BLOCK);
+    }
+
+    #[test]
+    fn test_plan_rotates_through_the_directions() {
+        let first = ProbeSwap::plan(&market(), &derived(), &sizer(), POOL, 0).unwrap();
+        let second = ProbeSwap::plan(&market(), &derived(), &sizer(), POOL, 1).unwrap();
+        let wrapped = ProbeSwap::plan(&market(), &derived(), &sizer(), POOL, 2).unwrap();
+
+        assert_eq!((first.token_in(), first.token_out()), (&addr(0x01), &addr(0x02)));
+        assert_eq!((second.token_in(), second.token_out()), (&addr(0x02), &addr(0x01)));
+        assert_eq!((wrapped.token_in(), wrapped.token_out()), (&addr(0x01), &addr(0x02)));
+    }
+
+    #[test]
+    fn test_plan_skips_a_direction_it_cannot_size() {
+        let mut prices = derived()
+            .token_prices()
+            .unwrap()
+            .clone();
+        prices.remove(&addr(0x02));
+        let mut derived = DerivedData::new();
+        derived.set_token_prices(prices, vec![], BLOCK);
+
+        let swap = ProbeSwap::plan(&market(), &derived, &sizer(), POOL, 1).unwrap();
+
+        assert_eq!(swap.token_in(), &addr(0x01));
+    }
+
+    #[test]
+    fn test_plan_reports_the_last_direction_reason() {
+        let error = ProbeSwap::plan(&market(), &DerivedData::new(), &sizer(), POOL, 0)
+            .err()
+            .unwrap();
+
+        let ProbePlanError::NoDirection { component_id, reason } = error else {
+            panic!("expected NoDirection, got {error:?}");
+        };
+        assert_eq!(component_id, POOL);
+        assert!(reason.contains("no token prices"), "got: {reason}");
+    }
+
+    #[test]
+    fn test_plan_unknown_component() {
+        let error = ProbeSwap::plan(&market(), &derived(), &sizer(), "0xdead", 0)
+            .err()
+            .unwrap();
+
+        assert_eq!(error, ProbePlanError::UnknownComponent("0xdead".to_string()));
+    }
+
+    #[test]
+    fn test_plan_component_without_state() {
+        let mut market = market();
+        let (usdc, weth) = (token(0x01, "USDC"), token(0x02, "WETH"));
+        market.upsert_components([component_with_protocol("0xb1", "uniswap_v2", &[usdc, weth])]);
+
+        let error = ProbeSwap::plan(&market, &derived(), &sizer(), "0xb1", 0)
+            .err()
+            .unwrap();
+
+        assert_eq!(error, ProbePlanError::NoState("0xb1".to_string()));
+    }
+
+    #[test]
+    fn test_plan_before_the_first_block() {
+        let mut market = MarketState::new();
+        let (usdc, weth) = (token(0x01, "USDC"), token(0x02, "WETH"));
+        market.upsert_components([component_with_protocol(POOL, "uniswap_v2", &[usdc, weth])]);
+        market.update_states([(
+            POOL.to_string(),
+            Box::new(MockProtocolSim::new(0.0005)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let error = ProbeSwap::plan(&market, &derived(), &sizer(), POOL, 0)
+            .err()
+            .unwrap();
+
+        assert_eq!(error, ProbePlanError::NoBlock);
+    }
+
+    #[test]
+    fn test_plan_out_of_sync_protocol() {
+        let mut market = market();
+        market.update_sync_status(
+            [(
+                "uniswap_v2".to_string(),
+                SynchronizerState::Stale(BlockHeader { number: 90, ..Default::default() }),
+            )],
+            std::time::Duration::from_secs(15),
+        );
+
+        let error = ProbeSwap::plan(&market, &derived(), &sizer(), POOL, 0)
+            .err()
+            .unwrap();
+
+        assert_eq!(error, ProbePlanError::OutOfSync("uniswap_v2".to_string()));
+    }
+
+    #[test]
+    fn test_plan_components_that_are_not_probeable() {
+        let (usdc, weth) = (token(0x01, "USDC"), token(0x02, "WETH"));
+        let mut exclusive =
+            component_with_protocol("exclusive", "uniswap_v2", &[usdc.clone(), weth.clone()]);
+        mark_exclusive(&mut exclusive);
+        let components = [
+            component_with_protocol("rfq", "rfq:bebop", &[usdc.clone(), weth.clone()]),
+            component_with_protocol("pamm", "fallback:metric", &[usdc.clone(), weth.clone()]),
+            exclusive,
+        ];
+        let mut market = market();
+        let ids: FxHashSet<_> = components
+            .iter()
+            .map(|c| c.id.to_string())
+            .collect();
+        market.upsert_components(components);
+        for id in &ids {
+            market.update_states([(
+                id.clone(),
+                Box::new(MockProtocolSim::new(0.0005)) as Box<dyn ProtocolSim>,
+            )]);
+        }
+
+        for id in ids {
+            let error = ProbeSwap::plan(&market, &derived(), &sizer(), &id, 0)
+                .err()
+                .unwrap();
+
+            assert!(matches!(error, ProbePlanError::NotProbeable { .. }), "{id}: {error:?}");
+        }
+    }
+}
