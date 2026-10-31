@@ -14,7 +14,7 @@ use std::{
 
 use futures::StreamExt as _;
 use fynd_core::nexus::{rfq::RfqVenue, NexusMessage};
-use fynd_nexus::{latest_prices::LatestPrices, stream_kind::StreamKind};
+use fynd_nexus::{latest_stream::LatestStream, stream_kind::StreamKind};
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -129,8 +129,8 @@ impl<P> Attempts<P> {
     }
 }
 
-pub fn new_latest_prices(venue: RfqVenue) -> Arc<LatestPrices> {
-    Arc::new(LatestPrices::new(Chain::Ethereum, StreamKind::Rfq(venue), EPOCH))
+pub fn new_latest_stream(venue: RfqVenue) -> Arc<LatestStream> {
+    Arc::new(LatestStream::new(Chain::Ethereum, StreamKind::Rfq(venue), EPOCH))
 }
 
 pub fn decode<D: DeserializeOwned>(encoded: &[u8]) -> NexusMessage<D> {
@@ -138,9 +138,9 @@ pub fn decode<D: DeserializeOwned>(encoded: &[u8]) -> NexusMessage<D> {
 }
 
 /// The message a stream serves now.
-pub fn current_message<D: DeserializeOwned>(latest_prices: &LatestPrices) -> NexusMessage<D> {
+pub fn current_message<D: DeserializeOwned>(latest_stream: &LatestStream) -> NexusMessage<D> {
     decode(
-        &latest_prices
+        &latest_stream
             .current()
             .expect("the stream has a message")
             .encoded,
