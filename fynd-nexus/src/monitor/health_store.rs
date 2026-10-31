@@ -179,12 +179,12 @@ impl HealthStore {
         counts
     }
 
-    /// Whether any tracked component has been probed.
-    pub fn has_probed_components(&self) -> bool {
+    /// Whether any tracked component has a verdict from a probe.
+    pub fn has_verdicts(&self) -> bool {
         self.lock()
             .components
             .values()
-            .any(|health| health.checked_at.is_some())
+            .any(|health| health.last_outcome.is_some())
     }
 
     /// A copy of every record if any changed since the last call, and marks the store as saved.
