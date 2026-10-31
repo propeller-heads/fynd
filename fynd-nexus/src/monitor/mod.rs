@@ -3,3 +3,5 @@
 //!
 //! [`component_health`] holds one component's status and the rules that move it.
 pub mod component_health;
+pub mod health_store;
+pub mod monitor_clock;
