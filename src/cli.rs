@@ -191,6 +191,11 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub nexus_url: Option<String>,
 
+    /// Do not route through the pools that Fynd Nexus reports as broken or inaccurate, and route
+    /// through them again when they recover. Requires --nexus-url.
+    #[arg(long, env)]
+    pub exclude_nexus_unhealthy_pools: bool,
+
     /// Enable price guard validation against external price sources.
     /// Disabled by default.
     #[arg(long)]

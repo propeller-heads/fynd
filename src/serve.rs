@@ -284,6 +284,18 @@ pub(crate) fn resolve_rpc_url(
     }
 }
 
+/// Fails when the pods are to skip unhealthy pools but no Fynd Nexus service is set to ask.
+fn check_nexus_exclusion(args: &cli::ServeArgs) -> Result<(), SolverError> {
+    if args.exclude_nexus_unhealthy_pools && args.nexus_url.is_none() {
+        return Err(SolverError::SetupError(
+            "--exclude-nexus-unhealthy-pools needs --nexus-url (NEXUS_URL), e.g. \
+             http://fynd-nexus:3000"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Sets up the solver (loads config, parses chain, builds solver).
 ///
 /// `configure` sees the fully CLI-configured builder and returns the one to build, so an
@@ -317,6 +329,8 @@ async fn setup_solver(
             .map_err(|e| SolverError::SetupError(format!("failed to load chains config: {e}")))?;
         info!(?path, "installed custom chain registry");
     }
+
+    check_nexus_exclusion(args)?;
 
     // Parse chain
     let chain = parse_chain(&args.chain)
@@ -385,6 +399,7 @@ async fn setup_solver(
     if let Some(url) = &args.nexus_url {
         builder = builder.nexus_url(url.clone());
     }
+    builder = builder.exclude_nexus_unhealthy_pools(args.exclude_nexus_unhealthy_pools);
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }
