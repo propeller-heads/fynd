@@ -14,7 +14,19 @@ use std::{
 
 use futures::StreamExt as _;
 use fynd_core::nexus::{rfq::RfqVenue, NexusMessage};
-use fynd_nexus::{latest_stream::LatestStream, stream_kind::StreamKind};
+use fynd_nexus::{
+    latest_stream::LatestStream,
+    monitor::{
+        component_health::{HealthThresholds, Observation},
+        excluded_publisher::ExcludedPublisher,
+        health_store::HealthStore,
+        monitor_clock::MonitorClock,
+        probe_liveness::ProbeLiveness,
+        probe_scheduler::ProbeScheduler,
+        Monitor,
+    },
+    stream_kind::StreamKind,
+};
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -145,4 +157,53 @@ pub fn current_message<D: DeserializeOwned>(latest_stream: &LatestStream) -> Nex
             .expect("the stream has a message")
             .encoded,
     )
+}
+
+/// A health monitor with tracked components and its excluded components stream, without a prober.
+pub struct TestMonitor {
+    pub monitor: Arc<Monitor>,
+    pub stream: Arc<LatestStream>,
+}
+
+impl TestMonitor {
+    /// A monitor that tracks `component_ids` as `uniswap_v3` components.
+    pub fn new(component_ids: &[&str]) -> Self {
+        let clock = MonitorClock::new();
+        let thresholds =
+            HealthThresholds { broken_after: 2, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+        let store = Arc::new(HealthStore::new(thresholds, Default::default()));
+        for id in component_ids {
+            store.track(id, "uniswap_v3", clock.now());
+        }
+        let stream =
+            Arc::new(LatestStream::new(Chain::Ethereum, StreamKind::ExcludedComponents, EPOCH));
+        let publisher =
+            Arc::new(ExcludedPublisher::new(Arc::clone(&stream), Arc::clone(&store), clock));
+        let monitor = Arc::new(Monitor {
+            chain: Chain::Ethereum,
+            scheduler: ProbeScheduler::new(
+                Duration::from_secs(6 * 3600),
+                Duration::from_secs(3600),
+            ),
+            liveness: Arc::new(ProbeLiveness::new(Duration::from_millis(500))),
+            publisher,
+            store,
+            clock,
+        });
+        Self { monitor, stream }
+    }
+
+    /// Two pool reverts on different blocks make the component broken, and the excluded
+    /// components are published.
+    pub fn break_component(&self, id: &str) {
+        for block in [1, 2] {
+            let reason = "PoolEmpty".to_string();
+            self.monitor.store.record(
+                id,
+                Observation::PoolReverted { block, reason },
+                self.monitor.clock.now(),
+            );
+        }
+        self.monitor.publisher.sync();
+    }
 }

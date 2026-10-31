@@ -98,4 +98,32 @@ mod tests {
         assert_eq!(cli.rfq.metric.api_key.as_deref(), Some("m"));
         assert_eq!(cli.rfq.metric.api_url.as_deref(), Some("https://metric.example"));
     }
+
+    #[test]
+    fn test_parse_monitor_without_venues() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "--rpc-url",
+            "https://node.example",
+            "--tycho-url",
+            "tycho.example",
+            "--probe-rate",
+            "5",
+        ])
+        .unwrap();
+
+        assert!(cli.venues.is_empty());
+        assert!(cli.monitor.is_enabled());
+        assert_eq!(cli.monitor.probe_rate, 5.0);
+    }
+
+    #[test]
+    fn test_parse_monitor_off_by_default() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum"]).unwrap();
+
+        assert!(!cli.monitor.is_enabled());
+    }
 }
