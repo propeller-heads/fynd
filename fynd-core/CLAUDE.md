@@ -244,8 +244,8 @@ which firm quotes use. Native and Liquorice always connect directly.
 A `fynd-nexus` instance serves one chain, so the URL must be the instance of the pod's own chain.
 The client does not check it.
 
-`RfqPricesFeed` (`nexus/rfq/feed.rs`) is a tycho `SnapshotFeed`. Its private `PricePoller`
-polls the service's `GET /v1/rfq/{venue}` every 500 ms with `If-None-Match`, and
+`RfqPricesFeed` (`nexus/rfq/feed.rs`) is a tycho `SnapshotFeed`. Its `StreamPoller`
+(`nexus/poller.rs`, shared with the excluded-pools stream below) polls the service's `GET /v1/rfq/{venue}` every 500 ms with `If-None-Match`, and
 `Publisher::publishing` publishes what it yields, so `BookStream` diffs its books and handles its
 withdrawals like any direct feed. A `200` with a `snapshot` message becomes the books of the
 venue's `RfqAssembler`, anchored at the snapshot's `as_of`; `withdrawn` becomes an empty set of
@@ -254,6 +254,18 @@ books; `304` and `204` publish nothing. A snapshot older than the venue's snapsh
 in `nexus_client_failed_polls_total` and retried after a wait that doubles from 500 ms to
 8 s. The feed never gives up, and the venue's pools are withdrawn once it has applied no new
 prices for the venue's snapshot age. The message format is in `nexus/mod.rs`.
+
+## Unhealthy pools
+
+`--exclude-nexus-unhealthy-pools` (needs `--nexus-url`) makes `FyndBuilder` build an
+`UnhealthyPoolsPoller` (`nexus/components/feed.rs`) on the same `StreamPoller`. It polls
+`GET /v1/components/excluded`, whose snapshot data is `ExcludedComponents` (`nexus/components/mod.rs`),
+and sets `MarketState::unhealthy_pools`. That set is excluded from routing like `unsynced_pools`:
+`ResolvedRouteConstraints::excludes_pool`, the worker's `check_route` and the fallback candidates
+all read it, and `exclusion_generation` moves only when the set changes. The poller fails open: a
+withdrawal, a `204`, or no answer for 10 minutes frees every pool; a failed poll in between keeps
+the last set. It runs inside the feed task, so it stops with the feed. It logs each pool it excludes
+or frees and sets the gauge `nexus_excluded_pools{cause}`.
 
 ## RFQ aggregation
 
