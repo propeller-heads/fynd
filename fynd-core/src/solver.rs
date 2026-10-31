@@ -35,8 +35,8 @@ use tycho_simulation::{
 use crate::{
     algorithm::{AlgorithmConfig, AlgorithmError, AlgorithmRegistry},
     derived::{
-        registry::ErasedComputation, ComputationManager, ComputationManagerConfig,
-        DerivedComputation, SharedDerivedDataRef,
+        events::DerivedDataEvent, registry::ErasedComputation, ComputationManager,
+        ComputationManagerConfig, DerivedComputation, SharedDerivedDataRef,
     },
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
@@ -521,25 +521,39 @@ struct CustomPoolEntry {
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
 
-/// All components produced by [`FyndBuilder::assemble_components`], consumed by
-/// [`FyndBuilder::build`] and [`FyndBuilder::build_with_pending`].
-struct BuiltComponents {
+/// The shared market state that readers use, with the senders that hand out its event receivers.
+struct MarketStores {
+    market_data: MarketData,
+    derived_data: SharedDerivedDataRef,
+    market_event_tx: broadcast::Sender<MarketEvent>,
+    derived_event_tx: broadcast::Sender<DerivedDataEvent>,
+}
+
+/// The market tasks that are built but not yet started, with the channels that connect them.
+///
+/// They keep [`MarketStores`] current: the Tycho feed fills the market data, the gas price
+/// fetcher adds gas prices, and the computation manager derives data from the market events.
+struct MarketServices {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
-    router_fee_fetcher: Option<RouterFeeFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     computation_shutdown_tx: broadcast::Sender<()>,
     computation_shutdown_rx: broadcast::Receiver<()>,
+}
+
+/// All components produced by [`FyndBuilder::assemble_components`], consumed by
+/// [`FyndBuilder::build`] and [`FyndBuilder::build_with_pending`].
+struct BuiltComponents {
+    stores: MarketStores,
+    services: MarketServices,
+    router_fee_fetcher: Option<RouterFeeFetcher>,
     router: WorkerPoolRouter,
     worker_pools: Vec<WorkerPool>,
-    market_data: MarketData,
-    derived_data: SharedDerivedDataRef,
     router_fees: SharedRouterFees,
     chain: Chain,
     router_address: Option<Bytes>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
-    market_event_tx: broadcast::Sender<MarketEvent>,
 }
 
 /// Builder for assembling the full solver pipeline.
@@ -1046,6 +1060,89 @@ impl FyndBuilder {
         Ok(self)
     }
 
+    /// Builds the market stores and the services that keep them current, without starting them.
+    ///
+    /// Takes the settings it consumes out of the builder, which the caller no longer reads.
+    fn assemble_market(&mut self) -> Result<(MarketStores, MarketServices), SolverBuildError> {
+        let market_data = MarketData::new_shared();
+
+        let tycho_feed_config = TychoFeedConfig::new(
+            std::mem::take(&mut self.tycho_url),
+            self.chain,
+            self.tycho_api_key.take(),
+            self.tycho_use_tls,
+            std::mem::take(&mut self.protocols),
+            self.min_tvl,
+        )
+        .tvl_buffer_ratio(self.tvl_buffer_ratio)
+        .reconnect_delay(self.reconnect_delay)
+        .min_token_quality(self.min_token_quality)
+        .traded_n_days_ago(self.traded_n_days_ago)
+        .blocklisted_components(std::mem::take(&mut self.blocklisted_components))
+        .partial_blocks(self.partial_blocks)
+        .max_sync_lag(self.max_sync_lag)
+        .aggregate_rfqs(self.aggregate_rfqs)
+        .external_liquidity(std::mem::take(&mut self.external_liquidity));
+
+        let tycho_feed_config = match self.nexus_url.take() {
+            Some(url) => tycho_feed_config.nexus_url(url),
+            None => tycho_feed_config,
+        };
+        let tycho_feed_config = match self.tycho_subscription_buffer_size {
+            Some(size) => tycho_feed_config.subscription_buffer_size(size),
+            None => tycho_feed_config,
+        };
+
+        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
+            .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
+
+        let gas_price_fetcher =
+            GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
+
+        let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
+        let market_event_tx = tycho_feed.event_sender();
+
+        let mut computation_config = ComputationManagerConfig::new()
+            .with_chain_gas_token(&self.chain)
+            .map_err(|_| SolverBuildError::GasToken)?
+            .with_max_hop(self.pricing_max_hops);
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
+        // ComputationManager::new returns a broadcast receiver that we don't need here —
+        // workers subscribe via computation_manager.event_sender() below.
+        let (mut computation_manager, _) =
+            ComputationManager::new(computation_config, market_data.clone())
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+        for computation in std::mem::take(&mut self.computations) {
+            computation_manager
+                .register_boxed(computation)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+        }
+
+        let derived_data: SharedDerivedDataRef = computation_manager.store();
+        let derived_event_tx = computation_manager.event_sender();
+
+        // Subscribe event channels before spawning (one for the computation manager + one per
+        // worker pool)
+        let computation_event_rx = tycho_feed.subscribe();
+        let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
+
+        let stores = MarketStores { market_data, derived_data, market_event_tx, derived_event_tx };
+        let services = MarketServices {
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+        };
+        Ok((stores, services))
+    }
+
     /// Constructs all components shared between [`build`](Self::build) and
     /// [`build_with_pending`](Self::build_with_pending).
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
@@ -1087,72 +1184,7 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let market_data = MarketData::new_shared();
-
-        let tycho_feed_config = TychoFeedConfig::new(
-            self.tycho_url,
-            self.chain,
-            self.tycho_api_key,
-            self.tycho_use_tls,
-            self.protocols,
-            self.min_tvl,
-        )
-        .tvl_buffer_ratio(self.tvl_buffer_ratio)
-        .reconnect_delay(self.reconnect_delay)
-        .min_token_quality(self.min_token_quality)
-        .traded_n_days_ago(self.traded_n_days_ago)
-        .blocklisted_components(self.blocklisted_components)
-        .partial_blocks(self.partial_blocks)
-        .max_sync_lag(self.max_sync_lag)
-        .aggregate_rfqs(self.aggregate_rfqs)
-        .external_liquidity(self.external_liquidity);
-
-        let tycho_feed_config = match self.nexus_url {
-            Some(url) => tycho_feed_config.nexus_url(url),
-            None => tycho_feed_config,
-        };
-        let tycho_feed_config = match self.tycho_subscription_buffer_size {
-            Some(size) => tycho_feed_config.subscription_buffer_size(size),
-            None => tycho_feed_config,
-        };
-
-        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
-            .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
-
-        let gas_price_fetcher =
-            GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
-
-        let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
-        let market_event_tx = tycho_feed.event_sender();
-
-        let mut computation_config = ComputationManagerConfig::new()
-            .with_chain_gas_token(&self.chain)
-            .map_err(|_| SolverBuildError::GasToken)?
-            .with_max_hop(self.pricing_max_hops);
-        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
-            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
-        }
-        if let Some(interval) = self.pricing_min_pass_interval {
-            computation_config = computation_config.with_pricing_min_pass_interval(interval);
-        }
-        // ComputationManager::new returns a broadcast receiver that we don't need here —
-        // workers subscribe via computation_manager.event_sender() below.
-        let (mut computation_manager, _) =
-            ComputationManager::new(computation_config, market_data.clone())
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        for computation in self.computations {
-            computation_manager
-                .register_boxed(computation)
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        }
-
-        let derived_data: SharedDerivedDataRef = computation_manager.store();
-        let derived_event_tx = computation_manager.event_sender();
-
-        // Subscribe event channels before spawning (one for the computation manager + one per
-        // worker pool)
-        let computation_event_rx = tycho_feed.subscribe();
-        let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
+        let (stores, services) = self.assemble_market()?;
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
@@ -1160,8 +1192,8 @@ impl FyndBuilder {
         let pools = std::mem::take(&mut self.pools);
 
         for pool_entry in pools {
-            let pool_event_rx = tycho_feed.subscribe();
-            let derived_rx = derived_event_tx.subscribe();
+            let pool_event_rx = stores.market_event_tx.subscribe();
+            let derived_rx = stores.derived_event_tx.subscribe();
 
             let pool_scope = pool_entry
                 .liquidity_scope()
@@ -1209,8 +1241,8 @@ impl FyndBuilder {
                         .algorithms
                         .configure(&algorithm, named)?;
                     builder.build(
-                        market_data.clone(),
-                        Arc::clone(&derived_data),
+                        stores.market_data.clone(),
+                        Arc::clone(&stores.derived_data),
                         pool_event_rx,
                         derived_rx,
                     )?
@@ -1230,8 +1262,8 @@ impl FyndBuilder {
                         .liquidity_scope(pool_scope);
                     let builder = (custom.configure)(builder);
                     builder.build(
-                        market_data.clone(),
-                        Arc::clone(&derived_data),
+                        stores.market_data.clone(),
+                        Arc::clone(&stores.derived_data),
                         pool_event_rx,
                         derived_rx,
                     )?
@@ -1311,7 +1343,7 @@ impl FyndBuilder {
             .with_min_responses(self.router_min_responses)
             .with_encoding_retry_budget(self.encoding_retry_budget);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
-            .with_derived_data(Arc::clone(&derived_data));
+            .with_derived_data(Arc::clone(&stores.derived_data));
         if let Some(simulator) = quote_simulator {
             router = router.with_simulator(simulator);
         }
@@ -1320,7 +1352,7 @@ impl FyndBuilder {
             let mut registry = PriceProviderRegistry::new();
             let mut worker_handles = Vec::new();
             for mut provider in self.price_providers {
-                worker_handles.push(provider.start(market_data.clone()));
+                worker_handles.push(provider.start(stores.market_data.clone()));
                 registry = registry.register(provider);
             }
             let price_guard = PriceGuard::new(registry, worker_handles);
@@ -1328,22 +1360,15 @@ impl FyndBuilder {
         }
 
         Ok(BuiltComponents {
-            tycho_feed,
-            gas_price_fetcher,
+            stores,
+            services,
             router_fee_fetcher,
-            computation_manager,
-            computation_event_rx,
-            computation_shutdown_tx,
-            computation_shutdown_rx,
             router,
             worker_pools,
-            market_data,
-            derived_data,
             router_fees,
             chain,
             router_address,
             pending_indexers: self.pending_indexers,
-            market_event_tx,
         })
     }
 
@@ -1451,22 +1476,23 @@ impl FyndBuilder {
         Fut: Future<Output = Result<(), DataFeedError>> + Send + 'static,
     {
         let BuiltComponents {
-            tycho_feed,
-            mut gas_price_fetcher,
+            stores: MarketStores { market_data, derived_data, market_event_tx, derived_event_tx: _ },
+            services:
+                MarketServices {
+                    tycho_feed,
+                    mut gas_price_fetcher,
+                    computation_manager,
+                    computation_event_rx,
+                    computation_shutdown_tx,
+                    computation_shutdown_rx,
+                },
             router_fee_fetcher,
-            computation_manager,
-            computation_event_rx,
-            computation_shutdown_tx,
-            computation_shutdown_rx,
             router,
             worker_pools,
-            market_data,
-            derived_data,
             router_fees,
             chain,
             router_address,
             pending_indexers,
-            market_event_tx,
         } = components;
 
         let feed = run_feed(tycho_feed, pending_indexers);
