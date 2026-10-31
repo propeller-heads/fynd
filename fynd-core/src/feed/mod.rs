@@ -3,8 +3,12 @@ use std::{future::Future, time::Duration};
 use rustc_hash::FxHashSet;
 use tycho_simulation::tycho_common::models::Chain;
 
-/// Book feeds: market-maker venues streaming price levels over their own connection.
+/// Book feeds: market-maker venues' price levels, from the venue's own connection or polled from
+/// Fynd Nexus.
 pub(crate) mod book_stream;
+/// The book venues Fynd can run, and the feed each one opens. Only [`book_venues::metric`] is
+/// public.
+pub mod book_venues;
 /// Per-worker component filtering: which components reach one worker's graph.
 pub(crate) mod component_filter;
 /// Market events broadcast by the Tycho feed on every block update.
@@ -79,6 +83,9 @@ pub(crate) struct TychoFeedConfig {
     pub(crate) aggregate_rfqs: bool,
     /// External liquidity a caller added beside the `--protocols` venues.
     pub(crate) external_liquidity: Vec<book_stream::ExternalLiquidity>,
+    /// The `fynd-nexus` service of this chain supplying Bebop, Hashflow and Metric prices. When
+    /// unset, Fynd connects to those venues directly.
+    pub(crate) nexus_url: Option<String>,
 }
 
 impl TychoFeedConfig {
@@ -107,6 +114,7 @@ impl TychoFeedConfig {
             max_sync_lag: crate::solver::defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
             external_liquidity: Vec::new(),
+            nexus_url: None,
         }
     }
 
@@ -160,6 +168,11 @@ impl TychoFeedConfig {
         external_liquidity: Vec<book_stream::ExternalLiquidity>,
     ) -> Self {
         self.external_liquidity = external_liquidity;
+        self
+    }
+
+    pub(crate) fn nexus_url(mut self, url: String) -> Self {
+        self.nexus_url = Some(url);
         self
     }
 }

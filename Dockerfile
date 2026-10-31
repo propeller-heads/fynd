@@ -16,6 +16,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock LICENSE.md ./
 COPY bench-harness/Cargo.toml bench-harness/
 COPY fynd-core/Cargo.toml fynd-core/
+COPY fynd-nexus/Cargo.toml fynd-nexus/
 COPY fynd-rpc/Cargo.toml fynd-rpc/
 COPY fynd-rpc-types/Cargo.toml fynd-rpc-types/
 COPY clients/rust/Cargo.toml clients/rust/
@@ -26,7 +27,7 @@ COPY tools/fynd-gas-audit/Cargo.toml tools/fynd-gas-audit/
 COPY tools/record-market/Cargo.toml tools/record-market/
 COPY test-fixtures/Cargo.toml test-fixtures/
 RUN mkdir -p src fynd-core/src bench-harness/src bench-harness/benches fynd-rpc/src \
-        fynd-rpc-types/src \
+        fynd-rpc-types/src fynd-nexus/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/fynd-gas-audit/src \
         tools/record-market/src test-fixtures/src && \
@@ -39,6 +40,8 @@ RUN mkdir -p src fynd-core/src bench-harness/src bench-harness/benches fynd-rpc/
     echo "" > fynd-core/src/lib.rs && \
     echo "" > fynd-rpc/src/lib.rs && \
     echo "" > fynd-rpc-types/src/lib.rs && \
+    echo "" > fynd-nexus/src/lib.rs && \
+    echo "fn main() {}" > fynd-nexus/src/main.rs && \
     echo "" > clients/rust/src/lib.rs && \
     echo "fn main() {}" > tools/benchmark/src/main.rs && \
     echo "" > tools/common/src/lib.rs && \
@@ -46,9 +49,10 @@ RUN mkdir -p src fynd-core/src bench-harness/src bench-harness/benches fynd-rpc/
     echo "fn main() {}" > tools/fynd-gas-audit/src/main.rs && \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
     echo "" > test-fixtures/src/lib.rs && \
-    cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli && \
+    cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli \
+        --package fynd-nexus && \
     rm -rf src fynd-core/src bench-harness/src bench-harness/benches fynd-rpc/src \
-        fynd-rpc-types/src \
+        fynd-rpc-types/src fynd-nexus/src \
         clients/rust/src tools/benchmark/src tools/common/src tools/fynd-swap-cli/src \
         tools/fynd-gas-audit/src \
         tools/record-market/src test-fixtures/src
@@ -58,6 +62,7 @@ COPY src/ src/
 COPY fynd-core/src/ fynd-core/src/
 COPY fynd-rpc/src/ fynd-rpc/src/
 COPY fynd-rpc-types/src/ fynd-rpc-types/src/
+COPY fynd-nexus/src/ fynd-nexus/src/
 COPY clients/rust/src/ clients/rust/src/
 COPY tools/fynd-swap-cli/src/ tools/fynd-swap-cli/src/
 COPY tools/common/src/ tools/common/src/
@@ -72,10 +77,12 @@ RUN mkdir -p tools/benchmark/src tools/fynd-gas-audit/src \
     echo "fn main() {}" > tools/record-market/src/main.rs && \
     echo "" > test-fixtures/src/lib.rs && \
     touch src/main.rs src/lib.rs fynd-core/src/lib.rs fynd-rpc/src/lib.rs \
-        fynd-rpc-types/src/lib.rs clients/rust/src/lib.rs \
+        fynd-rpc-types/src/lib.rs fynd-nexus/src/lib.rs fynd-nexus/src/main.rs \
+        clients/rust/src/lib.rs \
         tools/fynd-swap-cli/src/main.rs \
         tools/common/src/lib.rs && \
-    cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli
+    cargo build --release --package fynd --features fynd-rpc/experimental --package fynd-swap-cli \
+        --package fynd-nexus
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -87,6 +94,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /app/target/release/fynd /usr/local/bin/fynd
 COPY --from=builder /app/target/release/fynd-swap-cli /usr/local/bin/fynd-swap-cli
+COPY --from=builder /app/target/release/fynd-nexus /usr/local/bin/fynd-nexus
 COPY --from=builder /app/LICENSE.md /usr/share/licenses/fynd/LICENSE.md
 
 EXPOSE 3000 9898

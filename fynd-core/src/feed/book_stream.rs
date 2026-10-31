@@ -9,27 +9,15 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    str::FromStr,
     sync::Arc,
 };
 
-use alloy::primitives::Address;
 use futures::StreamExt as _;
 use itertools::Itertools;
 use tracing::{debug, info, warn};
 use tycho_simulation::{
-    book::{
-        all_pairs::QuoteRule, quote_tokens::usd_stablecoins_for_chain, BookFeedConfig,
-        BookFeedEvent, BookFeedStreams, BookSnapshot, ReceivedAt,
-    },
-    pamm::protocols::metric::{self, feed::MetricFeedBuilder},
+    book::{BookFeedConfig, BookFeedEvent, BookFeedStreams, BookSnapshot, ReceivedAt},
     protocol::models::ProtocolComponent,
-    rfq::protocols::{
-        bebop::{self, feed::BebopFeedBuilder},
-        hashflow::{self, feed::HashflowFeedBuilder},
-        liquorice::{self, feed::LiquoriceFeedBuilder},
-        native::{self, feed::NativeFeedBuilder},
-    },
     snapshot_feed::{
         errors::FeedError, SnapshotFeed, SnapshotFeedEvent, SnapshotFeedOutcome,
         SnapshotFeedStreams,
@@ -39,6 +27,7 @@ use tycho_simulation::{
 };
 
 use super::{
+    book_venues::{open_book_feed, BookVenueContext, BookVenueEntry},
     external_liquidity::{
         liquidity_snapshot_from_books, ExternalLiquidityConfig, LiquidityComponent,
         LiquiditySnapshot,
@@ -46,9 +35,8 @@ use super::{
     when_configured, DataFeedError, TychoFeedConfig,
 };
 use crate::{
-    feed::protocol_registry::{
-        matches_streamed_system, parse_rfq_entries, require_executor, RfqEntry, METRIC_CHAINS,
-    },
+    feed::protocol_registry::{matches_streamed_system, RfqEntry},
+    nexus::client::NexusClient,
     types::ComponentId,
 };
 
@@ -163,14 +151,17 @@ impl BookStream {
     /// USD amount — unlike the native-token threshold the Tycho component filter takes. With
     /// `config.aggregate_rfqs`, Bebop and Hashflow each stream as one component for all their
     /// pairs. External sources get an [`ExternalLiquidityConfig`] with the same chain, tokens and
-    /// floor.
+    /// floor. With `config.nexus_url`, Bebop, Hashflow and Metric get their prices from
+    /// that service instead of from the venue, and Metric needs no API key. Native and Liquorice
+    /// connect directly either way.
     ///
     /// # Errors
     ///
     /// Returns [`DataFeedError::Config`] if a venue's credentials are missing from the
-    /// environment, if the chain has no curated USD stablecoin set to price built-in venues'
-    /// books against, if external liquidity cannot be built, if two sources share a name, or if a
-    /// source has the name of a `--protocols` entry.
+    /// environment, if the nexus URL is not an HTTP URL, if the chain has no curated USD
+    /// stablecoin set to price built-in venues' books against, if external liquidity cannot be
+    /// built, if two sources share a name, or if a source has the name of a `--protocols`
+    /// entry.
     pub fn open(
         config: &TychoFeedConfig,
         tokens: HashMap<Bytes, Token>,
@@ -178,61 +169,30 @@ impl BookStream {
         let chain = config.chain;
         let external_liquidity = &config.external_liquidity;
         reject_name_clash(&config.protocols, external_liquidity)?;
-        let mut venues = Vec::new();
-        for (entry, venue) in parse_rfq_entries(&config.protocols)? {
-            match venue.protocol() {
-                bebop::PROTOCOL_SYSTEM => {
-                    // The feed supports more chains than Tycho's execution registry. Reject
-                    // deployments that could publish books Fynd cannot encode.
-                    require_executor(chain, entry)?;
-                }
-                hashflow::PROTOCOL_SYSTEM => {
-                    // Hashflow's feed builder accepts any chain with a numeric id and defers
-                    // venue support to its first poll. Reject a deployment that could publish
-                    // books Fynd cannot encode before starting any feed tasks.
-                    require_executor(chain, entry)?;
-                }
-                metric::PROTOCOL_SYSTEM => {
-                    if !METRIC_CHAINS.contains(&chain) {
-                        return Err(DataFeedError::Config(format!(
-                            "{entry} is only served on {}, but this feed runs on {chain}",
-                            METRIC_CHAINS
-                                .iter()
-                                .map(|chain| chain.to_string())
-                                .collect_vec()
-                                .join(", ")
-                        )));
-                    }
-                    require_executor(chain, entry)?;
-                }
-                native::PROTOCOL_SYSTEM | liquorice::PROTOCOL_SYSTEM => {
-                    require_executor(chain, entry)?;
-                }
-                unknown => {
-                    warn!("Skipping unknown book protocol system: {unknown}");
-                    continue;
-                }
-            }
-            venues.push((entry, venue));
+        let entries = BookVenueEntry::parse_all(&config.protocols)?;
+        for entry in &entries {
+            entry.check_supported(chain)?;
         }
-        if venues.is_empty() && external_liquidity.is_empty() {
+        if entries.is_empty() && external_liquidity.is_empty() {
             return Ok(None);
         }
 
-        // Metric reports each pool's USD TVL itself; the other venues price their books' TVL in
-        // the chain's USD stablecoins, so only they need a chain that has a curated set.
-        let usd_quote_tokens = || {
-            usd_stablecoins_for_chain(chain)
-                .map(Arc::new)
-                .ok_or_else(|| {
-                    DataFeedError::Config(format!(
-                        "book feeds price their books in USD stablecoins, and none are known for \
-                         {chain}"
-                    ))
-                })
+        let nexus = config
+            .nexus_url
+            .as_deref()
+            .map(NexusClient::new)
+            .transpose()
+            .map_err(|e| DataFeedError::Config(e.to_string()))?;
+        let context = BookVenueContext {
+            book_config: BookFeedConfig {
+                chain,
+                tokens: Arc::new(tokens),
+                min_tvl_usd: config.min_tvl,
+            },
+            aggregate_rfqs: config.aggregate_rfqs,
+            nexus,
         };
-        let book_config =
-            BookFeedConfig { chain, tokens: Arc::new(tokens), min_tvl_usd: config.min_tvl };
+        let book_config = &context.book_config;
 
         let external_config = ExternalLiquidityConfig {
             chain,
@@ -249,99 +209,9 @@ impl BookStream {
         for source in external_liquidity {
             source.open(external_config.clone(), &mut books.external)?;
         }
-        for (entry, venue) in venues {
-            match venue.protocol() {
-                bebop::PROTOCOL_SYSTEM => {
-                    let mut builder = BebopFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("BEBOP_KEY")?,
-                    );
-                    if let Some(address) = optional_address_env("BEBOP_ORIGIN_ADDRESS")? {
-                        builder = builder.origin_address(address);
-                    }
-                    if let Some(target) = optional_address_env("BEBOP_ORIGIN_TARGET")? {
-                        builder = builder.origin_target(target);
-                    }
-                    if let Ok(source) = std::env::var("BEBOP_ORIGIN_SOURCE") {
-                        builder = builder.origin_source(source);
-                    }
-                    if config.aggregate_rfqs {
-                        builder = builder.all_pairs();
-                    }
-                    if venue.uses_fallback_router() {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
-                }
-                hashflow::PROTOCOL_SYSTEM => {
-                    let mut builder = HashflowFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("HASHFLOW_USER")?,
-                        get_env("HASHFLOW_KEY")?,
-                    );
-                    if config.aggregate_rfqs {
-                        builder = builder.all_pairs(QuoteRule::OncePerMaker);
-                    }
-                    if venue.uses_fallback_router() {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
-                }
-                metric::PROTOCOL_SYSTEM => {
-                    let mut builder =
-                        MetricFeedBuilder::new(book_config.clone(), get_env("METRIC_API_KEY")?);
-                    if let Some(base_url) = trimmed_non_empty(std::env::var("METRIC_API_URL").ok())
-                    {
-                        builder = builder.base_url(base_url);
-                    }
-                    if venue.uses_fallback_router() {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
-                }
-                native::PROTOCOL_SYSTEM => {
-                    let mut builder = NativeFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("NATIVE_API_KEY")?,
-                    );
-                    if venue.uses_fallback_router() {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
-                }
-                liquorice::PROTOCOL_SYSTEM => {
-                    let mut builder = LiquoriceFeedBuilder::new(
-                        book_config.clone(),
-                        usd_quote_tokens()?,
-                        get_env("LIQUORICE_USER")?,
-                        get_env("LIQUORICE_KEY")?,
-                    );
-                    if venue.uses_fallback_router() {
-                        builder = builder.with_fallback_router();
-                    }
-                    let feed = builder
-                        .build()
-                        .map_err(|e| DataFeedError::StreamError(e.to_string()))?;
-                    books.add_feed(entry, feed);
-                }
-                // Every unknown entry was removed during preflight above.
-                _ => unreachable!("preflight retained an unknown book protocol"),
-            }
+        for entry in &entries {
+            let feed = open_book_feed(entry, &context)?;
+            books.add_feed(entry.name, feed);
         }
         Ok((!books.feeds.is_empty() || !books.external.is_empty()).then_some(books))
     }
@@ -560,31 +430,6 @@ fn reject_name_clash(
     Ok(())
 }
 
-fn get_env(var: &str) -> Result<String, DataFeedError> {
-    std::env::var(var).map_err(|_| DataFeedError::Config(format!("{var} env var not set")))
-}
-
-/// Trims an optional environment value and treats an empty one as absent.
-fn trimmed_non_empty(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_string())
-    })
-}
-
-/// The address `var` holds, or `None` when it is unset.
-///
-/// A set-but-unparseable value is a configuration error rather than an absent address: Bebop
-/// identifies the caller by these, so silently quoting as nobody is worse than refusing to start.
-fn optional_address_env(var: &str) -> Result<Option<Bytes>, DataFeedError> {
-    let Ok(value) = std::env::var(var) else {
-        return Ok(None);
-    };
-    Address::from_str(value.trim())
-        .map(|address| Some(Bytes::from(address.into_array())))
-        .map_err(|e| DataFeedError::Config(format!("{var} is not an address: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use tycho_simulation::tycho_common::models::Chain;
@@ -707,6 +552,73 @@ mod tests {
 
         assert_eq!(update.added.len(), 1);
         assert!(update.removed.is_empty());
+    }
+
+    const NEXUS_URL: &str = "http://127.0.0.1:1";
+
+    fn open_shared(
+        chain: Chain,
+        entries: &[&str],
+        url: &str,
+    ) -> Result<Option<BookStream>, DataFeedError> {
+        let protocols = entries
+            .iter()
+            .map(|entry| (*entry).to_string())
+            .collect();
+        let config =
+            TychoFeedConfig::new("localhost:0".to_string(), chain, None, false, protocols, 1.0)
+                .nexus_url(url.to_string());
+        BookStream::open(&config, HashMap::new())
+    }
+
+    #[tokio::test]
+    async fn test_open_reads_venues_from_nexus() {
+        std::env::remove_var("METRIC_API_KEY");
+
+        let books = open_shared(Chain::Base, &["rfq:metric"], NEXUS_URL)
+            .unwrap_or_else(|e| panic!("rfq:metric on base should open: {e}"));
+
+        assert_eq!(
+            books
+                .expect("the entry names a book venue")
+                .feeds
+                .labels()
+                .collect::<Vec<_>>(),
+            ["rfq:metric"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_keeps_native_direct() {
+        std::env::remove_var("NATIVE_API_KEY");
+
+        let Err(err) = open_shared(Chain::Ethereum, &["rfq:native"], NEXUS_URL) else {
+            panic!("expected rfq:native to need its own credentials");
+        };
+
+        assert!(
+            err.to_string()
+                .contains("NATIVE_API_KEY"),
+            "got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_open_invalid_nexus_url() {
+        let url = "ws://fynd-nexus:3000";
+        let Err(err) = open_shared(Chain::Base, &["rfq:metric"], url) else {
+            panic!("expected {url} to be rejected");
+        };
+
+        assert!(matches!(err, DataFeedError::Config(_)), "got {err}");
+        assert!(err.to_string().contains("http://"), "got {err}");
+    }
+
+    #[test]
+    fn test_open_without_book_venues_with_invalid_nexus_url() {
+        let books = open_shared(Chain::Ethereum, &["uniswap_v3"], "not a url").unwrap();
+
+        assert!(books.is_none());
     }
 
     #[test]
@@ -1067,16 +979,5 @@ mod tests {
         };
 
         assert!(message.contains(expected), "{message}");
-    }
-
-    #[test]
-    fn test_trimmed_non_empty() {
-        assert_eq!(trimmed_non_empty(None), None);
-        assert_eq!(trimmed_non_empty(Some(String::new())), None);
-        assert_eq!(trimmed_non_empty(Some("  \t".to_string())), None);
-        assert_eq!(
-            trimmed_non_empty(Some(" https://metric.example/ ".to_string())),
-            Some("https://metric.example/".to_string())
-        );
     }
 }
