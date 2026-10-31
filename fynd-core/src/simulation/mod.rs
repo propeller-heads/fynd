@@ -12,3 +12,8 @@ pub mod simulator;
 pub mod token_layout;
 /// Request bodies for the simulation RPCs, with the field names of the execution-apis spec.
 pub(crate) mod wire;
+
+pub use probe::{
+    ComponentProbe, ProbeConnectError, ProbeOutcome, ProbePlanError, ProbeSizer, ProbeSwap,
+    RevertBlame, SizingError,
+};
