@@ -1,4 +1,4 @@
-//! The latest message of each venue's stream, kept in memory for the API to serve.
+//! The latest message of each stream, kept in memory for the API to serve.
 
 use std::{
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard},
@@ -7,10 +7,12 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use fynd_core::nexus::{rfq::RfqVenue, MessageBody, NexusMessage};
+use fynd_core::nexus::{MessageBody, NexusMessage};
 use metrics::{gauge, histogram, Label};
 use serde::Serialize;
 use tycho_simulation::evm::tycho_models::Chain;
+
+use crate::stream_kind::StreamKind;
 
 /// How often the snapshot age gauges are refreshed.
 const AGE_REPORT_INTERVAL: Duration = Duration::from_secs(1);
@@ -23,7 +25,7 @@ pub enum StreamState {
         /// When the run started.
         started_at: DateTime<Utc>,
     },
-    /// The stream holds prices.
+    /// The stream holds a snapshot.
     Serving {
         /// When the service received the prices.
         as_of: DateTime<Utc>,
@@ -68,7 +70,7 @@ impl LatestMessage {
 }
 
 /// A stream's sequence number, encoded message, and state, guarded by one lock in
-/// [`LatestPrices`].
+/// [`LatestStream`].
 struct StreamRecord {
     seq: u64,
     encoded: Option<Bytes>,
@@ -78,23 +80,23 @@ struct StreamRecord {
 /// The latest message of one stream and the state of the stream.
 ///
 /// Only the stream's feed runner publishes or withdraws.
-pub struct LatestPrices {
+pub struct LatestStream {
     chain: Chain,
-    venue: RfqVenue,
+    kind: StreamKind,
     epoch: u64,
     latest: RwLock<StreamRecord>,
 }
 
-impl LatestPrices {
-    /// The stream of `venue` on the chain the service serves, with no snapshot yet. `epoch`
+impl LatestStream {
+    /// The stream of `kind` on the chain the service serves, with no snapshot yet. `epoch`
     /// identifies this run of the service.
-    pub fn new(chain: Chain, venue: RfqVenue, epoch: u64) -> Self {
+    pub fn new(chain: Chain, kind: StreamKind, epoch: u64) -> Self {
         let latest = StreamRecord {
             seq: 0,
             encoded: None,
             state: StreamState::AwaitingSnapshot { started_at: Utc::now() },
         };
-        Self { chain, venue, epoch, latest: RwLock::new(latest) }
+        Self { chain, kind, epoch, latest: RwLock::new(latest) }
     }
 
     /// The chain the service serves.
@@ -102,17 +104,15 @@ impl LatestPrices {
         self.chain
     }
 
-    /// The venue this stream serves.
-    pub fn venue(&self) -> RfqVenue {
-        self.venue
+    /// What this stream carries.
+    pub fn kind(&self) -> StreamKind {
+        self.kind
     }
 
-    /// The `chain` and `venue` label values every metric of this stream carries.
+    /// The `chain` label and the label of the stream's kind, which every metric of this stream
+    /// carries.
     pub fn labels(&self) -> Vec<Label> {
-        vec![
-            Label::new("chain", self.chain.to_string()),
-            Label::new("venue", self.venue.to_string()),
-        ]
+        vec![Label::new("chain", self.chain.to_string()), self.kind.label()]
     }
 
     /// The latest message, or `None` while no snapshot has arrived in this run.
@@ -124,8 +124,8 @@ impl LatestPrices {
             .map(|encoded| LatestMessage { epoch: self.epoch, seq: latest.seq, encoded })
     }
 
-    /// Whether the stream holds prices rather than a withdrawal or nothing yet.
-    pub fn has_prices(&self) -> bool {
+    /// Whether the stream holds a snapshot rather than a withdrawal or nothing yet.
+    pub fn is_serving(&self) -> bool {
         match self.read().state {
             StreamState::Serving { .. } => true,
             StreamState::AwaitingSnapshot { .. } | StreamState::Withdrawn { .. } => false,
@@ -196,7 +196,7 @@ impl LatestPrices {
 }
 
 /// Refreshes `nexus_snapshot_age_seconds` of every stream in `streams` on a timer.
-pub fn spawn_snapshot_age_reports(streams: Vec<Arc<LatestPrices>>) {
+pub fn spawn_snapshot_age_reports(streams: Vec<Arc<LatestStream>>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(AGE_REPORT_INTERVAL);
         loop {
@@ -211,6 +211,7 @@ pub fn spawn_snapshot_age_reports(streams: Vec<Arc<LatestPrices>>) {
 
 #[cfg(test)]
 mod tests {
+    use fynd_core::nexus::rfq::RfqVenue;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use serde_json::{json, Value};
 
@@ -218,12 +219,12 @@ mod tests {
 
     const EPOCH: u64 = 7;
 
-    fn latest_prices() -> LatestPrices {
-        LatestPrices::new(Chain::Base, RfqVenue::Hashflow, EPOCH)
+    fn latest_stream() -> LatestStream {
+        LatestStream::new(Chain::Base, StreamKind::Rfq(RfqVenue::Hashflow), EPOCH)
     }
 
-    fn message(latest_prices: &LatestPrices) -> NexusMessage<Value> {
-        let latest = latest_prices
+    fn message(latest_stream: &LatestStream) -> NexusMessage<Value> {
+        let latest = latest_stream
             .current()
             .expect("the stream has a message");
         NexusMessage::decode(std::str::from_utf8(&latest.encoded).unwrap()).unwrap()
@@ -231,25 +232,25 @@ mod tests {
 
     #[test]
     fn test_new_stream() {
-        let latest_prices = latest_prices();
+        let latest_stream = latest_stream();
 
-        assert!(!latest_prices.has_prices());
-        assert!(latest_prices.current().is_none());
+        assert!(!latest_stream.is_serving());
+        assert!(latest_stream.current().is_none());
     }
 
     #[test]
     fn test_seq_grows_with_every_change_and_not_otherwise() {
-        let latest_prices = latest_prices();
+        let latest_stream = latest_stream();
         let at = Utc::now();
 
-        latest_prices.publish(&json!({"n": 1}), at);
-        latest_prices.publish(&json!({"n": 2}), at);
-        latest_prices.withdraw();
-        latest_prices.withdraw();
-        latest_prices.publish(&json!({"n": 3}), at);
+        latest_stream.publish(&json!({"n": 1}), at);
+        latest_stream.publish(&json!({"n": 2}), at);
+        latest_stream.withdraw();
+        latest_stream.withdraw();
+        latest_stream.publish(&json!({"n": 3}), at);
 
         let NexusMessage { seq, body: MessageBody::Snapshot { data, as_of }, .. } =
-            message(&latest_prices)
+            message(&latest_stream)
         else {
             panic!("expected a snapshot");
         };
@@ -258,21 +259,21 @@ mod tests {
 
     #[test]
     fn test_withdraw_before_first_snapshot() {
-        let latest_prices = latest_prices();
+        let latest_stream = latest_stream();
 
-        latest_prices.withdraw();
+        latest_stream.withdraw();
 
-        assert!(!latest_prices.has_prices());
-        assert_eq!(message(&latest_prices), NexusMessage::new(EPOCH, 1, MessageBody::Withdrawn));
+        assert!(!latest_stream.is_serving());
+        assert_eq!(message(&latest_stream), NexusMessage::new(EPOCH, 1, MessageBody::Withdrawn));
     }
 
     #[test]
     fn test_etag_follows_epoch_and_seq() {
-        let latest_prices = latest_prices();
-        latest_prices.publish(&json!({}), Utc::now());
-        let first = latest_prices.current().unwrap();
-        latest_prices.publish(&json!({}), Utc::now());
-        let second = latest_prices.current().unwrap();
+        let latest_stream = latest_stream();
+        latest_stream.publish(&json!({}), Utc::now());
+        let first = latest_stream.current().unwrap();
+        latest_stream.publish(&json!({}), Utc::now());
+        let second = latest_stream.current().unwrap();
 
         assert_eq!(first.etag(), "\"7-1\"");
         assert_eq!(second.etag(), "\"7-2\"");
@@ -282,7 +283,7 @@ mod tests {
     fn test_snapshot_age_gauge_keeps_counting_while_not_serving() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let latest_prices = latest_prices();
+        let latest_stream = latest_stream();
         let now = Utc::now();
         let age_gauge = || {
             let (_, _, _, value) = snapshotter
@@ -296,12 +297,12 @@ mod tests {
         };
 
         metrics::with_local_recorder(&recorder, || {
-            latest_prices.publish(&json!({}), now - chrono::Duration::seconds(2));
-            latest_prices.report_snapshot_age(now);
+            latest_stream.publish(&json!({}), now - chrono::Duration::seconds(2));
+            latest_stream.report_snapshot_age(now);
             assert_eq!(age_gauge(), 2.0);
 
-            latest_prices.withdraw();
-            latest_prices.report_snapshot_age(now + chrono::Duration::seconds(10));
+            latest_stream.withdraw();
+            latest_stream.report_snapshot_age(now + chrono::Duration::seconds(10));
             assert_eq!(age_gauge(), 12.0);
         });
     }

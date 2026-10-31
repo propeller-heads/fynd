@@ -35,8 +35,8 @@ use tycho_simulation::{
 use crate::{
     algorithm::{AlgorithmConfig, AlgorithmError, AlgorithmRegistry},
     derived::{
-        registry::ErasedComputation, ComputationManager, ComputationManagerConfig,
-        DerivedComputation, SharedDerivedDataRef,
+        events::DerivedDataEvent, registry::ErasedComputation, ComputationManager,
+        ComputationManagerConfig, DerivedComputation, SharedDerivedDataRef,
     },
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
     feed::{
@@ -50,6 +50,10 @@ use crate::{
         DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    nexus::{
+        client::{NexusClient, NexusError},
+        components::{UnhealthyPoolsPoller, DEFAULT_MAX_UNCONFIRMED_AGE},
+    },
     post_process::{
         registry::check_post_processor_order, PostProcessorOrderError, PostProcessorRegistry,
         UnknownPostProcessorError,
@@ -398,6 +402,15 @@ pub enum SolverBuildError {
     /// The quote simulator could not be created (e.g. malformed RPC URL).
     #[error("failed to create quote simulator: {0}")]
     QuoteSimulator(String),
+    /// Excluding the pools `fynd-nexus` reports as unhealthy was requested without a nexus URL.
+    #[error(
+        "excluding unhealthy pools needs a fynd-nexus service to ask: set the nexus URL, e.g. \
+         http://fynd-nexus:3000"
+    )]
+    NexusUrlMissing,
+    /// The `fynd-nexus` client could not be created (e.g. malformed URL).
+    #[error(transparent)]
+    Nexus(#[from] NexusError),
     /// A worker pool referenced an algorithm name that is not registered.
     #[error(transparent)]
     UnknownAlgorithm(#[from] UnknownAlgorithmError),
@@ -521,6 +534,20 @@ struct CustomPoolEntry {
     configure: Box<dyn FnOnce(WorkerPoolBuilder) -> WorkerPoolBuilder + Send>,
 }
 
+/// The market half of the pipeline, produced by [`FyndBuilder::assemble_market`].
+struct MarketParts {
+    market_data: MarketData,
+    tycho_feed: TychoFeed,
+    gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
+    computation_manager: ComputationManager,
+    derived_data: SharedDerivedDataRef,
+    derived_event_tx: broadcast::Sender<DerivedDataEvent>,
+    computation_event_rx: broadcast::Receiver<MarketEvent>,
+    computation_shutdown_tx: broadcast::Sender<()>,
+    computation_shutdown_rx: broadcast::Receiver<()>,
+    market_event_tx: broadcast::Sender<MarketEvent>,
+}
+
 /// All components produced by [`FyndBuilder::assemble_components`], consumed by
 /// [`FyndBuilder::build`] and [`FyndBuilder::build_with_pending`].
 struct BuiltComponents {
@@ -540,6 +567,7 @@ struct BuiltComponents {
     router_address: Option<Bytes>,
     pending_indexers: Vec<(String, Box<dyn TxDeltaIndexer>)>,
     market_event_tx: broadcast::Sender<MarketEvent>,
+    unhealthy_pools_poller: Option<UnhealthyPoolsPoller>,
 }
 
 /// Builder for assembling the full solver pipeline.
@@ -571,6 +599,7 @@ pub struct FyndBuilder {
     aggregate_rfqs: bool,
     external_liquidity: Vec<ExternalLiquidity>,
     nexus_url: Option<String>,
+    exclude_nexus_unhealthy_pools: bool,
     pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
     /// default.
@@ -622,6 +651,7 @@ impl FyndBuilder {
             aggregate_rfqs: false,
             external_liquidity: Vec::new(),
             nexus_url: None,
+            exclude_nexus_unhealthy_pools: false,
             pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
             pricing_min_pass_interval: None,
@@ -783,6 +813,20 @@ impl FyndBuilder {
     /// and firm quotes still go straight to the venue.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
         self.nexus_url = Some(url.into());
+        self
+    }
+
+    /// Skips the pools the `fynd-nexus` service reports as unhealthy when solving (default:
+    /// `false`).
+    ///
+    /// The service probes each component on chain and reports the ones that revert or pay less
+    /// than their state predicts. The solver polls that set from the service set with
+    /// [`nexus_url`](Self::nexus_url) and routes through those pools again once they recover. It
+    /// fails open: it excludes nothing until the service reports a set, nor when the service
+    /// withdraws it or stays silent for too long. The build fails with
+    /// [`SolverBuildError::NexusUrlMissing`] when no `nexus_url` is set.
+    pub fn exclude_nexus_unhealthy_pools(mut self, enabled: bool) -> Self {
+        self.exclude_nexus_unhealthy_pools = enabled;
         self
     }
 
@@ -1046,6 +1090,93 @@ impl FyndBuilder {
         Ok(self)
     }
 
+    /// Constructs the market components that both [`build`](Self::build) and
+    /// [`build_market`](Self::build_market) need: the Tycho feed, the gas price fetcher and the
+    /// computation manager with its derived data.
+    ///
+    /// Takes the settings it consumes out of the builder, which the caller no longer reads.
+    fn assemble_market(&mut self) -> Result<MarketParts, SolverBuildError> {
+        let market_data = MarketData::new_shared();
+
+        let tycho_feed_config = TychoFeedConfig::new(
+            std::mem::take(&mut self.tycho_url),
+            self.chain,
+            self.tycho_api_key.take(),
+            self.tycho_use_tls,
+            std::mem::take(&mut self.protocols),
+            self.min_tvl,
+        )
+        .tvl_buffer_ratio(self.tvl_buffer_ratio)
+        .reconnect_delay(self.reconnect_delay)
+        .min_token_quality(self.min_token_quality)
+        .traded_n_days_ago(self.traded_n_days_ago)
+        .blocklisted_components(std::mem::take(&mut self.blocklisted_components))
+        .partial_blocks(self.partial_blocks)
+        .max_sync_lag(self.max_sync_lag)
+        .aggregate_rfqs(self.aggregate_rfqs)
+        .external_liquidity(std::mem::take(&mut self.external_liquidity));
+
+        let tycho_feed_config = match self.nexus_url.take() {
+            Some(url) => tycho_feed_config.nexus_url(url),
+            None => tycho_feed_config,
+        };
+        let tycho_feed_config = match self.tycho_subscription_buffer_size {
+            Some(size) => tycho_feed_config.subscription_buffer_size(size),
+            None => tycho_feed_config,
+        };
+
+        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
+            .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
+
+        let gas_price_fetcher =
+            GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
+
+        let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
+        let market_event_tx = tycho_feed.event_sender();
+
+        let mut computation_config = ComputationManagerConfig::new()
+            .with_chain_gas_token(&self.chain)
+            .map_err(|_| SolverBuildError::GasToken)?
+            .with_max_hop(self.pricing_max_hops);
+        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
+            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
+        }
+        if let Some(interval) = self.pricing_min_pass_interval {
+            computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
+        // ComputationManager::new returns a broadcast receiver that we don't need here —
+        // workers subscribe via computation_manager.event_sender() below.
+        let (mut computation_manager, _) =
+            ComputationManager::new(computation_config, market_data.clone())
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+        for computation in std::mem::take(&mut self.computations) {
+            computation_manager
+                .register_boxed(computation)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+        }
+
+        let derived_data: SharedDerivedDataRef = computation_manager.store();
+        let derived_event_tx = computation_manager.event_sender();
+
+        // Subscribe event channels before spawning (one for the computation manager + one per
+        // worker pool)
+        let computation_event_rx = tycho_feed.subscribe();
+        let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
+
+        Ok(MarketParts {
+            market_data,
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            derived_data,
+            derived_event_tx,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            market_event_tx,
+        })
+    }
+
     /// Constructs all components shared between [`build`](Self::build) and
     /// [`build_with_pending`](Self::build_with_pending).
     fn assemble_components(mut self) -> Result<BuiltComponents, SolverBuildError> {
@@ -1087,72 +1218,32 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let market_data = MarketData::new_shared();
-
-        let tycho_feed_config = TychoFeedConfig::new(
-            self.tycho_url,
-            self.chain,
-            self.tycho_api_key,
-            self.tycho_use_tls,
-            self.protocols,
-            self.min_tvl,
-        )
-        .tvl_buffer_ratio(self.tvl_buffer_ratio)
-        .reconnect_delay(self.reconnect_delay)
-        .min_token_quality(self.min_token_quality)
-        .traded_n_days_ago(self.traded_n_days_ago)
-        .blocklisted_components(self.blocklisted_components)
-        .partial_blocks(self.partial_blocks)
-        .max_sync_lag(self.max_sync_lag)
-        .aggregate_rfqs(self.aggregate_rfqs)
-        .external_liquidity(self.external_liquidity);
-
-        let tycho_feed_config = match self.nexus_url {
-            Some(url) => tycho_feed_config.nexus_url(url),
-            None => tycho_feed_config,
-        };
-        let tycho_feed_config = match self.tycho_subscription_buffer_size {
-            Some(size) => tycho_feed_config.subscription_buffer_size(size),
-            None => tycho_feed_config,
+        let unhealthy_pools_url = match (self.exclude_nexus_unhealthy_pools, &self.nexus_url) {
+            (true, Some(url)) => Some(url.clone()),
+            (true, None) => return Err(SolverBuildError::NexusUrlMissing),
+            (false, _) => None,
         };
 
-        let ethereum_client = EthereumRpcClient::new(self.rpc_url.as_str())
-            .map_err(|e| SolverBuildError::RpcClient(e.to_string()))?;
+        let MarketParts {
+            market_data,
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            derived_data,
+            derived_event_tx,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            market_event_tx,
+        } = self.assemble_market()?;
 
-        let gas_price_fetcher =
-            GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
-
-        let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
-        let market_event_tx = tycho_feed.event_sender();
-
-        let mut computation_config = ComputationManagerConfig::new()
-            .with_chain_gas_token(&self.chain)
-            .map_err(|_| SolverBuildError::GasToken)?
-            .with_max_hop(self.pricing_max_hops);
-        if let Some(max_tokens) = self.pricing_max_tokens_per_pass {
-            computation_config = computation_config.with_pricing_max_tokens_per_pass(max_tokens);
-        }
-        if let Some(interval) = self.pricing_min_pass_interval {
-            computation_config = computation_config.with_pricing_min_pass_interval(interval);
-        }
-        // ComputationManager::new returns a broadcast receiver that we don't need here —
-        // workers subscribe via computation_manager.event_sender() below.
-        let (mut computation_manager, _) =
-            ComputationManager::new(computation_config, market_data.clone())
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        for computation in self.computations {
-            computation_manager
-                .register_boxed(computation)
-                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-        }
-
-        let derived_data: SharedDerivedDataRef = computation_manager.store();
-        let derived_event_tx = computation_manager.event_sender();
-
-        // Subscribe event channels before spawning (one for the computation manager + one per
-        // worker pool)
-        let computation_event_rx = tycho_feed.subscribe();
-        let (computation_shutdown_tx, computation_shutdown_rx) = broadcast::channel(1);
+        let unhealthy_pools_poller = match unhealthy_pools_url {
+            Some(url) => Some(
+                NexusClient::new(&url)?
+                    .unhealthy_pools_poller(market_data.clone(), DEFAULT_MAX_UNCONFIRMED_AGE),
+            ),
+            None => None,
+        };
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
@@ -1344,6 +1435,7 @@ impl FyndBuilder {
             router_address,
             pending_indexers: self.pending_indexers,
             market_event_tx,
+            unhealthy_pools_poller,
         })
     }
 
@@ -1355,6 +1447,50 @@ impl FyndBuilder {
     pub fn build(self) -> Result<Solver, SolverBuildError> {
         let components = self.assemble_components()?;
         Ok(Self::spawn_tasks(components, |tycho_feed, _pending_indexers| tycho_feed.run()))
+    }
+
+    /// Starts only the market: the Tycho feed, the gas price fetcher and the derived-data
+    /// computations, with no worker pools, encoder or router.
+    ///
+    /// It uses the same settings as [`build`](Self::build): the Tycho connection, protocols, TVL
+    /// floor, blocklist, the nexus URL for shared RFQ prices, the pricing limits and the
+    /// registered computations. Worker pool, encoder, simulation, price guard and
+    /// unhealthy-pool settings have no effect. Call it inside a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError`] if the RPC client, the computation manager or the gas token
+    /// cannot be set up.
+    pub fn build_market(mut self) -> Result<MarketFeed, SolverBuildError> {
+        let MarketParts {
+            market_data,
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            derived_data,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            market_event_tx,
+            ..
+        } = self.assemble_market()?;
+        let tasks = spawn_market_tasks(
+            tycho_feed.run(),
+            None,
+            gas_price_fetcher,
+            &market_data,
+            computation_manager,
+            computation_event_rx,
+            computation_shutdown_rx,
+        );
+        Ok(MarketFeed {
+            market_data,
+            derived_data,
+            market_event_tx,
+            tasks,
+            computation_shutdown_tx,
+            chain: self.chain,
+        })
     }
 
     /// Assembles and starts all solver components, also returning a [`PendingBlockProcessor`]
@@ -1452,7 +1588,7 @@ impl FyndBuilder {
     {
         let BuiltComponents {
             tycho_feed,
-            mut gas_price_fetcher,
+            gas_price_fetcher,
             router_fee_fetcher,
             computation_manager,
             computation_event_rx,
@@ -1467,30 +1603,28 @@ impl FyndBuilder {
             router_address,
             pending_indexers,
             market_event_tx,
+            unhealthy_pools_poller,
         } = components;
 
         let feed = run_feed(tycho_feed, pending_indexers);
-        let feed_handle = tokio::spawn(async move {
-            if let Err(e) = feed.await {
-                metrics::counter!("tycho_feed_failures_total").increment(1);
-                tracing::error!(error = %e, "tycho feed error");
-            }
-        });
-        let gas_price_handle = tokio::spawn(async move {
-            gas_price_fetcher.run().await;
-        });
-        let metrics_sampler =
-            MetricsSampler::new(market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
-        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+        let MarketTasks {
+            feed_handle,
+            gas_price_handle,
+            metrics_sampler_handle,
+            computation_handle,
+        } = spawn_market_tasks(
+            feed,
+            unhealthy_pools_poller,
+            gas_price_fetcher,
+            &market_data,
+            computation_manager,
+            computation_event_rx,
+            computation_shutdown_rx,
+        );
         let router_fee_handle = match router_fee_fetcher {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
-        let computation_handle = tokio::spawn(async move {
-            computation_manager
-                .run(computation_event_rx, computation_shutdown_rx)
-                .await;
-        });
 
         Solver {
             router,
@@ -1510,6 +1644,161 @@ impl FyndBuilder {
         }
     }
 } // impl FyndBuilder
+
+/// The background tasks of the market half of the pipeline.
+struct MarketTasks {
+    feed_handle: JoinHandle<()>,
+    gas_price_handle: JoinHandle<()>,
+    metrics_sampler_handle: JoinHandle<()>,
+    computation_handle: JoinHandle<()>,
+}
+
+/// Spawns the Tycho feed, the gas price fetcher, the metrics sampler and the computation manager.
+///
+/// The poller of excluded pools, when there is one, runs inside the feed task so that it stops
+/// with the feed.
+fn spawn_market_tasks<Fut>(
+    feed: Fut,
+    unhealthy_pools_poller: Option<UnhealthyPoolsPoller>,
+    mut gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
+    market_data: &MarketData,
+    computation_manager: ComputationManager,
+    computation_event_rx: broadcast::Receiver<MarketEvent>,
+    computation_shutdown_rx: broadcast::Receiver<()>,
+) -> MarketTasks
+where
+    Fut: Future<Output = Result<(), DataFeedError>> + Send + 'static,
+{
+    let feed_handle = tokio::spawn(async move {
+        let feed = async {
+            if let Err(e) = feed.await {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
+                tracing::error!(error = %e, "tycho feed error");
+            }
+        };
+        match unhealthy_pools_poller {
+            Some(poller) => tokio::select! {
+                () = feed => {},
+                () = poller.run() => {},
+            },
+            None => feed.await,
+        }
+    });
+    let gas_price_handle = tokio::spawn(async move {
+        gas_price_fetcher.run().await;
+    });
+    let metrics_sampler =
+        MetricsSampler::new(market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+    let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+    let computation_handle = tokio::spawn(async move {
+        computation_manager
+            .run(computation_event_rx, computation_shutdown_rx)
+            .await;
+    });
+    MarketTasks { feed_handle, gas_price_handle, metrics_sampler_handle, computation_handle }
+}
+
+/// Waits until `market_data` holds a block and `derived_data` has completed a cycle, polling
+/// every 500 ms.
+async fn wait_for_market(
+    market_data: &MarketData,
+    derived_data: &SharedDerivedDataRef,
+    timeout: Duration,
+) -> Result<(), WaitReadyError> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let market_ready = market_data
+            .read()
+            .await
+            .last_updated()
+            .is_some();
+        let derived_ready = derived_data
+            .read()
+            .await
+            .derived_data_ready();
+
+        if market_ready && derived_ready {
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(WaitReadyError { timeout_ms: timeout.as_millis() as u64 });
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// A running market with no solver on top, started by [`FyndBuilder::build_market`].
+///
+/// It holds the live Tycho market, the derived data computed from it (spot prices, depths, token
+/// gas prices) and the tasks that keep both current. Dropping it leaves the tasks running; call
+/// [`shutdown`](Self::shutdown) to stop them.
+pub struct MarketFeed {
+    market_data: MarketData,
+    derived_data: SharedDerivedDataRef,
+    market_event_tx: broadcast::Sender<MarketEvent>,
+    tasks: MarketTasks,
+    computation_shutdown_tx: broadcast::Sender<()>,
+    chain: Chain,
+}
+
+impl MarketFeed {
+    /// Returns the chain this market is on.
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
+    /// Returns a clone of the shared market data reference.
+    pub fn market_data(&self) -> MarketData {
+        self.market_data.clone()
+    }
+
+    /// Returns a clone of the shared derived data reference.
+    pub fn derived_data(&self) -> SharedDerivedDataRef {
+        Arc::clone(&self.derived_data)
+    }
+
+    /// Returns a new receiver for the [`MarketEvent`]s of the Tycho feed.
+    ///
+    /// Each call returns an independent receiver. Receivers created after a block has been
+    /// processed miss that block's event.
+    pub fn subscribe_market_events(&self) -> broadcast::Receiver<MarketEvent> {
+        self.market_event_tx.subscribe()
+    }
+
+    /// Waits until the market holds a block and the derived data has completed one cycle.
+    ///
+    /// Polls every 500 ms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WaitReadyError`] if `timeout` elapses first.
+    pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), WaitReadyError> {
+        wait_for_market(&self.market_data, &self.derived_data, timeout).await
+    }
+
+    /// Whether the Tycho feed task has ended, so that the market no longer updates.
+    ///
+    /// The feed ends when its connection fails for good. It logs the error and counts it in
+    /// `tycho_feed_failures_total`.
+    pub fn feed_has_ended(&self) -> bool {
+        self.tasks.feed_handle.is_finished()
+    }
+
+    /// Signals the computation manager to stop, then aborts the background tasks.
+    pub fn shutdown(self) {
+        let _ = self.computation_shutdown_tx.send(());
+        self.tasks.feed_handle.abort();
+        self.tasks.gas_price_handle.abort();
+        self.tasks
+            .metrics_sampler_handle
+            .abort();
+    }
+}
 
 /// A running solver assembled by [`FyndBuilder`].
 pub struct Solver {
@@ -1585,33 +1874,7 @@ impl Solver {
     /// solver.wait_until_ready(Duration::from_secs(180)).await?;
     /// ```
     pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), WaitReadyError> {
-        const POLL_INTERVAL: Duration = Duration::from_millis(500);
-
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            let market_ready = self
-                .market_data
-                .read()
-                .await
-                .last_updated()
-                .is_some();
-            let derived_ready = self
-                .derived_data
-                .read()
-                .await
-                .derived_data_ready();
-
-            if market_ready && derived_ready {
-                return Ok(());
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(WaitReadyError { timeout_ms: timeout.as_millis() as u64 });
-            }
-
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+        wait_for_market(&self.market_data, &self.derived_data, timeout).await
     }
 
     /// Build a Solver by replaying recorded market updates.
@@ -2007,6 +2270,78 @@ mod tests {
         .build();
 
         assert!(matches!(result, Err(SolverBuildError::NoPublicPool)));
+    }
+
+    /// The poller asks the service for the set, so there must be a service to ask. It is caught at
+    /// build time, not when the first poll fails.
+    #[rstest::rstest]
+    #[case::no_url(None, "needs a fynd-nexus service")]
+    #[case::invalid_url(Some("ftp://shared"), "must be an http:// or https:// URL")]
+    fn test_build_exclude_unhealthy_pools_needs_a_valid_nexus_url(
+        #[case] nexus_url: Option<&str>,
+        #[case] message: &str,
+    ) {
+        let mut builder = FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            "https://example.invalid",
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+        .algorithm("most_liquid")
+        .exclude_nexus_unhealthy_pools(true);
+        if let Some(url) = nexus_url {
+            builder = builder.nexus_url(url);
+        }
+
+        let Err(error) = builder.build() else {
+            panic!("excluding unhealthy pools without a usable nexus URL must not build");
+        };
+
+        assert!(error.to_string().contains(message), "got: {error}");
+    }
+
+    fn market_builder(rpc_url: &str) -> FyndBuilder {
+        FyndBuilder::new(
+            Chain::Ethereum,
+            "wss://example.invalid",
+            rpc_url,
+            vec!["uniswap_v2".to_string()],
+            100.0,
+        )
+    }
+
+    /// The market starts without any worker pool, and reports not ready until a block arrives.
+    #[tokio::test]
+    async fn test_build_market_without_pools() {
+        let market = market_builder("https://example.invalid")
+            .build_market()
+            .expect("a market needs no worker pool");
+
+        let ready = market
+            .wait_until_ready(Duration::from_millis(20))
+            .await;
+        let mut events = market.subscribe_market_events();
+
+        assert!(ready.is_err(), "no block has arrived");
+        assert!(events.try_recv().is_err());
+        assert_eq!(market.chain(), Chain::Ethereum);
+        assert!(market
+            .market_data()
+            .read()
+            .await
+            .last_updated()
+            .is_none());
+        market.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_build_market_invalid_rpc_url() {
+        let Err(error) = market_builder("not a url").build_market() else {
+            panic!("an invalid RPC URL must not build");
+        };
+
+        assert!(matches!(error, SolverBuildError::RpcClient(_)), "got: {error:?}");
     }
 
     /// A pool budget above the router deadline cannot take effect for a request that does not

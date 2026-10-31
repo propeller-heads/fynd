@@ -243,7 +243,8 @@ fn select_fallback(
 }
 
 /// Whether this candidate pool is ruled out, by the request's own filter, by the worker pool's
-/// `exclude_protocols`, or because its protocol is out of sync.
+/// `exclude_protocols`, because its protocol is out of sync, or because `fynd-nexus` reports it
+/// unhealthy.
 ///
 /// The fallback executes as part of the route, so a pool told never to route through a protocol
 /// must not settle its pAMM legs there either.
@@ -262,7 +263,10 @@ fn is_excluded(
         .contains(candidate) ||
         market
             .base_market_state()
-            .is_unsynced_pool(candidate)
+            .is_unsynced_pool(candidate) ||
+        market
+            .base_market_state()
+            .is_unhealthy_pool(candidate)
     {
         return true;
     }
@@ -966,6 +970,27 @@ mod tests {
             [("uniswap_v2".to_string(), SynchronizerState::Stale(BlockHeader::default()))],
             Duration::from_secs(15),
         );
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+
+        let fallback =
+            select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
+                .expect("the worse pool is left");
+
+        assert_eq!(fallback.component_id(), WORSE_POOL);
+    }
+
+    /// A pool `fynd-nexus` reports as unhealthy can't settle a pAMM leg any more than it can
+    /// carry a route.
+    #[tokio::test]
+    async fn test_select_fallback_unhealthy_candidates() {
+        let market = market_with_fallback_pools();
+        market
+            .write()
+            .await
+            .set_unhealthy_pools(rustc_hash::FxHashSet::from_iter([BETTER_POOL.to_string()]));
         let view = market
             .try_read_blocking()
             .expect("uncontended");

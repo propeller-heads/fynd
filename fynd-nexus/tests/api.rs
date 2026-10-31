@@ -2,29 +2,29 @@ mod common;
 
 use std::{net::SocketAddr, sync::Arc};
 
-use common::{new_latest_prices, EPOCH};
+use common::{new_latest_stream, EPOCH};
 use fynd_core::nexus::{
     rfq::{prices_path, RfqVenue},
     MessageBody, NexusMessage,
 };
 use fynd_nexus::{
     api::{self, Streams},
-    latest_prices::LatestPrices,
+    latest_stream::LatestStream,
 };
 use reqwest::{header, Response};
 use rstest::rstest;
 use serde_json::{json, Value};
 
 /// The API on a local port, serving `streams`.
-fn serve(streams: &[Arc<LatestPrices>]) -> SocketAddr {
+fn serve(streams: &[Arc<LatestStream>]) -> SocketAddr {
     let streams = Arc::new(Streams::new(streams.iter().cloned()));
-    let (server, address) = api::bind(streams, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let (server, address) = api::bind(streams, None, "127.0.0.1:0".parse().unwrap()).unwrap();
     tokio::spawn(server);
     address
 }
 
-fn bebop() -> Arc<LatestPrices> {
-    new_latest_prices(RfqVenue::Bebop)
+fn bebop() -> Arc<LatestStream> {
+    new_latest_stream(RfqVenue::Bebop)
 }
 
 async fn get(address: SocketAddr, path: &str, if_none_match: Option<&str>) -> Response {
@@ -138,7 +138,7 @@ async fn test_request_unknown_stream(#[case] path: &str) {
 #[case::metric(RfqVenue::Metric)]
 #[tokio::test]
 async fn test_prices_path_routing(#[case] venue: RfqVenue) {
-    let state = new_latest_prices(venue);
+    let state = new_latest_stream(venue);
     state.publish(&json!({}), chrono::Utc::now());
     let address = serve(&[state]);
 
@@ -148,18 +148,18 @@ async fn test_prices_path_routing(#[case] venue: RfqVenue) {
 }
 
 #[rstest]
-#[case::none_has_prices(false, false, 503, json!([]))]
-#[case::one_has_prices(true, false, 200, json!(["metric"]))]
+#[case::none_is_serving(false, false, 503, json!([]))]
+#[case::one_is_serving(true, false, 200, json!(["metric"]))]
 #[case::withdrawn_again(true, true, 503, json!([]))]
 #[tokio::test]
-async fn test_health_follows_whether_any_stream_has_prices(
+async fn test_health_follows_whether_any_stream_is_serving(
     #[case] publish: bool,
     #[case] withdraw: bool,
     #[case] status: u16,
     #[case] serving: Value,
 ) {
     let bebop = bebop();
-    let metric = new_latest_prices(RfqVenue::Metric);
+    let metric = new_latest_stream(RfqVenue::Metric);
     let address = serve(&[bebop, metric.clone()]);
     if publish {
         metric.publish(&json!({}), chrono::Utc::now());

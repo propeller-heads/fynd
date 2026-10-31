@@ -15,7 +15,7 @@ use tycho_simulation::evm::tycho_models::Chain;
 
 use crate::{
     feed_runner::{run_feed, RESTART_BACKOFF},
-    latest_prices::LatestPrices,
+    latest_stream::LatestStream,
     rfq::{
         bebop::{BebopArgs, BebopCredentials},
         hashflow::{HashflowArgs, HashflowCredentials},
@@ -115,7 +115,8 @@ pub fn require_credentials(
 ///
 /// # Errors
 ///
-/// Returns an error naming `chain` and the listed venues when none of them supports it.
+/// Returns an error naming `chain` and the listed venues when some are listed and none of them
+/// supports it.
 pub fn streams_to_serve(
     chain: Chain,
     credentials: &[RfqCredentials],
@@ -135,7 +136,7 @@ pub fn streams_to_serve(
             warn!(%chain, %venue, "the venue does not support the chain; skipping");
         }
     }
-    if streams.is_empty() {
+    if streams.is_empty() && !credentials.is_empty() {
         let listed: Vec<String> = credentials
             .iter()
             .map(|venue_credentials| venue_credentials.venue().to_string())
@@ -145,27 +146,27 @@ pub fn streams_to_serve(
     Ok(streams)
 }
 
-/// Starts the prices feed of `latest_prices` on a task, and restarts it as `run_feed` decides.
-pub fn spawn_prices_feed(latest_prices: Arc<LatestPrices>, credentials: RfqCredentials) {
-    let chain = latest_prices.chain();
+/// Starts the prices feed of `latest_stream` on a task, and restarts it as `run_feed` decides.
+pub fn spawn_prices_feed(latest_stream: Arc<LatestStream>, credentials: RfqCredentials) {
+    let chain = latest_stream.chain();
     match credentials {
         RfqCredentials::Bebop(credentials) => {
             tokio::spawn(run_feed(
-                latest_prices,
+                latest_stream,
                 move || bebop::prices_feed(chain, &credentials),
                 RESTART_BACKOFF,
             ));
         }
         RfqCredentials::Hashflow(credentials) => {
             tokio::spawn(run_feed(
-                latest_prices,
+                latest_stream,
                 move || hashflow::prices_feed(chain, &credentials),
                 RESTART_BACKOFF,
             ));
         }
         RfqCredentials::Metric(credentials) => {
             tokio::spawn(run_feed(
-                latest_prices,
+                latest_stream,
                 move || metric::prices_feed(chain, &credentials),
                 RESTART_BACKOFF,
             ));
@@ -288,5 +289,12 @@ mod tests {
             .to_string();
 
         assert_eq!(error, "none of the listed venues (bebop, metric) supports unichain");
+    }
+
+    #[test]
+    fn test_no_venues_means_no_streams() {
+        let streams = streams_to_serve(Chain::Ethereum, &[]).unwrap();
+
+        assert!(streams.is_empty());
     }
 }

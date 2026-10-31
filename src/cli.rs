@@ -191,6 +191,11 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub nexus_url: Option<String>,
 
+    /// Do not route through the pools that Fynd Nexus reports as broken or inaccurate, and route
+    /// through them again when they recover. Requires --nexus-url.
+    #[arg(long, env)]
+    pub exclude_nexus_unhealthy_pools: bool,
+
     /// Enable price guard validation against external price sources.
     /// Disabled by default.
     #[arg(long)]
@@ -369,6 +374,23 @@ mod cli_tests {
 
         std::env::remove_var("MAX_SYNC_LAG_SECS");
         assert_eq!(args.max_sync_lag_secs, 30);
+    }
+
+    #[rstest::rstest]
+    #[case::default(&[], false)]
+    #[case::flag(&["--exclude-nexus-unhealthy-pools"], true)]
+    fn test_arg_parsing_exclude_nexus_unhealthy_pools(
+        #[case] flags: &[&str],
+        #[case] expected: bool,
+    ) {
+        let mut argv = vec!["fynd", "serve", "--tycho-api-key", "test-key"];
+        argv.extend_from_slice(flags);
+        let cli = Cli::try_parse_from(argv).expect("parse errored");
+
+        let Commands::Serve(args) = cli.command else {
+            panic!("expected Serve command");
+        };
+        assert_eq!(args.exclude_nexus_unhealthy_pools, expected);
     }
 
     #[test]

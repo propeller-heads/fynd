@@ -2,6 +2,8 @@
 
 /// Shared quote/simulation comparison helpers with no RPC dependency.
 pub(crate) mod deviation;
+/// One-swap probes of a component, run on chain.
+pub mod probe;
 /// Decoding of the revert a simulated router call produces.
 mod revert;
 /// Simulation of encoded Tycho router quotes.
@@ -10,3 +12,8 @@ pub mod simulator;
 pub mod token_layout;
 /// Request bodies for the simulation RPCs, with the field names of the execution-apis spec.
 pub(crate) mod wire;
+
+pub use probe::{
+    ComponentProbe, ProbeConnectError, ProbeOutcome, ProbePlanError, ProbeSizer, ProbeSwap,
+    RevertBlame, SizingError,
+};

@@ -284,6 +284,18 @@ pub(crate) fn resolve_rpc_url(
     }
 }
 
+/// Fails when the pods are to skip unhealthy pools but no Fynd Nexus service is set to ask.
+fn check_nexus_exclusion(args: &cli::ServeArgs) -> Result<(), SolverError> {
+    if args.exclude_nexus_unhealthy_pools && args.nexus_url.is_none() {
+        return Err(SolverError::SetupError(
+            "--exclude-nexus-unhealthy-pools needs --nexus-url (NEXUS_URL), e.g. \
+             http://fynd-nexus:3000"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Sets up the solver (loads config, parses chain, builds solver).
 ///
 /// `configure` sees the fully CLI-configured builder and returns the one to build, so an
@@ -317,6 +329,8 @@ async fn setup_solver(
             .map_err(|e| SolverError::SetupError(format!("failed to load chains config: {e}")))?;
         info!(?path, "installed custom chain registry");
     }
+
+    check_nexus_exclusion(args)?;
 
     // Parse chain
     let chain = parse_chain(&args.chain)
@@ -385,6 +399,7 @@ async fn setup_solver(
     if let Some(url) = &args.nexus_url {
         builder = builder.nexus_url(url.clone());
     }
+    builder = builder.exclude_nexus_unhealthy_pools(args.exclude_nexus_unhealthy_pools);
     if let Some(size) = args.tycho_subscription_buffer_size {
         builder = builder.tycho_subscription_buffer_size(size);
     }
@@ -598,5 +613,52 @@ mod watermark_tests {
             default_calldata_watermark(Some("key-a")),
             default_calldata_watermark(Some("key-b"))
         );
+    }
+}
+
+#[cfg(test)]
+mod nexus_exclusion_tests {
+    use clap::Parser;
+
+    use super::check_nexus_exclusion;
+    use crate::cli::{Cli, Commands, ServeArgs};
+
+    fn serve_args(flags: &[&str]) -> ServeArgs {
+        let mut argv = vec!["fynd", "serve", "--tycho-api-key", "test-key"];
+        argv.extend_from_slice(flags);
+        let Commands::Serve(args) = Cli::try_parse_from(argv)
+            .expect("parse errored")
+            .command
+        else {
+            panic!("expected Serve command");
+        };
+        *args
+    }
+
+    #[test]
+    fn test_exclusion_without_nexus_url_is_refused() {
+        let args = serve_args(&["--exclude-nexus-unhealthy-pools"]);
+
+        let error = check_nexus_exclusion(&args).expect_err("no service to ask");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--nexus-url"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn test_exclusion_with_nexus_url_is_accepted() {
+        let args =
+            serve_args(&["--exclude-nexus-unhealthy-pools", "--nexus-url", "http://nexus:3000"]);
+
+        assert!(check_nexus_exclusion(&args).is_ok());
+    }
+
+    #[test]
+    fn test_no_exclusion_needs_no_nexus_url() {
+        assert!(check_nexus_exclusion(&serve_args(&[])).is_ok());
     }
 }

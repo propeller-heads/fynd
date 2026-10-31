@@ -72,8 +72,8 @@ fn should_drop_component(
 ///
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The answer depends on the market's
-/// components and its unsynced protocols, so a cached one stands until the market's exclusion
-/// generation changes.
+/// components, its unsynced protocols and its unhealthy pools, so a cached one stands until the
+/// market's exclusion generation changes.
 ///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
 fn resolve_exclusions(
@@ -111,7 +111,8 @@ fn resolve_exclusions(
     exclusions
 }
 
-/// Checks that `route` is valid, passes the request's route filter, and uses no unsynced pool.
+/// Checks that `route` is valid, passes the request's route filter, and uses no unsynced or
+/// unhealthy pool.
 fn check_route(
     route: &Route,
     order: &Order,
@@ -129,6 +130,12 @@ fn check_route(
                 swap.component_id(),
                 swap.protocol_component()
                     .protocol_system
+            ));
+        }
+        if exclusions.is_unhealthy_pool(swap.component_id()) {
+            return Err(format!(
+                "route uses pool {} that fynd-nexus reports as unhealthy",
+                swap.component_id()
             ));
         }
     }
@@ -1983,6 +1990,52 @@ mod tests {
                     msg.contains("pool p1 of out-of-sync protocol uniswap_v2"),
                     "unexpected message: {msg}"
                 );
+            }
+            other => panic!("expected the route to be rejected, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_quote_route_through_unhealthy_pool() {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) =
+            setup_market_weighted(vec![("p1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        market
+            .write()
+            .await
+            .set_unhealthy_pools(FxHashSet::from_iter(["p1".to_string()]));
+        let swap = Swap::new(
+            "p1".to_string(),
+            "uniswap_v2".to_string(),
+            token_a.address.clone(),
+            token_b.address.clone(),
+            BigUint::from(100u64),
+            BigUint::from(90u64),
+            BigUint::from(1u64),
+            component("p1", &[token_a.clone(), token_b.clone()]),
+            Box::new(MockProtocolSim::new(2.0)),
+        );
+        let route = Route::new(vec![swap], FxHashMap::default()).expect("non-empty route");
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            FilterIgnoringAlgorithm(route),
+            0,
+            "test_pool".to_string(),
+        );
+
+        let result = worker
+            .quote(
+                &order(&token_a, &token_b, 100, OrderSide::Sell),
+                SolveParams::default(),
+                far_deadline(),
+            )
+            .await;
+
+        match result {
+            Err(SolveError::AlgorithmError(msg)) => {
+                assert!(msg.contains("pool p1 that fynd-nexus reports"), "unexpected: {msg}");
             }
             other => panic!("expected the route to be rejected, got {other:?}"),
         }

@@ -2,7 +2,7 @@
 name = "fynd-nexus"
 version.workspace = true
 edition = "2021"
-description = "Holds the RFQ venue connections that Fynd pods would otherwise each open, and serves the latest prices to them"
+description = "Holds the RFQ venue connections that Fynd pods would otherwise each open, serves the latest prices to them, and monitors the health of the chain's Tycho components"
 license-file = "../LICENSE.md"
 repository.workspace = true
 readme = "README.md"
@@ -11,6 +11,7 @@ exclude = ["tests/"]
 
 [dependencies]
 fynd-core.workspace = true
+fynd-rpc.workspace = true
 tycho-simulation.workspace = true
 actix-web.workspace = true
 bytes.workspace = true
@@ -31,6 +32,7 @@ tokio = { workspace = true, features = ["test-util"] }
 fynd-core = { workspace = true, features = ["test-utils"] }
 rstest.workspace = true
 tokio-stream.workspace = true
+tempfile.workspace = true
 reqwest.workspace = true
 metrics-util.workspace = true
 
