@@ -208,3 +208,185 @@ impl HealthStore {
             .unwrap_or_else(PoisonError::into_inner)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::component_health::LastOutcome;
+
+    const THRESHOLDS: HealthThresholds =
+        HealthThresholds { broken_after: 2, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+
+    fn store() -> HealthStore {
+        HealthStore::new(THRESHOLDS, BTreeMap::new())
+    }
+
+    fn revert(block: u64) -> Observation {
+        Observation::PoolReverted { block, reason: "PoolEmpty".to_string() }
+    }
+
+    fn break_component(store: &HealthStore, id: &str, now: DateTime<Utc>) {
+        store.record(id, revert(1), now);
+        store.record(id, revert(2), now);
+    }
+
+    #[test]
+    fn test_excluded_lists_broken_and_inaccurate_components_by_id() {
+        let store = store();
+        let now = Utc::now();
+        for id in ["0xc", "0xb", "0xa", "0xd"] {
+            store.track(id, "uniswap_v3", now);
+        }
+        break_component(&store, "0xc", now);
+        for block in 1..=3 {
+            store.record("0xa", Observation::Executed { block, deviation_bps: -250.0 }, now);
+        }
+        store.record("0xb", revert(1), now);
+        store.record("0xd", Observation::Executed { block: 1, deviation_bps: 0.0 }, now);
+
+        let excluded = store.excluded();
+
+        let summary: Vec<_> = excluded
+            .iter()
+            .map(|component| (component.id.as_str(), component.cause))
+            .collect();
+        assert_eq!(summary, [("0xa", ExclusionCause::Inaccurate), ("0xc", ExclusionCause::Broken)]);
+        assert_eq!(excluded[0].reason, "pays 250 bps less than predicted");
+        assert_eq!(excluded[1].reason, "PoolEmpty");
+        assert_eq!(excluded[1].since, now);
+    }
+
+    #[test]
+    fn test_track_keeps_the_record_of_a_tracked_component() {
+        let store = store();
+        let now = Utc::now();
+        store.track("0xa", "uniswap_v3", now);
+        store.record("0xa", revert(1), now);
+
+        store.track("0xa", "uniswap_v3", now + chrono::Duration::seconds(5));
+
+        assert_eq!(store.get("0xa").unwrap().last_outcome, Some(LastOutcome::PoolReverted));
+    }
+
+    #[test]
+    fn test_untrack_and_retain_forget_components() {
+        let store = store();
+        let now = Utc::now();
+        for id in ["0xa", "0xb", "0xc"] {
+            store.track(id, "uniswap_v3", now);
+        }
+
+        store.untrack("0xa");
+        store.retain(|id| id != "0xb");
+
+        let ids: Vec<_> = store
+            .report(None, None)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["0xc"]);
+    }
+
+    #[test]
+    fn test_record_of_an_untracked_component_is_ignored() {
+        let store = store();
+
+        store.record("0xa", revert(1), Utc::now());
+
+        assert!(store.get("0xa").is_none());
+        assert!(store.take_unsaved().is_none());
+    }
+
+    #[test]
+    fn test_reset_one_moves_a_component_to_the_front_and_clears_it() {
+        let store = store();
+        let now = Utc::now();
+        let later = now + chrono::Duration::seconds(30);
+        store.track("0xa", "uniswap_v3", now);
+        store.track("0xb", "uniswap_v3", now);
+        break_component(&store, "0xa", now);
+
+        let reset_known = store.reset_one("0xa", later);
+        let reset_unknown = store.reset_one("0xz", later);
+
+        let health = store.get("0xa").unwrap();
+        assert!(reset_known && !reset_unknown);
+        assert_eq!(
+            (health.status, health.queued_at, health.checked_at),
+            (HealthStatus::Unknown, later, None)
+        );
+        assert!(store.excluded().is_empty());
+        assert_eq!(store.get("0xb").unwrap().queued_at, now);
+    }
+
+    #[test]
+    fn test_reset_all_clears_every_component() {
+        let store = store();
+        let now = Utc::now();
+        for id in ["0xa", "0xb"] {
+            store.track(id, "uniswap_v3", now);
+            break_component(&store, id, now);
+        }
+
+        let count = store.reset_all(now);
+
+        assert_eq!(count, 2);
+        assert!(store.excluded().is_empty());
+        assert!(!store.has_probed_components());
+    }
+
+    #[test]
+    fn test_report_filters_by_status_and_protocol() {
+        let store = store();
+        let now = Utc::now();
+        store.track("0xa", "uniswap_v3", now);
+        store.track("0xb", "uniswap_v2", now);
+        store.track("0xc", "uniswap_v2", now);
+        store.record("0xb", Observation::Executed { block: 1, deviation_bps: 0.0 }, now);
+        let ids = |status, protocol| -> Vec<String> {
+            store
+                .report(status, protocol)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+
+        assert_eq!(ids(None, None), ["0xa", "0xb", "0xc"]);
+        assert_eq!(ids(Some(HealthStatus::Healthy), None), ["0xb"]);
+        assert_eq!(ids(None, Some("uniswap_v2")), ["0xb", "0xc"]);
+        assert_eq!(ids(Some(HealthStatus::Unknown), Some("uniswap_v2")), ["0xc"]);
+        assert!(ids(Some(HealthStatus::Broken), None).is_empty());
+    }
+
+    #[test]
+    fn test_status_counts_per_protocol() {
+        let store = store();
+        let now = Utc::now();
+        store.track("0xa", "uniswap_v3", now);
+        store.track("0xb", "uniswap_v3", now);
+        store.track("0xc", "uniswap_v2", now);
+        store.record("0xb", Observation::Executed { block: 1, deviation_bps: 0.0 }, now);
+
+        let counts = store.status_counts();
+
+        assert_eq!(counts[&("uniswap_v3".to_string(), HealthStatus::Unknown)], 1);
+        assert_eq!(counts[&("uniswap_v3".to_string(), HealthStatus::Healthy)], 1);
+        assert_eq!(counts[&("uniswap_v2".to_string(), HealthStatus::Unknown)], 1);
+        assert_eq!(counts.len(), 3);
+    }
+
+    #[test]
+    fn test_take_unsaved_hands_out_once_per_change() {
+        let store = store();
+        assert!(store.take_unsaved().is_none());
+        store.track("0xa", "uniswap_v3", Utc::now());
+
+        let first = store.take_unsaved();
+        let second = store.take_unsaved();
+        store.mark_unsaved();
+
+        assert_eq!(first.map(|records| records.len()), Some(1));
+        assert!(second.is_none());
+        assert!(store.take_unsaved().is_some());
+    }
+}
