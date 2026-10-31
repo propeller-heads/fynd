@@ -56,8 +56,7 @@ Another binary can start the service with `fynd_nexus::run(Cli::parse())`, where
 
 A listed venue without its credentials fails startup. Pass `--venues` with no value to run the
 market alone; with no venue and no `--tycho-url`, startup fails. The service has no authentication:
-expose it inside the cluster. The reset endpoints below change the excluded components the service
-serves.
+expose it inside the cluster. The reset endpoints below change what pods exclude.
 
 The venues and the health monitor are independent. Without `--monitor-components` the service only
 serves price levels, as it always did. With it, the service runs the monitor on the market next to
@@ -216,7 +215,7 @@ unchanged. A new snapshot appears only when the set of excluded components or a 
 
 The stream is withdrawn when probing stalls: no probe has given a verdict, and nothing was left to
 probe, for ten probe intervals and at least five minutes. It is published again when probing
-resumes.
+resumes. Pods treat a withdrawal, a `204`, and ten minutes without an answer as "exclude nothing".
 
 ### Resetting
 
