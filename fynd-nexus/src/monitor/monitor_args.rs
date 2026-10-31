@@ -135,3 +135,88 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     }
     Ok(Duration::from_secs(count * unit_seconds))
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use rstest::rstest;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        monitor: MonitorArgs,
+    }
+
+    fn parse(arguments: &[&str]) -> Result<MonitorArgs, clap::Error> {
+        let mut command_line = vec!["test"];
+        command_line.extend_from_slice(arguments);
+        TestCli::try_parse_from(command_line).map(|cli| cli.monitor)
+    }
+
+    #[test]
+    fn test_defaults() {
+        let args = parse(&[]).unwrap();
+
+        assert!(!args.is_enabled());
+        assert_eq!(args.probe_rate, 2.0);
+        assert_eq!(args.probe_usd, 500.0);
+        assert_eq!(args.probe_depth_share, 0.01);
+        assert_eq!(args.refresh_interval, Duration::from_secs(6 * 3600));
+        assert_eq!(args.max_retry_backoff, Duration::from_secs(3600));
+        assert_eq!((args.broken_after, args.inaccurate_after), (2, 3));
+        assert_eq!(args.inaccuracy_bps, 100.0);
+        assert!(args.tycho_use_tls);
+        assert_eq!(args.health_file, PathBuf::from("component-health.json"));
+        assert_eq!(args.probe_interval(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_rpc_url_turns_the_monitor_on() {
+        let args = parse(&["--rpc-url", "https://node.example"]).unwrap();
+
+        assert!(args.is_enabled());
+    }
+
+    #[test]
+    fn test_tls_can_be_turned_off() {
+        let args = parse(&["--tycho-use-tls", "false"]).unwrap();
+
+        assert!(!args.tycho_use_tls);
+    }
+
+    #[rstest]
+    #[case::seconds("90s", 90)]
+    #[case::minutes("30m", 1800)]
+    #[case::hours("6h", 21600)]
+    fn test_durations(#[case] text: &str, #[case] seconds: u64) {
+        let args = parse(&["--refresh-interval", text]).unwrap();
+
+        assert_eq!(args.refresh_interval, Duration::from_secs(seconds));
+    }
+
+    #[rstest]
+    #[case::refresh_without_unit(&["--refresh-interval", "90"])]
+    #[case::refresh_unknown_unit(&["--refresh-interval", "2d"])]
+    #[case::backoff_not_a_number(&["--max-retry-backoff", "soonh"])]
+    #[case::refresh_zero(&["--refresh-interval", "0s"])]
+    #[case::zero_rate(&["--probe-rate", "0"])]
+    #[case::negative_rate(&["--probe-rate=-1"])]
+    #[case::zero_broken_after(&["--broken-after", "0"])]
+    #[case::zero_inaccurate_after(&["--inaccurate-after", "0"])]
+    fn test_invalid_values_are_rejected(#[case] arguments: &[&str]) {
+        assert!(parse(arguments).is_err());
+    }
+
+    #[test]
+    fn test_debug_hides_secrets() {
+        let args =
+            parse(&["--rpc-url", "https://node.example/key123", "--tycho-api-key", "secret"])
+                .unwrap();
+
+        let shown = format!("{args:?}");
+
+        assert!(!shown.contains("key123") && !shown.contains("secret"), "{shown}");
+    }
+}
