@@ -982,6 +982,27 @@ mod tests {
         assert_eq!(fallback.component_id(), WORSE_POOL);
     }
 
+    /// A pool `fynd-nexus` reports as unhealthy can't settle a pAMM leg any more than it can
+    /// carry a route.
+    #[tokio::test]
+    async fn test_select_fallback_unhealthy_candidates() {
+        let market = market_with_fallback_pools();
+        market
+            .write()
+            .await
+            .set_unhealthy_pools(rustc_hash::FxHashSet::from_iter([BETTER_POOL.to_string()]));
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+
+        let fallback =
+            select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
+                .expect("the worse pool is left");
+
+        assert_eq!(fallback.component_id(), WORSE_POOL);
+    }
+
     /// A labeled solve selects on its overlay, so a pool the overlay reprices is judged at the
     /// overlay's price rather than the base market's.
     #[tokio::test]

@@ -1281,6 +1281,53 @@ mod tests {
         assert!(!market.is_unsynced_pool("v3_pool"));
     }
 
+    fn pool_set(ids: &[&str]) -> FxHashSet<ComponentId> {
+        ids.iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_set_unhealthy_pools_excludes_from_routing() {
+        let mut market = market_with_v3_status(SynchronizerState::Ready(header(100)));
+
+        let changed = market.set_unhealthy_pools(pool_set(&["v3_pool"]));
+
+        let exclusions = market.resolve_route_filter(&RouteConstraints::default());
+        assert!(changed);
+        assert!(exclusions.excludes_pool("v3_pool"));
+        assert!(!exclusions.excludes_pool("v2_pool"));
+        assert!(market.is_unhealthy_pool("v3_pool"));
+        assert!(!exclusions.is_empty());
+    }
+
+    #[test]
+    fn test_set_unhealthy_pools_moves_generation_only_on_change() {
+        let mut market = market_with_v3_status(SynchronizerState::Ready(header(100)));
+        market.set_unhealthy_pools(pool_set(&["v3_pool"]));
+        let generation = market.exclusion_generation();
+
+        let unchanged = market.set_unhealthy_pools(pool_set(&["v3_pool"]));
+        assert!(!unchanged);
+        assert_eq!(market.exclusion_generation(), generation);
+
+        let cleared = market.set_unhealthy_pools(FxHashSet::default());
+        assert!(cleared);
+        assert_ne!(market.exclusion_generation(), generation);
+        assert!(market
+            .resolve_route_filter(&RouteConstraints::default())
+            .is_empty());
+    }
+
+    /// The component may arrive after the report that names it.
+    #[test]
+    fn test_set_unhealthy_pools_keeps_unknown_ids() {
+        let mut market = MarketState::new();
+        market.set_unhealthy_pools(pool_set(&["not_yet_here"]));
+
+        assert!(market.is_unhealthy_pool("not_yet_here"));
+    }
+
     fn market_with_two_components() -> MarketState {
         let mut market = MarketState::new();
         let token_a = token(0x0A, "A");
