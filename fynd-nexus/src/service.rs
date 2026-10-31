@@ -13,7 +13,7 @@ use tracing::info;
 use crate::{
     api::{self, Streams},
     cli::Cli,
-    latest_prices::{spawn_snapshot_age_reports, LatestPrices},
+    latest_stream::{spawn_snapshot_age_reports, LatestStream},
     price_levels,
     stream_kind::StreamKind,
 };
@@ -72,10 +72,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     for venue_credentials in to_start {
         let venue = venue_credentials.venue();
         info!(%venue, "starting stream");
-        let latest_prices =
-            Arc::new(LatestPrices::new(cli.chain, StreamKind::PriceLevels(venue), run_id));
-        price_levels::spawn_prices_feed(Arc::clone(&latest_prices), venue_credentials);
-        streams.push(latest_prices);
+        let latest_stream =
+            Arc::new(LatestStream::new(cli.chain, StreamKind::PriceLevels(venue), run_id));
+        price_levels::spawn_prices_feed(Arc::clone(&latest_stream), venue_credentials);
+        streams.push(latest_stream);
     }
     spawn_snapshot_age_reports(streams.clone());
 

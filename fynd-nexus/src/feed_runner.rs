@@ -1,4 +1,4 @@
-//! Runs one venue's prices feed and publishes it into a [`LatestPrices`]. When the feed ends, the
+//! Runs one venue's prices feed and publishes it into a [`LatestStream`]. When the feed ends, the
 //! stream is withdrawn and the feed starts again after [`RESTART_BACKOFF`], unless it ended with a
 //! [`FeedError::Fatal`] or a [`FeedError::InvalidInput`]: then the runner stops for good.
 
@@ -13,7 +13,7 @@ use tycho_simulation::snapshot_feed::{
     errors::FeedError, SnapshotFeed, SnapshotFeedEvent, SnapshotFeedOutcome, SnapshotFeedStream,
 };
 
-use crate::latest_prices::LatestPrices;
+use crate::latest_stream::LatestStream;
 
 /// How long to wait before starting a feed again after it ended.
 pub const RESTART_BACKOFF: Duration = Duration::from_secs(30);
@@ -46,7 +46,7 @@ fn restart_decision_for_error(error: &FeedError) -> RestartDecision {
     }
 }
 
-/// Publishes everything the feed made by `start_feed` yields to `latest_prices`, and starts a new
+/// Publishes everything the feed made by `start_feed` yields to `latest_stream`, and starts a new
 /// feed when it ends, until one ends for good.
 ///
 /// The stream is withdrawn when the feed's prices go stale and when the feed ends. After an end the
@@ -56,7 +56,7 @@ fn restart_decision_for_error(error: &FeedError) -> RestartDecision {
 /// withdrawn for the rest of the process. Each restart is counted in
 /// `nexus_venue_restarts_total`.
 pub async fn run_feed<Feed, Start>(
-    latest_prices: Arc<LatestPrices>,
+    latest_stream: Arc<LatestStream>,
     mut start_feed: Start,
     restart_backoff: Duration,
 ) where
@@ -64,10 +64,10 @@ pub async fn run_feed<Feed, Start>(
     Feed::Snapshot: Serialize + Clone + Send + Sync + 'static,
     Start: FnMut() -> Result<Feed, FeedError>,
 {
-    let venue = latest_prices.kind();
+    let venue = latest_stream.kind();
     loop {
         let decision = match start_feed() {
-            Ok(feed) => follow_feed(&latest_prices, feed).await,
+            Ok(feed) => follow_feed(&latest_stream, feed).await,
             Err(error) => {
                 warn!(%venue, "cannot start the feed: {error}");
                 restart_decision_for_error(&error)
@@ -76,11 +76,11 @@ pub async fn run_feed<Feed, Start>(
         match decision {
             RestartDecision::Stop => {
                 error!(%venue, "feed ended for good; the stream stays withdrawn");
-                counter!("nexus_venue_ended_total", latest_prices.labels()).increment(1);
+                counter!("nexus_venue_ended_total", latest_stream.labels()).increment(1);
                 return;
             }
             RestartDecision::Restart => {
-                counter!("nexus_venue_restarts_total", latest_prices.labels()).increment(1);
+                counter!("nexus_venue_restarts_total", latest_stream.labels()).increment(1);
                 info!(%venue, ?restart_backoff, "restarting the feed");
                 tokio::time::sleep(restart_backoff).await;
             }
@@ -90,22 +90,22 @@ pub async fn run_feed<Feed, Start>(
 
 /// Runs `feed`, publishes its snapshots and withdrawals, and returns whether to restart after it
 /// ends.
-async fn follow_feed<Feed>(latest_prices: &LatestPrices, feed: Feed) -> RestartDecision
+async fn follow_feed<Feed>(latest_stream: &LatestStream, feed: Feed) -> RestartDecision
 where
     Feed: SnapshotFeed<Error = FeedError>,
     Feed::Snapshot: Serialize + Clone + Send + Sync + 'static,
 {
-    let venue = latest_prices.kind();
+    let venue = latest_stream.kind();
     let mut events = SnapshotFeedStream::spawn(&venue.to_string(), feed);
     while let Some(event) = events.next().await {
         match event {
-            SnapshotFeedEvent::Published(prices) => latest_prices.publish(&prices, Utc::now()),
+            SnapshotFeedEvent::Published(prices) => latest_stream.publish(&prices, Utc::now()),
             SnapshotFeedEvent::Withdrawn => {
                 warn!(%venue, "venue prices went stale; withdrawing");
-                latest_prices.withdraw();
+                latest_stream.withdraw();
             }
             SnapshotFeedEvent::Ended(outcome) => {
-                latest_prices.withdraw();
+                latest_stream.withdraw();
                 match &outcome {
                     SnapshotFeedOutcome::Failed(error) => {
                         warn!(%venue, "feed ended with an error: {error}");
@@ -123,6 +123,6 @@ where
     }
     // The stream should yield `Ended` before closing. If the stream closes without `Ended`, the
     // runner withdraws its prices and restarts the feed.
-    latest_prices.withdraw();
+    latest_stream.withdraw();
     RestartDecision::Restart
 }

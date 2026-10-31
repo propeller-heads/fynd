@@ -3,7 +3,7 @@
 //!
 //! The service serves one chain; a stream is one of its venues, and the service keeps its latest
 //! message. [`price_levels`] starts the venue's prices feed. [`feed_runner`] keeps the feed running
-//! and publishes its prices to [`latest_prices::LatestPrices`], which stores the stream's latest
+//! and publishes its prices to [`latest_stream::LatestStream`], which stores the stream's latest
 //! message. [`api`] serves that message at `GET /v1/price-levels/{venue}`. [`cli`] defines the
 //! command-line arguments and [`run`] starts the service from them. The message format is in
 //! `fynd_core::nexus`.
@@ -11,7 +11,7 @@
 pub mod api;
 pub mod cli;
 pub mod feed_runner;
-pub mod latest_prices;
+pub mod latest_stream;
 pub mod price_levels;
 pub mod service;
 pub mod stream_kind;
