@@ -14,6 +14,7 @@ pub mod component_prober;
 pub mod excluded_publisher;
 pub mod health_file;
 pub mod health_store;
+pub mod monitor_args;
 pub mod monitor_clock;
 pub mod probe_liveness;
 pub mod probe_scheduler;
