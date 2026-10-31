@@ -4,7 +4,7 @@ use clap::Parser;
 use fynd_core::nexus::rfq::RfqVenue;
 use tycho_simulation::evm::tycho_models::Chain;
 
-use crate::rfq::RfqArgs;
+use crate::{monitor::monitor_args::MonitorArgs, rfq::RfqArgs};
 
 /// The arguments of `fynd-nexus`.
 #[derive(Debug, Parser)]
@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(long, env = "CHAIN")]
     pub chain: Chain,
 
-    /// Venues to connect to, comma separated.
+    /// Venues to connect to, comma separated. Leave it empty to run the health monitor alone.
     #[arg(
         long,
         env = "VENUES",
@@ -34,6 +34,10 @@ pub struct Cli {
     /// The venues' credentials and endpoints.
     #[command(flatten)]
     pub rfq: RfqArgs,
+
+    /// The health monitor's settings. It runs when `--rpc-url` is set.
+    #[command(flatten)]
+    pub monitor: MonitorArgs,
 }
 
 #[cfg(test)]

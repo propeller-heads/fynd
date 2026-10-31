@@ -115,7 +115,8 @@ pub fn require_credentials(
 ///
 /// # Errors
 ///
-/// Returns an error naming `chain` and the listed venues when none of them supports it.
+/// Returns an error naming `chain` and the listed venues when some are listed and none of them
+/// supports it.
 pub fn streams_to_serve(
     chain: Chain,
     credentials: &[RfqCredentials],
@@ -135,7 +136,7 @@ pub fn streams_to_serve(
             warn!(%chain, %venue, "the venue does not support the chain; skipping");
         }
     }
-    if streams.is_empty() {
+    if streams.is_empty() && !credentials.is_empty() {
         let listed: Vec<String> = credentials
             .iter()
             .map(|venue_credentials| venue_credentials.venue().to_string())
