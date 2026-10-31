@@ -108,3 +108,118 @@ pub async fn keep_saved(store: Arc<HealthStore>, path: PathBuf) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::monitor::component_health::{HealthStatus, HealthThresholds, Observation};
+
+    fn broken_records() -> BTreeMap<ComponentId, ComponentHealth> {
+        let thresholds =
+            HealthThresholds { broken_after: 1, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+        let now = Utc::now();
+        let mut broken = ComponentHealth::new("uniswap_v3".to_string(), now);
+        broken.record(
+            Observation::PoolReverted { block: 9, reason: "PoolEmpty".to_string() },
+            &thresholds,
+            now,
+        );
+        let fresh = ComponentHealth::new("uniswap_v2".to_string(), now);
+        BTreeMap::from([("0xa".to_string(), broken), ("0xb".to_string(), fresh)])
+    }
+
+    #[test]
+    fn test_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("health.json");
+        let records = broken_records();
+
+        save(&path, &records).unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded, records);
+        assert_eq!(loaded["0xa"].status, HealthStatus::Broken);
+    }
+
+    #[test]
+    fn test_missing_file_is_a_fresh_start() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let loaded = load(&directory.path().join("absent.json")).unwrap();
+
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn test_malformed_file_names_the_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("health.json");
+        fs::write(&path, b"{\"version\": 1, \"components\": [").unwrap();
+
+        let error = format!("{:#}", load(&path).unwrap_err());
+
+        assert!(error.contains("health.json"), "{error}");
+        assert!(error.contains("malformed"), "{error}");
+    }
+
+    #[test]
+    fn test_other_format_version_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("health.json");
+        fs::write(&path, br#"{"version": 2, "components": {}}"#).unwrap();
+
+        let error = format!("{:#}", load(&path).unwrap_err());
+
+        assert!(error.contains("format version 2"), "{error}");
+    }
+
+    #[test]
+    fn test_save_replaces_the_file_and_leaves_no_temporary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("health.json");
+        save(&path, &broken_records()).unwrap();
+
+        save(&path, &BTreeMap::new()).unwrap();
+
+        assert!(load(&path).unwrap().is_empty());
+        let files: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(files, ["health.json"]);
+    }
+
+    #[test]
+    fn test_save_into_a_missing_directory_names_the_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("absent")
+            .join("health.json");
+
+        let error = format!("{:#}", save(&path, &BTreeMap::new()).unwrap_err());
+
+        assert!(error.contains("health.json.tmp"), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_keep_saved_writes_changes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("health.json");
+        let store = Arc::new(HealthStore::new(
+            HealthThresholds { broken_after: 2, inaccurate_after: 3, inaccuracy_bps: 100.0 },
+            BTreeMap::new(),
+        ));
+        tokio::spawn(keep_saved(Arc::clone(&store), path.clone()));
+
+        tokio::time::sleep(SAVE_INTERVAL * 2).await;
+        assert!(!path.exists(), "nothing changed, so nothing is written");
+        store.track("0xa", "uniswap_v3", Utc::now());
+        tokio::time::sleep(SAVE_INTERVAL * 2).await;
+
+        assert_eq!(load(&path).unwrap().len(), 1);
+        assert!(store.take_unsaved().is_none());
+    }
+}
