@@ -56,3 +56,47 @@ pub struct ExcludedComponents {
     /// The excluded components.
     pub components: Vec<ExcludedComponent>,
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_json_shape() {
+        let excluded = ExcludedComponents {
+            components: vec![ExcludedComponent {
+                id: "0xabc".to_string(),
+                protocol_system: "uniswap_v2".to_string(),
+                cause: ExclusionCause::Inaccurate,
+                since: "2026-10-27T09:00:00Z".parse().unwrap(),
+                reason: "pays 250 bps less than predicted".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(&excluded).unwrap();
+
+        assert_eq!(
+            value,
+            json!({"components": [{
+                "id": "0xabc",
+                "protocol_system": "uniswap_v2",
+                "cause": "inaccurate",
+                "since": "2026-10-27T09:00:00Z",
+                "reason": "pays 250 bps less than predicted"
+            }]})
+        );
+        assert_eq!(serde_json::from_value::<ExcludedComponents>(value).unwrap(), excluded);
+    }
+
+    #[test]
+    fn test_unknown_cause_is_malformed() {
+        let value = json!({"components": [{
+            "id": "0xabc", "protocol_system": "p", "cause": "sleepy",
+            "since": "2026-10-27T09:00:00Z", "reason": ""
+        }]});
+
+        assert!(serde_json::from_value::<ExcludedComponents>(value).is_err());
+    }
+}
