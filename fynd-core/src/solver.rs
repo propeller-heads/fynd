@@ -1449,6 +1449,50 @@ impl FyndBuilder {
         Ok(Self::spawn_tasks(components, |tycho_feed, _pending_indexers| tycho_feed.run()))
     }
 
+    /// Starts only the market: the Tycho feed, the gas price fetcher and the derived-data
+    /// computations, with no worker pools, encoder or router.
+    ///
+    /// It uses the same settings as [`build`](Self::build): the Tycho connection, protocols, TVL
+    /// floor, blocklist, the nexus URL for shared RFQ prices, the pricing limits and the
+    /// registered computations. Worker pool, encoder, simulation, price guard and
+    /// unhealthy-pool settings have no effect. Call it inside a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SolverBuildError`] if the RPC client, the computation manager or the gas token
+    /// cannot be set up.
+    pub fn build_market(mut self) -> Result<MarketFeed, SolverBuildError> {
+        let MarketParts {
+            market_data,
+            tycho_feed,
+            gas_price_fetcher,
+            computation_manager,
+            derived_data,
+            computation_event_rx,
+            computation_shutdown_tx,
+            computation_shutdown_rx,
+            market_event_tx,
+            ..
+        } = self.assemble_market()?;
+        let tasks = spawn_market_tasks(
+            tycho_feed.run(),
+            None,
+            gas_price_fetcher,
+            &market_data,
+            computation_manager,
+            computation_event_rx,
+            computation_shutdown_rx,
+        );
+        Ok(MarketFeed {
+            market_data,
+            derived_data,
+            market_event_tx,
+            tasks,
+            computation_shutdown_tx,
+            chain: self.chain,
+        })
+    }
+
     /// Assembles and starts all solver components, also returning a [`PendingBlockProcessor`]
     /// for ephemeral bundle simulation against the live Tycho market state.
     ///
@@ -1544,7 +1588,7 @@ impl FyndBuilder {
     {
         let BuiltComponents {
             tycho_feed,
-            mut gas_price_fetcher,
+            gas_price_fetcher,
             router_fee_fetcher,
             computation_manager,
             computation_event_rx,
@@ -1563,37 +1607,24 @@ impl FyndBuilder {
         } = components;
 
         let feed = run_feed(tycho_feed, pending_indexers);
-        // The poller of excluded pools runs inside the feed task, so that it stops with the feed.
-        let feed_handle = tokio::spawn(async move {
-            let feed = async {
-                if let Err(e) = feed.await {
-                    metrics::counter!("tycho_feed_failures_total").increment(1);
-                    tracing::error!(error = %e, "tycho feed error");
-                }
-            };
-            match unhealthy_pools_poller {
-                Some(poller) => tokio::select! {
-                    () = feed => {},
-                    () = poller.run() => {},
-                },
-                None => feed.await,
-            }
-        });
-        let gas_price_handle = tokio::spawn(async move {
-            gas_price_fetcher.run().await;
-        });
-        let metrics_sampler =
-            MetricsSampler::new(market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
-        let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+        let MarketTasks {
+            feed_handle,
+            gas_price_handle,
+            metrics_sampler_handle,
+            computation_handle,
+        } = spawn_market_tasks(
+            feed,
+            unhealthy_pools_poller,
+            gas_price_fetcher,
+            &market_data,
+            computation_manager,
+            computation_event_rx,
+            computation_shutdown_rx,
+        );
         let router_fee_handle = match router_fee_fetcher {
             Some(fetcher) => tokio::spawn(async move { fetcher.run().await }),
             None => tokio::spawn(async {}),
         };
-        let computation_handle = tokio::spawn(async move {
-            computation_manager
-                .run(computation_event_rx, computation_shutdown_rx)
-                .await;
-        });
 
         Solver {
             router,
@@ -1613,6 +1644,161 @@ impl FyndBuilder {
         }
     }
 } // impl FyndBuilder
+
+/// The background tasks of the market half of the pipeline.
+struct MarketTasks {
+    feed_handle: JoinHandle<()>,
+    gas_price_handle: JoinHandle<()>,
+    metrics_sampler_handle: JoinHandle<()>,
+    computation_handle: JoinHandle<()>,
+}
+
+/// Spawns the Tycho feed, the gas price fetcher, the metrics sampler and the computation manager.
+///
+/// The poller of excluded pools, when there is one, runs inside the feed task so that it stops
+/// with the feed.
+fn spawn_market_tasks<Fut>(
+    feed: Fut,
+    unhealthy_pools_poller: Option<UnhealthyPoolsPoller>,
+    mut gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
+    market_data: &MarketData,
+    computation_manager: ComputationManager,
+    computation_event_rx: broadcast::Receiver<MarketEvent>,
+    computation_shutdown_rx: broadcast::Receiver<()>,
+) -> MarketTasks
+where
+    Fut: Future<Output = Result<(), DataFeedError>> + Send + 'static,
+{
+    let feed_handle = tokio::spawn(async move {
+        let feed = async {
+            if let Err(e) = feed.await {
+                metrics::counter!("tycho_feed_failures_total").increment(1);
+                tracing::error!(error = %e, "tycho feed error");
+            }
+        };
+        match unhealthy_pools_poller {
+            Some(poller) => tokio::select! {
+                () = feed => {},
+                () = poller.run() => {},
+            },
+            None => feed.await,
+        }
+    });
+    let gas_price_handle = tokio::spawn(async move {
+        gas_price_fetcher.run().await;
+    });
+    let metrics_sampler =
+        MetricsSampler::new(market_data.clone(), defaults::METRICS_SAMPLE_INTERVAL);
+    let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
+    let computation_handle = tokio::spawn(async move {
+        computation_manager
+            .run(computation_event_rx, computation_shutdown_rx)
+            .await;
+    });
+    MarketTasks { feed_handle, gas_price_handle, metrics_sampler_handle, computation_handle }
+}
+
+/// Waits until `market_data` holds a block and `derived_data` has completed a cycle, polling
+/// every 500 ms.
+async fn wait_for_market(
+    market_data: &MarketData,
+    derived_data: &SharedDerivedDataRef,
+    timeout: Duration,
+) -> Result<(), WaitReadyError> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let market_ready = market_data
+            .read()
+            .await
+            .last_updated()
+            .is_some();
+        let derived_ready = derived_data
+            .read()
+            .await
+            .derived_data_ready();
+
+        if market_ready && derived_ready {
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(WaitReadyError { timeout_ms: timeout.as_millis() as u64 });
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// A running market with no solver on top, started by [`FyndBuilder::build_market`].
+///
+/// It holds the live Tycho market, the derived data computed from it (spot prices, depths, token
+/// gas prices) and the tasks that keep both current. Dropping it leaves the tasks running; call
+/// [`shutdown`](Self::shutdown) to stop them.
+pub struct MarketFeed {
+    market_data: MarketData,
+    derived_data: SharedDerivedDataRef,
+    market_event_tx: broadcast::Sender<MarketEvent>,
+    tasks: MarketTasks,
+    computation_shutdown_tx: broadcast::Sender<()>,
+    chain: Chain,
+}
+
+impl MarketFeed {
+    /// Returns the chain this market is on.
+    pub fn chain(&self) -> Chain {
+        self.chain
+    }
+
+    /// Returns a clone of the shared market data reference.
+    pub fn market_data(&self) -> MarketData {
+        self.market_data.clone()
+    }
+
+    /// Returns a clone of the shared derived data reference.
+    pub fn derived_data(&self) -> SharedDerivedDataRef {
+        Arc::clone(&self.derived_data)
+    }
+
+    /// Returns a new receiver for the [`MarketEvent`]s of the Tycho feed.
+    ///
+    /// Each call returns an independent receiver. Receivers created after a block has been
+    /// processed miss that block's event.
+    pub fn subscribe_market_events(&self) -> broadcast::Receiver<MarketEvent> {
+        self.market_event_tx.subscribe()
+    }
+
+    /// Waits until the market holds a block and the derived data has completed one cycle.
+    ///
+    /// Polls every 500 ms.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WaitReadyError`] if `timeout` elapses first.
+    pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), WaitReadyError> {
+        wait_for_market(&self.market_data, &self.derived_data, timeout).await
+    }
+
+    /// Whether the Tycho feed task has ended, so that the market no longer updates.
+    ///
+    /// The feed ends when its connection fails for good. It logs the error and counts it in
+    /// `tycho_feed_failures_total`.
+    pub fn feed_has_ended(&self) -> bool {
+        self.tasks.feed_handle.is_finished()
+    }
+
+    /// Signals the computation manager to stop, then aborts the background tasks.
+    pub fn shutdown(self) {
+        let _ = self.computation_shutdown_tx.send(());
+        self.tasks.feed_handle.abort();
+        self.tasks.gas_price_handle.abort();
+        self.tasks
+            .metrics_sampler_handle
+            .abort();
+    }
+}
 
 /// A running solver assembled by [`FyndBuilder`].
 pub struct Solver {
@@ -1688,33 +1874,7 @@ impl Solver {
     /// solver.wait_until_ready(Duration::from_secs(180)).await?;
     /// ```
     pub async fn wait_until_ready(&self, timeout: Duration) -> Result<(), WaitReadyError> {
-        const POLL_INTERVAL: Duration = Duration::from_millis(500);
-
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            let market_ready = self
-                .market_data
-                .read()
-                .await
-                .last_updated()
-                .is_some();
-            let derived_ready = self
-                .derived_data
-                .read()
-                .await
-                .derived_data_ready();
-
-            if market_ready && derived_ready {
-                return Ok(());
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return Err(WaitReadyError { timeout_ms: timeout.as_millis() as u64 });
-            }
-
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+        wait_for_market(&self.market_data, &self.derived_data, timeout).await
     }
 
     /// Build a Solver by replaying recorded market updates.
