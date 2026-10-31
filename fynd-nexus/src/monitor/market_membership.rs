@@ -86,3 +86,141 @@ async fn track_added(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::Utc;
+    use fynd_core::{
+        algorithm::test_utils::{
+            component_with_protocol, setup_market_unweighted, token, MockProtocolSim,
+        },
+        rustc_hash::FxHashMap,
+        types::ComponentTopology,
+    };
+    use tokio::sync::broadcast;
+
+    use super::*;
+    use crate::monitor::component_health::HealthThresholds;
+
+    const THRESHOLDS: HealthThresholds =
+        HealthThresholds { broken_after: 2, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+
+    fn store() -> Arc<HealthStore> {
+        Arc::new(HealthStore::new(THRESHOLDS, Default::default()))
+    }
+
+    fn ids(store: &HealthStore) -> Vec<String> {
+        store
+            .report(None, None)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    async fn settle() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    fn market_of(component_ids: &[&str]) -> MarketData {
+        let (usdc, weth) = (token(1, "USDC"), token(2, "WETH"));
+        let (market, _) = setup_market_unweighted(
+            component_ids
+                .iter()
+                .map(|id| (*id, &usdc, &weth, Box::new(MockProtocolSim::new(1.0)) as _))
+                .collect(),
+        );
+        market
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_tracks_the_market_and_drops_components_it_no_longer_holds() {
+        let market = market_of(&["0xa", "0xb"]);
+        let store = store();
+        store.track("0xgone", "uniswap_v2", Utc::now());
+        let (sender, receiver) = broadcast::channel(8);
+        tokio::spawn(keep_tracking(market, receiver, Arc::clone(&store), MonitorClock::new()));
+
+        settle().await;
+        drop(sender);
+
+        assert_eq!(ids(&store), ["0xa", "0xb"]);
+        assert_eq!(
+            store
+                .get("0xa")
+                .unwrap()
+                .protocol_system,
+            "uniswap_v2"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_follows_added_and_removed_components() {
+        let market = market_of(&["0xa", "0xb"]);
+        let store = store();
+        let (sender, receiver) = broadcast::channel(8);
+        tokio::spawn(keep_tracking(
+            market.clone(),
+            receiver,
+            Arc::clone(&store),
+            MonitorClock::new(),
+        ));
+        settle().await;
+        let tokens = [token(1, "USDC"), token(2, "WETH")];
+        market
+            .write()
+            .await
+            .upsert_components([component_with_protocol("0xc", "uniswap_v3", &tokens)]);
+
+        sender
+            .send(MarketEvent::MarketUpdated {
+                added_components: FxHashMap::from_iter([(
+                    "0xc".to_string(),
+                    ComponentTopology::from(vec![
+                        tokens[0].address.clone(),
+                        tokens[1].address.clone(),
+                    ]),
+                )]),
+                removed_components: vec!["0xa".to_string()],
+                updated_components: vec![],
+            })
+            .unwrap();
+        settle().await;
+
+        assert_eq!(ids(&store), ["0xb", "0xc"]);
+        assert_eq!(
+            store
+                .get("0xc")
+                .unwrap()
+                .protocol_system,
+            "uniswap_v3"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_reads_the_whole_market_again_after_missed_events() {
+        let market = market_of(&["0xa"]);
+        let store = store();
+        let (sender, receiver) = broadcast::channel(1);
+        let tokens = [token(1, "USDC"), token(2, "WETH")];
+        market
+            .write()
+            .await
+            .upsert_components([component_with_protocol("0xb", "uniswap_v2", &tokens)]);
+        for _ in 0..3 {
+            sender
+                .send(MarketEvent::MarketUpdated {
+                    added_components: FxHashMap::default(),
+                    removed_components: vec![],
+                    updated_components: vec![],
+                })
+                .unwrap();
+        }
+        tokio::spawn(keep_tracking(market, receiver, Arc::clone(&store), MonitorClock::new()));
+
+        settle().await;
+
+        assert_eq!(ids(&store), ["0xa", "0xb"]);
+    }
+}
