@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 /// The API on a local port, serving `streams`.
 fn serve(streams: &[Arc<LatestStream>]) -> SocketAddr {
     let streams = Arc::new(Streams::new(streams.iter().cloned()));
-    let (server, address) = api::bind(streams, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let (server, address) = api::bind(streams, None, "127.0.0.1:0".parse().unwrap()).unwrap();
     tokio::spawn(server);
     address
 }
