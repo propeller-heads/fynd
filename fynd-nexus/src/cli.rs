@@ -129,4 +129,25 @@ mod tests {
 
         assert!(!cli.market.is_enabled());
     }
+
+    #[test]
+    fn test_parse_monitor_on_the_market() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "--tycho-url",
+            "tycho.example",
+            "--rpc-url",
+            "https://node.example",
+            "--monitor-components",
+            "--probe-rate",
+            "5",
+        ])
+        .unwrap();
+
+        assert!(cli.monitor.monitor_components);
+        assert_eq!(cli.monitor.probe_rate, 5.0);
+    }
 }

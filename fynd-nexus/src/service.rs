@@ -178,4 +178,20 @@ mod tests {
             "{error}"
         );
     }
+
+    #[tokio::test]
+    async fn test_run_fails_when_the_monitor_has_no_market() {
+        let cli =
+            Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum", "--monitor-components"])
+                .unwrap();
+
+        let error = run(cli).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--tycho-url"),
+            "{error}"
+        );
+    }
 }
