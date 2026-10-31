@@ -18,6 +18,7 @@ pub mod health_store;
 pub mod market_membership;
 pub mod monitor_args;
 pub mod monitor_clock;
+pub mod monitor_launch;
 pub mod probe_liveness;
 pub mod probe_scheduler;
 
