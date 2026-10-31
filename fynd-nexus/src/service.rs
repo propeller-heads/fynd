@@ -79,7 +79,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     spawn_snapshot_age_reports(streams.clone());
 
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cli.http_port));
-    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), address)
+    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), None, address)
         .with_context(|| format!("cannot bind the HTTP port {}", cli.http_port))?;
     info!(%bound, "HTTP API listening");
     tokio::select! {
