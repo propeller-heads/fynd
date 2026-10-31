@@ -217,14 +217,17 @@ pub enum RouteConstraintsError {
 /// excluded token is excluded as an intermediate only, and a required token counts as visited
 /// when it is one of them.
 ///
-/// Every solve also excludes the pools of protocols the market marks out of sync; see
-/// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status).
+/// Every solve also excludes the pools of protocols the market marks out of sync, see
+/// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status),
+/// and the pools the `fynd-nexus` service reports as unhealthy, see
+/// [`MarketState::set_unhealthy_pools`](crate::feed::market_data::MarketState::set_unhealthy_pools).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedRouteConstraints {
     pub(crate) pools: FxHashSet<ComponentId>,
     pub(crate) tokens: FxHashSet<Address>,
     pub(crate) required_tokens: FxHashSet<Address>,
     pub(crate) unsynced_pools: Arc<FxHashSet<ComponentId>>,
+    pub(crate) unhealthy_pools: Arc<FxHashSet<ComponentId>>,
 }
 
 impl ResolvedRouteConstraints {
@@ -261,19 +264,31 @@ impl ResolvedRouteConstraints {
     /// Whether nothing is excluded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pools.is_empty() && self.tokens.is_empty() && self.unsynced_pools.is_empty()
+        self.pools.is_empty() &&
+            self.tokens.is_empty() &&
+            self.unsynced_pools.is_empty() &&
+            self.unhealthy_pools.is_empty()
     }
 
     /// Whether this pool is excluded.
     #[must_use]
     pub fn excludes_pool(&self, component_id: &str) -> bool {
-        self.pools.contains(component_id) || self.is_unsynced_pool(component_id)
+        self.pools.contains(component_id) ||
+            self.is_unsynced_pool(component_id) ||
+            self.is_unhealthy_pool(component_id)
     }
 
     /// Whether this pool belongs to a protocol the market marks out of sync.
     #[must_use]
     pub(crate) fn is_unsynced_pool(&self, component_id: &str) -> bool {
         self.unsynced_pools
+            .contains(component_id)
+    }
+
+    /// Whether the `fynd-nexus` service reports this pool as unhealthy.
+    #[must_use]
+    pub(crate) fn is_unhealthy_pool(&self, component_id: &str) -> bool {
+        self.unhealthy_pools
             .contains(component_id)
     }
 

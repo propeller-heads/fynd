@@ -72,8 +72,8 @@ fn should_drop_component(
 ///
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The answer depends on the market's
-/// components and its unsynced protocols, so a cached one stands until the market's exclusion
-/// generation changes.
+/// components, its unsynced protocols and its unhealthy pools, so a cached one stands until the
+/// market's exclusion generation changes.
 ///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
 fn resolve_exclusions(
@@ -111,7 +111,8 @@ fn resolve_exclusions(
     exclusions
 }
 
-/// Checks that `route` is valid, passes the request's route filter, and uses no unsynced pool.
+/// Checks that `route` is valid, passes the request's route filter, and uses no unsynced or
+/// unhealthy pool.
 fn check_route(
     route: &Route,
     order: &Order,
@@ -129,6 +130,12 @@ fn check_route(
                 swap.component_id(),
                 swap.protocol_component()
                     .protocol_system
+            ));
+        }
+        if exclusions.is_unhealthy_pool(swap.component_id()) {
+            return Err(format!(
+                "route uses pool {} that fynd-nexus reports as unhealthy",
+                swap.component_id()
             ));
         }
     }

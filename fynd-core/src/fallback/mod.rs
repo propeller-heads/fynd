@@ -243,7 +243,8 @@ fn select_fallback(
 }
 
 /// Whether this candidate pool is ruled out, by the request's own filter, by the worker pool's
-/// `exclude_protocols`, or because its protocol is out of sync.
+/// `exclude_protocols`, because its protocol is out of sync, or because `fynd-nexus` reports it
+/// unhealthy.
 ///
 /// The fallback executes as part of the route, so a pool told never to route through a protocol
 /// must not settle its pAMM legs there either.
@@ -262,7 +263,10 @@ fn is_excluded(
         .contains(candidate) ||
         market
             .base_market_state()
-            .is_unsynced_pool(candidate)
+            .is_unsynced_pool(candidate) ||
+        market
+            .base_market_state()
+            .is_unhealthy_pool(candidate)
     {
         return true;
     }
