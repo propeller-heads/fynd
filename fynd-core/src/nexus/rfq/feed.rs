@@ -365,8 +365,8 @@ mod tests {
         let mut poller =
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
 
-        let applied = poller.poll().await.unwrap();
-        let unchanged = poller.poll().await.unwrap();
+        let applied = poller.poll().await.unwrap().update();
+        let unchanged = poller.poll().await.unwrap().update();
 
         assert!(!applied
             .expect("the snapshot from the HTTP 200 response is applied")
@@ -399,7 +399,7 @@ mod tests {
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
         poller.etag = Some("\"7-3\"".to_string());
 
-        let result = poller.poll().await.unwrap();
+        let result = poller.poll().await.unwrap().update();
 
         assert!(result.is_none());
         assert_eq!(poller.etag.as_deref(), Some("\"7-3\""));
@@ -411,7 +411,7 @@ mod tests {
         let mut poller =
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
 
-        let applied = poller.poll().await.unwrap();
+        let applied = poller.poll().await.unwrap().update();
 
         assert!(applied
             .expect("a withdrawal is published")
@@ -428,7 +428,7 @@ mod tests {
             .apply_message(snapshot(EPOCH, 2))
             .unwrap();
 
-        let result = poller.poll().await.unwrap();
+        let result = poller.poll().await.unwrap().update();
 
         assert!(result.is_none());
         assert_eq!(poller.etag.as_deref(), Some("\"1761550000000-2\""));
@@ -441,7 +441,12 @@ mod tests {
         let mut poller =
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
 
-        assert!(poller.poll().await.unwrap().is_none());
+        assert!(poller
+            .poll()
+            .await
+            .unwrap()
+            .update()
+            .is_none());
     }
 
     #[rstest]
