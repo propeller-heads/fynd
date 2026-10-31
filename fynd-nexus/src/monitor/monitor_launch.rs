@@ -147,3 +147,72 @@ async fn run_probing(
     feed.shutdown();
     anyhow::bail!("{ended}")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::Utc;
+    use fynd_core::nexus::{components::ExcludedComponents, MessageBody, NexusMessage};
+
+    use super::*;
+    use crate::{
+        monitor::{
+            component_health::{ComponentHealth, HealthStatus, Observation},
+            monitor_args::tests::parse,
+        },
+        stream_kind::StreamKind,
+    };
+
+    const POOL: &str = "0x00000000000000000000000000000000000000aa";
+
+    fn broken_record() -> ComponentHealth {
+        let thresholds =
+            HealthThresholds { broken_after: 2, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+        let now = Utc::now();
+        let mut record = ComponentHealth::new("uniswap_v2".to_string(), now);
+        for block in [1, 2] {
+            let reason = "reverted".to_string();
+            record.record(Observation::PoolReverted { block, reason }, &thresholds, now);
+        }
+        assert_eq!(record.status, HealthStatus::Broken);
+        record
+    }
+
+    #[tokio::test]
+    async fn test_launch_serves_saved_exclusions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("health.json");
+        health_file::save(&path, &BTreeMap::from([(POOL.to_string(), broken_record())])).unwrap();
+        let path = path.to_str().unwrap();
+        let args = parse(&[
+            "--rpc-url",
+            "http://127.0.0.1:1",
+            "--tycho-url",
+            "127.0.0.1:1",
+            "--health-file",
+            path,
+        ])
+        .unwrap();
+        let stream =
+            Arc::new(LatestStream::new(Chain::Ethereum, StreamKind::ExcludedComponents, 1));
+
+        let launched = launch_monitor(Chain::Ethereum, args, Arc::clone(&stream)).unwrap();
+        launched.task.abort();
+
+        let message = stream
+            .current()
+            .expect("the saved exclusions are served");
+        let message: NexusMessage<ExcludedComponents> =
+            serde_json::from_slice(&message.encoded).unwrap();
+        let MessageBody::Snapshot { data, .. } = message.body else {
+            panic!("expected a snapshot, got {:?}", message.body);
+        };
+        let ids: Vec<&str> = data
+            .components
+            .iter()
+            .map(|component| component.id.as_str())
+            .collect();
+        assert_eq!(ids, [POOL]);
+    }
+}

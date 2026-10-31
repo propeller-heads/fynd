@@ -137,7 +137,7 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use clap::Parser;
     use rstest::rstest;
 
@@ -149,7 +149,7 @@ mod tests {
         monitor: MonitorArgs,
     }
 
-    fn parse(arguments: &[&str]) -> Result<MonitorArgs, clap::Error> {
+    pub(crate) fn parse(arguments: &[&str]) -> Result<MonitorArgs, clap::Error> {
         let mut command_line = vec!["test"];
         command_line.extend_from_slice(arguments);
         TestCli::try_parse_from(command_line).map(|cli| cli.monitor)
