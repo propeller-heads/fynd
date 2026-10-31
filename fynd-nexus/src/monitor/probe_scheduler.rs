@@ -106,3 +106,175 @@ impl ProbeScheduler {
         (FIRST_RETRY_BACKOFF * 2_u32.pow(doublings)).min(self.max_retry_backoff)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone as _;
+    use rstest::rstest;
+
+    use super::*;
+    use crate::monitor::component_health::{HealthThresholds, Observation};
+
+    const THRESHOLDS: HealthThresholds =
+        HealthThresholds { broken_after: 2, inaccurate_after: 3, inaccuracy_bps: 100.0 };
+    const REFRESH: Duration = Duration::from_secs(6 * 3600);
+    const MAX_BACKOFF: Duration = Duration::from_secs(3600);
+
+    fn scheduler() -> ProbeScheduler {
+        ProbeScheduler::new(REFRESH, MAX_BACKOFF)
+    }
+
+    fn start() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 10, 1, 12, 0, 0)
+            .unwrap()
+    }
+
+    fn seconds(count: i64) -> chrono::Duration {
+        chrono::Duration::seconds(count)
+    }
+
+    fn new_component(queued_at: DateTime<Utc>) -> ComponentHealth {
+        ComponentHealth::new("uniswap_v3".to_string(), queued_at)
+    }
+
+    fn healthy(checked_at: DateTime<Utc>) -> ComponentHealth {
+        let mut health = new_component(start());
+        let observation = Observation::Executed { block: 1, deviation_bps: 0.0 };
+        health.record(observation, &THRESHOLDS, checked_at);
+        health
+    }
+
+    fn reverted(checked_at: DateTime<Utc>, times: u64) -> ComponentHealth {
+        let mut health = new_component(start());
+        for block in 1..=times {
+            let observation = Observation::PoolReverted { block, reason: "x".to_string() };
+            health.record(observation, &THRESHOLDS, checked_at);
+        }
+        health
+    }
+
+    fn components(entries: Vec<(&str, ComponentHealth)>) -> BTreeMap<ComponentId, ComponentHealth> {
+        entries
+            .into_iter()
+            .map(|(id, health)| (id.to_string(), health))
+            .collect()
+    }
+
+    #[test]
+    fn test_order_new_then_retry_then_refresh() {
+        let now = start() + seconds(7 * 3600);
+        let mut records = components(vec![
+            ("0xa", healthy(start())),
+            ("0xb", reverted(start(), 1)),
+            ("0xc", new_component(start())),
+        ]);
+        let mut order = Vec::new();
+
+        while let Some(id) = scheduler().next_to_probe(&records, now) {
+            records.get_mut(&id).unwrap().record(
+                Observation::Executed { block: 9, deviation_bps: 0.0 },
+                &THRESHOLDS,
+                now,
+            );
+            order.push(id);
+        }
+
+        assert_eq!(order, ["0xc", "0xb", "0xa"]);
+    }
+
+    #[test]
+    fn test_new_components_latest_to_join_first() {
+        let records = components(vec![
+            ("0xa", new_component(start())),
+            ("0xb", new_component(start() + seconds(60))),
+            ("0xc", new_component(start() + seconds(30))),
+        ]);
+
+        let next = scheduler().next_to_probe(&records, start() + seconds(120));
+
+        assert_eq!(next.as_deref(), Some("0xb"));
+    }
+
+    #[test]
+    fn test_refresh_oldest_first() {
+        let records = components(vec![
+            ("0xa", healthy(start() + seconds(100))),
+            ("0xb", healthy(start())),
+            ("0xc", healthy(start() + seconds(50))),
+        ]);
+
+        let next = scheduler().next_to_probe(&records, start() + REFRESH + seconds(1000));
+
+        assert_eq!(next.as_deref(), Some("0xb"));
+    }
+
+    #[rstest]
+    #[case::first_retry(1, 60)]
+    #[case::second_retry(2, 120)]
+    #[case::fourth_retry(4, 480)]
+    #[case::capped(20, 3600)]
+    #[case::far_beyond_the_cap(500, 3600)]
+    fn test_retry_backoff_doubles_up_to_the_maximum(
+        #[case] unsettled_checks: u32,
+        #[case] wait_seconds: i64,
+    ) {
+        let mut health = reverted(start(), 1);
+        health.unsettled_checks = unsettled_checks;
+
+        let due = scheduler().next_check_at(&health);
+
+        assert_eq!(due, Some(start() + seconds(wait_seconds)));
+    }
+
+    #[test]
+    fn test_nothing_is_picked_before_it_is_due() {
+        let records = components(vec![("0xa", healthy(start())), ("0xb", reverted(start(), 1))]);
+
+        let early = scheduler().next_to_probe(&records, start() + seconds(59));
+        let retry_due = scheduler().next_to_probe(&records, start() + seconds(60));
+
+        assert_eq!(early, None);
+        assert_eq!(retry_due.as_deref(), Some("0xb"));
+    }
+
+    #[test]
+    fn test_component_that_cannot_be_probed_is_skipped() {
+        let mut skipped = new_component(start());
+        skipped.mark_not_probeable(start());
+        let records = components(vec![("0xa", skipped)]);
+
+        let next = scheduler().next_to_probe(&records, start() + seconds(10 * 3600));
+
+        assert_eq!(next, None);
+        assert_eq!(scheduler().next_check_at(&records["0xa"]), None);
+    }
+
+    #[test]
+    fn test_clean_component_that_could_not_be_probed_is_retried_with_backoff() {
+        let mut health = healthy(start());
+        health.record(
+            Observation::SetupFailed { reason: "rpc down".to_string() },
+            &THRESHOLDS,
+            start() + seconds(10),
+        );
+
+        let due = scheduler().next_check_at(&health);
+
+        assert_eq!(due, Some(start() + seconds(10 + 60)));
+    }
+
+    #[test]
+    fn test_reset_component_goes_before_older_new_ones() {
+        let mut records =
+            components(vec![("0xa", new_component(start())), ("0xb", reverted(start(), 2))]);
+        let now = start() + seconds(300);
+        records
+            .get_mut("0xb")
+            .unwrap()
+            .reset(now);
+
+        let next = scheduler().next_to_probe(&records, now);
+
+        assert_eq!(next.as_deref(), Some("0xb"));
+    }
+}
