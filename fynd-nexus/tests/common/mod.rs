@@ -14,7 +14,7 @@ use std::{
 
 use futures::StreamExt as _;
 use fynd_core::nexus::{price_levels::PriceLevelVenue, NexusMessage};
-use fynd_nexus::latest_prices::LatestPrices;
+use fynd_nexus::{latest_prices::LatestPrices, stream_kind::StreamKind};
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -130,7 +130,7 @@ impl<P> Attempts<P> {
 }
 
 pub fn new_latest_prices(venue: PriceLevelVenue) -> Arc<LatestPrices> {
-    Arc::new(LatestPrices::new(Chain::Ethereum, venue, RUN_ID))
+    Arc::new(LatestPrices::new(Chain::Ethereum, StreamKind::PriceLevels(venue), RUN_ID))
 }
 
 pub fn decode<D: DeserializeOwned>(encoded: &[u8]) -> NexusMessage<D> {

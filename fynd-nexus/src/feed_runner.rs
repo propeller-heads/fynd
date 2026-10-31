@@ -64,7 +64,7 @@ pub async fn run_feed<Feed, Start>(
     Feed::Snapshot: Serialize + Clone + Send + Sync + 'static,
     Start: FnMut() -> Result<Feed, FeedError>,
 {
-    let venue = latest_prices.venue();
+    let venue = latest_prices.kind();
     loop {
         let decision = match start_feed() {
             Ok(feed) => follow_feed(&latest_prices, feed).await,
@@ -95,7 +95,7 @@ where
     Feed: SnapshotFeed<Error = FeedError>,
     Feed::Snapshot: Serialize + Clone + Send + Sync + 'static,
 {
-    let venue = latest_prices.venue();
+    let venue = latest_prices.kind();
     let mut events = SnapshotFeedStream::spawn(&venue.to_string(), feed);
     while let Some(event) = events.next().await {
         match event {

@@ -16,5 +16,6 @@ pub mod latest_prices;
 pub mod market;
 pub mod price_levels;
 pub mod service;
+pub mod stream_kind;
 
 pub use service::run;

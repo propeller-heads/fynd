@@ -18,6 +18,7 @@ use fynd_nexus::{
     api::{self, Streams},
     feed_runner::run_feed,
     latest_prices::LatestPrices,
+    stream_kind::StreamKind,
 };
 use tokio::time::timeout;
 use tycho_simulation::{
@@ -43,8 +44,11 @@ struct Service {
 /// Starts a service with `run_id` on `address` and prepares `attempts` feeds. Starts the first feed
 /// immediately and each remaining feed after its predecessor ends.
 fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
-    let latest_prices =
-        Arc::new(LatestPrices::new(Chain::Ethereum, PriceLevelVenue::Bebop, run_id));
+    let latest_prices = Arc::new(LatestPrices::new(
+        Chain::Ethereum,
+        StreamKind::PriceLevels(PriceLevelVenue::Bebop),
+        run_id,
+    ));
     let mut feed_controls = Vec::new();
     let mut scripted = Vec::new();
     for _ in 0..attempts {
