@@ -1,4 +1,4 @@
-//! Starts the prices feeds, the Tycho market and the HTTP and metrics servers.
+//! Starts the prices feeds, the Tycho market, the health monitor and the HTTP and metrics servers.
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -15,6 +15,7 @@ use crate::{
     cli::Cli,
     latest_stream::{spawn_snapshot_age_reports, LatestStream},
     market::market_launch::{launch_market, LaunchedMarket},
+    monitor::monitor_launch::{launch_monitor, LaunchedMonitor},
     price_levels,
     stream_kind::StreamKind,
 };
@@ -22,6 +23,12 @@ use crate::{
 /// Byte sizes for `nexus_message_bytes`: from a withdrawal up to a full Bebop book.
 const MESSAGE_BYTES_BUCKETS: &[f64] =
     &[256.0, 1e3, 1e4, 1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6, 1e7, 2.5e7];
+
+/// Basis points for `nexus_probe_deviation_bps`: from a large shortfall to a large surplus.
+const PROBE_DEVIATION_BUCKETS: &[f64] = &[
+    -1000.0, -500.0, -250.0, -100.0, -50.0, -25.0, -10.0, -5.0, 0.0, 5.0, 10.0, 25.0, 50.0, 100.0,
+    250.0, 500.0, 1000.0,
+];
 
 /// The run id of this service run: its start time in Unix milliseconds.
 fn new_run_id() -> u64 {
@@ -38,6 +45,11 @@ fn bind_metrics(port: u16) -> anyhow::Result<actix_web::dev::Server> {
             MESSAGE_BYTES_BUCKETS,
         )
         .context("invalid message size buckets")?
+        .set_buckets_for_metric(
+            Matcher::Full("nexus_probe_deviation_bps".to_string()),
+            PROBE_DEVIATION_BUCKETS,
+        )
+        .context("invalid probe deviation buckets")?
         .install_recorder()
         .context("cannot install the Prometheus recorder")?;
     let server = actix_web::HttpServer::new(move || {
@@ -70,11 +82,27 @@ async fn market_ended(launched: Option<&mut LaunchedMarket>) -> anyhow::Result<(
         .context("the market stopped")
 }
 
-/// Starts the prices feeds, the Tycho market and the HTTP and metrics servers, and returns when
-/// one stops.
+/// Waits for the monitor's probing task to end, which is an error. Never returns without a
+/// monitor.
+async fn monitor_ended(launched: Option<&mut LaunchedMonitor>) -> anyhow::Result<()> {
+    let Some(launched) = launched else {
+        return std::future::pending().await;
+    };
+    let joined: Result<anyhow::Result<()>, _> = (&mut launched.task).await;
+    joined
+        .context("the health monitor task failed")?
+        .context("the health monitor stopped")
+}
+
+/// Starts the prices feeds, the Tycho market, the health monitor and the HTTP and metrics servers,
+/// and returns when one stops.
 ///
 /// The caller sets up logging.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !cli.monitor.monitor_components || cli.market.is_enabled(),
+        "--monitor-components needs the market: set --tycho-url (TYCHO_URL) and --rpc-url (RPC_URL)"
+    );
     let credentials = price_levels::require_credentials(&cli.venues, &cli.venue_args)?;
     anyhow::ensure!(
         !credentials.is_empty() || cli.market.is_enabled(),
@@ -99,16 +127,34 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         info!("starting the market");
         market = Some(launch_market(cli.chain, &cli.market).await?);
     }
+    let mut launched = None;
+    if cli.monitor.monitor_components {
+        let market = market
+            .as_ref()
+            .context("the health monitor needs the market")?;
+        let rpc_url =
+            (cli.market.rpc_url.clone()).context("the health monitor needs --rpc-url (RPC_URL)")?;
+        info!("starting the health monitor");
+        let excluded =
+            Arc::new(LatestStream::new(cli.chain, StreamKind::ExcludedComponents, run_id));
+        streams.push(Arc::clone(&excluded));
+        let feed = Arc::clone(&market.feed);
+        launched = Some(launch_monitor(cli.chain, cli.monitor.clone(), feed, rpc_url, excluded)?);
+    }
     spawn_snapshot_age_reports(streams.clone());
 
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cli.http_port));
-    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), None, address)
+    let monitor = launched
+        .as_ref()
+        .map(|launched| Arc::clone(&launched.monitor));
+    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), monitor, address)
         .with_context(|| format!("cannot bind the HTTP port {}", cli.http_port))?;
     info!(%bound, "HTTP API listening");
     tokio::select! {
         result = http_server => result.context("the HTTP server failed")?,
         result = metrics_server => result.context("the metrics server failed")?,
         result = market_ended(market.as_mut()) => result?,
+        result = monitor_ended(launched.as_mut()) => result?,
     }
     Ok(())
 }
