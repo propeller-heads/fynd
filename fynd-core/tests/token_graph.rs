@@ -18,11 +18,11 @@ use rustc_hash::FxHashMap;
 use tycho_simulation::tycho_common::models::Address;
 
 /// Tokens in the snapshot, one node each.
-const TOKENS: usize = 2003;
+const TOKENS: usize = 2002;
 /// Directed token pairs, one edge each — two per pair of tokens that trade.
-const EDGES: usize = 5000;
+const EDGES: usize = 4994;
 /// Components in the snapshot, spread across those edges.
-const COMPONENTS: usize = 2948;
+const COMPONENTS: usize = 2943;
 
 const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
 const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
