@@ -1,5 +1,6 @@
 
 
+
 ## [0.118.2](https://github.com/propeller-heads/fynd/compare/0.118.1...0.118.2) (2026-10-30)
 
 ### Features
