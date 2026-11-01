@@ -24,7 +24,10 @@ use tycho_simulation::{
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
     derived::{
-        computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
+        computation::{ComputationId, ComputationRequirements, DerivedComputation},
+        computations::{ComponentDepthComputation, SpotPriceComputation},
+        events::DerivedDataEvent,
+        tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
     exclusive_route::{pin_route_commitment, routes_through_exclusive},
@@ -49,6 +52,11 @@ use crate::{
 /// after the deadline. Without this margin, a post-processor that runs to the deadline would also
 /// lose the algorithm's route.
 const POST_PROCESS_DEADLINE_MARGIN: Duration = Duration::from_millis(10);
+
+/// The computations that edge data is built from; a worker rebuilds its edge data when one
+/// completes, whether or not the algorithm requires it.
+const EDGE_DATA_INPUTS: [ComputationId; 2] =
+    [SpotPriceComputation::ID, ComponentDepthComputation::ID];
 
 /// Whether a worker with this scope and exclusion list must keep `component` out of its graph: an
 /// exclusive component in a `PublicOnly` worker pool, or a component of an excluded protocol
@@ -1187,7 +1195,9 @@ where
 
                             // Update edge weights when a relevant computation completes.
                             if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
-                                if self.requirements.is_required(computation_id) {
+                                if self.requirements.is_required(computation_id)
+                                    || EDGE_DATA_INPUTS.contains(computation_id)
+                                {
                                     let market = self.market_data.read().await;
                                     let derived = self.derived_data.read().await;
                                     let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
