@@ -1371,7 +1371,10 @@ mod tests {
     use rustc_hash::FxHashMap;
     use tycho_simulation::{
         tycho_client::feed::{BlockHeader, SynchronizerState},
-        tycho_core::{models::token::Token, simulation::protocol_sim::ProtocolSim},
+        tycho_core::{
+            models::token::Token,
+            simulation::protocol_sim::{Price, ProtocolSim},
+        },
     };
 
     use super::*;
@@ -1386,6 +1389,7 @@ mod tests {
         derived::{
             computation::DerivedComputation,
             computations::{SpotPriceComputation, TokenGasPriceComputation},
+            types::{ComponentDepths, SpotPrices, TokenGasPrices},
             DerivedData,
         },
         fallback::{manager::PammState, FALLBACK_PREFIX},
@@ -3009,6 +3013,77 @@ mod tests {
             .await
             .expect("worker should shutdown")
             .expect("worker task should not panic");
+    }
+
+    /// Edge data is rebuilt when a computation it reads completes, even if the algorithm does not
+    /// require that computation, and left alone when an unrelated one completes.
+    #[rstest]
+    #[case::pool_depths(ComponentDepthComputation::ID, true)]
+    #[case::spot_prices(SpotPriceComputation::ID, true)]
+    #[case::token_prices(TokenGasPriceComputation::ID, false)]
+    #[tokio::test]
+    async fn worker_rebuilds_edge_data_when_edge_inputs_complete(
+        #[case] completed: ComputationId,
+        #[case] rebuilt: bool,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) =
+            setup_market_weighted(vec![("p1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(
+            market,
+            Arc::clone(&derived),
+            MockAlgorithm::new(),
+            0,
+            "test_pool".to_string(),
+        );
+        worker.initialize_graph().await;
+        {
+            let mut store = derived.write().await;
+            let mut spot_prices = SpotPrices::default();
+            let mut depths = ComponentDepths::default();
+            let mut token_prices = TokenGasPrices::default();
+            for (from, to) in [(&token_a, &token_b), (&token_b, &token_a)] {
+                let key = ("p1".to_string(), from.address.clone(), to.address.clone());
+                spot_prices.insert(key.clone(), 2.0);
+                depths.insert(key, BigUint::from(1_000u64));
+                token_prices.insert(
+                    from.address.clone(),
+                    Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+                );
+            }
+            store.set_spot_prices(spot_prices, vec![], 1);
+            store.set_component_depths(depths, vec![], 1);
+            store.set_token_prices(token_prices, vec![], 1);
+        }
+        let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        derived_tx
+            .send(DerivedDataEvent::ComputationComplete {
+                computation_id: completed,
+                block: 1,
+                failed_items: vec![],
+            })
+            .unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(());
+        });
+
+        worker
+            .run(event_rx, derived_rx, task_rx, shutdown_rx)
+            .await;
+
+        let weighted = worker
+            .graph_manager
+            .graph()
+            .edge_weights()
+            .filter(|edge| edge.data.is_some())
+            .count();
+        assert_eq!(weighted > 0, rebuilt);
     }
 
     /// Captures log output for assertions, shared between the subscriber and the test.
