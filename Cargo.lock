@@ -3599,7 +3599,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-nexus"
-version = "0.118.4"
+version = "0.118.5"
 dependencies = [
  "actix-web",
  "anyhow",
