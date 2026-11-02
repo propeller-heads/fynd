@@ -764,7 +764,7 @@ impl Encoder {
     /// Both amounts the router compares come off `solution`: `expected_amount_out`, its reference
     /// for positive and negative slippage, and `min_amount_out`, the post-fee floor below which it
     /// reverts.
-    fn encode_tycho_router_call(
+    pub fn encode_tycho_router_call(
         &self,
         encoded_solution: &EncodedSolution,
         solution: &Solution,
