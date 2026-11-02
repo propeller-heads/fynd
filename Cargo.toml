@@ -152,8 +152,8 @@ serde_with = { version = "3", features = ["std"] }
 toml = "0.8"
 
 # OpenAPI / Swagger UI
-utoipa = { version = "5", features = ["actix_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
+utoipa = { version = "6", features = ["actix_extras"] }
+utoipa-swagger-ui = { version = "10", features = ["actix-web"] }
 
 # Error handling
 thiserror = "1"
