@@ -78,15 +78,6 @@ impl RfqCredentials {
     }
 }
 
-/// Whether `venue` supports `chain`. A venue that does not is skipped rather than started.
-pub fn supports_chain(venue: RfqVenue, chain: Chain) -> bool {
-    match venue {
-        RfqVenue::Bebop => bebop::supports_chain(chain),
-        RfqVenue::Hashflow => hashflow::supports_chain(chain),
-        RfqVenue::Metric => metric::supports_chain(chain),
-    }
-}
-
 /// Reads the credentials of every venue in `venues` from `args`.
 ///
 /// # Errors
@@ -129,7 +120,7 @@ pub fn streams_to_serve(
         {
             continue;
         }
-        if supports_chain(venue, chain) {
+        if venue.supports_chain(chain) {
             streams.push(venue_credentials.clone());
         } else {
             warn!(%chain, %venue, "the venue does not support the chain; skipping");
@@ -242,21 +233,6 @@ mod tests {
         for secret in ["bebop-secret", "hashflow-secret", "metric-secret"] {
             assert!(!shown.contains(secret), "{shown}");
         }
-    }
-
-    #[rstest]
-    #[case::bebop_ethereum(RfqVenue::Bebop, Chain::Ethereum, true)]
-    #[case::bebop_base(RfqVenue::Bebop, Chain::Base, true)]
-    #[case::bebop_unichain(RfqVenue::Bebop, Chain::Unichain, false)]
-    #[case::metric_arbitrum(RfqVenue::Metric, Chain::Arbitrum, true)]
-    #[case::metric_unichain(RfqVenue::Metric, Chain::Unichain, false)]
-    #[case::hashflow_anywhere(RfqVenue::Hashflow, Chain::Unichain, true)]
-    fn test_venues_support_their_chains(
-        #[case] venue: RfqVenue,
-        #[case] chain: Chain,
-        #[case] expected: bool,
-    ) {
-        assert_eq!(supports_chain(venue, chain), expected);
     }
 
     #[test]

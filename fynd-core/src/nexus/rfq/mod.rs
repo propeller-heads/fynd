@@ -10,12 +10,18 @@ use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 pub use feed::RfqPricesFeed;
 use tycho_simulation::{
     book::Book,
+    evm::tycho_models::Chain,
     pamm::protocols::metric::{feed::MetricFeedBuilder, MetricBookAssembler, MetricPrices},
     rfq::protocols::{
-        bebop::{feed::BebopFeedBuilder, BebopBookAssembler, BebopPrices},
+        bebop::{
+            feed::{BebopFeedBuilder, BebopPricesFeedBuilder},
+            BebopBookAssembler, BebopPrices,
+        },
         hashflow::{feed::HashflowFeedBuilder, HashflowBookAssembler, HashflowPrices},
     },
 };
+
+use crate::feed::book_venues::metric::METRIC_CHAINS;
 
 /// An RFQ venue whose pricing connection Fynd Nexus can manage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,6 +45,17 @@ impl RfqVenue {
             Self::Bebop => "bebop",
             Self::Hashflow => "hashflow",
             Self::Metric => "metric",
+        }
+    }
+
+    /// Whether the service can serve this venue on `chain`.
+    pub fn supports_chain(self, chain: Chain) -> bool {
+        match self {
+            Self::Bebop => BebopPricesFeedBuilder::new(chain, String::new())
+                .build()
+                .is_ok(),
+            Self::Hashflow => true,
+            Self::Metric => METRIC_CHAINS.contains(&chain),
         }
     }
 }

@@ -42,13 +42,6 @@ impl BebopArgs {
     }
 }
 
-/// Whether Bebop supports `chain`: the chains its pricing client accepts.
-pub fn supports_chain(chain: Chain) -> bool {
-    BebopPricesFeedBuilder::new(chain, String::new())
-        .build()
-        .is_ok()
-}
-
 /// Bebop's prices feed on `chain`.
 ///
 /// # Errors

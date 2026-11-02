@@ -60,12 +60,6 @@ impl HashflowArgs {
     }
 }
 
-/// Whether Hashflow supports `chain`: always, because it reports whether it prices a chain on its
-/// first poll.
-pub fn supports_chain(_chain: Chain) -> bool {
-    true
-}
-
 /// Hashflow's prices feed on `chain`.
 ///
 /// # Errors

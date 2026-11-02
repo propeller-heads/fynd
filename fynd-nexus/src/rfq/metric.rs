@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-use fynd_core::feed::book_venues::metric::METRIC_CHAINS;
 use tycho_simulation::{
     evm::tycho_models::Chain,
     pamm::protocols::metric::feed::{MetricPricesFeed, MetricPricesFeedBuilder},
@@ -62,11 +61,6 @@ impl MetricArgs {
             .map(str::to_string);
         Ok(MetricCredentials { api_key, base_url })
     }
-}
-
-/// Whether Metric supports `chain`: the chains in [`METRIC_CHAINS`].
-pub fn supports_chain(chain: Chain) -> bool {
-    METRIC_CHAINS.contains(&chain)
 }
 
 /// Metric's prices feed on `chain`.
