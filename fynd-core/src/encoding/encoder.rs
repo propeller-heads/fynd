@@ -460,11 +460,12 @@ impl Encoder {
     ) -> Result<PreparedSolution, SolveError> {
         let fee_client = Self::fee_client(encoding_options, quote);
         let fee_rates = router_fees.fees_for(&fee_client);
+        let client_fee_bps = encoding_options
+            .client_fee_params()
+            .map_or(0, |f| f.bps());
         let fee_breakdown = Self::calculate_fee_breakdown(
             quote.amount_out(),
-            encoding_options
-                .client_fee_params()
-                .map_or(0, |f| f.bps()),
+            client_fee_bps,
             encoding_options.slippage(),
             fee_rates,
         )?;
@@ -502,10 +503,26 @@ impl Encoder {
                 solution
             }
         };
-        let solution = match encoding_options.solution_hook() {
-            Some(hook) => Self::apply_solution_hook(hook, quote, solution)?,
-            None => solution,
+        let Some(hook) = encoding_options.solution_hook() else {
+            return Ok(PreparedSolution { solution, fee_breakdown, fee_rates });
         };
+        let solution = Self::apply_solution_hook(hook, quote, solution)?;
+        let hooked_fees = Self::calculate_fee_breakdown(
+            solution.expected_amount_out(),
+            client_fee_bps,
+            encoding_options.slippage(),
+            fee_rates,
+        )?;
+        // The router takes its fees on the full output, a hook's raise included, but the raise is
+        // not guaranteed on chain, so the floor stays the one computed from the route's output.
+        let fee_breakdown = FeeBreakdown::new(
+            hooked_fees.router_fee().clone(),
+            hooked_fees.client_fee().clone(),
+            fee_breakdown.max_slippage().clone(),
+            fee_breakdown
+                .min_amount_received()
+                .clone(),
+        );
         Ok(PreparedSolution { solution, fee_breakdown, fee_rates })
     }
 
@@ -2799,6 +2816,48 @@ mod tests {
                     .unwrap()
                     .min_amount_received()
             );
+        }
+
+        #[tokio::test]
+        async fn test_solution_hook_raised_amount_out_fees() {
+            let (route_amount_out, raise) = (1_000_000u64, 50_000u64);
+            let raised_amount_out = BigUint::from(route_amount_out + raise);
+            let encoder = real_encoder();
+            let quote = make_order_quote(route_amount_out)
+                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+            let opts = EncodingOptions::new(0.01).with_client_fee_params(make_client_fee(100));
+
+            let without_hook = encoder
+                .encode(vec![quote.clone()], opts.clone())
+                .await
+                .unwrap();
+            let hook = SetExpectedAmountOut(raised_amount_out.clone());
+            let with_hook = encoder
+                .encode(vec![quote], opts.with_solution_hook(Arc::new(hook)))
+                .await
+                .unwrap();
+
+            let floor = without_hook[0].fee_breakdown().unwrap();
+            let fees = with_hook[0].fee_breakdown().unwrap();
+            let rates = FeeRates::new(100_000, 20_000_000, FEE_SCALE);
+            let fees_on_raise =
+                Encoder::calculate_fee_breakdown(&raised_amount_out, 100, 0.01, rates).unwrap();
+            assert_eq!(fees.router_fee(), fees_on_raise.router_fee());
+            assert_eq!(fees.client_fee(), fees_on_raise.client_fee());
+            assert!(fees.router_fee() > floor.router_fee());
+            assert!(fees.client_fee() > floor.client_fee());
+            assert_eq!(fees.min_amount_received(), floor.min_amount_received());
+            assert_eq!(fees.max_slippage(), floor.max_slippage());
+            let tx = with_hook[0].transaction().unwrap();
+            let (_, _, _, _, min_amount_out, _, _, _) =
+                <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
+            assert_eq!(min_amount_out, biguint_to_u256(floor.min_amount_received()));
+
+            let received_after_fees = &raised_amount_out - fees.router_fee() - fees.client_fee();
+            let deviation =
+                crate::simulation::deviation::deviation_bps(&with_hook[0], &received_after_fees)
+                    .expect("an encoded quote carries fees");
+            assert!(deviation.abs() < 1e-9, "got {deviation}");
         }
 
         #[rstest]

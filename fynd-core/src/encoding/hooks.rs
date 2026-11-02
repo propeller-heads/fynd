@@ -33,8 +33,10 @@ use crate::{OrderQuote, SolveError};
 /// subsidy terms (`Solution::with_subsidy`). Any other change fails the quote.
 ///
 /// The quote reports the hooked `expected_amount_out` as `amount_out` and moves
-/// `amount_out_net_gas` by the same difference. The fee breakdown and the per-swap amounts of the
-/// route stay as computed before the hook.
+/// `amount_out_net_gas` by the same difference. The router and client fees of the fee breakdown
+/// are computed on the hooked amount, because the router takes them on the full output.
+/// `min_amount_received`, `max_slippage` and the per-swap amounts of the route stay as computed
+/// before the hook: the hook's raise is not guaranteed on chain.
 pub trait SolutionHook: Debug + Send + Sync + RefUnwindSafe {
     /// Returns the `Solution` to encode for `quote`.
     ///

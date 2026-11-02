@@ -1,7 +1,7 @@
 //! Helpers shared by quote simulation and quote logging.
 
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{CheckedSub, ToPrimitive};
 
 use crate::OrderQuote;
 
@@ -9,15 +9,20 @@ use crate::OrderQuote;
 ///
 /// The router returns the output after it takes the router and client fees, so the quote's own
 /// `amount_out`, which is the raw swap output, is not the same quantity and would read as a
-/// standing fee-sized gap. The comparison is against the quoted amount less those same fees,
-/// reached by addition because `min_amount_received` is that amount less the accepted slippage.
+/// standing fee-sized gap. The comparison is against `amount_out` less those same fees. A solution
+/// hook may raise `amount_out` above the route's output, and the fees follow it, so the baseline
+/// includes the raise.
 ///
 /// A negative value means the simulation returned less than the quote promised. Returns `None`
-/// when the quote states no fees, when the quoted amount is zero and there is no ratio to take,
-/// or when an amount past the range of `f64` saturates the ratio to infinity.
+/// when the quote states no fees, when the quoted amount after fees is zero and there is no ratio
+/// to take, or when an amount past the range of `f64` saturates the ratio to infinity.
 pub(crate) fn deviation_bps(quote: &OrderQuote, simulated_amount_out: &BigUint) -> Option<f64> {
     let fees = quote.fee_breakdown()?;
-    let quoted = fees.min_amount_received() + fees.max_slippage();
+    let total_fees = fees.router_fee() + fees.client_fee();
+    let quoted = quote
+        .amount_out()
+        .checked_sub(&total_fees)
+        .unwrap_or_default();
     if quoted == BigUint::ZERO {
         return None;
     }
@@ -127,17 +132,38 @@ mod tests {
         assert_eq!(deviation_bps(&quote_without_fees(), &BigUint::from(1_000u64)), None);
     }
 
-    #[test]
-    fn test_deviation_bps_zero_quoted_amount() {
+    #[rstest::rstest]
+    #[case::fees_equal_amount_out(FIXTURE_ROUTER_FEE + FIXTURE_CLIENT_FEE)]
+    #[case::fees_above_amount_out(FIXTURE_ROUTER_FEE)]
+    fn test_deviation_bps_zero_quoted_amount(#[case] amount_out: u64) {
         let mut quote = quote_with_fees(1_000_000);
-        quote.set_fee_breakdown(crate::FeeBreakdown::new(
-            BigUint::ZERO,
-            BigUint::ZERO,
-            BigUint::ZERO,
-            BigUint::ZERO,
-        ));
+        quote.set_amount_out(BigUint::from(amount_out));
 
         assert_eq!(deviation_bps(&quote, &BigUint::from(1_000u64)), None);
+    }
+
+    /// A solution hook raises `amount_out` and the fees on it, and keeps the floor computed from
+    /// the route's output. A simulation that pays the raised amount after fees has no deviation.
+    #[test]
+    fn test_deviation_bps_raised_quote() {
+        let raise = 50_000u64;
+        let mut quote = quote_with_fees(1_000_000);
+        let floor = quote
+            .fee_breakdown()
+            .expect("the quote carries fees")
+            .clone();
+        quote.set_amount_out(quote.amount_out() + raise);
+        quote.set_fee_breakdown(crate::FeeBreakdown::new(
+            floor.router_fee() + 1_000u64,
+            floor.client_fee() + 500u64,
+            floor.max_slippage().clone(),
+            floor.min_amount_received().clone(),
+        ));
+
+        let deviation = deviation_bps(&quote, &BigUint::from(1_000_000 + raise - 1_500))
+            .expect("a quote carrying fees has a baseline");
+
+        assert!(deviation.abs() < 1e-9, "got {deviation}");
     }
 
     /// An amount past `f64` saturates to infinity rather than failing to convert, so the ratio is

@@ -631,7 +631,8 @@ pub struct FeeBreakdown {
     #[serde_as(as = "DisplayFromStr")]
     max_slippage: BigUint,
     /// Minimum amount the user receives on-chain.
-    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    /// Equal to amount_out - router_fee - client_fee - max_slippage, unless a solution hook
+    /// changed amount_out: the fees then follow the hooked amount and this floor does not.
     /// This is the value encoded as min_amount_out in the transaction.
     #[serde_as(as = "DisplayFromStr")]
     min_amount_received: BigUint,

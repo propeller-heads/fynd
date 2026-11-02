@@ -4533,6 +4533,7 @@ mod tests {
             BigUint::from(100u64),
             BigUint::from(900u64),
         ));
+        quote.set_amount_out(BigUint::from(1100u64));
         // 999 against a post-fee 1000 is a shortfall of 10 bps, or 1000 hundredths.
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
@@ -4600,6 +4601,7 @@ mod tests {
             BigUint::from(100u64),
             BigUint::from(900u64),
         ));
+        quote.set_amount_out(BigUint::from(1100u64));
         // 1001 against a post-fee 1000: the simulated call returned more than promised.
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(1001u64),
@@ -4638,6 +4640,7 @@ mod tests {
             BigUint::from(100u64),
             BigUint::from(900u64),
         ));
+        quote.set_amount_out(BigUint::from(1100u64));
         // The quote promises 1000 after fees; the simulated call returns 999, a 10 bps shortfall.
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
