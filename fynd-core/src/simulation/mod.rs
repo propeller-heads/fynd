@@ -10,3 +10,5 @@ pub mod simulator;
 pub mod token_layout;
 /// Request bodies for the simulation RPCs, with the field names of the execution-apis spec.
 pub(crate) mod wire;
+
+pub use revert::{decode_error, reason_from_frame};

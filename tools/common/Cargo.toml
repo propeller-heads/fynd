@@ -10,7 +10,7 @@ readme = "README.md"
 [dependencies]
 fynd-client = { workspace = true }
 fynd-core = { workspace = true }
-alloy = { workspace = true }
+alloy = { workspace = true, features = ["provider-debug-api"] }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 num-bigint = { workspace = true }

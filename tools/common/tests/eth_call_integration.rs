@@ -9,7 +9,7 @@
 //! --ignored`.
 
 use alloy::{primitives::Address, providers::ProviderBuilder};
-use fynd_tools_common::swap_simulation::EthCallRunner;
+use fynd_tools_common::swap_simulation::{EthCallRunner, SwapOutcome};
 use num_bigint::BigUint;
 
 /// Canonical WETH9 contract on Ethereum mainnet.
@@ -41,11 +41,13 @@ async fn eth_simulate_weth_deposit_returns_exact_amount() {
     let value: BigUint = ONE_ETH_WEI.parse().unwrap();
 
     // token_in = native ETH (zero), token_out = WETH, router = WETH, calldata = deposit().
-    let (amount, gas) = runner
+    let outcome = runner
         .execute(Address::ZERO, weth, weth, &DEPOSIT_CALLDATA, &value, block)
         .await
-        .expect("execute should not error")
-        .expect("deposit should produce a balance");
+        .expect("execute should not error");
+    let SwapOutcome::Success { amount_out: amount, gas } = outcome else {
+        panic!("deposit should produce a balance, got {outcome:?}");
+    };
 
     assert_eq!(amount, value, "1 ETH deposited must yield exactly 1 WETH");
     assert!(gas.unwrap_or(0) > 21_000, "deposit must consume more than base gas");
