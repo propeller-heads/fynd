@@ -123,7 +123,7 @@ pub(crate) struct BookVenueContext {
     pub(crate) aggregate_rfqs: bool,
     /// Optional client for shared Bebop, Hashflow and Metric prices. Without this client, each
     /// feed connects directly to its venue.
-    pub(crate) nexus: Option<NexusClient>,
+    pub(crate) nexus_client: Option<NexusClient>,
 }
 
 /// The feed of one book venue that [`BookStream`] runs: the venue's own connection, or `SharedRfq`
@@ -177,7 +177,7 @@ pub(crate) fn open_book_feed(
         BookVenue::Bebop => {
             let env = bebop::BebopEnv::read()?;
             let assembler = bebop::assembler(context, entry, &env)?;
-            match &context.nexus {
+            match &context.nexus_client {
                 Some(client) => {
                     BookVenueFeed::SharedRfq(client.rfq_prices_feed(RfqAssembler::Bebop(assembler)))
                 }
@@ -187,7 +187,7 @@ pub(crate) fn open_book_feed(
         BookVenue::Hashflow => {
             let env = hashflow::HashflowEnv::read()?;
             let assembler = hashflow::assembler(context, entry, &env)?;
-            match &context.nexus {
+            match &context.nexus_client {
                 Some(client) => BookVenueFeed::SharedRfq(
                     client.rfq_prices_feed(RfqAssembler::Hashflow(assembler)),
                 ),
@@ -196,7 +196,7 @@ pub(crate) fn open_book_feed(
         }
         BookVenue::Metric => {
             let assembler = metric::assembler(context, entry);
-            match &context.nexus {
+            match &context.nexus_client {
                 Some(client) => BookVenueFeed::SharedRfq(
                     client.rfq_prices_feed(RfqAssembler::Metric(assembler)),
                 ),
@@ -334,7 +334,7 @@ mod tests {
             .unwrap();
     }
 
-    fn context(nexus: Option<NexusClient>) -> BookVenueContext {
+    fn context(nexus_client: Option<NexusClient>) -> BookVenueContext {
         BookVenueContext {
             book_config: BookFeedConfig {
                 chain: Chain::Ethereum,
@@ -342,7 +342,7 @@ mod tests {
                 min_tvl_usd: 0.0,
             },
             aggregate_rfqs: false,
-            nexus,
+            nexus_client,
         }
     }
 

@@ -169,15 +169,15 @@ impl BookStream {
         let chain = config.chain;
         let external_liquidity = &config.external_liquidity;
         reject_name_clash(&config.protocols, external_liquidity)?;
-        let entries = BookVenueEntry::parse_all(&config.protocols)?;
-        for entry in &entries {
+        let venue_entries = BookVenueEntry::parse_all(&config.protocols)?;
+        for entry in &venue_entries {
             entry.check_supported(chain)?;
         }
-        if entries.is_empty() && external_liquidity.is_empty() {
+        if venue_entries.is_empty() && external_liquidity.is_empty() {
             return Ok(None);
         }
 
-        let nexus = config
+        let nexus_client = config
             .nexus_url
             .as_deref()
             .map(NexusClient::new)
@@ -190,7 +190,7 @@ impl BookStream {
                 min_tvl_usd: config.min_tvl,
             },
             aggregate_rfqs: config.aggregate_rfqs,
-            nexus,
+            nexus_client,
         };
         let book_config = &context.book_config;
 
@@ -209,7 +209,7 @@ impl BookStream {
         for source in external_liquidity {
             source.open(external_config.clone(), &mut books.external)?;
         }
-        for entry in &entries {
+        for entry in &venue_entries {
             let feed = open_book_feed(entry, &context)?;
             books.add_feed(entry.name, feed);
         }

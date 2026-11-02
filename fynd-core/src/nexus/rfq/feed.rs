@@ -69,20 +69,24 @@ pub struct RfqPricesFeed {
 }
 
 impl RfqPricesFeed {
-    /// A feed of the venue `assembler` reads, from the service at `base_url`, which
+    /// A feed of the venue `assembler` reads, from the service at `connection_url`, which
     /// must be a valid HTTP URL.
-    pub(crate) fn new(base_url: &str, http: reqwest::Client, assembler: RfqAssembler) -> Self {
+    pub(crate) fn new(
+        connection_url: &str,
+        http: reqwest::Client,
+        assembler: RfqAssembler,
+    ) -> Self {
         let timings = PollTimings::for_venue(assembler.venue());
-        Self::with_timings(base_url, http, assembler, timings)
+        Self::with_timings(connection_url, http, assembler, timings)
     }
 
     fn with_timings(
-        base_url: &str,
+        connection_url: &str,
         http: reqwest::Client,
         assembler: RfqAssembler,
         timings: PollTimings,
     ) -> Self {
-        let url = format!("{base_url}{}", prices_path(assembler.venue()));
+        let url = format!("{connection_url}{}", prices_path(assembler.venue()));
         Self {
             max_snapshot_age: timings.max_snapshot_age,
             poller: PricePoller::new(url, http, assembler, timings),

@@ -24,35 +24,36 @@ pub enum NexusError {
 /// Connects a pod to a `fynd-nexus` service.
 #[derive(Debug, Clone)]
 pub struct NexusClient {
-    base_url: String,
+    connection_url: String,
     http: reqwest::Client,
 }
 
 impl NexusClient {
-    /// A client for the service at `base_url`, such as `http://fynd-nexus:3000`.
+    /// A client for the service at `connection_url`, such as `http://fynd-nexus:3000`.
     ///
-    /// The service serves one chain; the caller points `base_url` at the one of the pod's chain.
+    /// The service serves one chain; the caller points `connection_url` at the one of the pod's
+    /// chain.
     ///
     /// # Errors
     ///
-    /// [`NexusError::InvalidUrl`] when `base_url` is not an http:// or https:// URL, and
+    /// [`NexusError::InvalidUrl`] when `connection_url` is not an http:// or https:// URL, and
     /// [`NexusError::HttpClient`] when the HTTP client cannot be built.
-    pub fn new(base_url: &str) -> Result<Self, NexusError> {
-        let valid = Url::parse(base_url)
+    pub fn new(connection_url: &str) -> Result<Self, NexusError> {
+        let valid = Url::parse(connection_url)
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
         if !valid {
-            return Err(NexusError::InvalidUrl { url: base_url.to_string() });
+            return Err(NexusError::InvalidUrl { url: connection_url.to_string() });
         }
-        let base_url = base_url.trim_end_matches('/');
+        let connection_url = connection_url.trim_end_matches('/');
         let http = reqwest::Client::builder()
             .build()
             .map_err(|e| NexusError::HttpClient(e.to_string()))?;
-        Ok(Self { base_url: base_url.to_string(), http })
+        Ok(Self { connection_url: connection_url.to_string(), http })
     }
 
     /// A feed of one RFQ venue's books, built by `assembler` from the prices the service serves.
     pub fn rfq_prices_feed(&self, assembler: RfqAssembler) -> RfqPricesFeed {
-        RfqPricesFeed::new(&self.base_url, self.http.clone(), assembler)
+        RfqPricesFeed::new(&self.connection_url, self.http.clone(), assembler)
     }
 }
 
