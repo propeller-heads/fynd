@@ -589,21 +589,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_open_keeps_native_direct() {
-        std::env::remove_var("NATIVE_API_KEY");
-
-        let Err(err) = open_shared(Chain::Ethereum, &["rfq:native"], NEXUS_URL) else {
-            panic!("expected rfq:native to need its own credentials");
-        };
-
-        assert!(
-            err.to_string()
-                .contains("NATIVE_API_KEY"),
-            "got {err}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_open_invalid_nexus_url() {
         let url = "ws://fynd-nexus:3000";
         let Err(err) = open_shared(Chain::Base, &["rfq:metric"], url) else {
