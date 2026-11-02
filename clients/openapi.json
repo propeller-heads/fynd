@@ -7,7 +7,7 @@
       "name": "Fynd License 1.0",
       "url": "https://github.com/propeller-heads/fynd/blob/main/LICENSE.md"
     },
-    "version": "0.107.0"
+    "version": "0.118.4"
   },
   "paths": {
     "/v1/health": {
@@ -449,22 +449,22 @@
           "client_fee_params": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ClientFeeParams",
                 "description": "Client fee configuration. When absent, no fee is charged."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "permit": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PermitSingle",
                 "description": "Permit2 single-token authorization. Required when using `transfer_from_permit2`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -479,11 +479,11 @@
           "price_guard": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PriceGuardConfig",
                 "description": "Per-request price guard configuration. If `None`, struct defaults are used."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -813,11 +813,11 @@
           "fee_breakdown": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FeeBreakdown",
                 "description": "Fee breakdown (populated when encoding options are provided)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -850,22 +850,22 @@
           "route": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Route",
                 "description": "The route to execute, if a valid route was found."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "simulation_result": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SimulationResult",
                 "description": "Result of an optional on-chain simulation."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -876,11 +876,11 @@
           "transaction": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Transaction",
                 "description": "An encoded EVM transaction ready to be submitted on-chain."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -1081,11 +1081,11 @@
           "encoding_options": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/EncodingOptions",
                 "description": "Options during encoding. If None, quote will be returned without calldata."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -1108,11 +1108,11 @@
           "route_filter": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RouteFilter",
                 "description": "Liquidity this request excludes from a route. If None, nothing is excluded."
+              },
+              {
+                "type": "null"
               }
             ]
           },

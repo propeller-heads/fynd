@@ -255,14 +255,14 @@ export interface components {
         };
         /** @description Options to customize the encoding behavior. */
         EncodingOptions: {
-            client_fee_params?: null | components["schemas"]["ClientFeeParams"];
-            permit?: null | components["schemas"]["PermitSingle"];
+            client_fee_params?: components["schemas"]["ClientFeeParams"] | null;
+            permit?: components["schemas"]["PermitSingle"] | null;
             /**
              * @description Permit2 signature (65 bytes, hex-encoded). Required when `permit` is set.
              * @example 0xabcd...
              */
             permit2_signature?: string | null;
-            price_guard?: null | components["schemas"]["PriceGuardConfig"];
+            price_guard?: components["schemas"]["PriceGuardConfig"] | null;
             /**
              * @description Whether to simulate encoded transactions against the latest block. Defaults to `false`.
              * @example false
@@ -508,7 +508,7 @@ export interface components {
             amount_out_net_gas: string;
             /** @description Block at which this quote was computed. The quote is valid only for this block. */
             block: components["schemas"]["BlockInfo"];
-            fee_breakdown?: null | components["schemas"]["FeeBreakdown"];
+            fee_breakdown?: components["schemas"]["FeeBreakdown"] | null;
             /**
              * @description Estimated gas cost for executing this route (as decimal string).
              * @example 150000
@@ -529,11 +529,11 @@ export interface components {
              * @description Price impact in basis points (1 bip = 0.01%).
              */
             price_impact_bps?: number | null;
-            route?: null | components["schemas"]["Route"];
-            simulation_result?: null | components["schemas"]["SimulationResult"];
+            route?: components["schemas"]["Route"] | null;
+            simulation_result?: components["schemas"]["SimulationResult"] | null;
             /** @description Status indicating whether a route was found. */
             status: components["schemas"]["QuoteStatus"];
-            transaction?: null | components["schemas"]["Transaction"];
+            transaction?: components["schemas"]["Transaction"] | null;
         };
         /**
          * @description Specifies the side of an order: sell (exact input) or buy (exact output).
@@ -650,7 +650,7 @@ export interface components {
         };
         /** @description Options to customize the solving behavior. */
         QuoteOptions: {
-            encoding_options?: null | components["schemas"]["EncodingOptions"];
+            encoding_options?: components["schemas"]["EncodingOptions"] | null;
             /**
              * @description Maximum gas cost allowed for a solution. Quotes exceeding this are filtered out.
              * @example 500000
@@ -664,7 +664,7 @@ export interface components {
              *     Values exceeding the number of active solver pools are clamped internally.
              */
             min_responses?: number | null;
-            route_filter?: null | components["schemas"]["RouteFilter"];
+            route_filter?: components["schemas"]["RouteFilter"] | null;
             /**
              * Format: int64
              * @description Timeout in milliseconds. If `None`, uses server default.

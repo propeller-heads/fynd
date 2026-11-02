@@ -26,7 +26,7 @@ bytes.workspace = true
 hex.workspace = true
 
 # Optional: OpenAPI schema generation (used by fynd-rpc server)
-utoipa = { version = "5", optional = true }
+utoipa = { version = "6", optional = true }
 # Optional: conversions to/from fynd-core domain types (also enables tycho-simulation for conversions)
 fynd-core = { workspace = true, optional = true }
 tycho-simulation = { workspace = true, optional = true }

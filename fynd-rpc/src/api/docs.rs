@@ -68,7 +68,7 @@ fn hosted_spec(server_url: &str) -> OpenApi {
             operation
                 .parameters
                 .get_or_insert_with(Vec::new)
-                .push(chain_parameter())
+                .push(chain_parameter().into())
         }
         openapi
             .paths
