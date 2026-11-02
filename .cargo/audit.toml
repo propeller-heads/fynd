@@ -6,12 +6,6 @@
 # tracing-subscriber 0.3 and revm-precompile 42+ uses ark 0.6; drop this once tycho-simulation
 # moves off revm 29.
 #
-# RUSTSEC-2026-0367, RUSTSEC-2026-0368, RUSTSEC-2026-0369: zip <9.0.0 extract() follows symlinks
-# and keeps SUID/SGID bits. zip 3 is only a build-dependency of utoipa-swagger-ui, whose build
-# script unpacks the pinned Swagger UI release with its own loop and never calls extract().
-# utoipa-swagger-ui 10.0.1 still requires zip ^8.6. Upstream moved to zip 9 in
-# https://github.com/juhaku/utoipa/pull/1645; drop these once that is released and we upgrade.
-#
 # RUSTSEC-2026-0387: crypto-bigint <0.7.6 may branch on secret values in subtraction, division
 # and Montgomery multiplication. Dep chain: alloy-signer <- elliptic-curve 0.13 / k256 0.13 <-
 # crypto-bigint ^0.5. k256's scalar arithmetic uses it, so signing with the controller key is in
@@ -20,8 +14,5 @@
 # elliptic-curve 0.14.
 ignore = [
     "RUSTSEC-2025-0055",
-    "RUSTSEC-2026-0367",
-    "RUSTSEC-2026-0368",
-    "RUSTSEC-2026-0369",
     "RUSTSEC-2026-0387",
 ]
