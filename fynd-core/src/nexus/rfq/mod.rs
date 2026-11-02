@@ -13,10 +13,7 @@ use tycho_simulation::{
     evm::tycho_models::Chain,
     pamm::protocols::metric::{feed::MetricFeedBuilder, MetricBookAssembler, MetricPrices},
     rfq::protocols::{
-        bebop::{
-            feed::{BebopFeedBuilder, BebopPricesFeedBuilder},
-            BebopBookAssembler, BebopPrices,
-        },
+        bebop::{feed::BebopFeedBuilder, BebopBookAssembler, BebopPrices},
         hashflow::{feed::HashflowFeedBuilder, HashflowBookAssembler, HashflowPrices},
     },
 };
@@ -48,13 +45,12 @@ impl RfqVenue {
         }
     }
 
-    /// Whether the service can serve this venue on `chain`.
+    /// Whether Nexus serves this venue on `chain`: the chains where tycho-execution has its
+    /// executor.
     pub fn supports_chain(self, chain: Chain) -> bool {
         match self {
-            Self::Bebop => BebopPricesFeedBuilder::new(chain, String::new())
-                .build()
-                .is_ok(),
-            Self::Hashflow => true,
+            Self::Bebop => [Chain::Ethereum, Chain::Base].contains(&chain),
+            Self::Hashflow => chain == Chain::Ethereum,
             Self::Metric => METRIC_CHAINS.contains(&chain),
         }
     }

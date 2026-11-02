@@ -1,4 +1,4 @@
-//! Bebop's prices feed: its API key and the chains its pricing client accepts.
+//! Bebop's prices feed: its API key.
 
 use std::fmt;
 

@@ -1,4 +1,4 @@
-//! Hashflow's prices feed: its taker API credentials. Hashflow is tried on every chain.
+//! Hashflow's prices feed: its taker API credentials.
 
 use std::fmt;
 

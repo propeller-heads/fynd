@@ -1,4 +1,4 @@
-//! Metric's prices feed: its API key, its endpoint, and the chains Fynd serves it on.
+//! Metric's prices feed: its API key, and its endpoint.
 
 use std::fmt;
 

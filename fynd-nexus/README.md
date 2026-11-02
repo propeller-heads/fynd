@@ -8,9 +8,9 @@ environment, such as `ethereum-fynd-nexus`, deploy it with the `Recreate` strate
 instances never hold the same Bebop key, and point each pod at the instance of its own chain with
 `fynd serve --nexus-url`. The service does not check the pod's chain.
 
-The service runs one prices feed per venue: Bebop if its client accepts the chain, Metric if Fynd
-serves it on the chain, Hashflow on every chain. A venue that does not serve the chain is logged at
-startup and skipped; if none of the listed venues does, startup fails. The pods build the same books they build from a direct
+The service runs one prices feed per venue: Bebop on Ethereum and Base, Hashflow on
+Ethereum, and Metric on the chains Fynd serves it on. A venue that does not serve the chain is
+logged at startup and skipped; if none of the listed venues does, startup fails. The pods build the same books they build from a direct
 connection, with their own token list, TVL floor and `--aggregate-rfqs` layout, and ask the venues
 for firm quotes themselves.
 
