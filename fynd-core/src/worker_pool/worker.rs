@@ -24,7 +24,7 @@ use tycho_simulation::{
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
     derived::{
-        computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
+        computation::ComputationId, events::DerivedDataEvent, tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
     exclusive_route::{pin_route_commitment, routes_through_exclusive},
@@ -314,6 +314,56 @@ fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity
     .record(duration.as_secs_f64());
 }
 
+/// Decides when, in one computation round, the worker rebuilds its edge weights.
+///
+/// The computation manager runs its computations in dependency stages and reports each one, as
+/// complete or failed, once per round. The edge weights read several of them, so a rebuild before
+/// the last has reported would read that one's output from an earlier round, or nothing at all,
+/// and no later event would correct it. Waiting for all of them keeps the rebuild to one per round
+/// and makes what it reads independent of how quickly the worker drains its events.
+///
+/// A failed input counts as reported: nothing more is coming for it this round, and the rebuild
+/// then reads whatever that computation last wrote.
+struct WeightRebuildRound {
+    /// The computations the edge weights read.
+    inputs: &'static [ComputationId],
+    /// The block of the round in progress, or `None` before the first `NewBlock`.
+    block: Option<u64>,
+    /// The inputs that have reported in the round in progress.
+    reported: Vec<ComputationId>,
+}
+
+impl WeightRebuildRound {
+    fn new(inputs: &'static [ComputationId]) -> Self {
+        Self { inputs, block: None, reported: Vec::with_capacity(inputs.len()) }
+    }
+
+    /// Records `event`, and returns whether it was the last of the round's inputs to report.
+    ///
+    /// Weights that read no computation never call for a rebuild.
+    fn record(&mut self, event: &DerivedDataEvent) -> bool {
+        let (computation_id, block) = match event {
+            DerivedDataEvent::NewBlock { block } => {
+                self.block = Some(*block);
+                self.reported.clear();
+                return false;
+            }
+            DerivedDataEvent::ComputationComplete { computation_id, block, failed_items: _ } |
+            DerivedDataEvent::ComputationFailed { computation_id, block } => {
+                (computation_id, block)
+            }
+        };
+        if self.block != Some(*block) ||
+            !self.inputs.contains(computation_id) ||
+            self.reported.contains(computation_id)
+        {
+            return false;
+        }
+        self.reported.push(computation_id);
+        self.reported.len() == self.inputs.len()
+    }
+}
+
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
 /// probes, and how the calculation ended: `computed`, or the reason `price_impact_bps` was left
 /// off the quote.
@@ -355,8 +405,6 @@ where
     market_data: MarketData,
     /// Reference to shared derived data (component depths, token prices).
     derived_data: SharedDerivedDataRef,
-    /// Algorithm's computation requirements (which derived data to react to).
-    requirements: ComputationRequirements,
     /// Tracks readiness of required derived data computations.
     readiness_tracker: ReadinessTracker,
     /// Notified when readiness state may have changed.
@@ -415,7 +463,6 @@ where
             graph_manager: A::GraphManager::default(),
             market_data,
             derived_data,
-            requirements: requirements.clone(),
             readiness_tracker: ReadinessTracker::new(requirements),
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
@@ -1127,6 +1174,7 @@ where
         // call; keeping the arm in the select would turn this loop into a busy spin. The guard
         // disables the arm so the worker keeps solving with the last derived data it saw.
         let mut derived_closed = false;
+        let mut weight_rebuild = WeightRebuildRound::new(A::GraphManager::WEIGHT_INPUTS);
 
         loop {
             tokio::select! {
@@ -1185,20 +1233,16 @@ where
                             // Signal waiters that readiness may have changed
                             self.ready_notify.notify_waiters();
 
-                            // Update edge weights when a relevant computation completes.
-                            if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
-                                if self.requirements.is_required(computation_id) {
-                                    let market = self.market_data.read().await;
-                                    let derived = self.derived_data.read().await;
-                                    let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
-                                    debug!(
-                                        self.worker_id,
-                                        computation_id,
-                                        block,
-                                        updated,
-                                        "updated edge weights with derived data"
-                                    );
-                                }
+                            if weight_rebuild.record(&event) {
+                                let market = self.market_data.read().await;
+                                let derived = self.derived_data.read().await;
+                                let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
+                                debug!(
+                                    self.worker_id,
+                                    block = ?weight_rebuild.block,
+                                    updated,
+                                    "updated edge weights with derived data"
+                                );
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
@@ -1374,8 +1418,10 @@ mod tests {
             },
         },
         derived::{
-            computation::DerivedComputation,
-            computations::{SpotPriceComputation, TokenGasPriceComputation},
+            computation::{ComputationRequirements, DerivedComputation},
+            computations::{
+                ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation,
+            },
             DerivedData,
         },
         fallback::{manager::PammState, FALLBACK_PREFIX},
@@ -3902,5 +3948,154 @@ mod tests {
             "rfq:bebop"
         );
         assert_eq!(quote.order().post_processed_by(), ["rfq".to_string()]);
+    }
+
+    // ==================== WeightRebuildRound ====================
+
+    const WEIGHT_INPUTS: &[ComputationId] =
+        &[SpotPriceComputation::ID, ComponentDepthComputation::ID, TokenGasPriceComputation::ID];
+
+    fn new_block(block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::NewBlock { block }
+    }
+
+    fn complete(computation_id: ComputationId, block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::ComputationComplete { computation_id, block, failed_items: vec![] }
+    }
+
+    fn failed(computation_id: ComputationId, block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::ComputationFailed { computation_id, block }
+    }
+
+    /// Feeds `events` in order and returns which of them called for a rebuild.
+    fn rebuilds(round: &mut WeightRebuildRound, events: &[DerivedDataEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .map(|event| round.record(event))
+            .collect()
+    }
+
+    #[test]
+    fn test_weight_rebuild_round_last_input() {
+        let mut round = WeightRebuildRound::new(WEIGHT_INPUTS);
+
+        let calls = rebuilds(
+            &mut round,
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_rebuild_round_failed_input() {
+        let mut round = WeightRebuildRound::new(WEIGHT_INPUTS);
+
+        let calls = rebuilds(
+            &mut round,
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 1),
+                failed(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_rebuild_round_once_per_round() {
+        let mut round = WeightRebuildRound::new(WEIGHT_INPUTS);
+
+        let calls = rebuilds(
+            &mut round,
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+                complete("custom", 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, false, true, false, false]);
+    }
+
+    #[test]
+    fn test_weight_rebuild_round_new_round() {
+        let mut round = WeightRebuildRound::new(WEIGHT_INPUTS);
+
+        let calls = rebuilds(
+            &mut round,
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 1),
+                new_block(2),
+                complete(ComponentDepthComputation::ID, 2),
+                complete(SpotPriceComputation::ID, 2),
+                complete(TokenGasPriceComputation::ID, 2),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, false, false, false, true]);
+    }
+
+    /// A round that repeats a block, as partial blocks do, starts over like any other.
+    #[test]
+    fn test_weight_rebuild_round_repeated_block() {
+        let mut round = WeightRebuildRound::new(WEIGHT_INPUTS);
+        let one_round = [
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+        ];
+
+        let calls = rebuilds(&mut round, &[one_round.clone(), one_round].concat());
+
+        assert_eq!(calls, [false, false, false, true, false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_rebuild_round_other_block() {
+        let mut round = WeightRebuildRound::new(WEIGHT_INPUTS);
+
+        let calls = rebuilds(
+            &mut round,
+            &[
+                complete(SpotPriceComputation::ID, 1),
+                new_block(2),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 2),
+                complete(ComponentDepthComputation::ID, 2),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, false, false]);
+    }
+
+    #[test]
+    fn test_weight_rebuild_round_no_inputs() {
+        let mut round = WeightRebuildRound::new(&[]);
+
+        let calls = rebuilds(
+            &mut round,
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false]);
     }
 }

@@ -18,7 +18,7 @@ use tycho_simulation::{
 };
 
 use crate::{
-    derived::DerivedData,
+    derived::{computation::ComputationId, DerivedData},
     feed::market_data::MarketDataView,
     types::{ComponentId, ComponentTopology, ResolvedRouteConstraints},
 };
@@ -189,6 +189,14 @@ impl RouteSearch<'_> {
 /// Implement this trait for edge data types that should use pre-computed derived data
 /// (component depths, spot prices, etc.) instead of computing them from scratch.
 pub trait EdgeWeightFromSimAndDerived: Sized {
+    /// The derived computations [`from_sim_and_derived`](Self::from_sim_and_derived) reads.
+    ///
+    /// A worker rebuilds its edge weights once per computation round, after every one of these
+    /// has reported for that round. A computation read but left out of this list can land after
+    /// the rebuild, and the weights then hold whatever that computation's output was when the
+    /// rebuild ran.
+    const INPUTS: &'static [ComputationId];
+
     /// Computes edge weight data using ProtocolSim and pre-computed DerivedData.
     ///
     /// # Arguments
@@ -213,6 +221,8 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
 
 /// Trivial implementation for algorithms that don't use edge weights (e.g., Bellman-Ford).
 impl EdgeWeightFromSimAndDerived for () {
+    const INPUTS: &'static [ComputationId] = &[];
+
     fn from_sim_and_derived(
         _sim: &dyn ProtocolSim,
         _component_id: &ComponentId,
@@ -226,6 +236,10 @@ impl EdgeWeightFromSimAndDerived for () {
 
 /// Trait for graph managers that support edge weight updates with derived data.
 pub trait EdgeWeightUpdaterWithDerived {
+    /// The derived computations the edge weights are built from: the weight type's
+    /// [`INPUTS`](EdgeWeightFromSimAndDerived::INPUTS).
+    const WEIGHT_INPUTS: &'static [ComputationId];
+
     /// Updates edge weights using simulation states and pre-computed derived data.
     ///
     /// Returns the number of edges successfully updated.

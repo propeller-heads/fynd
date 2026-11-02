@@ -739,6 +739,8 @@ impl<D: Clone> TopologyGraphManager<D> {
 impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWithDerived
     for TopologyGraphManager<D>
 {
+    const WEIGHT_INPUTS: &'static [crate::derived::computation::ComputationId] = D::INPUTS;
+
     /// Recomputes every pool's weight from this block's simulation states and derived data.
     ///
     /// Returns how many pools ended up with a weight. A pool whose derived data is missing has its

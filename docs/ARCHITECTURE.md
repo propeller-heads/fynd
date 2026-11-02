@@ -230,7 +230,7 @@ Graph management infrastructure:
 * `GraphManager` trait: initialize + incremental updates from events
 * `PetgraphStableDiGraphManager`: Implementation using `petgraph::StableDiGraph`
 * `TopologyGraphManager`: Manages a `TopologyGraph` (`token_graph.rs`), used by `MostLiquidAlgorithm` and `WaterFillAlgorithm`
-* `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data (component depths)
+* `EdgeWeightUpdaterWithDerived`: Updates edge weights from derived data, once per computation round after every computation the weight type declares in `EdgeWeightFromSimAndDerived::INPUTS` has reported
 * `Path` type: Sequence of edges for route representation
 
 ***

@@ -50,13 +50,23 @@ where
 }
 ```
 
-### `EdgeWeightUpdaterWithDerived` (`graph/mod.rs`)
+### `EdgeWeightFromSimAndDerived` / `EdgeWeightUpdaterWithDerived` (`graph/mod.rs`)
 
 ```rust
+pub trait EdgeWeightFromSimAndDerived: Sized {
+    const INPUTS: &'static [ComputationId];
+    fn from_sim_and_derived(sim: &dyn ProtocolSim, component_id: &ComponentId, token_in: &Token, token_out: &Token, derived: &DerivedData) -> Option<Self>;
+}
+
 pub trait EdgeWeightUpdaterWithDerived {
+    const WEIGHT_INPUTS: &'static [ComputationId];
     fn update_edge_weights_with_derived(&mut self, market: MarketDataView<'_>, derived: &DerivedData) -> usize;
 }
 ```
+
+A worker rebuilds its edge weights once per computation round, after every computation in the
+weight type's `INPUTS` has reported (complete or failed). An algorithm's
+`computation_requirements()` decides only what a solve waits for, not when weights are rebuilt.
 
 ## Builder
 
