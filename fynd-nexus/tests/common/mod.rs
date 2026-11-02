@@ -23,7 +23,7 @@ use tycho_simulation::{
     snapshot_feed::{errors::FeedError, Publisher, SnapshotFeed},
 };
 
-pub const EPOCH: u64 = 1_761_550_000_000;
+pub const RUN_ID: u64 = 1_761_550_000_000;
 
 enum Step<P> {
     Publish(P),
@@ -130,7 +130,7 @@ impl<P> Attempts<P> {
 }
 
 pub fn new_latest_prices(venue: RfqVenue) -> Arc<LatestPrices> {
-    Arc::new(LatestPrices::new(Chain::Ethereum, venue, EPOCH))
+    Arc::new(LatestPrices::new(Chain::Ethereum, venue, RUN_ID))
 }
 
 pub fn decode<D: DeserializeOwned>(encoded: &[u8]) -> NexusMessage<D> {

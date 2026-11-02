@@ -14,16 +14,17 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The current message of a nexus stream, for state of type `D`.
 ///
-/// `epoch` changes each time the service starts and `seq` grows per stream, so a reader can tell a
+/// `run_id` changes each time the service starts and `seq` grows per stream, so a reader can tell a
 /// replayed or reordered message from a new one. In JSON the version is the field `v` and the
-/// body's fields sit beside `epoch` and `seq`, with `type` naming the kind of body.
+/// body's fields sit beside `run_id` and `seq`, with `type` naming the kind of body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NexusMessage<D> {
     /// The protocol version the message was written in.
     #[serde(rename = "v")]
     pub version: u32,
-    /// Identifies the service run that sent the message.
-    pub epoch: u64,
+    /// Identifies one run of the service: its start time in milliseconds, so it changes on every
+    /// restart.
+    pub run_id: u64,
     /// The position of the message in its stream.
     pub seq: u64,
     /// The snapshot or withdrawal carried by the message.
@@ -71,8 +72,8 @@ struct VersionField {
 
 impl<D> NexusMessage<D> {
     /// A message in this build's protocol version.
-    pub fn new(epoch: u64, seq: u64, body: MessageBody<D>) -> Self {
-        Self { version: PROTOCOL_VERSION, epoch, seq, body }
+    pub fn new(run_id: u64, seq: u64, body: MessageBody<D>) -> Self {
+        Self { version: PROTOCOL_VERSION, run_id, seq, body }
     }
 }
 
@@ -128,7 +129,7 @@ mod tests {
         *,
     };
 
-    const EPOCH: u64 = 1_761_550_000_000;
+    const RUN_ID: u64 = 1_761_550_000_000;
 
     fn metric_prices() -> MetricPrices {
         MetricPrices {
@@ -157,7 +158,7 @@ mod tests {
         let as_of = "2026-10-27T09:00:00.123456Z"
             .parse()
             .unwrap();
-        NexusMessage::new(EPOCH, 42, MessageBody::Snapshot { as_of, data })
+        NexusMessage::new(RUN_ID, 42, MessageBody::Snapshot { as_of, data })
     }
 
     fn round_trip<D>(message: &NexusMessage<D>) -> NexusMessage<D>
@@ -169,7 +170,7 @@ mod tests {
 
     #[rstest]
     #[case::snapshot(snapshot(json!({"x": [1, 2.5, null]})))]
-    #[case::withdrawn(NexusMessage::new(EPOCH, 43, MessageBody::Withdrawn))]
+    #[case::withdrawn(NexusMessage::new(RUN_ID, 43, MessageBody::Withdrawn))]
     fn test_round_trip_each_message_type(#[case] message: NexusMessage<serde_json::Value>) {
         assert_eq!(round_trip(&message), message);
     }
@@ -207,7 +208,7 @@ mod tests {
         json!({
             "v": 1,
             "type": "snapshot",
-            "epoch": EPOCH,
+            "run_id": RUN_ID,
             "seq": 42,
             "as_of": "2026-10-27T09:00:00.123456Z",
             "data": {"x": 1}
@@ -215,7 +216,7 @@ mod tests {
     )]
     #[case::withdrawn(
         NexusMessage::new(7, 3, MessageBody::Withdrawn),
-        json!({"v": 1, "type": "withdrawn", "epoch": 7, "seq": 3})
+        json!({"v": 1, "type": "withdrawn", "run_id": 7, "seq": 3})
     )]
     fn test_encoded_json_shape(
         #[case] message: NexusMessage<serde_json::Value>,
@@ -229,8 +230,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case::newer(r#"{"v":2,"type":"withdrawn","epoch":1,"seq":1}"#, 2)]
-    #[case::zero(r#"{"v":0,"type":"withdrawn","epoch":1,"seq":1}"#, 0)]
+    #[case::newer(r#"{"v":2,"type":"withdrawn","run_id":1,"seq":1}"#, 2)]
+    #[case::zero(r#"{"v":0,"type":"withdrawn","run_id":1,"seq":1}"#, 0)]
     #[case::unreadable_body(r#"{"v":9,"type":"something_new","payload":[1]}"#, 9)]
     fn test_decode_unknown_version(#[case] text: &str, #[case] version: u32) {
         let error = NexusMessage::<serde_json::Value>::decode(text).unwrap_err();
@@ -243,14 +244,14 @@ mod tests {
 
     #[rstest]
     #[case::not_json("not json")]
-    #[case::no_version(r#"{"type":"withdrawn","epoch":1,"seq":1}"#)]
-    #[case::unknown_type(r#"{"v":1,"type":"goodbye","epoch":1,"seq":1}"#)]
-    #[case::no_epoch(r#"{"v":1,"type":"withdrawn","seq":1}"#)]
+    #[case::no_version(r#"{"type":"withdrawn","run_id":1,"seq":1}"#)]
+    #[case::unknown_type(r#"{"v":1,"type":"goodbye","run_id":1,"seq":1}"#)]
+    #[case::no_run_id(r#"{"v":1,"type":"withdrawn","seq":1}"#)]
     #[case::snapshot_without_data(
-        r#"{"v":1,"type":"snapshot","epoch":1,"seq":1,"as_of":"2026-10-27T09:00:00Z"}"#
+        r#"{"v":1,"type":"snapshot","run_id":1,"seq":1,"as_of":"2026-10-27T09:00:00Z"}"#
     )]
     #[case::snapshot_with_bad_timestamp(
-        r#"{"v":1,"type":"snapshot","epoch":1,"seq":1,"as_of":"yesterday","data":1}"#
+        r#"{"v":1,"type":"snapshot","run_id":1,"seq":1,"as_of":"yesterday","data":1}"#
     )]
     fn test_decode_malformed_message(#[case] text: &str) {
         assert!(matches!(

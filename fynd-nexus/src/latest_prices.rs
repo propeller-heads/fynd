@@ -51,8 +51,9 @@ impl StreamState {
 /// The message a stream serves: a snapshot or a withdrawal, encoded once.
 #[derive(Debug, Clone)]
 pub struct LatestMessage {
-    /// Identifies the service run that made the message.
-    pub epoch: u64,
+    /// Identifies one run of the service: its start time in milliseconds, so it changes on every
+    /// restart.
+    pub run_id: u64,
     /// The position of the message in its stream.
     pub seq: u64,
     /// The message as JSON. Clones share one buffer.
@@ -63,7 +64,7 @@ impl LatestMessage {
     /// The HTTP `ETag` of this message, such as `"1761550000000-42"`. It changes whenever the
     /// stream's message does, including across service restarts.
     pub fn etag(&self) -> String {
-        format!("\"{}-{}\"", self.epoch, self.seq)
+        format!("\"{}-{}\"", self.run_id, self.seq)
     }
 }
 
@@ -81,20 +82,20 @@ struct StreamRecord {
 pub struct LatestPrices {
     chain: Chain,
     venue: RfqVenue,
-    epoch: u64,
+    run_id: u64,
     latest: RwLock<StreamRecord>,
 }
 
 impl LatestPrices {
-    /// The stream of `venue` on the chain the service serves, with no snapshot yet. `epoch`
+    /// The stream of `venue` on the chain the service serves, with no snapshot yet. `run_id`
     /// identifies this run of the service.
-    pub fn new(chain: Chain, venue: RfqVenue, epoch: u64) -> Self {
+    pub fn new(chain: Chain, venue: RfqVenue, run_id: u64) -> Self {
         let latest = StreamRecord {
             seq: 0,
             encoded: None,
             state: StreamState::AwaitingSnapshot { started_at: Utc::now() },
         };
-        Self { chain, venue, epoch, latest: RwLock::new(latest) }
+        Self { chain, venue, run_id, latest: RwLock::new(latest) }
     }
 
     /// The chain the service serves.
@@ -121,7 +122,7 @@ impl LatestPrices {
         latest
             .encoded
             .clone()
-            .map(|encoded| LatestMessage { epoch: self.epoch, seq: latest.seq, encoded })
+            .map(|encoded| LatestMessage { run_id: self.run_id, seq: latest.seq, encoded })
     }
 
     /// Whether the stream holds prices rather than a withdrawal or nothing yet.
@@ -137,7 +138,7 @@ impl LatestPrices {
     pub fn publish<P: Serialize>(&self, prices: &P, as_of: DateTime<Utc>) {
         let seq = self.read().seq + 1;
         let body = MessageBody::Snapshot { as_of, data: prices };
-        let encoded = self.encode(&NexusMessage::new(self.epoch, seq, body));
+        let encoded = self.encode(&NexusMessage::new(self.run_id, seq, body));
         *self.write() =
             StreamRecord { seq, encoded: Some(encoded), state: StreamState::Serving { as_of } };
     }
@@ -153,7 +154,7 @@ impl LatestPrices {
             };
             (latest.seq + 1, last_as_of)
         };
-        let message = NexusMessage::<()>::new(self.epoch, seq, MessageBody::Withdrawn);
+        let message = NexusMessage::<()>::new(self.run_id, seq, MessageBody::Withdrawn);
         let encoded = self.encode(&message);
         *self.write() = StreamRecord {
             seq,
@@ -216,10 +217,10 @@ mod tests {
 
     use super::*;
 
-    const EPOCH: u64 = 7;
+    const RUN_ID: u64 = 7;
 
     fn latest_prices() -> LatestPrices {
-        LatestPrices::new(Chain::Base, RfqVenue::Hashflow, EPOCH)
+        LatestPrices::new(Chain::Base, RfqVenue::Hashflow, RUN_ID)
     }
 
     fn message(latest_prices: &LatestPrices) -> NexusMessage<Value> {
@@ -263,11 +264,11 @@ mod tests {
         latest_prices.withdraw();
 
         assert!(!latest_prices.has_prices());
-        assert_eq!(message(&latest_prices), NexusMessage::new(EPOCH, 1, MessageBody::Withdrawn));
+        assert_eq!(message(&latest_prices), NexusMessage::new(RUN_ID, 1, MessageBody::Withdrawn));
     }
 
     #[test]
-    fn test_etag_follows_epoch_and_seq() {
+    fn test_etag_follows_run_id_and_seq() {
         let latest_prices = latest_prices();
         latest_prices.publish(&json!({}), Utc::now());
         let first = latest_prices.current().unwrap();

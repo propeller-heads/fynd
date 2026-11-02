@@ -50,7 +50,7 @@ serves prices only: expose it inside the cluster.
 
 | Status | When |
 |---|---|
-| `200` | The message is the one described below. The `ETag` header is `"{epoch}-{seq}"`, such as `"1761550000000-42"`. |
+| `200` | The message is the one described below. The `ETag` header is `"{run_id}-{seq}"`, such as `"1761550000000-42"`. |
 | `304` | The request's `If-None-Match` equals the current `ETag`. The body is empty. |
 | `204` | The stream has had no snapshot yet in this run. The body is empty. |
 | `404` | The service does not run that venue. |
@@ -65,12 +65,13 @@ response has no body. A request that fails, times out after 2 s, or gets any oth
 The response body is one JSON message. The format is defined in `fynd_core::nexus`.
 
 ```json
-{ "v": 1, "type": "snapshot",  "epoch": 1761550000000, "seq": 42, "as_of": "2026-10-27T09:00:00.123Z", "data": { } }
-{ "v": 1, "type": "withdrawn", "epoch": 1761550000000, "seq": 43 }
+{ "v": 1, "type": "snapshot",  "run_id": 1761550000000, "seq": 42, "as_of": "2026-10-27T09:00:00.123Z", "data": { } }
+{ "v": 1, "type": "withdrawn", "run_id": 1761550000000, "seq": 43 }
 ```
 
 - `v` is the protocol version. A reader rejects a version it does not know.
-- `epoch` is the service's start time in milliseconds, so it changes on every start.
+- `run_id` identifies one run of the service: its start time in milliseconds, so it changes on
+  every restart.
 - `seq` grows by one per snapshot or withdrawal on a venue's stream.
 - `as_of` is when the service got the prices from the venue.
 - `data` is the venue's parsed prices: Bebop's pairs, Hashflow's levels per market maker, or

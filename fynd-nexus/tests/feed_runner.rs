@@ -2,7 +2,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{current_message, new_latest_prices, scripted_feed, Attempts, FeedControl, EPOCH};
+use common::{current_message, new_latest_prices, scripted_feed, Attempts, FeedControl, RUN_ID};
 use fynd_core::nexus::{rfq::RfqVenue, MessageBody, NexusMessage};
 use fynd_nexus::{feed_runner::run_feed, latest_prices::LatestPrices};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
@@ -64,7 +64,7 @@ async fn test_publishes_what_the_feed_yields() {
 
     let latest = latest_prices.current().unwrap();
     assert!(latest_prices.has_prices());
-    assert_eq!((latest.epoch, latest.seq), (EPOCH, 2));
+    assert_eq!((latest.run_id, latest.seq), (RUN_ID, 2));
     assert_eq!(snapshot_data(&latest_prices), json!({"pairs": [2]}));
 }
 

@@ -106,10 +106,10 @@ impl SnapshotFeed for RfqPricesFeed {
     }
 }
 
-/// The `epoch` and `seq` of a message: which service run sent it and where it sits in the stream.
+/// The `run_id` and `seq` of a message: which service run sent it and where it sits in the stream.
 #[derive(Debug, Clone, Copy)]
-struct MessagePosition {
-    epoch: u64,
+struct MessageId {
+    run_id: u64,
     seq: u64,
 }
 
@@ -138,7 +138,7 @@ struct PricePoller {
     ticker: Option<Interval>,
     failed_polls: u32,
     etag: Option<String>,
-    last_applied: Option<MessagePosition>,
+    last_applied: Option<MessageId>,
 }
 
 impl PricePoller {
@@ -233,39 +233,39 @@ impl PricePoller {
         &mut self,
         message: NexusMessage<serde_json::Value>,
     ) -> Result<Option<BookSnapshot<ReceivedAt>>, PollError> {
-        let NexusMessage { epoch, seq, body, .. } = message;
-        let position = MessagePosition { epoch, seq };
+        let NexusMessage { run_id, seq, body, .. } = message;
+        let id = MessageId { run_id, seq };
         match body {
-            MessageBody::Snapshot { as_of, data } => self.apply_snapshot(position, as_of, data),
-            MessageBody::Withdrawn => Ok(self.apply_withdrawal(position)),
+            MessageBody::Snapshot { as_of, data } => self.apply_snapshot(id, as_of, data),
+            MessageBody::Withdrawn => Ok(self.apply_withdrawal(id)),
         }
     }
 
-    fn is_replay(&self, position: MessagePosition) -> bool {
+    fn is_replay(&self, id: MessageId) -> bool {
         self.last_applied
-            .is_some_and(|last| last.epoch == position.epoch && position.seq <= last.seq)
+            .is_some_and(|last| last.run_id == id.run_id && id.seq <= last.seq)
     }
 
-    /// Records `position` as applied and logs a service restart when the epoch changes.
-    fn mark_applied(&mut self, position: MessagePosition) {
+    /// Records `id` as applied and logs a service restart when the `run_id` changes.
+    fn mark_applied(&mut self, id: MessageId) {
         if self
             .last_applied
-            .is_some_and(|last| last.epoch != position.epoch)
+            .is_some_and(|last| last.run_id != id.run_id)
         {
-            info!(venue = %self.venue, epoch = position.epoch, "Fynd Nexus restarted");
+            info!(venue = %self.venue, run_id = id.run_id, "Fynd Nexus restarted");
         }
-        self.last_applied = Some(position);
+        self.last_applied = Some(id);
     }
 
     fn apply_snapshot(
         &mut self,
-        position: MessagePosition,
+        id: MessageId,
         as_of: DateTime<Utc>,
         data: serde_json::Value,
     ) -> Result<Option<BookSnapshot<ReceivedAt>>, PollError> {
-        let MessagePosition { epoch, seq } = position;
-        if self.is_replay(position) {
-            debug!(venue = %self.venue, epoch, seq, "dropping a snapshot already applied");
+        let MessageId { run_id, seq } = id;
+        if self.is_replay(id) {
+            debug!(venue = %self.venue, run_id, seq, "dropping a snapshot already applied");
             return Ok(None);
         }
         let age = (Utc::now() - as_of).max(chrono::Duration::zero());
@@ -275,30 +275,30 @@ impl PricePoller {
             .zip(age.to_std().ok())
             .is_some_and(|(max_age, age)| age > max_age)
         {
-            debug!(venue = %self.venue, epoch, seq, %age, "dropping a stale snapshot");
+            debug!(venue = %self.venue, run_id, seq, %age, "dropping a stale snapshot");
             return Ok(None);
         }
         let books = self
             .assembler
             .books(data)
             .map_err(PollError::Prices)?;
-        self.mark_applied(position);
+        self.mark_applied(id);
         gauge!("nexus_client_snapshot_age_seconds", "venue" => self.venue.name())
             .set(age.num_milliseconds() as f64 / 1000.0);
         Ok(Some(BookSnapshot { anchor: ReceivedAt(as_of), books: Arc::new(books) }))
     }
 
-    fn apply_withdrawal(&mut self, position: MessagePosition) -> Option<BookSnapshot<ReceivedAt>> {
-        if self.is_replay(position) {
+    fn apply_withdrawal(&mut self, id: MessageId) -> Option<BookSnapshot<ReceivedAt>> {
+        if self.is_replay(id) {
             debug!(
                 venue = %self.venue,
-                epoch = position.epoch,
-                seq = position.seq,
+                run_id = id.run_id,
+                seq = id.seq,
                 "dropping a withdrawal already applied"
             );
             return None;
         }
-        self.mark_applied(position);
+        self.mark_applied(id);
         Some(BookSnapshot { anchor: ReceivedAt(Utc::now()), books: Arc::new(HashMap::new()) })
     }
 }
@@ -322,7 +322,7 @@ mod tests {
         metric_prices,
     };
 
-    const EPOCH: u64 = 1_761_550_000_000;
+    const RUN_ID: u64 = 1_761_550_000_000;
     const PATH: &str = "/v1/rfq/bebop";
     const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -349,23 +349,23 @@ mod tests {
 
     fn snapshot_of(
         data: Value,
-        epoch: u64,
+        run_id: u64,
         seq: u64,
         age: chrono::Duration,
     ) -> NexusMessage<Value> {
-        NexusMessage::new(epoch, seq, MessageBody::Snapshot { as_of: Utc::now() - age, data })
+        NexusMessage::new(run_id, seq, MessageBody::Snapshot { as_of: Utc::now() - age, data })
     }
 
-    fn snapshot_with_age(epoch: u64, seq: u64, age: chrono::Duration) -> NexusMessage<Value> {
-        snapshot_of(bebop_json(), epoch, seq, age)
+    fn snapshot_with_age(run_id: u64, seq: u64, age: chrono::Duration) -> NexusMessage<Value> {
+        snapshot_of(bebop_json(), run_id, seq, age)
     }
 
-    fn snapshot(epoch: u64, seq: u64) -> NexusMessage<Value> {
-        snapshot_with_age(epoch, seq, chrono::Duration::milliseconds(200))
+    fn snapshot(run_id: u64, seq: u64) -> NexusMessage<Value> {
+        snapshot_with_age(run_id, seq, chrono::Duration::milliseconds(200))
     }
 
-    fn withdrawn(epoch: u64, seq: u64) -> NexusMessage<Value> {
-        NexusMessage::new(epoch, seq, MessageBody::Withdrawn)
+    fn withdrawn(run_id: u64, seq: u64) -> NexusMessage<Value> {
+        NexusMessage::new(run_id, seq, MessageBody::Withdrawn)
     }
 
     fn bebop_json() -> Value {
@@ -381,7 +381,7 @@ mod tests {
     }
 
     fn etag_of(message: &NexusMessage<Value>) -> String {
-        format!("\"{}-{}\"", message.epoch, message.seq)
+        format!("\"{}-{}\"", message.run_id, message.seq)
     }
 
     fn ok(message: &NexusMessage<Value>) -> ResponseTemplate {
@@ -406,7 +406,7 @@ mod tests {
         let as_of = Utc::now() - chrono::Duration::milliseconds(300);
         let data = serde_json::to_value(bebop_prices(3000.1)).unwrap();
         let message =
-            NexusMessage::new(EPOCH, 1, MessageBody::Snapshot { as_of, data: data.clone() });
+            NexusMessage::new(RUN_ID, 1, MessageBody::Snapshot { as_of, data: data.clone() });
 
         let applied = poller
             .apply_message(message)
@@ -429,11 +429,11 @@ mod tests {
     fn test_withdrawal_after_snapshot() {
         let mut poller = poller();
         poller
-            .apply_message(snapshot(EPOCH, 1))
+            .apply_message(snapshot(RUN_ID, 1))
             .unwrap();
 
         let applied = poller
-            .apply_message(withdrawn(EPOCH, 2))
+            .apply_message(withdrawn(RUN_ID, 2))
             .unwrap()
             .expect("a withdrawal is published");
 
@@ -465,7 +465,7 @@ mod tests {
         #[case] age_secs: i64,
         #[case] published: bool,
     ) {
-        let message = snapshot_of(data, EPOCH, 1, chrono::Duration::seconds(age_secs));
+        let message = snapshot_of(data, RUN_ID, 1, chrono::Duration::seconds(age_secs));
         let venue_timings = PollTimings::for_venue(assembler.venue());
 
         let applied = poller_of("http://shared:3000", assembler, venue_timings)
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_from_the_future() {
-        let message = snapshot_with_age(EPOCH, 1, chrono::Duration::seconds(-30));
+        let message = snapshot_with_age(RUN_ID, 1, chrono::Duration::seconds(-30));
 
         assert!(poller()
             .apply_message(message)
@@ -486,14 +486,14 @@ mod tests {
     }
 
     #[test]
-    fn test_message_epoch_and_sequence_ordering() {
+    fn test_message_run_id_and_sequence_ordering() {
         let steps = [
             (snapshot(7, 5), true, "first message"),
             (snapshot(7, 5), false, "same seq again"),
             (snapshot(7, 4), false, "lower seq"),
             (snapshot(7, 6), true, "higher seq"),
-            (snapshot(8, 1), true, "new epoch restarts seq"),
-            (snapshot(8, 1), false, "replay in the new epoch"),
+            (snapshot(8, 1), true, "new run restarts seq"),
+            (snapshot(8, 1), false, "replay in the new run"),
             (withdrawn(8, 2), true, "withdrawal after snapshot"),
             (snapshot(8, 2), false, "snapshot the withdrawal superseded"),
             (withdrawn(8, 2), false, "repeated withdrawal"),
@@ -514,7 +514,7 @@ mod tests {
             poller_of("http://shared:3000", RfqAssembler::Metric(metric_assembler()), timings());
 
         let error = poller
-            .apply_message(snapshot(EPOCH, 1))
+            .apply_message(snapshot(RUN_ID, 1))
             .unwrap_err();
 
         assert!(matches!(error, PollError::Prices(_)), "got {error}");
@@ -529,7 +529,7 @@ mod tests {
 
         metrics::with_local_recorder(&recorder, || {
             poller
-                .apply_message(snapshot_with_age(EPOCH, 1, chrono::Duration::seconds(2)))
+                .apply_message(snapshot_with_age(RUN_ID, 1, chrono::Duration::seconds(2)))
                 .unwrap();
         });
 
@@ -560,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_applies_a_snapshot_then_sends_its_etag() {
-        let first = snapshot(EPOCH, 1);
+        let first = snapshot(RUN_ID, 1);
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(PATH))
@@ -619,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_withdrawal() {
-        let server = serve(ok(&withdrawn(EPOCH, 4))).await;
+        let server = serve(ok(&withdrawn(RUN_ID, 4))).await;
         let mut poller =
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
 
@@ -633,11 +633,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_skips_a_replay_but_remembers_its_etag() {
-        let server = serve(ok(&snapshot(EPOCH, 2))).await;
+        let server = serve(ok(&snapshot(RUN_ID, 2))).await;
         let mut poller =
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
         poller
-            .apply_message(snapshot(EPOCH, 2))
+            .apply_message(snapshot(RUN_ID, 2))
             .unwrap();
 
         let result = poller.poll().await.unwrap();
@@ -648,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_skips_a_stale_snapshot() {
-        let stale = snapshot_with_age(EPOCH, 1, chrono::Duration::seconds(120));
+        let stale = snapshot_with_age(RUN_ID, 1, chrono::Duration::seconds(120));
         let server = serve(ok(&stale)).await;
         let mut poller =
             poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
@@ -664,7 +664,7 @@ mod tests {
         ResponseTemplate::new(200).set_body_string(r#"{"v":2,"type":"withdrawn"}"#),
         "version 2"
     )]
-    #[case::other_venues_prices(ok(&snapshot_of(metric_json(), EPOCH, 1, chrono::Duration::zero())),
+    #[case::other_venues_prices(ok(&snapshot_of(metric_json(), RUN_ID, 1, chrono::Duration::zero())),
         "price format")]
     #[tokio::test]
     async fn test_poll_response_errors(#[case] response: ResponseTemplate, #[case] reason: &str) {
@@ -681,7 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_timeout() {
-        let server = serve(ok(&snapshot(EPOCH, 1)).set_delay(Duration::from_secs(30))).await;
+        let server = serve(ok(&snapshot(RUN_ID, 1)).set_delay(Duration::from_secs(30))).await;
         let slow = PollTimings { request_timeout: Duration::from_millis(50), ..timings() };
         let mut poller = poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), slow);
 
@@ -722,7 +722,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path(PATH))
-            .respond_with(ok(&snapshot(EPOCH, 1)))
+            .respond_with(ok(&snapshot(RUN_ID, 1)))
             .with_priority(3)
             .mount(&server)
             .await;
@@ -760,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_feed_withdraws_prices_that_stop_changing() {
-        let first = snapshot(EPOCH, 1);
+        let first = snapshot(RUN_ID, 1);
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(PATH))
@@ -772,7 +772,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(PATH))
             .respond_with(|_: &wiremock::Request| {
-                ok(&snapshot_with_age(EPOCH, 1, chrono::Duration::zero()))
+                ok(&snapshot_with_age(RUN_ID, 1, chrono::Duration::zero()))
             })
             .mount(&server)
             .await;

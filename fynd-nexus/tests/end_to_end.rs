@@ -40,10 +40,10 @@ struct Service {
     feed_controls: Vec<FeedControl<BebopPrices>>,
 }
 
-/// Starts a service with `epoch` on `address` and prepares `attempts` feeds. Starts the first feed
+/// Starts a service with `run_id` on `address` and prepares `attempts` feeds. Starts the first feed
 /// immediately and each remaining feed after its predecessor ends.
-fn start_service(epoch: u64, address: SocketAddr, attempts: usize) -> Service {
-    let latest_prices = Arc::new(LatestPrices::new(Chain::Ethereum, RfqVenue::Bebop, epoch));
+fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
+    let latest_prices = Arc::new(LatestPrices::new(Chain::Ethereum, RfqVenue::Bebop, run_id));
     let mut feed_controls = Vec::new();
     let mut scripted = Vec::new();
     for _ in 0..attempts {
@@ -113,7 +113,7 @@ async fn test_pod_follows_snapshot_withdrawal_snapshot_and_a_service_restart() {
         .books
         .is_empty());
 
-    // The pod accepts the restarted service's messages although the new epoch resets `seq`, and
+    // The pod accepts the restarted service's messages although the new run resets `seq`, and
     // keeps its books until the restarted service has a snapshot.
     service.handle.stop(false).await;
     let restarted = start_service(2, service.address, 1);

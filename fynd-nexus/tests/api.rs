@@ -2,7 +2,7 @@ mod common;
 
 use std::{net::SocketAddr, sync::Arc};
 
-use common::{new_latest_prices, EPOCH};
+use common::{new_latest_prices, RUN_ID};
 use fynd_core::nexus::{
     rfq::{prices_path, RfqVenue},
     MessageBody, NexusMessage,
@@ -73,16 +73,16 @@ async fn test_snapshot_response() {
     let response = get(address, "/v1/rfq/bebop", None).await;
 
     assert_eq!(response.status(), 200);
-    assert_eq!(etag_of(&response), format!("\"{EPOCH}-1\""));
+    assert_eq!(etag_of(&response), format!("\"{RUN_ID}-1\""));
     assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
-    let NexusMessage { epoch, seq, body: MessageBody::Snapshot { data, .. }, .. } = response
+    let NexusMessage { run_id, seq, body: MessageBody::Snapshot { data, .. }, .. } = response
         .json::<NexusMessage<Value>>()
         .await
         .unwrap()
     else {
         panic!("expected a snapshot");
     };
-    assert_eq!((epoch, seq, data), (EPOCH, 1, json!({"pairs": [1]})));
+    assert_eq!((run_id, seq, data), (RUN_ID, 1, json!({"pairs": [1]})));
 }
 
 #[tokio::test]
@@ -110,14 +110,14 @@ async fn test_etag_round_trip() {
         .is_empty());
     assert_eq!(other.status(), 200, "a different ETag gets the message");
     assert_eq!(changed.status(), 200);
-    assert_eq!(second, format!("\"{EPOCH}-2\""));
+    assert_eq!(second, format!("\"{RUN_ID}-2\""));
     assert_eq!(withdrawn.status(), 200);
     assert_eq!(
         withdrawn
             .json::<NexusMessage<Value>>()
             .await
             .unwrap(),
-        NexusMessage::new(EPOCH, 3, MessageBody::Withdrawn)
+        NexusMessage::new(RUN_ID, 3, MessageBody::Withdrawn)
     );
 }
 

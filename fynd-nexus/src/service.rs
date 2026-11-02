@@ -21,8 +21,8 @@ use crate::{
 const MESSAGE_BYTES_BUCKETS: &[f64] =
     &[256.0, 1e3, 1e4, 1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6, 1e7, 2.5e7];
 
-/// The epoch of this service run: its start time in Unix milliseconds.
-fn start_epoch_ms() -> u64 {
+/// The run id of this service run: its start time in Unix milliseconds.
+fn new_run_id() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since_epoch| u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX))
@@ -64,14 +64,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let credentials = rfq::require_credentials(&cli.venues, &cli.rfq)?;
 
     let metrics_server = bind_metrics(cli.metrics_port)?;
-    let epoch = start_epoch_ms();
+    let run_id = new_run_id();
     let to_start = rfq::streams_to_serve(cli.chain, &credentials)?;
-    info!(chain = %cli.chain, epoch, "starting the service");
+    info!(chain = %cli.chain, run_id, "starting the service");
     let mut streams = Vec::new();
     for venue_credentials in to_start {
         let venue = venue_credentials.venue();
         info!(%venue, "starting stream");
-        let latest_prices = Arc::new(LatestPrices::new(cli.chain, venue, epoch));
+        let latest_prices = Arc::new(LatestPrices::new(cli.chain, venue, run_id));
         rfq::spawn_prices_feed(Arc::clone(&latest_prices), venue_credentials);
         streams.push(latest_prices);
     }
