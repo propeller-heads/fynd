@@ -6,7 +6,9 @@ its latest message. Bebop allows one pricing connection per API key, so pods sha
 each other's connections when they open their own. Run exactly one `fynd-nexus` per chain and
 environment, such as `ethereum-fynd-nexus`, deploy it with the `Recreate` strategy so two
 instances never hold the same Bebop key, and point each pod at the instance of its own chain with
-`fynd serve --nexus-url`. The service does not check the pod's chain.
+`fynd serve --nexus-url`. The service does not check the pod's chain. Nexus and the pods must run
+the same Fynd version, because a pod reads the venue prices as the types of its own build. They do
+today, as both are built from the same workspace and image.
 
 The service runs one prices feed per venue: Bebop on Ethereum and Base, Hashflow on
 Ethereum, and Metric on the chains Fynd serves it on. A venue that does not serve the chain is

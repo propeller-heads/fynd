@@ -10,6 +10,9 @@ use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// The protocol version this build writes and reads.
+///
+/// Bump it when the message envelope or the venue price data a pod reads changes so that an older
+/// pod cannot parse it, including a tycho upgrade that changes a venue's price types.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The current message of a nexus stream, for state of type `D`.
