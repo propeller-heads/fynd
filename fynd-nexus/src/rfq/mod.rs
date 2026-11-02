@@ -243,26 +243,25 @@ mod tests {
         )
         .unwrap_or_default();
 
-        let streams = streams_to_serve(Chain::Unichain, &credentials).unwrap();
+        let streams = streams_to_serve(Chain::Base, &credentials).unwrap();
 
         let venues: Vec<_> = streams
             .iter()
             .map(RfqCredentials::venue)
             .collect();
-        assert_eq!(venues, [RfqVenue::Hashflow]);
+        assert_eq!(venues, [RfqVenue::Bebop, RfqVenue::Metric]);
     }
 
     #[test]
     fn test_streams_fail_when_no_venue_supports_the_chain() {
         let credentials =
-            require_credentials(&[RfqVenue::Bebop, RfqVenue::Metric], &args(true, true, true))
-                .unwrap_or_default();
+            require_credentials(&[RfqVenue::Hashflow], &args(true, true, true)).unwrap_or_default();
 
-        let error = streams_to_serve(Chain::Unichain, &credentials)
+        let error = streams_to_serve(Chain::Base, &credentials)
             .err()
             .unwrap()
             .to_string();
 
-        assert_eq!(error, "none of the listed venues (bebop, metric) supports unichain");
+        assert_eq!(error, "none of the listed venues (hashflow) supports base");
     }
 }

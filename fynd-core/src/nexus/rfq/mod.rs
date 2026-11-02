@@ -139,6 +139,18 @@ mod tests {
 
     use super::{test_support::*, *};
 
+    #[rstest]
+    #[case::bebop_ethereum(RfqVenue::Bebop, Chain::Ethereum, true)]
+    #[case::bebop_base(RfqVenue::Bebop, Chain::Base, true)]
+    #[case::bebop_arbitrum(RfqVenue::Bebop, Chain::Arbitrum, false)]
+    #[case::hashflow_ethereum(RfqVenue::Hashflow, Chain::Ethereum, true)]
+    #[case::hashflow_base(RfqVenue::Hashflow, Chain::Base, false)]
+    #[case::metric_arbitrum(RfqVenue::Metric, Chain::Arbitrum, true)]
+    #[case::metric_unichain(RfqVenue::Metric, Chain::Unichain, false)]
+    fn test_supports_chain(#[case] venue: RfqVenue, #[case] chain: Chain, #[case] expected: bool) {
+        assert_eq!(venue.supports_chain(chain), expected);
+    }
+
     #[test]
     fn test_venue_names() {
         for venue in RfqVenue::ALL {
