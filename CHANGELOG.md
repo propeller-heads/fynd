@@ -1,4 +1,16 @@
 
+## [0.118.5](https://github.com/propeller-heads/fynd/compare/0.118.4...0.118.5) (2026-11-02)
+
+### Features
+
+* **encoding:** make encode_tycho_router_call public ([c2296eb](https://github.com/propeller-heads/fynd/commit/c2296eba06c1cd4fcfc33525bc11b1c617553a2f))
+
+### Bug Fixes
+
+* **deps:** move utoipa-swagger-ui to 10 to clear the zip advisories ([1cfa82b](https://github.com/propeller-heads/fynd/commit/1cfa82bdc9f79da6e6b4e1504dbbfd99ffa01399))
+* **worker:** rebuild edge data when spot prices or depths complete ([9ab0296](https://github.com/propeller-heads/fynd/commit/9ab0296d93ae467560fe4d073b4bc6f4c93b43c6))
+
+
 
 
 ## [0.118.2](https://github.com/propeller-heads/fynd/compare/0.118.1...0.118.2) (2026-10-30)
