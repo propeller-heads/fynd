@@ -104,6 +104,9 @@ impl EthCallRunner {
     /// Tries `eth_simulateV1` first (balance-delta approach). Falls back to `eth_call` +
     /// return-data parsing when the RPC does not support `eth_simulateV1`. Gas is `None`
     /// on the fallback path.
+    ///
+    /// Returns `Ok(None)` when the swap reverts, and `Err` when the node fails to answer, for
+    /// example on a rate limit, a timeout or missing state.
     pub async fn execute(
         &self,
         token_in: Address,
@@ -283,10 +286,11 @@ impl EthCallRunner {
 
         let return_data = match result {
             Ok(d) => d,
-            Err(e) => {
+            Err(e) if is_revert(&e) => {
                 warn!("eth_call at block {block} reverted: {e}");
                 return Ok(None);
             }
+            Err(e) => return Err(e).context(format!("eth_call at block {block}")),
         };
 
         Ok(parse_return_amount(&return_data))
@@ -463,6 +467,22 @@ pub fn is_method_not_found(e: &anyhow::Error) -> bool {
     msg.contains("method not found") || msg.contains("does not exist")
 }
 
+/// Returns `true` when the node ran the call and the call reverted, as opposed to a node that
+/// failed to run it.
+///
+/// Geth-style nodes answer a revert with error code `3`. Nodes that use another code still say
+/// "revert" in the message.
+fn is_revert(e: &RpcError<TransportErrorKind>) -> bool {
+    let RpcError::ErrorResp(payload) = e else {
+        return false;
+    };
+    payload.code == 3 ||
+        payload
+            .message
+            .to_ascii_lowercase()
+            .contains("revert")
+}
+
 /// Extract `uint256 amountOut` from raw `eth_call` return bytes.
 ///
 /// Most routers return a bare `uint256` as the first word. The 0x AllowanceHolder wraps
@@ -546,6 +566,23 @@ mod tests {
             .unwrap();
         assert_eq!(amount, BigUint::from(100u32));
         assert_eq!(gas, 0x5208);
+    }
+
+    fn error_response(code: i64, message: &'static str) -> RpcError<TransportErrorKind> {
+        RpcError::ErrorResp(alloy::rpc::json_rpc::ErrorPayload {
+            code,
+            message: message.into(),
+            data: None,
+        })
+    }
+
+    #[test]
+    fn test_is_revert() {
+        assert!(is_revert(&error_response(3, "execution reverted")));
+        assert!(is_revert(&error_response(-32000, "execution reverted")));
+        assert!(!is_revert(&error_response(-32005, "rate limit exceeded")));
+        assert!(!is_revert(&error_response(-32000, "missing trie node")));
+        assert!(!is_revert(&RpcError::Transport(TransportErrorKind::BackendGone)));
     }
 
     #[test]
