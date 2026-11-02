@@ -28,6 +28,7 @@ Key properties:
 | [`fynd-core`](../fynd-core/CLAUDE.md) | `fynd-core/` | Pure solving logic: algorithms, worker pools, graph, feed, derived data, encoding. No HTTP deps |
 | [`fynd-rpc`](../fynd-rpc/CLAUDE.md) | `fynd-rpc/` | HTTP RPC server builder (Actix Web): API handlers, middleware, `FyndRPCBuilder` |
 | [`fynd-rpc-types`](../fynd-rpc-types/CLAUDE.md) | `fynd-rpc-types/` | Shared DTO types for the RPC API (request/response wire format) |
+| [`fynd-nexus`](../fynd-nexus/README.md) | `fynd-nexus/` | Service binary that holds the Bebop, Hashflow and Metric connections of one chain and serves their latest prices to pods started with `--nexus-url` |
 | `fynd-test-fixtures` | `test-fixtures/` | Shared types for recorded-market test fixtures: `MarketRecording`, expected outputs, test scenarios |
 | [`fynd-bench-harness`](../bench-harness/README.md) | `bench-harness/` | Runs the routing algorithms over one market and writes a report: the `algorithm_bench`, `profile` and `derived` targets, the configs, the viewer. Takes an `AlgorithmRegistry`, so a crate outside this workspace can benchmark its own algorithm |
 
