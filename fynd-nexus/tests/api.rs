@@ -4,7 +4,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use common::{new_latest_prices, RUN_ID};
 use fynd_core::nexus::{
-    rfq::{prices_path, RfqVenue},
+    price_levels::{prices_path, PriceLevelVenue},
     MessageBody, NexusMessage,
 };
 use fynd_nexus::{
@@ -24,7 +24,7 @@ fn serve(streams: &[Arc<LatestPrices>]) -> SocketAddr {
 }
 
 fn bebop() -> Arc<LatestPrices> {
-    new_latest_prices(RfqVenue::Bebop)
+    new_latest_prices(PriceLevelVenue::Bebop)
 }
 
 async fn get(address: SocketAddr, path: &str, if_none_match: Option<&str>) -> Response {
@@ -54,7 +54,7 @@ async fn get_json(address: SocketAddr, path: &str) -> (u16, Value) {
 async fn test_request_before_first_snapshot() {
     let address = serve(&[bebop()]);
 
-    let response = get(address, "/v1/rfq/bebop", None).await;
+    let response = get(address, "/v1/price-levels/bebop", None).await;
 
     assert_eq!(response.status(), 204);
     assert!(response
@@ -70,7 +70,7 @@ async fn test_snapshot_response() {
     state.publish(&json!({"pairs": [1]}), chrono::Utc::now());
     let address = serve(&[state]);
 
-    let response = get(address, "/v1/rfq/bebop", None).await;
+    let response = get(address, "/v1/price-levels/bebop", None).await;
 
     assert_eq!(response.status(), 200);
     assert_eq!(etag_of(&response), format!("\"{RUN_ID}-1\""));
@@ -90,7 +90,7 @@ async fn test_etag_round_trip() {
     let state = bebop();
     state.publish(&json!({"n": 1}), chrono::Utc::now());
     let address = serve(std::slice::from_ref(&state));
-    let path = "/v1/rfq/bebop";
+    let path = "/v1/price-levels/bebop";
     let first = etag_of(&get(address, path, None).await);
 
     let unchanged = get(address, path, Some(&first)).await;
@@ -122,8 +122,8 @@ async fn test_etag_round_trip() {
 }
 
 #[rstest]
-#[case::unknown_venue("/v1/rfq/liquorice")]
-#[case::venue_not_served("/v1/rfq/metric")]
+#[case::unknown_venue("/v1/price-levels/liquorice")]
+#[case::venue_not_served("/v1/price-levels/metric")]
 #[tokio::test]
 async fn test_request_unknown_stream(#[case] path: &str) {
     let address = serve(&[bebop()]);
@@ -134,10 +134,10 @@ async fn test_request_unknown_stream(#[case] path: &str) {
 }
 
 #[rstest]
-#[case::bebop(RfqVenue::Bebop)]
-#[case::metric(RfqVenue::Metric)]
+#[case::bebop(PriceLevelVenue::Bebop)]
+#[case::metric(PriceLevelVenue::Metric)]
 #[tokio::test]
-async fn test_prices_path_routing(#[case] venue: RfqVenue) {
+async fn test_prices_path_routing(#[case] venue: PriceLevelVenue) {
     let state = new_latest_prices(venue);
     state.publish(&json!({}), chrono::Utc::now());
     let address = serve(&[state]);
@@ -159,7 +159,7 @@ async fn test_health_follows_whether_any_stream_has_prices(
     #[case] serving: Value,
 ) {
     let bebop = bebop();
-    let metric = new_latest_prices(RfqVenue::Metric);
+    let metric = new_latest_prices(PriceLevelVenue::Metric);
     let address = serve(&[bebop, metric.clone()]);
     if publish {
         metric.publish(&json!({}), chrono::Utc::now());

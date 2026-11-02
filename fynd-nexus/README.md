@@ -1,6 +1,6 @@
 # fynd-nexus
 
-Holds the RFQ venue connections that Fynd pods would otherwise each open, and serves the latest
+Holds the venue connections that Fynd pods would otherwise each open, and serves the latest
 prices to them. An instance serves one chain, and a stream is one of its venues; the service keeps
 its latest message. Bebop allows one pricing connection per API key, so pods sharing a key close
 each other's connections when they open their own. Run exactly one `fynd-nexus` per chain and
@@ -44,11 +44,11 @@ serves prices only: expose it inside the cluster.
 
 | Endpoint | |
 |---|---|
-| `GET /v1/rfq/{venue}` | The current message of the stream as JSON, with an `ETag`. |
+| `GET /v1/price-levels/{venue}` | The current message of the stream as JSON, with an `ETag`. |
 | `GET /v1/health` | 200 while at least one stream holds prices, 503 otherwise. |
 | `GET /metrics` (metrics port) | Prometheus metrics. |
 
-`venue` is `bebop`, `hashflow` or `metric`. `GET /v1/rfq/{venue}` answers:
+`venue` is `bebop`, `hashflow` or `metric`. `GET /v1/price-levels/{venue}` answers:
 
 | Status | When |
 |---|---|

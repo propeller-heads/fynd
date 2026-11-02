@@ -7,7 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use fynd_core::nexus::{rfq::RfqVenue, MessageBody, NexusMessage};
+use fynd_core::nexus::{price_levels::PriceLevelVenue, MessageBody, NexusMessage};
 use metrics::{gauge, histogram, Label};
 use serde::Serialize;
 use tycho_simulation::evm::tycho_models::Chain;
@@ -81,7 +81,7 @@ struct StreamRecord {
 /// Only the stream's feed runner publishes or withdraws.
 pub struct LatestPrices {
     chain: Chain,
-    venue: RfqVenue,
+    venue: PriceLevelVenue,
     run_id: u64,
     latest: RwLock<StreamRecord>,
 }
@@ -89,7 +89,7 @@ pub struct LatestPrices {
 impl LatestPrices {
     /// The stream of `venue` on the chain the service serves, with no snapshot yet. `run_id`
     /// identifies this run of the service.
-    pub fn new(chain: Chain, venue: RfqVenue, run_id: u64) -> Self {
+    pub fn new(chain: Chain, venue: PriceLevelVenue, run_id: u64) -> Self {
         let latest = StreamRecord {
             seq: 0,
             encoded: None,
@@ -104,7 +104,7 @@ impl LatestPrices {
     }
 
     /// The venue this stream serves.
-    pub fn venue(&self) -> RfqVenue {
+    pub fn venue(&self) -> PriceLevelVenue {
         self.venue
     }
 
@@ -220,7 +220,7 @@ mod tests {
     const RUN_ID: u64 = 7;
 
     fn latest_prices() -> LatestPrices {
-        LatestPrices::new(Chain::Base, RfqVenue::Hashflow, RUN_ID)
+        LatestPrices::new(Chain::Base, PriceLevelVenue::Hashflow, RUN_ID)
     }
 
     fn message(latest_prices: &LatestPrices) -> NexusMessage<Value> {

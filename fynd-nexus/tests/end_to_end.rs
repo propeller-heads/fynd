@@ -1,4 +1,4 @@
-//! Fynd Nexus and a pod-side RFQ prices feed reading from it over a local socket, with
+//! Fynd Nexus and a pod-side price levels feed reading from it over a local socket, with
 //! a scripted feed standing in for Bebop.
 
 mod common;
@@ -9,9 +9,9 @@ use common::{scripted_feed, Attempts, FeedControl};
 use futures::StreamExt as _;
 use fynd_core::nexus::{
     client::NexusClient,
-    rfq::{
+    price_levels::{
         test_support::{bebop_assembler, bebop_prices},
-        RfqAssembler, RfqVenue,
+        PriceLevelVenue, PriceLevelsAssembler,
     },
 };
 use fynd_nexus::{
@@ -43,7 +43,8 @@ struct Service {
 /// Starts a service with `run_id` on `address` and prepares `attempts` feeds. Starts the first feed
 /// immediately and each remaining feed after its predecessor ends.
 fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
-    let latest_prices = Arc::new(LatestPrices::new(Chain::Ethereum, RfqVenue::Bebop, run_id));
+    let latest_prices =
+        Arc::new(LatestPrices::new(Chain::Ethereum, PriceLevelVenue::Bebop, run_id));
     let mut feed_controls = Vec::new();
     let mut scripted = Vec::new();
     for _ in 0..attempts {
@@ -62,7 +63,10 @@ fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
 
 fn start_pod(service: SocketAddr) -> PodFeed {
     let client = NexusClient::new(&format!("http://{service}")).unwrap();
-    SnapshotFeedStream::spawn("pod", client.rfq_prices_feed(RfqAssembler::Bebop(bebop_assembler())))
+    SnapshotFeedStream::spawn(
+        "pod",
+        client.price_levels_feed(PriceLevelsAssembler::Bebop(bebop_assembler())),
+    )
 }
 
 /// The books the pod publishes next.

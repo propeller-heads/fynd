@@ -1,4 +1,4 @@
-//! The HTTP API: `/v1/rfq/{venue}` serves a stream's current message and
+//! The HTTP API: `/v1/price-levels/{venue}` serves a stream's current message and
 //! `/v1/health` says whether any stream holds prices.
 
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
@@ -9,14 +9,14 @@ use actix_web::{
     http::header::{ContentType, ETAG, IF_NONE_MATCH},
     web, App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
-use fynd_core::nexus::rfq::RfqVenue;
+use fynd_core::nexus::price_levels::PriceLevelVenue;
 use serde_json::json;
 
 use crate::latest_prices::LatestPrices;
 
 /// The streams this service serves, by venue.
 pub struct Streams {
-    by_venue: HashMap<RfqVenue, Arc<LatestPrices>>,
+    by_venue: HashMap<PriceLevelVenue, Arc<LatestPrices>>,
 }
 
 impl Streams {
@@ -37,7 +37,7 @@ impl Streams {
 
     fn find(&self, venue: &str) -> Result<Arc<LatestPrices>, actix_web::Error> {
         let not_served = || ErrorNotFound(format!("no stream for venue '{venue}'"));
-        let venue = RfqVenue::from_str(venue).map_err(|_| not_served())?;
+        let venue = PriceLevelVenue::from_str(venue).map_err(|_| not_served())?;
         self.by_venue
             .get(&venue)
             .cloned()
@@ -55,7 +55,7 @@ pub fn bind(streams: Arc<Streams>, address: SocketAddr) -> std::io::Result<(Serv
         App::new()
             .app_data(web::Data::from(streams.clone()))
             .route("/v1/health", web::get().to(health))
-            .route("/v1/rfq/{venue}", web::get().to(current))
+            .route("/v1/price-levels/{venue}", web::get().to(current))
     })
     .bind(address)?;
     let bound = server
@@ -87,7 +87,7 @@ async fn health(streams: web::Data<Streams>) -> impl Responder {
     }
 }
 
-/// `GET /v1/rfq/{venue}`: the stream's current message with its `ETag`.
+/// `GET /v1/price-levels/{venue}`: the stream's current message with its `ETag`.
 ///
 /// Answers 304 with no body when `If-None-Match` equals the current `ETag`, and 204 while the
 /// stream has had no snapshot in this run.

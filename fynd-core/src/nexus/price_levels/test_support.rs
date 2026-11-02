@@ -1,4 +1,4 @@
-//! Assemblers and prices for the tests of the RFQ modules: WETH and USDC on Ethereum.
+//! Assemblers and prices for the tests of the price level modules: WETH and USDC on Ethereum.
 
 use std::{
     collections::{HashMap, HashSet},

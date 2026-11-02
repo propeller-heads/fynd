@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use common::{current_message, new_latest_prices, scripted_feed, Attempts, FeedControl, RUN_ID};
-use fynd_core::nexus::{rfq::RfqVenue, MessageBody, NexusMessage};
+use fynd_core::nexus::{price_levels::PriceLevelVenue, MessageBody, NexusMessage};
 use fynd_nexus::{feed_runner::run_feed, latest_prices::LatestPrices};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use rstest::rstest;
@@ -52,7 +52,7 @@ fn snapshot_data(latest_prices: &LatestPrices) -> Value {
 
 #[tokio::test(start_paused = true)]
 async fn test_publishes_what_the_feed_yields() {
-    let latest_prices = new_latest_prices(RfqVenue::Bebop);
+    let latest_prices = new_latest_prices(PriceLevelVenue::Bebop);
     let (control, feed) = scripted_feed(None);
     let attempts = Attempts::new(vec![Ok(feed)]);
     tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), BACKOFF));
@@ -70,7 +70,7 @@ async fn test_publishes_what_the_feed_yields() {
 
 #[tokio::test(start_paused = true)]
 async fn test_withdraws_what_the_feed_lets_go_stale() {
-    let latest_prices = new_latest_prices(RfqVenue::Bebop);
+    let latest_prices = new_latest_prices(PriceLevelVenue::Bebop);
     let (control, feed) = scripted_feed(Some(Duration::from_secs(60)));
     let attempts = Attempts::new(vec![Ok(feed)]);
     tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), BACKOFF));
@@ -87,7 +87,7 @@ async fn test_withdraws_what_the_feed_lets_go_stale() {
 
 #[tokio::test(start_paused = true)]
 async fn test_feed_end_during_restart_backoff() {
-    let latest_prices = new_latest_prices(RfqVenue::Hashflow);
+    let latest_prices = new_latest_prices(PriceLevelVenue::Hashflow);
     let (first, first_feed) = scripted_feed(None);
     let attempts = Attempts::new(vec![Ok(first_feed)]);
     tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), BACKOFF));
@@ -111,7 +111,7 @@ async fn test_feed_ending_that_restarts(#[case] feed_end: FeedEnd) {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let _guard = metrics::set_default_local_recorder(&recorder);
-    let latest_prices = new_latest_prices(RfqVenue::Hashflow);
+    let latest_prices = new_latest_prices(PriceLevelVenue::Hashflow);
     let (first, first_feed) = scripted_feed(None);
     let (second, second_feed) = scripted_feed(None);
     let attempts = Attempts::new(vec![Ok(first_feed), Ok(second_feed)]);
@@ -138,7 +138,7 @@ async fn test_feed_ending_that_stops(#[case] error: FeedError) {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let _guard = metrics::set_default_local_recorder(&recorder);
-    let latest_prices = new_latest_prices(RfqVenue::Hashflow);
+    let latest_prices = new_latest_prices(PriceLevelVenue::Hashflow);
     let (first, first_feed) = scripted_feed(None);
     let attempts = Attempts::new(vec![Ok(first_feed)]);
     let runner = tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), BACKOFF));
@@ -161,7 +161,7 @@ async fn test_feed_ending_that_stops(#[case] error: FeedError) {
 #[case::invalid_input(FeedError::InvalidInput("bad url".into()), false)]
 #[tokio::test(start_paused = true)]
 async fn test_feed_that_cannot_start(#[case] error: FeedError, #[case] retries: bool) {
-    let latest_prices = new_latest_prices(RfqVenue::Metric);
+    let latest_prices = new_latest_prices(PriceLevelVenue::Metric);
     let (control, feed) = scripted_feed(None);
     let attempts = Attempts::new(vec![Err(error), Ok(feed)]);
     let runner = tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), BACKOFF));

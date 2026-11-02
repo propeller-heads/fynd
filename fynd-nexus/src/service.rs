@@ -14,7 +14,7 @@ use crate::{
     api::{self, Streams},
     cli::Cli,
     latest_prices::{spawn_snapshot_age_reports, LatestPrices},
-    rfq,
+    price_levels,
 };
 
 /// Byte sizes for `nexus_message_bytes`: from a withdrawal up to a full Bebop book.
@@ -61,18 +61,18 @@ fn bind_metrics(port: u16) -> anyhow::Result<actix_web::dev::Server> {
 ///
 /// The caller sets up logging.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
-    let credentials = rfq::require_credentials(&cli.venues, &cli.rfq)?;
+    let credentials = price_levels::require_credentials(&cli.venues, &cli.venue_args)?;
 
     let metrics_server = bind_metrics(cli.metrics_port)?;
     let run_id = new_run_id();
-    let to_start = rfq::streams_to_serve(cli.chain, &credentials)?;
+    let to_start = price_levels::streams_to_serve(cli.chain, &credentials)?;
     info!(chain = %cli.chain, run_id, "starting the service");
     let mut streams = Vec::new();
     for venue_credentials in to_start {
         let venue = venue_credentials.venue();
         info!(%venue, "starting stream");
         let latest_prices = Arc::new(LatestPrices::new(cli.chain, venue, run_id));
-        rfq::spawn_prices_feed(Arc::clone(&latest_prices), venue_credentials);
+        price_levels::spawn_prices_feed(Arc::clone(&latest_prices), venue_credentials);
         streams.push(latest_prices);
     }
     spawn_snapshot_age_reports(streams.clone());

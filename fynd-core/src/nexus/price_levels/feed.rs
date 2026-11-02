@@ -1,4 +1,4 @@
-//! The feed of one RFQ venue's books, polled from a `fynd-nexus` service.
+//! The feed of one venue's price levels, polled from a `fynd-nexus` service.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -16,7 +16,7 @@ use tycho_simulation::{
     snapshot_feed::{errors::FeedError, Publisher, SnapshotFeed},
 };
 
-use super::{max_snapshot_age, prices_path, RfqAssembler, RfqVenue};
+use super::{max_snapshot_age, prices_path, PriceLevelVenue, PriceLevelsAssembler};
 use crate::nexus::{MessageBody, MessageError, NexusMessage};
 
 /// How often the feed polls the service for current prices.
@@ -41,7 +41,7 @@ struct PollTimings {
 }
 
 impl PollTimings {
-    fn for_venue(venue: RfqVenue) -> Self {
+    fn for_venue(venue: PriceLevelVenue) -> Self {
         Self {
             poll_interval: POLL_INTERVAL,
             request_timeout: REQUEST_TIMEOUT,
@@ -63,18 +63,18 @@ impl PollTimings {
 ///
 /// It never gives up polling: it withdraws the venue's books once it has applied no new prices for
 /// the venue's snapshot age, and restores them when new prices arrive.
-pub struct RfqPricesFeed {
+pub struct PriceLevelsFeed {
     max_snapshot_age: Option<Duration>,
     poller: PricePoller,
 }
 
-impl RfqPricesFeed {
+impl PriceLevelsFeed {
     /// A feed of the venue `assembler` reads, from the service at `connection_url`, which
     /// must be a valid HTTP URL.
     pub(crate) fn new(
         connection_url: &str,
         http: reqwest::Client,
-        assembler: RfqAssembler,
+        assembler: PriceLevelsAssembler,
     ) -> Self {
         let timings = PollTimings::for_venue(assembler.venue());
         Self::with_timings(connection_url, http, assembler, timings)
@@ -83,7 +83,7 @@ impl RfqPricesFeed {
     fn with_timings(
         connection_url: &str,
         http: reqwest::Client,
-        assembler: RfqAssembler,
+        assembler: PriceLevelsAssembler,
         timings: PollTimings,
     ) -> Self {
         let url = format!("{connection_url}{}", prices_path(assembler.venue()));
@@ -94,7 +94,7 @@ impl RfqPricesFeed {
     }
 }
 
-impl SnapshotFeed for RfqPricesFeed {
+impl SnapshotFeed for PriceLevelsFeed {
     type Snapshot = BookSnapshot<ReceivedAt>;
     type Error = FeedError;
 
@@ -134,10 +134,10 @@ enum PollError {
 /// empty books. Drops previously applied messages and snapshots older than the venue's snapshot
 /// age.
 struct PricePoller {
-    venue: RfqVenue,
+    venue: PriceLevelVenue,
     url: String,
     http: reqwest::Client,
-    assembler: RfqAssembler,
+    assembler: PriceLevelsAssembler,
     timings: PollTimings,
     ticker: Option<Interval>,
     failed_polls: u32,
@@ -149,7 +149,7 @@ impl PricePoller {
     fn new(
         url: String,
         http: reqwest::Client,
-        assembler: RfqAssembler,
+        assembler: PriceLevelsAssembler,
         timings: PollTimings,
     ) -> Self {
         Self {
@@ -321,13 +321,13 @@ mod tests {
     };
 
     use super::*;
-    use crate::nexus::rfq::test_support::{
+    use crate::nexus::price_levels::test_support::{
         bebop_assembler, bebop_prices, hashflow_assembler, hashflow_prices, metric_assembler,
         metric_prices,
     };
 
     const RUN_ID: u64 = 1_761_550_000_000;
-    const PATH: &str = "/v1/rfq/bebop";
+    const PATH: &str = "/v1/price-levels/bebop";
     const DEADLINE: Duration = Duration::from_secs(10);
 
     fn timings() -> PollTimings {
@@ -339,16 +339,20 @@ mod tests {
         }
     }
 
-    fn feed_of(url: &str, assembler: RfqAssembler, timings: PollTimings) -> RfqPricesFeed {
-        RfqPricesFeed::with_timings(url, reqwest::Client::new(), assembler, timings)
+    fn feed_of(
+        url: &str,
+        assembler: PriceLevelsAssembler,
+        timings: PollTimings,
+    ) -> PriceLevelsFeed {
+        PriceLevelsFeed::with_timings(url, reqwest::Client::new(), assembler, timings)
     }
 
-    fn poller_of(url: &str, assembler: RfqAssembler, timings: PollTimings) -> PricePoller {
+    fn poller_of(url: &str, assembler: PriceLevelsAssembler, timings: PollTimings) -> PricePoller {
         feed_of(url, assembler, timings).poller
     }
 
     fn poller() -> PricePoller {
-        poller_of("http://shared:3000", RfqAssembler::Bebop(bebop_assembler()), timings())
+        poller_of("http://shared:3000", PriceLevelsAssembler::Bebop(bebop_assembler()), timings())
     }
 
     fn snapshot_of(
@@ -417,7 +421,7 @@ mod tests {
             .unwrap()
             .expect("a fresh snapshot is published");
 
-        let direct = RfqAssembler::Bebop(bebop_assembler())
+        let direct = PriceLevelsAssembler::Bebop(bebop_assembler())
             .books(data)
             .unwrap();
         let mut applied_ids: Vec<_> = applied.books.keys().collect();
@@ -445,26 +449,46 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bebop_fresh(RfqAssembler::Bebop(bebop_assembler()), bebop_json(), 5, true)]
-    #[case::bebop_just_inside(RfqAssembler::Bebop(bebop_assembler()), bebop_json(), 50, true)]
-    #[case::bebop_stale(RfqAssembler::Bebop(bebop_assembler()), bebop_json(), 120, false)]
-    #[case::bebop_long_dead(RfqAssembler::Bebop(bebop_assembler()), bebop_json(), 86_400, false)]
+    #[case::bebop_fresh(PriceLevelsAssembler::Bebop(bebop_assembler()), bebop_json(), 5, true)]
+    #[case::bebop_just_inside(
+        PriceLevelsAssembler::Bebop(bebop_assembler()),
+        bebop_json(),
+        50,
+        true
+    )]
+    #[case::bebop_stale(PriceLevelsAssembler::Bebop(bebop_assembler()), bebop_json(), 120, false)]
+    #[case::bebop_long_dead(
+        PriceLevelsAssembler::Bebop(bebop_assembler()),
+        bebop_json(),
+        86_400,
+        false
+    )]
     #[case::hashflow_inside(
-        RfqAssembler::Hashflow(hashflow_assembler()),
+        PriceLevelsAssembler::Hashflow(hashflow_assembler()),
         hashflow_json(),
         20,
         true
     )]
     #[case::hashflow_stale(
-        RfqAssembler::Hashflow(hashflow_assembler()),
+        PriceLevelsAssembler::Hashflow(hashflow_assembler()),
         hashflow_json(),
         40,
         false
     )]
-    #[case::metric_inside(RfqAssembler::Metric(metric_assembler()), metric_json(), 10, true)]
-    #[case::metric_stale(RfqAssembler::Metric(metric_assembler()), metric_json(), 20, false)]
+    #[case::metric_inside(
+        PriceLevelsAssembler::Metric(metric_assembler()),
+        metric_json(),
+        10,
+        true
+    )]
+    #[case::metric_stale(
+        PriceLevelsAssembler::Metric(metric_assembler()),
+        metric_json(),
+        20,
+        false
+    )]
     fn test_snapshot_age(
-        #[case] assembler: RfqAssembler,
+        #[case] assembler: PriceLevelsAssembler,
         #[case] data: Value,
         #[case] age_secs: i64,
         #[case] published: bool,
@@ -514,8 +538,11 @@ mod tests {
 
     #[test]
     fn test_prices_of_another_venue() {
-        let mut poller =
-            poller_of("http://shared:3000", RfqAssembler::Metric(metric_assembler()), timings());
+        let mut poller = poller_of(
+            "http://shared:3000",
+            PriceLevelsAssembler::Metric(metric_assembler()),
+            timings(),
+        );
 
         let error = poller
             .apply_message(snapshot(RUN_ID, 1))
@@ -557,7 +584,7 @@ mod tests {
     #[case::capped(6, 8_000)]
     #[case::many_failures(u32::MAX, 8_000)]
     fn test_backoff_doubles_up_to_the_cap(#[case] failed_polls: u32, #[case] millis: u64) {
-        let timings = PollTimings::for_venue(RfqVenue::Bebop);
+        let timings = PollTimings::for_venue(PriceLevelVenue::Bebop);
 
         assert_eq!(timings.backoff(failed_polls), Duration::from_millis(millis));
     }
@@ -579,7 +606,7 @@ mod tests {
             .mount(&server)
             .await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
 
         let applied = poller.poll().await.unwrap();
         let unchanged = poller.poll().await.unwrap();
@@ -612,7 +639,7 @@ mod tests {
     async fn test_poll_without_updates_with_existing_etag(#[case] status: u16) {
         let server = serve(ResponseTemplate::new(status)).await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
         poller.etag = Some("\"7-3\"".to_string());
 
         let result = poller.poll().await.unwrap();
@@ -625,7 +652,7 @@ mod tests {
     async fn test_poll_withdrawal() {
         let server = serve(ok(&withdrawn(RUN_ID, 4))).await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
 
         let applied = poller.poll().await.unwrap();
 
@@ -639,7 +666,7 @@ mod tests {
     async fn test_poll_skips_a_replay_but_remembers_its_etag() {
         let server = serve(ok(&snapshot(RUN_ID, 2))).await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
         poller
             .apply_message(snapshot(RUN_ID, 2))
             .unwrap();
@@ -655,7 +682,7 @@ mod tests {
         let stale = snapshot_with_age(RUN_ID, 1, chrono::Duration::seconds(120));
         let server = serve(ok(&stale)).await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
 
         assert!(poller.poll().await.unwrap().is_none());
     }
@@ -674,7 +701,7 @@ mod tests {
     async fn test_poll_response_errors(#[case] response: ResponseTemplate, #[case] reason: &str) {
         let server = serve(response).await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
 
         let error = poller.poll().await.unwrap_err();
 
@@ -687,7 +714,8 @@ mod tests {
     async fn test_poll_timeout() {
         let server = serve(ok(&snapshot(RUN_ID, 1)).set_delay(Duration::from_secs(30))).await;
         let slow = PollTimings { request_timeout: Duration::from_millis(50), ..timings() };
-        let mut poller = poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), slow);
+        let mut poller =
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), slow);
 
         let error = poller.poll().await.unwrap_err();
 
@@ -696,8 +724,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_unreachable_service() {
-        let mut poller =
-            poller_of("http://127.0.0.1:1", RfqAssembler::Bebop(bebop_assembler()), timings());
+        let mut poller = poller_of(
+            "http://127.0.0.1:1",
+            PriceLevelsAssembler::Bebop(bebop_assembler()),
+            timings(),
+        );
 
         let error = poller.poll().await.unwrap_err();
 
@@ -731,7 +762,7 @@ mod tests {
             .mount(&server)
             .await;
         let mut poller =
-            poller_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), timings());
+            poller_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), timings());
 
         let books = timeout(DEADLINE, poller.next_snapshot())
             .await
@@ -781,7 +812,7 @@ mod tests {
             .mount(&server)
             .await;
         let aging = PollTimings { max_snapshot_age: Some(Duration::from_millis(150)), ..timings() };
-        let feed = feed_of(&server.uri(), RfqAssembler::Bebop(bebop_assembler()), aging);
+        let feed = feed_of(&server.uri(), PriceLevelsAssembler::Bebop(bebop_assembler()), aging);
         let mut events = SnapshotFeedStream::spawn("test", feed);
 
         let published = timeout(DEADLINE, events.next())

@@ -1,4 +1,4 @@
-//! RFQ prices shared between pods: the venues a `fynd-nexus` service holds a connection
+//! Price levels shared between pods: the venues a `fynd-nexus` service holds a connection
 //! for, and the feed that turns their prices into books.
 
 mod feed;
@@ -7,7 +7,7 @@ pub mod test_support;
 
 use std::{collections::HashMap, fmt, str::FromStr, time::Duration};
 
-pub use feed::RfqPricesFeed;
+pub use feed::PriceLevelsFeed;
 use tycho_simulation::{
     book::Book,
     evm::tycho_models::Chain,
@@ -20,9 +20,9 @@ use tycho_simulation::{
 
 use crate::feed::book_venues::metric::METRIC_CHAINS;
 
-/// An RFQ venue whose pricing connection Fynd Nexus can manage.
+/// A venue whose pricing connection Fynd Nexus can manage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RfqVenue {
+pub enum PriceLevelVenue {
     /// Bebop.
     Bebop,
     /// Hashflow.
@@ -31,11 +31,11 @@ pub enum RfqVenue {
     Metric,
 }
 
-impl RfqVenue {
+impl PriceLevelVenue {
     /// Every venue the service can serve.
-    pub const ALL: [RfqVenue; 3] = [Self::Bebop, Self::Hashflow, Self::Metric];
+    pub const ALL: [PriceLevelVenue; 3] = [Self::Bebop, Self::Hashflow, Self::Metric];
 
-    /// The name of this venue, e.g. `bebop` in `/v1/rfq/bebop`. It is also the
+    /// The name of this venue, e.g. `bebop` in `/v1/price-levels/bebop`. It is also the
     /// `--venues` value and the `venue` metric label.
     pub fn name(self) -> &'static str {
         match self {
@@ -56,37 +56,37 @@ impl RfqVenue {
     }
 }
 
-impl fmt::Display for RfqVenue {
+impl fmt::Display for PriceLevelVenue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
 /// The path that serves the current prices of `venue` in a `fynd-nexus` service,
-/// e.g. `/v1/rfq/bebop`.
-pub fn prices_path(venue: RfqVenue) -> String {
-    format!("/v1/rfq/{venue}")
+/// e.g. `/v1/price-levels/bebop`.
+pub fn prices_path(venue: PriceLevelVenue) -> String {
+    format!("/v1/price-levels/{venue}")
 }
 
-/// A venue name not listed in [`RfqVenue::ALL`].
+/// A venue name not listed in [`PriceLevelVenue::ALL`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown venue '{0}'; expected one of bebop, hashflow, metric")]
-pub struct UnknownRfqVenue(String);
+pub struct UnknownPriceLevelVenue(String);
 
-impl FromStr for RfqVenue {
-    type Err = UnknownRfqVenue;
+impl FromStr for PriceLevelVenue {
+    type Err = UnknownPriceLevelVenue;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .into_iter()
             .find(|venue| venue.name() == name)
-            .ok_or_else(|| UnknownRfqVenue(name.to_string()))
+            .ok_or_else(|| UnknownPriceLevelVenue(name.to_string()))
     }
 }
 
 /// Builds one venue's books from its prices, with the pod's book settings. The variant says which
 /// venue's prices it reads.
-pub enum RfqAssembler {
+pub enum PriceLevelsAssembler {
     /// Reads [`BebopPrices`].
     Bebop(BebopBookAssembler),
     /// Reads [`HashflowPrices`].
@@ -95,13 +95,13 @@ pub enum RfqAssembler {
     Metric(MetricBookAssembler),
 }
 
-impl RfqAssembler {
+impl PriceLevelsAssembler {
     /// The venue whose prices the assembler reads.
-    pub fn venue(&self) -> RfqVenue {
+    pub fn venue(&self) -> PriceLevelVenue {
         match self {
-            Self::Bebop(_) => RfqVenue::Bebop,
-            Self::Hashflow(_) => RfqVenue::Hashflow,
-            Self::Metric(_) => RfqVenue::Metric,
+            Self::Bebop(_) => PriceLevelVenue::Bebop,
+            Self::Hashflow(_) => PriceLevelVenue::Hashflow,
+            Self::Metric(_) => PriceLevelVenue::Metric,
         }
     }
 
@@ -124,11 +124,11 @@ impl RfqAssembler {
 }
 
 /// The snapshot age limit used by the venue's direct feed, or `None` for no limit.
-fn max_snapshot_age(venue: RfqVenue) -> Option<Duration> {
+fn max_snapshot_age(venue: PriceLevelVenue) -> Option<Duration> {
     match venue {
-        RfqVenue::Bebop => BebopFeedBuilder::default_feed_config().max_snapshot_age,
-        RfqVenue::Hashflow => HashflowFeedBuilder::default_feed_config().max_snapshot_age,
-        RfqVenue::Metric => MetricFeedBuilder::default_feed_config().max_snapshot_age,
+        PriceLevelVenue::Bebop => BebopFeedBuilder::default_feed_config().max_snapshot_age,
+        PriceLevelVenue::Hashflow => HashflowFeedBuilder::default_feed_config().max_snapshot_age,
+        PriceLevelVenue::Metric => MetricFeedBuilder::default_feed_config().max_snapshot_age,
     }
 }
 
@@ -140,49 +140,62 @@ mod tests {
     use super::{test_support::*, *};
 
     #[rstest]
-    #[case::bebop_ethereum(RfqVenue::Bebop, Chain::Ethereum, true)]
-    #[case::bebop_base(RfqVenue::Bebop, Chain::Base, true)]
-    #[case::bebop_arbitrum(RfqVenue::Bebop, Chain::Arbitrum, false)]
-    #[case::hashflow_ethereum(RfqVenue::Hashflow, Chain::Ethereum, true)]
-    #[case::hashflow_base(RfqVenue::Hashflow, Chain::Base, false)]
-    #[case::metric_arbitrum(RfqVenue::Metric, Chain::Arbitrum, true)]
-    #[case::metric_unichain(RfqVenue::Metric, Chain::Unichain, false)]
-    fn test_supports_chain(#[case] venue: RfqVenue, #[case] chain: Chain, #[case] expected: bool) {
+    #[case::bebop_ethereum(PriceLevelVenue::Bebop, Chain::Ethereum, true)]
+    #[case::bebop_base(PriceLevelVenue::Bebop, Chain::Base, true)]
+    #[case::bebop_arbitrum(PriceLevelVenue::Bebop, Chain::Arbitrum, false)]
+    #[case::hashflow_ethereum(PriceLevelVenue::Hashflow, Chain::Ethereum, true)]
+    #[case::hashflow_base(PriceLevelVenue::Hashflow, Chain::Base, false)]
+    #[case::metric_arbitrum(PriceLevelVenue::Metric, Chain::Arbitrum, true)]
+    #[case::metric_unichain(PriceLevelVenue::Metric, Chain::Unichain, false)]
+    fn test_supports_chain(
+        #[case] venue: PriceLevelVenue,
+        #[case] chain: Chain,
+        #[case] expected: bool,
+    ) {
         assert_eq!(venue.supports_chain(chain), expected);
     }
 
     #[test]
     fn test_venue_names() {
-        for venue in RfqVenue::ALL {
+        for venue in PriceLevelVenue::ALL {
             assert_eq!(venue.name().parse(), Ok(venue));
             assert_eq!(venue.to_string(), venue.name());
         }
-        assert_eq!("liquorice".parse::<RfqVenue>(), Err(UnknownRfqVenue("liquorice".to_string())));
+        assert_eq!(
+            "liquorice".parse::<PriceLevelVenue>(),
+            Err(UnknownPriceLevelVenue("liquorice".to_string()))
+        );
     }
 
     #[test]
     fn test_prices_path() {
-        assert_eq!(prices_path(RfqVenue::Metric), "/v1/rfq/metric");
+        assert_eq!(prices_path(PriceLevelVenue::Metric), "/v1/price-levels/metric");
     }
 
     #[rstest]
-    #[case::bebop(RfqAssembler::Bebop(bebop_assembler()), RfqVenue::Bebop)]
-    #[case::hashflow(RfqAssembler::Hashflow(hashflow_assembler()), RfqVenue::Hashflow)]
-    #[case::metric(RfqAssembler::Metric(metric_assembler()), RfqVenue::Metric)]
-    fn test_assembler_venue(#[case] assembler: RfqAssembler, #[case] venue: RfqVenue) {
+    #[case::bebop(PriceLevelsAssembler::Bebop(bebop_assembler()), PriceLevelVenue::Bebop)]
+    #[case::hashflow(
+        PriceLevelsAssembler::Hashflow(hashflow_assembler()),
+        PriceLevelVenue::Hashflow
+    )]
+    #[case::metric(PriceLevelsAssembler::Metric(metric_assembler()), PriceLevelVenue::Metric)]
+    fn test_assembler_venue(
+        #[case] assembler: PriceLevelsAssembler,
+        #[case] venue: PriceLevelVenue,
+    ) {
         assert_eq!(assembler.venue(), venue);
     }
 
     #[rstest]
-    #[case::bebop(RfqAssembler::Bebop(bebop_assembler()), bebop_json(), bebop_books())]
+    #[case::bebop(PriceLevelsAssembler::Bebop(bebop_assembler()), bebop_json(), bebop_books())]
     #[case::hashflow(
-        RfqAssembler::Hashflow(hashflow_assembler()),
+        PriceLevelsAssembler::Hashflow(hashflow_assembler()),
         hashflow_json(),
         hashflow_books()
     )]
-    #[case::metric(RfqAssembler::Metric(metric_assembler()), metric_json(), metric_books())]
+    #[case::metric(PriceLevelsAssembler::Metric(metric_assembler()), metric_json(), metric_books())]
     fn test_shared_and_direct_book_assembly(
-        #[case] assembler: RfqAssembler,
+        #[case] assembler: PriceLevelsAssembler,
         #[case] data: serde_json::Value,
         #[case] direct: HashMap<String, Book>,
     ) {
@@ -194,12 +207,18 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bebop_given_metric(RfqAssembler::Bebop(bebop_assembler()), metric_json())]
-    #[case::hashflow_given_bebop(RfqAssembler::Hashflow(hashflow_assembler()), bebop_json())]
-    #[case::metric_given_hashflow(RfqAssembler::Metric(metric_assembler()), hashflow_json())]
-    #[case::bebop_given_nothing(RfqAssembler::Bebop(bebop_assembler()), json!(null))]
+    #[case::bebop_given_metric(PriceLevelsAssembler::Bebop(bebop_assembler()), metric_json())]
+    #[case::hashflow_given_bebop(
+        PriceLevelsAssembler::Hashflow(hashflow_assembler()),
+        bebop_json()
+    )]
+    #[case::metric_given_hashflow(
+        PriceLevelsAssembler::Metric(metric_assembler()),
+        hashflow_json()
+    )]
+    #[case::bebop_given_nothing(PriceLevelsAssembler::Bebop(bebop_assembler()), json!(null))]
     fn test_books_reject_another_venues_prices(
-        #[case] assembler: RfqAssembler,
+        #[case] assembler: PriceLevelsAssembler,
         #[case] data: serde_json::Value,
     ) {
         assert!(assembler.books(data).is_err());

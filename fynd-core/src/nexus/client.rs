@@ -2,7 +2,7 @@
 
 use reqwest::Url;
 
-use super::rfq::{RfqAssembler, RfqPricesFeed};
+use super::price_levels::{PriceLevelsAssembler, PriceLevelsFeed};
 
 /// Errors when creating a [`NexusClient`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,9 +51,9 @@ impl NexusClient {
         Ok(Self { connection_url: connection_url.to_string(), http })
     }
 
-    /// A feed of one RFQ venue's books, built by `assembler` from the prices the service serves.
-    pub fn rfq_prices_feed(&self, assembler: RfqAssembler) -> RfqPricesFeed {
-        RfqPricesFeed::new(&self.connection_url, self.http.clone(), assembler)
+    /// A feed of one venue's price levels, built by `assembler` from the prices the service serves.
+    pub fn price_levels_feed(&self, assembler: PriceLevelsAssembler) -> PriceLevelsFeed {
+        PriceLevelsFeed::new(&self.connection_url, self.http.clone(), assembler)
     }
 }
 

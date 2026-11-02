@@ -4,7 +4,7 @@
 //! poll it over HTTP. Each response carries a [`NexusMessage`](crate::nexus::NexusMessage) as JSON.
 
 pub mod client;
-pub mod rfq;
+pub mod price_levels;
 
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -128,7 +128,7 @@ mod tests {
     };
 
     use super::{
-        rfq::test_support::{bebop_prices, hashflow_prices},
+        price_levels::test_support::{bebop_prices, hashflow_prices},
         *,
     };
 

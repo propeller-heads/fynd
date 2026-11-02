@@ -1,10 +1,10 @@
 //! The command line and environment of `fynd-nexus`.
 
 use clap::Parser;
-use fynd_core::nexus::rfq::RfqVenue;
+use fynd_core::nexus::price_levels::PriceLevelVenue;
 use tycho_simulation::evm::tycho_models::Chain;
 
-use crate::rfq::RfqArgs;
+use crate::price_levels::VenueArgs;
 
 /// The arguments of `fynd-nexus`.
 #[derive(Debug, Parser)]
@@ -19,9 +19,9 @@ pub struct Cli {
         long,
         env = "VENUES",
         value_delimiter = ',',
-        default_values_t = RfqVenue::ALL
+        default_values_t = PriceLevelVenue::ALL
     )]
-    pub venues: Vec<RfqVenue>,
+    pub venues: Vec<PriceLevelVenue>,
 
     /// Port of the HTTP API.
     #[arg(long, env = "HTTP_PORT", default_value_t = 3000)]
@@ -33,7 +33,7 @@ pub struct Cli {
 
     /// The venues' credentials and endpoints.
     #[command(flatten)]
-    pub rfq: RfqArgs,
+    pub venue_args: VenueArgs,
 }
 
 #[cfg(test)]
@@ -50,7 +50,7 @@ mod tests {
         let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "base"]).unwrap();
 
         assert_eq!(cli.chain, Chain::Base);
-        assert_eq!(cli.venues, RfqVenue::ALL);
+        assert_eq!(cli.venues, PriceLevelVenue::ALL);
         assert_eq!((cli.http_port, cli.metrics_port), (3000, 9898));
     }
 
@@ -86,10 +86,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.rfq.bebop.key.as_deref(), Some("b"));
-        assert_eq!(cli.rfq.hashflow.user.as_deref(), Some("u"));
-        assert_eq!(cli.rfq.hashflow.key.as_deref(), Some("k"));
-        assert_eq!(cli.rfq.metric.api_key.as_deref(), Some("m"));
-        assert_eq!(cli.rfq.metric.api_url.as_deref(), Some("https://metric.example"));
+        assert_eq!(cli.venue_args.bebop.key.as_deref(), Some("b"));
+        assert_eq!(cli.venue_args.hashflow.user.as_deref(), Some("u"));
+        assert_eq!(cli.venue_args.hashflow.key.as_deref(), Some("k"));
+        assert_eq!(cli.venue_args.metric.api_key.as_deref(), Some("m"));
+        assert_eq!(cli.venue_args.metric.api_url.as_deref(), Some("https://metric.example"));
     }
 }

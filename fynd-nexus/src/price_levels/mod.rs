@@ -1,6 +1,6 @@
-//! The RFQ venues the service serves, and the one place that matches on [`RfqVenue`]: which chains
-//! a venue supports, which credentials it needs, and how its prices feed starts. Each venue's own
-//! settings and feed are in [`bebop`], [`hashflow`] and [`metric`].
+//! The venues the service serves, and the one place that matches on [`PriceLevelVenue`]: which
+//! chains a venue supports, which credentials it needs, and how its prices feed starts. Each
+//! venue's own settings and feed are in [`bebop`], [`hashflow`] and [`metric`].
 
 pub mod bebop;
 pub mod hashflow;
@@ -9,14 +9,14 @@ pub mod metric;
 use std::sync::Arc;
 
 use anyhow::bail;
-use fynd_core::nexus::rfq::RfqVenue;
+use fynd_core::nexus::price_levels::PriceLevelVenue;
 use tracing::warn;
 use tycho_simulation::evm::tycho_models::Chain;
 
 use crate::{
     feed_runner::{run_feed, RESTART_BACKOFF},
     latest_prices::LatestPrices,
-    rfq::{
+    price_levels::{
         bebop::{BebopArgs, BebopCredentials},
         hashflow::{HashflowArgs, HashflowCredentials},
         metric::{MetricArgs, MetricCredentials},
@@ -25,7 +25,7 @@ use crate::{
 
 /// The venues' credentials and endpoints.
 #[derive(clap::Args, Debug, Clone, Default)]
-pub struct RfqArgs {
+pub struct VenueArgs {
     /// Bebop's settings.
     #[command(flatten)]
     pub bebop: BebopArgs,
@@ -41,7 +41,7 @@ pub struct RfqArgs {
 
 /// The credentials of one venue, checked to be complete.
 #[derive(Clone)]
-pub enum RfqCredentials {
+pub enum VenueCredentials {
     /// Bebop's credentials.
     Bebop(BebopCredentials),
     /// Hashflow's credentials.
@@ -50,18 +50,18 @@ pub enum RfqCredentials {
     Metric(MetricCredentials),
 }
 
-impl RfqCredentials {
-    fn resolve(venue: RfqVenue, args: &RfqArgs) -> Result<Self, &'static str> {
+impl VenueCredentials {
+    fn resolve(venue: PriceLevelVenue, args: &VenueArgs) -> Result<Self, &'static str> {
         match venue {
-            RfqVenue::Bebop => args
+            PriceLevelVenue::Bebop => args
                 .bebop
                 .credentials()
                 .map(Self::Bebop),
-            RfqVenue::Hashflow => args
+            PriceLevelVenue::Hashflow => args
                 .hashflow
                 .credentials()
                 .map(Self::Hashflow),
-            RfqVenue::Metric => args
+            PriceLevelVenue::Metric => args
                 .metric
                 .credentials()
                 .map(Self::Metric),
@@ -69,11 +69,11 @@ impl RfqCredentials {
     }
 
     /// The venue these credentials are for.
-    pub fn venue(&self) -> RfqVenue {
+    pub fn venue(&self) -> PriceLevelVenue {
         match self {
-            Self::Bebop(_) => RfqVenue::Bebop,
-            Self::Hashflow(_) => RfqVenue::Hashflow,
-            Self::Metric(_) => RfqVenue::Metric,
+            Self::Bebop(_) => PriceLevelVenue::Bebop,
+            Self::Hashflow(_) => PriceLevelVenue::Hashflow,
+            Self::Metric(_) => PriceLevelVenue::Metric,
         }
     }
 }
@@ -84,13 +84,13 @@ impl RfqCredentials {
 ///
 /// Returns an error listing the environment variables needed for missing venue credentials.
 pub fn require_credentials(
-    venues: &[RfqVenue],
-    args: &RfqArgs,
-) -> anyhow::Result<Vec<RfqCredentials>> {
+    venues: &[PriceLevelVenue],
+    args: &VenueArgs,
+) -> anyhow::Result<Vec<VenueCredentials>> {
     let mut credentials = Vec::new();
     let mut missing = Vec::new();
     for &venue in venues {
-        match RfqCredentials::resolve(venue, args) {
+        match VenueCredentials::resolve(venue, args) {
             Ok(venue_credentials) => credentials.push(venue_credentials),
             Err(variables) => missing.push(variables),
         }
@@ -109,9 +109,9 @@ pub fn require_credentials(
 /// Returns an error naming `chain` and the listed venues when none of them supports it.
 pub fn streams_to_serve(
     chain: Chain,
-    credentials: &[RfqCredentials],
-) -> anyhow::Result<Vec<RfqCredentials>> {
-    let mut streams: Vec<RfqCredentials> = Vec::new();
+    credentials: &[VenueCredentials],
+) -> anyhow::Result<Vec<VenueCredentials>> {
+    let mut streams: Vec<VenueCredentials> = Vec::new();
     for venue_credentials in credentials {
         let venue = venue_credentials.venue();
         if streams
@@ -137,24 +137,24 @@ pub fn streams_to_serve(
 }
 
 /// Starts the prices feed of `latest_prices` on a task, and restarts it as `run_feed` decides.
-pub fn spawn_prices_feed(latest_prices: Arc<LatestPrices>, credentials: RfqCredentials) {
+pub fn spawn_prices_feed(latest_prices: Arc<LatestPrices>, credentials: VenueCredentials) {
     let chain = latest_prices.chain();
     match credentials {
-        RfqCredentials::Bebop(credentials) => {
+        VenueCredentials::Bebop(credentials) => {
             tokio::spawn(run_feed(
                 latest_prices,
                 move || bebop::prices_feed(chain, &credentials),
                 RESTART_BACKOFF,
             ));
         }
-        RfqCredentials::Hashflow(credentials) => {
+        VenueCredentials::Hashflow(credentials) => {
             tokio::spawn(run_feed(
                 latest_prices,
                 move || hashflow::prices_feed(chain, &credentials),
                 RESTART_BACKOFF,
             ));
         }
-        RfqCredentials::Metric(credentials) => {
+        VenueCredentials::Metric(credentials) => {
             tokio::spawn(run_feed(
                 latest_prices,
                 move || metric::prices_feed(chain, &credentials),
@@ -170,8 +170,8 @@ mod tests {
 
     use super::*;
 
-    fn args(bebop: bool, hashflow: bool, metric: bool) -> RfqArgs {
-        RfqArgs {
+    fn args(bebop: bool, hashflow: bool, metric: bool) -> VenueArgs {
+        VenueArgs {
             bebop: BebopArgs { key: bebop.then(|| "bebop-secret".to_string()) },
             hashflow: HashflowArgs {
                 user: hashflow.then(|| "user".to_string()),
@@ -185,27 +185,27 @@ mod tests {
     }
 
     #[rstest]
-    #[case::all_set(args(true, true, true), RfqVenue::ALL.to_vec(), None)]
+    #[case::all_set(args(true, true, true), PriceLevelVenue::ALL.to_vec(), None)]
     #[case::unlisted_venues_need_nothing(
         args(true, false, false),
-        vec![RfqVenue::Bebop],
+        vec![PriceLevelVenue::Bebop],
         None
     )]
-    #[case::bebop(args(false, true, true), RfqVenue::ALL.to_vec(), Some("BEBOP_KEY"))]
+    #[case::bebop(args(false, true, true), PriceLevelVenue::ALL.to_vec(), Some("BEBOP_KEY"))]
     #[case::hashflow(
         args(true, false, true),
-        RfqVenue::ALL.to_vec(),
+        PriceLevelVenue::ALL.to_vec(),
         Some("HASHFLOW_USER and HASHFLOW_KEY")
     )]
     #[case::hashflow_key_only_missing(
         hashflow_user_only(),
-        vec![RfqVenue::Hashflow],
+        vec![PriceLevelVenue::Hashflow],
         Some("HASHFLOW_USER and HASHFLOW_KEY")
     )]
-    #[case::metric(args(true, true, false), RfqVenue::ALL.to_vec(), Some("METRIC_API_KEY"))]
+    #[case::metric(args(true, true, false), PriceLevelVenue::ALL.to_vec(), Some("METRIC_API_KEY"))]
     fn test_required_credentials(
-        #[case] args: RfqArgs,
-        #[case] venues: Vec<RfqVenue>,
+        #[case] args: VenueArgs,
+        #[case] venues: Vec<PriceLevelVenue>,
         #[case] missing: Option<&str>,
     ) {
         let result = require_credentials(&venues, &args);
@@ -220,7 +220,7 @@ mod tests {
         }
     }
 
-    fn hashflow_user_only() -> RfqArgs {
+    fn hashflow_user_only() -> VenueArgs {
         let mut args = args(true, true, true);
         args.hashflow.key = None;
         args
@@ -238,7 +238,12 @@ mod tests {
     #[test]
     fn test_streams_skip_venues_that_do_not_support_the_chain_and_repeated_venues() {
         let credentials = require_credentials(
-            &[RfqVenue::Hashflow, RfqVenue::Bebop, RfqVenue::Metric, RfqVenue::Hashflow],
+            &[
+                PriceLevelVenue::Hashflow,
+                PriceLevelVenue::Bebop,
+                PriceLevelVenue::Metric,
+                PriceLevelVenue::Hashflow,
+            ],
             &args(true, true, true),
         )
         .unwrap_or_default();
@@ -247,15 +252,16 @@ mod tests {
 
         let venues: Vec<_> = streams
             .iter()
-            .map(RfqCredentials::venue)
+            .map(VenueCredentials::venue)
             .collect();
-        assert_eq!(venues, [RfqVenue::Bebop, RfqVenue::Metric]);
+        assert_eq!(venues, [PriceLevelVenue::Bebop, PriceLevelVenue::Metric]);
     }
 
     #[test]
     fn test_streams_fail_when_no_venue_supports_the_chain() {
         let credentials =
-            require_credentials(&[RfqVenue::Hashflow], &args(true, true, true)).unwrap_or_default();
+            require_credentials(&[PriceLevelVenue::Hashflow], &args(true, true, true))
+                .unwrap_or_default();
 
         let error = streams_to_serve(Chain::Base, &credentials)
             .err()

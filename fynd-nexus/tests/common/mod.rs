@@ -13,7 +13,7 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use fynd_core::nexus::{rfq::RfqVenue, NexusMessage};
+use fynd_core::nexus::{price_levels::PriceLevelVenue, NexusMessage};
 use fynd_nexus::latest_prices::LatestPrices;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
@@ -129,7 +129,7 @@ impl<P> Attempts<P> {
     }
 }
 
-pub fn new_latest_prices(venue: RfqVenue) -> Arc<LatestPrices> {
+pub fn new_latest_prices(venue: PriceLevelVenue) -> Arc<LatestPrices> {
     Arc::new(LatestPrices::new(Chain::Ethereum, venue, RUN_ID))
 }
 

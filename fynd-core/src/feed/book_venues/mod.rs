@@ -34,7 +34,7 @@ use crate::{
     feed::protocol_registry::parse_rfq_entries,
     nexus::{
         client::NexusClient,
-        rfq::{RfqAssembler, RfqPricesFeed},
+        price_levels::{PriceLevelsAssembler, PriceLevelsFeed},
     },
 };
 
@@ -126,8 +126,8 @@ pub(crate) struct BookVenueContext {
     pub(crate) nexus_client: Option<NexusClient>,
 }
 
-/// The feed of one book venue that [`BookStream`] runs: the venue's own connection, or `SharedRfq`
-/// for prices polled from Fynd Nexus.
+/// The feed of one book venue that [`BookStream`] runs: the venue's own connection, or
+/// `SharedPriceLevels` for prices polled from Fynd Nexus.
 ///
 /// [`BookStream`]: super::book_stream::BookStream
 pub(crate) enum BookVenueFeed {
@@ -136,7 +136,7 @@ pub(crate) enum BookVenueFeed {
     Metric(MetricFeed),
     Native(NativeFeed),
     Liquorice(LiquoriceFeed),
-    SharedRfq(RfqPricesFeed),
+    SharedPriceLevels(PriceLevelsFeed),
 }
 
 impl SnapshotFeed for BookVenueFeed {
@@ -153,7 +153,7 @@ impl SnapshotFeed for BookVenueFeed {
             Self::Metric(feed) => feed.run(publisher).boxed(),
             Self::Native(feed) => feed.run(publisher).boxed(),
             Self::Liquorice(feed) => feed.run(publisher).boxed(),
-            Self::SharedRfq(feed) => feed.run(publisher).boxed(),
+            Self::SharedPriceLevels(feed) => feed.run(publisher).boxed(),
         }
     }
 }
@@ -178,9 +178,9 @@ pub(crate) fn open_book_feed(
             let env = bebop::BebopEnv::read()?;
             let assembler = bebop::assembler(context, entry, &env)?;
             match &context.nexus_client {
-                Some(client) => {
-                    BookVenueFeed::SharedRfq(client.rfq_prices_feed(RfqAssembler::Bebop(assembler)))
-                }
+                Some(client) => BookVenueFeed::SharedPriceLevels(
+                    client.price_levels_feed(PriceLevelsAssembler::Bebop(assembler)),
+                ),
                 None => BookVenueFeed::Bebop(bebop::direct_feed(context, &env, assembler)?),
             }
         }
@@ -188,8 +188,8 @@ pub(crate) fn open_book_feed(
             let env = hashflow::HashflowEnv::read()?;
             let assembler = hashflow::assembler(context, entry, &env)?;
             match &context.nexus_client {
-                Some(client) => BookVenueFeed::SharedRfq(
-                    client.rfq_prices_feed(RfqAssembler::Hashflow(assembler)),
+                Some(client) => BookVenueFeed::SharedPriceLevels(
+                    client.price_levels_feed(PriceLevelsAssembler::Hashflow(assembler)),
                 ),
                 None => BookVenueFeed::Hashflow(hashflow::direct_feed(context, &env, assembler)?),
             }
@@ -197,8 +197,8 @@ pub(crate) fn open_book_feed(
         BookVenue::Metric => {
             let assembler = metric::assembler(context, entry);
             match &context.nexus_client {
-                Some(client) => BookVenueFeed::SharedRfq(
-                    client.rfq_prices_feed(RfqAssembler::Metric(assembler)),
+                Some(client) => BookVenueFeed::SharedPriceLevels(
+                    client.price_levels_feed(PriceLevelsAssembler::Metric(assembler)),
                 ),
                 None => {
                     let env = metric::MetricEnv::read()?;
@@ -353,7 +353,7 @@ mod tests {
             BookVenueFeed::Metric(_) => "metric",
             BookVenueFeed::Native(_) => "native",
             BookVenueFeed::Liquorice(_) => "liquorice",
-            BookVenueFeed::SharedRfq(_) => "shared",
+            BookVenueFeed::SharedPriceLevels(_) => "shared",
         }
     }
 
