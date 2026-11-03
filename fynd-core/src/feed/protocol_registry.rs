@@ -462,6 +462,13 @@ fn register_exchange(
         "pancakeswap_infinity_cl" => {
             builder.exchange::<UniswapV4State>("pancakeswap_infinity_cl", tvl_filter.clone(), None)
         }
+        // Infinity CL pools whose hook takes part in swaps. Tycho decodes them with a native
+        // handler for each supported hook; a pool with another hook fails to decode.
+        "pancakeswap_infinity_cl_hooks" => builder.exchange::<UniswapV4State>(
+            "pancakeswap_infinity_cl_hooks",
+            tvl_filter.clone(),
+            None,
+        ),
         "uniswap_v4_hooks" => builder.exchange::<UniswapV4State>(
             "uniswap_v4_hooks",
             tvl_filter.clone(),
