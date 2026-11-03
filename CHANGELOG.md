@@ -3,7 +3,7 @@
 
 ### Bug Fixes
 
-* **deps:** bump tycho to 0.497.0 ([c8c4952](https://github.com/propeller-heads/fynd/commit/c8c4952f799accfffc160668520b08caa1c448e1))
+- Update tycho-execution and tycho-simulation to 0.497.0 to pick up their latest releases. ([c8c4952](https://github.com/propeller-heads/fynd/commit/c8c4952f799accfffc160668520b08caa1c448e1))
 
 
 
