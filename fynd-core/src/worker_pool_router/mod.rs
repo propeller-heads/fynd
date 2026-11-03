@@ -49,15 +49,14 @@ use tycho_execution::encoding::{
 use tycho_simulation::tycho_common::Bytes;
 
 use crate::{
-    bps,
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_route_shape, leg_route_output, matched_commitment, pin_commitment,
-        record_gas_token_amount, routes_through_exclusive, to_gas_token_wei, ExclusiveRouteShape,
-        RouteOutput, USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
+        exclusive_route_shape, matched_commitment, pin_commitment, record_gas_token_amount,
+        routes_through_exclusive, to_gas_token_wei, ExclusiveRouteShape, RouteOutput,
+        USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
     },
-    feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
+    feed::protocol_registry::is_rfq_protocol,
     price_guard::guard::PriceGuard,
     simulation::simulator::{QuoteSimulator, SimulationPurpose},
     types::RouteRejection,
@@ -69,14 +68,6 @@ use crate::{
 /// Reported when a request asks for simulation on a server started without `--enable-simulation`.
 const SIMULATION_UNAVAILABLE: &str =
     "simulation requested but simulation is not enabled on this server";
-
-/// The fee in basis points that the protocol takes from an exclusive leg. It applies when the
-/// public worker pools find no route in the solve timeout.
-///
-/// Without a public quote there is no reference price. The protocol takes this fee and the user
-/// gets the rest. The value is the fee of Ekubo's most used ETH/USDC pool. This keeps the quote
-/// competitive with the other solvers.
-const NO_PUBLIC_ROUTE_FEE_BPS: u32 = 5;
 
 /// Which liquidity a solver pool (a group of workers) routes through, and therefore what its
 /// candidates mean in a quote.
@@ -645,8 +636,8 @@ impl WorkerPoolRouter {
         // source of the committed reference (its best quote without exclusive swaps). When the
         // allocation holds an exclusive-scope worker pool, the winning exclusive-access candidate
         // is inserted into that ranked list by net amount by `combine_with_surplus`, so the
-        // fallbacks are preserved. If no public quote avoids exclusive swaps, the exclusive
-        // candidate uses a default fee.
+        // fallbacks are preserved. If no public quote avoids exclusive swaps, there is no price to
+        // commit against and the exclusive candidate is dropped.
         let token_prices = self.snapshot_token_prices().await;
         let ranked_quotes: Vec<Vec<OrderQuote>> = order_responses
             .iter()
@@ -1144,15 +1135,12 @@ impl WorkerPoolRouter {
 /// additionally holds the candidates from `ExclusiveAccess`-scoped worker pools (routes that may
 /// use exclusive components).
 ///
-/// There are two ways to set the commitment:
-/// - **Matched**: `public_ranked` holds a public reference, and the commitment follows that quote,
-///   as shown below.
-/// - **Default fee**: no public reference exists: no public quote succeeded in the solve timeout,
-///   or every one routes through exclusive liquidity. The commitment is the route output minus
-///   `NO_PUBLIC_ROUTE_FEE_BPS` of the exclusive leg. The candidate is skipped if the fee leaves the
-///   user with nothing after gas.
+/// The commitment follows the public reference. If no public reference exists — no public quote
+/// succeeded in the solve timeout, or every one routes through exclusive liquidity — there is no
+/// price to commit against, so the exclusive candidate is dropped and `public_ranked` is returned
+/// unchanged.
 ///
-/// In matched mode a candidate must at least match the public reference net of gas; what it
+/// A candidate must at least match the public reference net of gas; what it
 /// produces on top, `improvement = exclusive_net − public_net`, is then split. The user's net
 /// target is `required_net = public_net + margin`, where `margin` is `user_share_bps` of
 /// `improvement` — so the mark-up is only as large as the route can afford, and a route with more
@@ -1183,11 +1171,9 @@ impl WorkerPoolRouter {
 /// - `Swap::committed_amount_out` set on each exclusive leg, and
 /// - an order-level `SurplusInfo`.
 ///
-/// If there is no commitment, this returns `public_ranked` unchanged. In default-fee mode the
-/// placeholder is the only fallback, so the order answers "no route" if there is no commitment or
-/// the price guard rejects the exclusive quote.
+/// If there is no commitment, this returns `public_ranked` unchanged.
 ///
-/// In matched mode the user is never worse off than the public market, in quoted `amount_out` and
+/// The user is never worse off than the public market, in quoted `amount_out` and
 /// net of gas. A candidate that equals the public reference is quoted with zero surplus, and
 /// executes on exclusive liquidity at the public price.
 ///
@@ -1213,32 +1199,24 @@ fn combine_with_surplus(
         return public_ranked;
     };
 
-    let public_reference = find_public_reference(&public_ranked);
-
-    let commitment = match public_reference {
-        Some(public_reference) => matched_commitment(
-            RouteOutput::from_quote(public_reference),
-            RouteOutput::from_quote(exclusive_candidate),
-            user_share_bps,
-        ),
-        None => default_fee_commitment(exclusive_candidate),
+    let Some(public_reference) = find_public_reference(&public_ranked) else {
+        return public_ranked;
     };
-    let Some(committed_amount_out) = commitment else {
+    let Some(committed_amount_out) = matched_commitment(
+        RouteOutput::from_quote(public_reference),
+        RouteOutput::from_quote(exclusive_candidate),
+        user_share_bps,
+    ) else {
         return public_ranked;
     };
 
-    // Only meaningful against a public reference: the user's improvement over what a plain
-    // public quote would have paid. The no-public-route fallback (default_fee_commitment) has
-    // no public amount_out to diff against.
-    if let Some(public_reference) = public_reference {
-        let user_savings = &committed_amount_out - public_reference.amount_out();
-        record_gas_token_amount(
-            "exclusive_user_savings_amount",
-            exclusive_candidate,
-            &user_savings,
-            token_prices,
-        );
-    }
+    let user_savings = &committed_amount_out - public_reference.amount_out();
+    record_gas_token_amount(
+        "exclusive_user_savings_amount",
+        exclusive_candidate,
+        &user_savings,
+        token_prices,
+    );
 
     let pinned = pin_commitment(exclusive_candidate, committed_amount_out, token_prices);
     let position = public_ranked
@@ -1357,34 +1335,6 @@ fn best_exclusive_candidate<'a>(
                 .cmp(b.quote.amount_out_net_gas())
         })
         .map(|wq| &wq.quote)
-}
-
-/// Returns the amount to commit if the public worker pools find no route. The amount is the
-/// candidate output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the route output the exclusive leg
-/// produces.
-///
-/// The fee applies to the exclusive leg only, not to the whole route. The public market prices the
-/// public branches of a split route, so the protocol takes nothing from them.
-///
-/// Returns `None` if the commitment does not cover the route gas, or if the route has no exclusive
-/// leg.
-fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
-    let route = exclusive_candidate.route()?;
-    let swaps = route.swaps();
-    let leg = swaps
-        .iter()
-        .find(|swap| is_exclusive(swap.protocol_component()))?;
-    let (numerator, denominator) = leg_route_output(swaps, leg, &route.output_token()?)?;
-
-    let realized_amount_out = exclusive_candidate.amount_out();
-    let fee = bps::scale_truncating(&(numerator / denominator), NO_PUBLIC_ROUTE_FEE_BPS);
-    let committed_amount_out = realized_amount_out - fee;
-
-    let gas_cost = realized_amount_out - exclusive_candidate.amount_out_net_gas();
-    if committed_amount_out <= gas_cost {
-        return None;
-    }
-    Some(committed_amount_out)
 }
 
 /// Whether the route of `quote` is [`ExclusiveRouteShape::Valid`]. Counts the two rejections that
@@ -1593,7 +1543,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         derived::DerivedData,
-        feed::exclusivity::mark_exclusive,
+        feed::exclusivity::{is_exclusive, mark_exclusive},
         solver::defaults,
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
@@ -3442,10 +3392,8 @@ mod tests {
     #[case::plain_quote_is_the_reference(
         Some(1_000_000), 1_010_000, 1_200_000, vec![1_020_000, 1_010_000, 1_000_000]
     )]
-    // Default fee: 1_200_000 minus 5 bps of the leg output.
-    #[case::only_replaced_quote_uses_the_default_fee(
-        None, 1_010_000, 1_200_000, vec![1_199_400, 1_010_000]
-    )]
+    // No plain public quote: there is no price to commit against, so the candidate is dropped.
+    #[case::only_replaced_quote(None, 1_010_000, 1_200_000, vec![1_010_000])]
     // The replaced quote nets more than the commitment, so it stays ahead of the pinned quote.
     #[case::replaced_quote_ahead_of_the_commitment(
         Some(1_000_000), 1_300_000, 1_200_000, vec![1_300_000, 1_020_000, 1_000_000]
@@ -3572,91 +3520,9 @@ mod tests {
     }
 
     #[test]
-    fn test_combine_no_public_route_applies_default_fee() {
-        // No public reference to match: 5 bps of the exclusive leg's 1_000_000 output is
-        // withheld, so the user is committed 999_500 and the exclusive component captures 500.
+    fn test_combine_no_public_route() {
         let responses = no_public_route_responses(
             make_exclusive_quote(1_000_000)
-                .order()
-                .clone(),
-        );
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_scopes(),
-            &QuoteOptions::default(),
-            vec![no_route_quote()],
-            1_000,
-            None,
-        );
-
-        assert_eq!(combined.len(), 2);
-        assert_eq!(combined[0].status(), QuoteStatus::Success);
-        assert_eq!(*combined[0].amount_out(), BigUint::from(999_500u64));
-        assert_eq!(*combined[0].amount_out_net_gas(), BigUint::from(999_500u64));
-        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(500u64)));
-
-        let exclusive_leg = combined[0]
-            .route()
-            .expect("surplus quote should have a route")
-            .swaps()
-            .iter()
-            .find(|s| is_exclusive(s.protocol_component()))
-            .expect("should have an exclusive swap")
-            .committed_amount_out()
-            .cloned();
-        assert_eq!(exclusive_leg, Some(BigUint::from(999_500u64)));
-
-        // The placeholder stays on as the price-guard fallback, so a rejected exclusive quote
-        // still answers "no route".
-        assert_eq!(combined[1].status(), QuoteStatus::NoRouteFound);
-    }
-
-    #[test]
-    fn test_combine_no_public_route_split_route_fee_on_exclusive_leg() {
-        // Split route with no public reference: the 5 bps fee is charged on the exclusive leg's
-        // 500_000 output only (250), not on the route's 1_100_000. The public branch pays out in
-        // full, so the whole fee comes out of the exclusive leg: 500_000 − 250 = 499_750.
-        let responses = no_public_route_responses(
-            make_exclusive_split_quote(600_000, 500_000)
-                .order()
-                .clone(),
-        );
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_scopes(),
-            &QuoteOptions::default(),
-            vec![no_route_quote()],
-            1_000,
-            None,
-        );
-
-        assert_eq!(*combined[0].amount_out(), BigUint::from(1_099_750u64));
-        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(250u64)));
-
-        let route = combined[0]
-            .route()
-            .expect("surplus quote should have a route");
-        let public_leg = route
-            .swaps()
-            .iter()
-            .find(|s| !is_exclusive(s.protocol_component()))
-            .expect("should have a public swap");
-        assert_eq!(public_leg.committed_amount_out(), None);
-
-        let exclusive_leg = route
-            .swaps()
-            .iter()
-            .find(|s| is_exclusive(s.protocol_component()))
-            .expect("should have an exclusive swap");
-        assert_eq!(exclusive_leg.committed_amount_out(), Some(&BigUint::from(499_750u64)));
-    }
-
-    #[test]
-    fn test_combine_no_public_route_fee_below_gas() {
-        // Gas leaves 3 of the 10_000 output, so the 5 fee would put the user under water: the
-        // candidate is dropped and the order still reports no route.
-        let responses = no_public_route_responses(
-            make_exclusive_quote_with_leg(10_000, 3, 10_000)
                 .order()
                 .clone(),
         );
@@ -3928,31 +3794,6 @@ mod tests {
             user_amount_out >= committed_amount_out,
             "user gets {user_amount_out}, below the committed {committed_amount_out}",
         );
-    }
-
-    #[test]
-    fn test_combine_no_public_route_first_hop_exclusive_leg() {
-        // The fee is 5 bps of the 900_000 the leg produces in the output token (450), not of the
-        // leg's own 1_000_000. In the leg's token that is 450 / 0.9 = 500.
-        let responses = no_public_route_responses(make_priced_route_quote(
-            &[
-                ("vm:exclusive", 0x01, 0x02, 1000, 1_000_000),
-                ("uniswap_v2", 0x02, 0x03, 1_000_000, 900_000),
-            ],
-            900_000,
-        ));
-        let combined = combine_with_surplus(
-            &responses,
-            &exclusive_access_pool_scopes(),
-            &QuoteOptions::default(),
-            vec![no_route_quote()],
-            1_000,
-            None,
-        );
-
-        assert_eq!(*combined[0].amount_out(), BigUint::from(899_550u64));
-        assert_eq!(combined[0].surplus_amount(), Some(&BigUint::from(450u64)));
-        assert_eq!(exclusive_leg_commitment(&combined[0]), Some(BigUint::from(999_500u64)));
     }
 
     /// Builds an `OrderResponses` where both quotes carry explicit `amount_out_net_gas`.
