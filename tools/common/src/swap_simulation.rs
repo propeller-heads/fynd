@@ -161,9 +161,10 @@ impl EthCallRunner {
             self.try_eth_call(token_in, router, calldata, value, block),
             self.try_estimate_gas(token_in, router, calldata, value, block),
         );
-        let gas = gas_res.ok().flatten();
         Ok(match amount_res? {
-            SwapOutcome::Success { amount_out, .. } => SwapOutcome::Success { amount_out, gas },
+            SwapOutcome::Success { amount_out, .. } => {
+                SwapOutcome::Success { amount_out, gas: gas_res.ok().flatten() }
+            }
             reverted @ SwapOutcome::Reverted { .. } => reverted,
         })
     }
