@@ -12,7 +12,7 @@ use fynd_tools_common::{
     aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote},
     bps::{eth_call_bps_diff, gas_adjusted_bps_diff, raw_bps_diff},
     constants::ETH_SENTINEL_ADDRESS,
-    swap_simulation::EthCallRunner,
+    swap_simulation::{EthCallRunner, SwapOutcome},
 };
 use num_bigint::BigUint;
 use tokio::time::sleep;
@@ -395,14 +395,14 @@ async fn run_eth_call_for_calldata(
         .execute(token_in, token_out, router, &calldata_bytes, &value, block)
         .await
     {
-        Ok(Some((actual, gas_used))) => {
+        Ok(SwapOutcome::Success { amount_out, gas }) => {
             let diff_bps = quoted_amount
                 .and_then(|q| q.parse::<BigUint>().ok())
                 .filter(|q| *q > BigUint::ZERO)
-                .and_then(|q| eth_call_bps_diff(&actual, &q));
-            (Some(actual.to_string()), diff_bps, gas_used)
+                .and_then(|q| eth_call_bps_diff(&amount_out, &q));
+            (Some(amount_out.to_string()), diff_bps, gas)
         }
-        Ok(None) => (None, None, None),
+        Ok(SwapOutcome::Reverted { .. }) => (None, None, None),
         Err(e) => {
             warn!("eth_call validation failed: {e}");
             (None, None, None)

@@ -204,7 +204,7 @@ sol! {
 ///
 /// A revert bubbles up the call tree, so the top frame carries only a generic message while the
 /// error that names the cause sits at the bottom.
-pub(crate) fn reason_from_frame(frame: &CallFrame) -> Option<String> {
+pub fn reason_from_frame(frame: &CallFrame) -> Option<String> {
     if !reverted(frame) {
         return None;
     }
@@ -281,7 +281,7 @@ fn carries_data(frame: &CallFrame) -> bool {
 ///
 /// Returns `None` for a payload too short to carry a selector, which leaves the caller its other
 /// sources rather than reporting an empty revert as a named one.
-pub(crate) fn decode_error(data: &[u8]) -> Option<String> {
+pub fn decode_error(data: &[u8]) -> Option<String> {
     if data.len() < 4 {
         return None;
     }

@@ -20,13 +20,20 @@ use alloy::{
     providers::{Provider, RootProvider},
     rpc::types::{
         state::{AccountOverride, StateOverride},
+        trace::geth::{
+            CallConfig, CallFrame, GethDebugBuiltInTracerType, GethDebugTracerType,
+            GethDebugTracingCallOptions, GethDebugTracingOptions,
+        },
         BlockId, RpcBlockHash, TransactionRequest,
     },
     transports::{RpcError, TransportErrorKind},
 };
 use anyhow::Context;
 use bytes::Bytes;
-use fynd_core::simulation::token_layout::{discover_layout, TokenLayout};
+use fynd_core::simulation::{
+    decode_error, reason_from_frame,
+    token_layout::{discover_layout, TokenLayout},
+};
 use num_bigint::BigUint;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -41,6 +48,17 @@ const ETH_BALANCE_READER_ADDR: Address = Address(alloy::primitives::FixedBytes([
 /// Returns the native ETH balance of the calling address as a uint256.
 const ETH_BALANCE_READER_CODE: [u8; 10] =
     [0x33, 0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+
+/// What a swap did when [`EthCallRunner::execute`] ran it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwapOutcome {
+    /// The sender received `amount_out` of `token_out`. `gas` is `None` when neither
+    /// `eth_simulateV1` nor `eth_estimateGas` reported it.
+    Success { amount_out: BigUint, gas: Option<u64> },
+    /// The swap reverted. `reason` names the error when the revert data or a trace of the call
+    /// carries one, and holds the node's message otherwise.
+    Reverted { reason: String },
+}
 
 /// Validates quotes by re-executing encoded calldata via simulation at the relevant block,
 /// using state overrides to inject token balance and allowance.
@@ -104,6 +122,10 @@ impl EthCallRunner {
     /// Tries `eth_simulateV1` first (balance-delta approach). Falls back to `eth_call` +
     /// return-data parsing when the RPC does not support `eth_simulateV1`. Gas is `None`
     /// on the fallback path.
+    ///
+    /// Returns [`SwapOutcome::Reverted`] when the swap reverts, and `Err` when the node fails to
+    /// answer, for example on a rate limit, a timeout or missing state, or answers with data the
+    /// runner cannot read.
     pub async fn execute(
         &self,
         token_in: Address,
@@ -112,7 +134,7 @@ impl EthCallRunner {
         calldata: &[u8],
         value: &BigUint,
         block: B256,
-    ) -> anyhow::Result<Option<(BigUint, Option<u64>)>> {
+    ) -> anyhow::Result<SwapOutcome> {
         if self
             .simulate_supported
             .load(Ordering::Relaxed)
@@ -121,7 +143,7 @@ impl EthCallRunner {
                 .try_simulate(token_in, token_out, router, calldata, value, block)
                 .await
             {
-                Ok(result) => return Ok(result.map(|(amount, gas)| (amount, Some(gas)))),
+                Ok(outcome) => return Ok(outcome),
                 Err(e) => {
                     if is_method_not_found(&e) {
                         self.simulate_supported
@@ -139,12 +161,19 @@ impl EthCallRunner {
             self.try_eth_call(token_in, router, calldata, value, block),
             self.try_estimate_gas(token_in, router, calldata, value, block),
         );
-        let gas = gas_res.ok().flatten();
-        amount_res.map(|opt| opt.map(|amount| (amount, gas)))
+        Ok(match amount_res? {
+            SwapOutcome::Success { amount_out, .. } => {
+                SwapOutcome::Success { amount_out, gas: gas_res.ok().flatten() }
+            }
+            reverted @ SwapOutcome::Reverted { .. } => reverted,
+        })
     }
 
     /// Run the swap and a balance measurement in the same simulated block via `eth_simulateV1`,
     /// returning the exact amount of `token_out` received and the gas consumed by the swap call.
+    ///
+    /// `eth_simulateV1` can drop the revert data of a reverted swap. The swap is then replayed
+    /// under the call tracer to read the error off the frame that reverted.
     async fn try_simulate(
         &self,
         token_in: Address,
@@ -153,7 +182,7 @@ impl EthCallRunner {
         calldata: &[u8],
         value: &BigUint,
         block: B256,
-    ) -> anyhow::Result<Option<(BigUint, u64)>> {
+    ) -> anyhow::Result<SwapOutcome> {
         let mut overrides = self
             .build_overrides(token_in, router)
             .await?;
@@ -181,7 +210,52 @@ impl EthCallRunner {
             .await
             .context("eth_simulateV1")?;
 
-        parse_simulate_result(&result)
+        let (return_data, message) = match parse_simulate_result(&result)? {
+            SimulatedSwap::Success { amount_out, gas } => {
+                return Ok(SwapOutcome::Success { amount_out, gas: Some(gas) })
+            }
+            SimulatedSwap::Reverted { return_data, message } => (return_data, message),
+        };
+        if let Some(reason) = decode_error(&return_data) {
+            return Ok(SwapOutcome::Reverted { reason });
+        }
+        let swap = self.swap_request(router, calldata, value);
+        let traced = self
+            .traced_revert_reason(swap, overrides, block)
+            .await;
+        Ok(SwapOutcome::Reverted { reason: traced.unwrap_or(message) })
+    }
+
+    /// Replays a reverted swap under the call tracer, with the same overrides at the same block,
+    /// and reads the reason off the frame that reverted.
+    ///
+    /// Returns `None` when the node serves no `debug_traceCall` or the trace names no reason.
+    async fn traced_revert_reason(
+        &self,
+        swap: TransactionRequest,
+        overrides: StateOverride,
+        block: B256,
+    ) -> Option<String> {
+        let options = GethDebugTracingCallOptions {
+            tracing_options: GethDebugTracingOptions::default()
+                .with_tracer(GethDebugTracerType::BuiltInTracer(
+                    GethDebugBuiltInTracerType::CallTracer,
+                ))
+                .with_call_config(CallConfig { only_top_call: Some(false), with_log: Some(false) }),
+            state_overrides: Some(overrides),
+            ..Default::default()
+        };
+        match self
+            .provider
+            .raw_request::<_, CallFrame>("debug_traceCall".into(), (swap, pinned(block), options))
+            .await
+        {
+            Ok(frame) => reason_from_frame(&frame),
+            Err(e) => {
+                warn!("debug_traceCall at block {block} failed: {e}");
+                None
+            }
+        }
     }
 
     /// Build the two `eth_simulateV1` calls: the swap, then a balance read of `token_out`.
@@ -255,13 +329,43 @@ impl EthCallRunner {
         calldata: &[u8],
         value: &BigUint,
         block: B256,
-    ) -> anyhow::Result<Option<BigUint>> {
+    ) -> anyhow::Result<SwapOutcome> {
         let overrides = self
             .build_overrides(token_in, router)
             .await?;
 
+        let result = self
+            .provider
+            .call(self.swap_request(router, calldata, value))
+            .overrides(overrides)
+            .block(pinned(block))
+            .await;
+
+        let return_data = match result {
+            Ok(d) => d,
+            Err(e) if is_revert(&e) => {
+                warn!("eth_call at block {block} reverted: {e}");
+                return Ok(SwapOutcome::Reverted { reason: revert_reason(&e) });
+            }
+            Err(e) => return Err(e).context(format!("eth_call at block {block}")),
+        };
+
+        let amount_out = parse_return_amount(&return_data).with_context(|| {
+            format!("eth_call at block {block} returned {} bytes, not an amount", return_data.len())
+        })?;
+        Ok(SwapOutcome::Success { amount_out, gas: None })
+    }
+
+    /// The swap transaction from the runner's sender, with a zero gas price so that the sender's
+    /// native balance is not charged for gas.
+    fn swap_request(
+        &self,
+        router: Address,
+        calldata: &[u8],
+        value: &BigUint,
+    ) -> TransactionRequest {
         let value_u128: u128 = value.to_string().parse().unwrap_or(0);
-        let tx = TransactionRequest {
+        TransactionRequest {
             from: Some(self.sender),
             to: Some(TxKind::Call(router)),
             input: alloy::primitives::Bytes::copy_from_slice(calldata).into(),
@@ -269,27 +373,7 @@ impl EthCallRunner {
             max_fee_per_gas: Some(0),
             max_priority_fee_per_gas: Some(0),
             ..Default::default()
-        };
-
-        let result = self
-            .provider
-            .call(tx)
-            .overrides(overrides)
-            .block(BlockId::Hash(RpcBlockHash {
-                block_hash: block,
-                require_canonical: Some(false),
-            }))
-            .await;
-
-        let return_data = match result {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("eth_call at block {block} reverted: {e}");
-                return Ok(None);
-            }
-        };
-
-        Ok(parse_return_amount(&return_data))
+        }
     }
 
     /// Gas estimate via `eth_estimateGas` with state overrides.
@@ -401,10 +485,28 @@ impl EthCallRunner {
     }
 }
 
-/// Parse an `eth_simulateV1` result: confirm the swap succeeded, then read the balance call's
-/// `returnData` (a uint256). Returns `(amount_out, gas_used)` or `None` when the swap reverted
-/// or the balance word is missing.
-fn parse_simulate_result(result: &serde_json::Value) -> anyhow::Result<Option<(BigUint, u64)>> {
+/// The swap call of an `eth_simulateV1` result.
+#[derive(Debug, PartialEq, Eq)]
+enum SimulatedSwap {
+    Success {
+        amount_out: BigUint,
+        gas: u64,
+    },
+    /// `return_data` is the revert data, which some nodes leave empty.
+    Reverted {
+        return_data: Vec<u8>,
+        message: String,
+    },
+}
+
+/// The block id that pins a call to `block`, whether or not the block is still canonical.
+fn pinned(block: B256) -> BlockId {
+    BlockId::Hash(RpcBlockHash { block_hash: block, require_canonical: Some(false) })
+}
+
+/// Parse an `eth_simulateV1` result: check whether the swap succeeded, then read the balance
+/// call's `returnData` (a uint256). Fails when the result holds no calls or no balance word.
+fn parse_simulate_result(result: &serde_json::Value) -> anyhow::Result<SimulatedSwap> {
     let calls = result
         .get(0)
         .and_then(|b| b.get("calls"))
@@ -419,8 +521,15 @@ fn parse_simulate_result(result: &serde_json::Value) -> anyhow::Result<Option<(B
         .map(|s| s == "0x1" || s.as_u64() == Some(1))
         .unwrap_or(false);
     if !swap_ok {
-        warn!("eth_simulateV1: swap call reverted");
-        return Ok(None);
+        let return_data = hex_field(swap_call, "returnData")?;
+        let message = swap_call
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("execution reverted")
+            .to_string();
+        warn!("eth_simulateV1: swap call reverted: {message}");
+        return Ok(SimulatedSwap::Reverted { return_data, message });
     }
 
     // gasUsed may be a hex string ("0x...") or a JSON integer depending on the RPC provider.
@@ -433,19 +542,23 @@ fn parse_simulate_result(result: &serde_json::Value) -> anyhow::Result<Option<(B
         })
         .unwrap_or(0);
 
-    let amount_hex = calls
+    let balance_call = calls
         .get(1)
-        .and_then(|c| c.get("returnData"))
+        .ok_or_else(|| anyhow::anyhow!("eth_simulateV1: missing balance call in result"))?;
+    let amount_bytes = hex_field(balance_call, "returnData")?;
+    let Some(amount_word) = amount_bytes.get(..32) else {
+        anyhow::bail!("eth_simulateV1: balance call returned {} bytes", amount_bytes.len());
+    };
+    Ok(SimulatedSwap::Success { amount_out: BigUint::from_bytes_be(amount_word), gas: gas_used })
+}
+
+/// Decodes the hex string `call` holds under `field`. A missing field reads as empty.
+fn hex_field(call: &serde_json::Value, field: &str) -> anyhow::Result<Vec<u8>> {
+    let hex_str = call
+        .get(field)
         .and_then(|d| d.as_str())
         .unwrap_or("0x");
-    let amount_bytes =
-        hex::decode(amount_hex.trim_start_matches("0x")).context("decode amount return")?;
-
-    if amount_bytes.len() >= 32 {
-        Ok(Some((BigUint::from_bytes_be(&amount_bytes[..32]), gas_used)))
-    } else {
-        Ok(None)
-    }
+    hex::decode(hex_str.trim_start_matches("0x")).with_context(|| format!("decode {field}"))
 }
 
 /// Returns `true` when `e` indicates that the called JSON-RPC method does not exist on this RPC.
@@ -461,6 +574,34 @@ pub fn is_method_not_found(e: &anyhow::Error) -> bool {
     // Fallback for providers that surface the error as plain text.
     let msg = e.to_string().to_ascii_lowercase();
     msg.contains("method not found") || msg.contains("does not exist")
+}
+
+/// Returns `true` when the node ran the call and the call reverted, as opposed to a node that
+/// failed to run it.
+///
+/// Geth-style nodes answer a revert with error code `3`. Nodes that use another code still say
+/// "revert" in the message.
+fn is_revert(e: &RpcError<TransportErrorKind>) -> bool {
+    let RpcError::ErrorResp(payload) = e else {
+        return false;
+    };
+    payload.code == 3 ||
+        payload
+            .message
+            .to_ascii_lowercase()
+            .contains("revert")
+}
+
+/// Names the error of an `eth_call` that reverted, from its revert data when the node returned
+/// any, and from the node's message otherwise.
+fn revert_reason(e: &RpcError<TransportErrorKind>) -> String {
+    let Some(payload) = e.as_error_resp() else {
+        return e.to_string();
+    };
+    payload
+        .as_revert_data()
+        .and_then(|data| decode_error(&data))
+        .unwrap_or_else(|| payload.message.to_string())
 }
 
 /// Extract `uint256 amountOut` from raw `eth_call` return bytes.
@@ -526,10 +667,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_simulate_result_reverted_swap_is_none() {
+    fn test_parse_simulate_result_reverted_swap() {
+        let result = serde_json::json!([{ "calls": [
+            {
+                "status": "0x0",
+                "returnData": "0xdeadbeef",
+                "error": { "code": 3, "message": "execution reverted" }
+            },
+            { "returnData": "0x" }
+        ] }]);
+        assert_eq!(
+            parse_simulate_result(&result).unwrap(),
+            SimulatedSwap::Reverted {
+                return_data: vec![0xde, 0xad, 0xbe, 0xef],
+                message: "execution reverted".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_simulate_result_short_balance_word() {
         let result =
-            serde_json::json!([{ "calls": [{ "status": "0x0" }, { "returnData": "0x" }] }]);
-        assert_eq!(parse_simulate_result(&result).unwrap(), None);
+            serde_json::json!([{ "calls": [{ "status": "0x1" }, { "returnData": "0x" }] }]);
+        assert!(parse_simulate_result(&result).is_err());
     }
 
     #[test]
@@ -541,11 +701,44 @@ mod tests {
                 { "returnData": amount }
             ]
         }]);
-        let (amount, gas) = parse_simulate_result(&result)
-            .unwrap()
-            .unwrap();
-        assert_eq!(amount, BigUint::from(100u32));
-        assert_eq!(gas, 0x5208);
+        assert_eq!(
+            parse_simulate_result(&result).unwrap(),
+            SimulatedSwap::Success { amount_out: BigUint::from(100u32), gas: 0x5208 }
+        );
+    }
+
+    fn error_response(code: i64, message: &'static str) -> RpcError<TransportErrorKind> {
+        RpcError::ErrorResp(alloy::rpc::json_rpc::ErrorPayload {
+            code,
+            message: message.into(),
+            data: None,
+        })
+    }
+
+    #[test]
+    fn test_revert_reason() {
+        // TychoRouter__AmountOutZero(), selector 0x6fa417d5.
+        let payload = alloy::rpc::json_rpc::ErrorPayload {
+            code: 3,
+            message: "execution reverted".into(),
+            data: Some(serde_json::value::to_raw_value("0x6fa417d5").unwrap()),
+        };
+        let reason = revert_reason(&RpcError::ErrorResp(payload));
+        assert!(reason.contains("TychoRouter__AmountOutZero"), "{reason}");
+
+        assert_eq!(
+            revert_reason(&error_response(-32000, "execution reverted: STF")),
+            "execution reverted: STF"
+        );
+    }
+
+    #[test]
+    fn test_is_revert() {
+        assert!(is_revert(&error_response(3, "execution reverted")));
+        assert!(is_revert(&error_response(-32000, "execution reverted")));
+        assert!(!is_revert(&error_response(-32005, "rate limit exceeded")));
+        assert!(!is_revert(&error_response(-32000, "missing trie node")));
+        assert!(!is_revert(&RpcError::Transport(TransportErrorKind::BackendGone)));
     }
 
     #[test]
