@@ -1,4 +1,11 @@
 
+## [0.119.0](https://github.com/propeller-heads/fynd/compare/0.118.8...0.119.0) (2026-11-03)
+
+### Features
+
+* **tools:** return the revert reason from EthCallRunner::execute ([a863cfd](https://github.com/propeller-heads/fynd/commit/a863cfd13d46b54f761d88ecbe6e98eac35d5a59))
+
+
 ## [0.118.8](https://github.com/propeller-heads/fynd/compare/0.118.7...0.118.8) (2026-11-03)
 
 ### Features
