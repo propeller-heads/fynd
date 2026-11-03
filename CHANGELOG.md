@@ -3,7 +3,13 @@
 
 ### Features
 
-* **tools:** return the revert reason from EthCallRunner::execute ([a863cfd](https://github.com/propeller-heads/fynd/commit/a863cfd13d46b54f761d88ecbe6e98eac35d5a59))
+- Return a `SwapOutcome` from `EthCallRunner::execute`: `Success` carries the amount out and gas used, and `Reverted` carries the revert reason, so callers can see why a simulated route reverted and attribute it to a single pool. **Breaking:** callers must now handle both outcomes. ([a863cfd](https://github.com/propeller-heads/fynd/commit/a863cfd13d46b54f761d88ecbe6e98eac35d5a59))
+- Decode revert reasons with the router error decoder from `fynd-core`. When `eth_simulateV1` drops the revert data, replay the swap with the `debug_traceCall` call tracer and read the reason from the frame that reverted. ([a863cfd](https://github.com/propeller-heads/fynd/commit/a863cfd13d46b54f761d88ecbe6e98eac35d5a59))
+- Re-export `decode_error` and `reason_from_frame` from `fynd_core::simulation`. ([a863cfd](https://github.com/propeller-heads/fynd/commit/a863cfd13d46b54f761d88ecbe6e98eac35d5a59))
+
+### Other
+
+- Return an error, not a revert, when a simulation result has no readable amount. The benchmark audit still records reverts as before, with no amount. ([a863cfd](https://github.com/propeller-heads/fynd/commit/a863cfd13d46b54f761d88ecbe6e98eac35d5a59))
 
 
 ## [0.118.8](https://github.com/propeller-heads/fynd/compare/0.118.7...0.118.8) (2026-11-03)
