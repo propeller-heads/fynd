@@ -526,7 +526,8 @@ impl Encoder {
     /// Runs `hook` and checks the `Solution` it returns: only the fields in `HOOK_MUTABLE_FIELDS`
     /// may change, and `expected_amount_out` may only rise.
     ///
-    /// A lowered `expected_amount_out` lowers the fees the router takes, so the user could receive
+    /// The router keeps any output above `expected_amount_out` as positive slippage. A lowered
+    /// `expected_amount_out` makes it keep part of the route's output, so the user could receive
     /// less than `min_amount_out` from a route that fills in full, and the call would revert.
     fn apply_solution_hook(
         hook: &dyn SolutionHook,
