@@ -1153,6 +1153,7 @@ mod tests {
     #[case::aero_basic("aero_basic")]
     #[case::aero_cl("aero_cl")]
     #[case::pancakeswap_infinity_cl("pancakeswap_infinity_cl")]
+    #[case::pancakeswap_infinity_cl_hooks("pancakeswap_infinity_cl_hooks")]
     #[case::rocketpool("rocketpool")]
     fn test_register_exchange_supports_protocol(#[case] protocol: &str) {
         let skipped = skipped_unknown_protocols(&[protocol]);
