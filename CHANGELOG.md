@@ -1,4 +1,11 @@
 
+## [0.118.7](https://github.com/propeller-heads/fynd/compare/0.118.6...0.118.7) (2026-11-03)
+
+### Bug Fixes
+
+* **deps:** bump tycho to 0.497.0 ([c8c4952](https://github.com/propeller-heads/fynd/commit/c8c4952f799accfffc160668520b08caa1c448e1))
+
+
 
 ## [0.118.5](https://github.com/propeller-heads/fynd/compare/0.118.4...0.118.5) (2026-11-02)
 
