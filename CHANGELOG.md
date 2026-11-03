@@ -1,4 +1,11 @@
 
+## [0.118.8](https://github.com/propeller-heads/fynd/compare/0.118.7...0.118.8) (2026-11-03)
+
+### Features
+
+* **core:** register PancakeSwap Infinity CL pools with hooks ([8d27c08](https://github.com/propeller-heads/fynd/commit/8d27c08396134bde9fb901137a5faf33a7144e31))
+
+
 ## [0.118.7](https://github.com/propeller-heads/fynd/compare/0.118.6...0.118.7) (2026-11-03)
 
 ### Bug Fixes
