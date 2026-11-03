@@ -441,7 +441,7 @@ pub struct MarketState {
     /// Changes when a component is added or removed or `unsynced_protocols` changes, the two
     /// things a resolved [`ResolvedRouteConstraints`] depends on. Not when a component's state
     /// changes.
-    exclusion_generation: u64,
+    constraint_generation: u64,
 }
 
 impl StoredComponent {
@@ -477,8 +477,8 @@ impl MarketState {
             }
         }
         ResolvedRouteConstraints {
-            pools,
-            tokens: filter.excluded_tokens().clone(),
+            excluded_pools: pools,
+            excluded_tokens: filter.excluded_tokens().clone(),
             required_tokens: filter.required_tokens().clone(),
             unsynced_pools: Arc::clone(&self.unsynced_pools),
         }
@@ -497,7 +497,7 @@ impl MarketState {
             unsynced_protocols: FxHashSet::default(),
             unsynced_pools: Arc::default(),
             components_by_protocol: FxHashMap::default(),
-            exclusion_generation: 0,
+            constraint_generation: 0,
         }
     }
 
@@ -506,10 +506,10 @@ impl MarketState {
         &self.label
     }
 
-    /// Returns the generation of what route exclusions depend on: the component set and the
+    /// Returns the generation of what route constraints depend on: the component set and the
     /// unsynced protocols.
-    pub fn exclusion_generation(&self) -> u64 {
-        self.exclusion_generation
+    pub fn constraint_generation(&self) -> u64 {
+        self.constraint_generation
     }
 
     /// Returns the protocol systems excluded from routing because they are out of sync.
@@ -676,8 +676,8 @@ impl MarketState {
                 .or_default()
                 .insert(component_id);
             if is_new {
-                self.exclusion_generation = self
-                    .exclusion_generation
+                self.constraint_generation = self
+                    .constraint_generation
                     .wrapping_add(1);
             }
         }
@@ -775,8 +775,8 @@ impl MarketState {
         }
         self.unsynced_protocols = unsynced;
         self.unsynced_pools = Arc::new(unsynced_pools);
-        self.exclusion_generation = self
-            .exclusion_generation
+        self.constraint_generation = self
+            .constraint_generation
             .wrapping_add(1);
     }
 
@@ -784,8 +784,8 @@ impl MarketState {
     pub fn remove_components<'a>(&mut self, ids: impl IntoIterator<Item = &'a ComponentId>) {
         for id in ids {
             if let Some(stored) = self.components.remove(id) {
-                self.exclusion_generation = self
-                    .exclusion_generation
+                self.constraint_generation = self
+                    .constraint_generation
                     .wrapping_add(1);
                 if self.unsynced_pools.contains(id) {
                     Arc::make_mut(&mut self.unsynced_pools).remove(id);
@@ -868,7 +868,7 @@ impl MarketState {
             unsynced_protocols: self.unsynced_protocols.clone(),
             unsynced_pools: Arc::clone(&self.unsynced_pools),
             components_by_protocol,
-            exclusion_generation: self.exclusion_generation,
+            constraint_generation: self.constraint_generation,
         }
     }
 
@@ -981,12 +981,12 @@ mod tests {
             .with_excluded_pools(["named_pool".to_string()])
             .with_excluded_protocols(["uniswap_v2".to_string()])
             .with_excluded_tokens([token_b.address.clone()]);
-        let exclusions = market.resolve_route_filter(&filter);
+        let constraints = market.resolve_route_filter(&filter);
 
-        assert!(exclusions.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
-        assert!(exclusions.excludes_pool("named_pool"), "a pool named directly stays excluded");
-        assert!(!exclusions.excludes_pool("v3_pool"), "another protocol's pool is untouched");
-        assert!(exclusions.excludes_token(&token_b.address));
+        assert!(constraints.excludes_pool("v2_pool"), "the protocol's own pool is excluded");
+        assert!(constraints.excludes_pool("named_pool"), "a pool named directly stays excluded");
+        assert!(!constraints.excludes_pool("v3_pool"), "another protocol's pool is untouched");
+        assert!(constraints.excludes_token(&token_b.address));
         assert!(
             market
                 .resolve_route_filter(
@@ -1004,12 +1004,12 @@ mod tests {
         let token_b = token(0x02, "B");
         let market = MarketState::new();
 
-        let exclusions = market.resolve_route_filter(
+        let constraints = market.resolve_route_filter(
             &RouteConstraints::default().with_required_tokens([token_b.address.clone()]),
         );
 
-        assert!(exclusions.visits_all_required_tokens([&token_b.address]));
-        assert!(!exclusions.visits_all_required_tokens([&token_a.address]));
+        assert!(constraints.visits_all_required_tokens([&token_b.address]));
+        assert!(!constraints.visits_all_required_tokens([&token_a.address]));
     }
 
     #[test]
@@ -1170,40 +1170,40 @@ mod tests {
     fn test_update_sync_status(#[case] status: SynchronizerState, #[case] excluded: bool) {
         let market = market_with_v3_status(status);
 
-        let exclusions = market.resolve_route_filter(&RouteConstraints::default());
-        assert_eq!(exclusions.excludes_pool("v3_pool"), excluded);
+        let constraints = market.resolve_route_filter(&RouteConstraints::default());
+        assert_eq!(constraints.excludes_pool("v3_pool"), excluded);
         assert_eq!(
             market
                 .unsynced_protocols()
                 .contains("uniswap_v3"),
             excluded
         );
-        assert!(!exclusions.excludes_pool("v2_pool"));
+        assert!(!constraints.excludes_pool("v2_pool"));
     }
 
     /// RFQ and price level updates carry no sync status.
     #[test]
     fn test_update_sync_status_without_states() {
         let mut market = market_with_v3_status(SynchronizerState::Stale(header(90)));
-        let generation = market.exclusion_generation();
+        let generation = market.constraint_generation();
 
         market.update_sync_status([], MAX_SYNC_LAG);
 
         assert!(market.is_unsynced_pool("v3_pool"));
-        assert_eq!(market.exclusion_generation(), generation);
+        assert_eq!(market.constraint_generation(), generation);
     }
 
     #[test]
     fn test_unsynced_protocol_recovery() {
         let mut market = market_with_v3_status(SynchronizerState::Stale(header(90)));
-        let generation = market.exclusion_generation();
+        let generation = market.constraint_generation();
 
         market.update_sync_status(
             [("uniswap_v3".to_string(), SynchronizerState::Ready(header(100)))],
             MAX_SYNC_LAG,
         );
 
-        assert_ne!(market.exclusion_generation(), generation);
+        assert_ne!(market.constraint_generation(), generation);
         assert!(market
             .resolve_route_filter(&RouteConstraints::default())
             .is_empty());

@@ -63,7 +63,7 @@ impl Algorithm for DirectComponentAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let SolveParts { graph, order, market, label, exclusions, .. } = request.into_parts();
+        let SolveParts { graph, order, market, label, constraints, .. } = request.into_parts();
         let market = match label.as_ref() {
             Some(l) => market
                 .read_labeled(l)
@@ -94,7 +94,7 @@ impl Algorithm for DirectComponentAlgorithm {
                 .expect("edge exists")
                 .component_id;
 
-            if exclusions.excludes_pool(component_id) {
+            if constraints.excludes_pool(component_id) {
                 continue;
             }
 

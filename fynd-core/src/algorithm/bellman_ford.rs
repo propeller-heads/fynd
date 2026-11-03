@@ -220,7 +220,7 @@ impl BellmanFordAlgorithm {
         &self,
         request: SolveRequest<'_, StableDiGraph<()>>,
     ) -> Result<BellmanFordContext, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
+        let SolveParts { graph, order, market, label, derived, constraints } = request.into_parts();
         if !order.is_sell() {
             return Err(AlgorithmError::ExactOutNotSupported);
         }
@@ -258,12 +258,12 @@ impl BellmanFordAlgorithm {
         }
 
         let subgraph =
-            Self::get_subgraph(graph, token_in_node, token_out_node, self.max_hops, &exclusions)
+            Self::get_subgraph(graph, token_in_node, token_out_node, self.max_hops, &constraints)
                 .ok_or_else(|| AlgorithmError::NoPath {
-                    from: order.token_in().clone(),
-                    to: order.token_out().clone(),
-                    reason: NoPathReason::NoGraphPath,
-                })?;
+                from: order.token_in().clone(),
+                to: order.token_out().clone(),
+                reason: NoPathReason::NoGraphPath,
+            })?;
         // The view is acquired only after the walk: only the extraction needs the guard, and
         // holding it through a walk would queue the feed's writer.
         let market_view = paths::read_market(&market, label).await?;
@@ -320,14 +320,14 @@ impl BellmanFordAlgorithm {
         let token_in_node = token_in_node?;
         // Pricing walks carry no request, so nothing is excluded and the source stands in for
         // both exempt endpoints.
-        let exclusions = ResolvedRouteConstraints::default();
+        let constraints = ResolvedRouteConstraints::default();
         let hops_to_targets = prune_toward.map(|_| {
             Self::get_hops_to_reach_any(
                 graph,
                 target_nodes,
                 (token_in_node, token_in_node),
                 walk_hops,
-                &exclusions,
+                &constraints,
             )
         });
         let subgraph = Self::get_subgraph_with_hop_map(
@@ -335,7 +335,7 @@ impl BellmanFordAlgorithm {
             (token_in_node, None),
             hops_to_targets.as_ref(),
             walk_hops,
-            &exclusions,
+            &constraints,
         )?;
         let market_data = market
             .extract_subset_batched(&subgraph.component_ids)
@@ -1011,19 +1011,19 @@ impl BellmanFordAlgorithm {
         token_in: NodeIndex,
         token_out: NodeIndex,
         max_hops: usize,
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
     ) -> Option<Subgraph<'a>> {
         // Walked from the destination along outgoing edges, not incoming ones. Every pool in this
         // graph is entered as a pair of opposite edges, so the two walks cover the same tokens and
         // the outgoing one needs no reversed index.
         let hops_to_token_out =
-            Self::get_hops_to_reach(graph, token_in, token_out, max_hops, exclusions);
+            Self::get_hops_to_reach(graph, token_in, token_out, max_hops, constraints);
         Self::get_subgraph_with_hop_map(
             graph,
             (token_in, Some(token_out)),
             Some(&hops_to_token_out),
             max_hops,
-            exclusions,
+            constraints,
         )
     }
 
@@ -1037,7 +1037,7 @@ impl BellmanFordAlgorithm {
         endpoints: (NodeIndex, Option<NodeIndex>),
         hops_to_token_out: Option<&FxHashMap<NodeIndex, usize>>,
         max_hops: usize,
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
     ) -> Option<Subgraph<'a>> {
         let (token_in, token_out) = endpoints;
         let mut adj: FxHashMap<NodeIndex, Vec<(NodeIndex, ComponentId)>> = FxHashMap::default();
@@ -1063,7 +1063,7 @@ impl BellmanFordAlgorithm {
                     graph,
                     edge,
                     (token_in, token_out.unwrap_or(token_in)),
-                    exclusions,
+                    constraints,
                 ) {
                     continue;
                 }
@@ -1107,10 +1107,10 @@ impl BellmanFordAlgorithm {
         graph: &StableDiGraph<()>,
         edge: EdgeReference<'_, EdgeData<()>>,
         endpoints: (NodeIndex, NodeIndex),
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
     ) -> bool {
-        !exclusions.excludes_pool(&edge.weight().component_id) &&
-            exclusions
+        !constraints.excludes_pool(&edge.weight().component_id) &&
+            constraints
                 .allows_token(&graph[edge.target()], (&graph[endpoints.0], &graph[endpoints.1]))
     }
 
@@ -1122,9 +1122,15 @@ impl BellmanFordAlgorithm {
         token_in: NodeIndex,
         token_out: NodeIndex,
         max_hops: usize,
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
     ) -> FxHashMap<NodeIndex, usize> {
-        Self::get_hops_to_reach_any(graph, [token_out], (token_in, token_out), max_hops, exclusions)
+        Self::get_hops_to_reach_any(
+            graph,
+            [token_out],
+            (token_in, token_out),
+            max_hops,
+            constraints,
+        )
     }
 
     /// Every node within `max_hops` of any of `sources`, and the fewest hops to reach one.
@@ -1136,7 +1142,7 @@ impl BellmanFordAlgorithm {
         sources: impl IntoIterator<Item = NodeIndex>,
         endpoints: (NodeIndex, NodeIndex),
         max_hops: usize,
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
     ) -> FxHashMap<NodeIndex, usize> {
         let mut hops_to_reach: FxHashMap<NodeIndex, usize> = FxHashMap::default();
         let mut frontier = Vec::new();
@@ -1150,7 +1156,7 @@ impl BellmanFordAlgorithm {
                 for edge in graph.edges(node) {
                     let neighbor = edge.target();
                     if hops_to_reach.contains_key(&neighbor) ||
-                        !Self::can_cross(graph, edge, endpoints, exclusions)
+                        !Self::can_cross(graph, edge, endpoints, constraints)
                     {
                         continue;
                     }
@@ -1609,9 +1615,9 @@ mod tests {
         let order = order(&a, &c, 1000, OrderSide::Sell);
         let result = bf_algorithm(2, 1000)
             .find_best_route(
-                SolveRequest::new(manager.graph(), market, &order).with_exclusions(
+                SolveRequest::new(manager.graph(), market, &order).with_constraints(
                     ResolvedRouteConstraints::default()
-                        .with_tokens([a.address.clone(), c.address.clone()]),
+                        .with_excluded_tokens([a.address.clone(), c.address.clone()]),
                 ),
             )
             .await
@@ -1634,8 +1640,8 @@ mod tests {
         let ord = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let result = bf_algorithm(2, 1000)
-            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_exclusions(
-                ResolvedRouteConstraints::default().with_pools(["best".to_string()]),
+            .find_best_route(SolveRequest::new(manager.graph(), market, &ord).with_constraints(
+                ResolvedRouteConstraints::default().with_excluded_pools(["best".to_string()]),
             ))
             .await
             .unwrap();

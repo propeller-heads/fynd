@@ -127,7 +127,7 @@ pub struct ScoredEdge<'a, W> {
 /// Parameters for one bounded candidate-discovery run.
 #[derive(Clone, Copy)]
 pub struct CandidateSearchConfig<'a> {
-    /// The same bounds and exclusions every other route search runs under.
+    /// The same bounds and constraints every other route search runs under.
     pub search: RouteSearch<'a>,
     pub max_candidates: usize,
     pub anchor_tokens: &'a FxHashSet<Address>,

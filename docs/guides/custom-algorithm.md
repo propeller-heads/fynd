@@ -11,7 +11,7 @@ Fynd exposes an `Algorithm` trait that lets you plug in custom routing logic wit
 The trait has four methods:
 
 * `name()` — a string identifier used in config and logs
-* `find_best_route()` — given a `SolveRequest` (graph, market, order, overlay label, derived data, and the pools and tokens the caller excluded), return the best route. Use `request.into_parts()` to move out the owned fields. Honour the exclusions during search and simulation; the worker rejects returned routes that violate them. Call `Route::validate()` on each candidate and skip invalid ones (disconnected swaps, repeated tokens, malformed splits): the solver worker rejects an invalid route, which drops the whole solution for that worker pool, so prefer the next-best valid route instead
+* `find_best_route()` — given a `SolveRequest` (graph, market, order, overlay label, derived data, and the resolved route constraints), return the best route. Use `request.into_parts()` to move out the owned fields. Honour the constraints during search and simulation; the worker rejects returned routes that violate them. Call `Route::validate()` on each candidate and skip invalid ones (disconnected swaps, repeated tokens, malformed splits): the solver worker rejects an invalid route, which drops the whole solution for that worker pool, so prefer the next-best valid route instead
 * `computation_requirements()` — declares which derived data the algorithm needs (spot prices, depths, etc.)
 * `timeout()` — per-order solve deadline
 
@@ -52,7 +52,7 @@ impl Algorithm for DirectComponentAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let SolveParts { graph, order, market, label, exclusions, .. } = request.into_parts();
+        let SolveParts { graph, order, market, label, constraints, .. } = request.into_parts();
         let market = match label.as_ref() {
             Some(l) => market
                 .read_labeled(l)
@@ -83,7 +83,7 @@ impl Algorithm for DirectComponentAlgorithm {
                 .expect("edge exists")
                 .component_id;
 
-            if exclusions.excludes_pool(component_id) {
+            if constraints.excludes_pool(component_id) {
                 continue;
             }
 

@@ -87,7 +87,7 @@ pub struct PostProcessRequest<'a> {
     market: &'a MarketData,
     label: Option<&'a StateLabel>,
     derived: &'a SharedDerivedDataRef,
-    exclusions: &'a ResolvedRouteConstraints,
+    constraints: &'a ResolvedRouteConstraints,
     pool_drops: Option<&'a (dyn Fn(&ProtocolComponent) -> bool + Sync)>,
     exclusive_access: ExclusiveAccess,
     deadline: Instant,
@@ -99,7 +99,7 @@ impl<'a> PostProcessRequest<'a> {
         order: &'a Order,
         market: &'a MarketData,
         derived: &'a SharedDerivedDataRef,
-        exclusions: &'a ResolvedRouteConstraints,
+        constraints: &'a ResolvedRouteConstraints,
         deadline: Instant,
     ) -> Self {
         Self {
@@ -107,7 +107,7 @@ impl<'a> PostProcessRequest<'a> {
             market,
             label: None,
             derived,
-            exclusions,
+            constraints,
             pool_drops: None,
             exclusive_access: ExclusiveAccess::Denied,
             deadline,
@@ -164,8 +164,8 @@ impl<'a> PostProcessRequest<'a> {
 
     /// The pools and tokens this route must not use. The worker keeps the algorithm's route when
     /// the returned route uses one.
-    pub fn exclusions(&self) -> &'a ResolvedRouteConstraints {
-        self.exclusions
+    pub fn constraints(&self) -> &'a ResolvedRouteConstraints {
+        self.constraints
     }
 
     /// Returns whether the pool drops `component`. The worker rejects processed routes that use
