@@ -4,7 +4,7 @@ use clap::Parser;
 use fynd_core::nexus::price_levels::PriceLevelVenue;
 use tycho_simulation::evm::tycho_models::Chain;
 
-use crate::price_levels::VenueArgs;
+use crate::{monitor::monitor_args::MonitorArgs, price_levels::VenueArgs};
 
 /// The arguments of `fynd-nexus`.
 #[derive(Debug, Parser)]
@@ -14,11 +14,13 @@ pub struct Cli {
     #[arg(long, env = "CHAIN")]
     pub chain: Chain,
 
-    /// Venues to connect to, comma separated.
+    /// Venues to connect to, comma separated. Pass the flag with no value to run the health
+    /// monitor alone.
     #[arg(
         long,
         env = "VENUES",
         value_delimiter = ',',
+        num_args = 0..,
         default_values_t = PriceLevelVenue::ALL
     )]
     pub venues: Vec<PriceLevelVenue>,
@@ -34,6 +36,10 @@ pub struct Cli {
     /// The venues' credentials and endpoints.
     #[command(flatten)]
     pub venue_args: VenueArgs,
+
+    /// The health monitor's settings. It runs when `--rpc-url` is set.
+    #[command(flatten)]
+    pub monitor: MonitorArgs,
 }
 
 #[cfg(test)]
@@ -91,5 +97,33 @@ mod tests {
         assert_eq!(cli.venue_args.hashflow.key.as_deref(), Some("k"));
         assert_eq!(cli.venue_args.metric.api_key.as_deref(), Some("m"));
         assert_eq!(cli.venue_args.metric.api_url.as_deref(), Some("https://metric.example"));
+    }
+
+    #[test]
+    fn test_parse_monitor_without_venues() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "--rpc-url",
+            "https://node.example",
+            "--tycho-url",
+            "tycho.example",
+            "--probe-rate",
+            "5",
+        ])
+        .unwrap();
+
+        assert!(cli.venues.is_empty());
+        assert!(cli.monitor.is_enabled());
+        assert_eq!(cli.monitor.probe_rate, 5.0);
+    }
+
+    #[test]
+    fn test_parse_monitor_off_by_default() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum"]).unwrap();
+
+        assert!(!cli.monitor.is_enabled());
     }
 }
