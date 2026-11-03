@@ -4533,7 +4533,6 @@ mod tests {
             BigUint::from(100u64),
             BigUint::from(900u64),
         ));
-        quote.set_amount_out(BigUint::from(1100u64));
         // 999 against a post-fee 1000 is a shortfall of 10 bps, or 1000 hundredths.
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),
@@ -4601,7 +4600,6 @@ mod tests {
             BigUint::from(100u64),
             BigUint::from(900u64),
         ));
-        quote.set_amount_out(BigUint::from(1100u64));
         // 1001 against a post-fee 1000: the simulated call returned more than promised.
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(1001u64),
@@ -4629,6 +4627,35 @@ mod tests {
         );
     }
 
+    /// A solution hook raised `amount_out` by 50 and the raise was not paid. The route filled as
+    /// quoted, so no protocol it crosses is charged a shortfall.
+    #[test]
+    fn test_winning_protocols_unpaid_raise() {
+        let mut quote = make_route_quote(&[("uniswap_v3", 0x01, 0x02)]);
+        quote.set_amount_out(BigUint::from(1_150u64));
+        quote.set_fee_breakdown(FeeBreakdown::new(
+            BigUint::from(70u64),
+            BigUint::from(30u64),
+            BigUint::from(100u64),
+            BigUint::from(900u64),
+        ));
+        quote.set_simulation_result(SimulationResult::Success {
+            amount_out: BigUint::from(1_000u64),
+            gas_used: 120_000,
+            logs: Vec::new(),
+        });
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            instrumentation::record_winning_protocols(&quote);
+        });
+
+        assert!(!recorded_metrics(&snapshotter)
+            .iter()
+            .any(|(metric, _, _)| metric == "winning_quote_shortfall_routes_total"));
+    }
+
     /// The reviewer's question: what did a route containing a given protocol simulate at. Both
     /// values ride on the line that names the protocols, so one record answers it.
     #[test]
@@ -4640,7 +4667,6 @@ mod tests {
             BigUint::from(100u64),
             BigUint::from(900u64),
         ));
-        quote.set_amount_out(BigUint::from(1100u64));
         // The quote promises 1000 after fees; the simulated call returns 999, a 10 bps shortfall.
         quote.set_simulation_result(SimulationResult::Success {
             amount_out: BigUint::from(999u64),

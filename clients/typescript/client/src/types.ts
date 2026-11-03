@@ -182,7 +182,7 @@ export interface FeeBreakdown {
   routerFee: bigint;
   /** Client's portion of the fee (after the router takes its share). */
   clientFee: bigint;
-  /** Maximum slippage: (amountOut - routerFee - clientFee) * slippage. */
+  /** Maximum slippage: at most (amountOut - routerFee - clientFee) * slippage. */
   maxSlippage: bigint;
   /** Minimum amount the user receives on-chain (the min_amount_out in the tx). */
   minAmountReceived: bigint;

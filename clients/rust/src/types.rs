@@ -857,13 +857,13 @@ impl FeeBreakdown {
         &self.client_fee
     }
 
-    /// Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+    /// Maximum slippage: at most (amount_out - router_fee - client_fee) * slippage.
     pub fn max_slippage(&self) -> &BigUint {
         &self.max_slippage
     }
 
     /// Minimum amount the user receives on-chain.
-    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    /// At most amount_out - router_fee - client_fee - max_slippage.
     pub fn min_amount_received(&self) -> &BigUint {
         &self.min_amount_received
     }

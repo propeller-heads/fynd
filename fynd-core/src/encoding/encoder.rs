@@ -507,17 +507,14 @@ impl Encoder {
             return Ok(PreparedSolution { solution, fee_breakdown, fee_rates });
         };
         let solution = Self::apply_solution_hook(hook, quote, solution)?;
-        let hooked_fees = Self::calculate_fee_breakdown(
-            solution.expected_amount_out(),
-            client_fee_bps,
-            encoding_options.slippage(),
-            fee_rates,
-        )?;
-        // The router takes its fees on the full output, a hook's raise included, but the raise is
-        // not guaranteed on chain, so the floor stays the one computed from the route's output.
+        // The router takes its fees on the full output, including the hook's raise. The raise is
+        // not guaranteed on chain, so `min_amount_received` and `max_slippage` stay as computed
+        // from the route's output.
+        let (router_fee, client_fee) =
+            Self::calculate_fees(solution.expected_amount_out(), client_fee_bps, fee_rates)?;
         let fee_breakdown = FeeBreakdown::new(
-            hooked_fees.router_fee().clone(),
-            hooked_fees.client_fee().clone(),
+            router_fee,
+            client_fee,
             fee_breakdown.max_slippage().clone(),
             fee_breakdown
                 .min_amount_received()
@@ -527,7 +524,10 @@ impl Encoder {
     }
 
     /// Runs `hook` and checks the `Solution` it returns: only the fields in `HOOK_MUTABLE_FIELDS`
-    /// may change, and `expected_amount_out` must stay at or above `min_amount_out`.
+    /// may change, and `expected_amount_out` may only rise.
+    ///
+    /// A lowered `expected_amount_out` lowers the fees the router takes, so the user could receive
+    /// less than `min_amount_out` from a route that fills in full, and the call would revert.
     fn apply_solution_hook(
         hook: &dyn SolutionHook,
         quote: &OrderQuote,
@@ -540,12 +540,11 @@ impl Encoder {
                 HOOK_MUTABLE_FIELDS.join(", ")
             )));
         }
-        if hooked.expected_amount_out() < hooked.min_amount_out() {
+        if hooked.expected_amount_out() < solution.expected_amount_out() {
             return Err(SolveError::FailedEncoding(format!(
-                "the solution hook set expected_amount_out {} below min_amount_out {}; the router \
-                 rejects it",
-                hooked.expected_amount_out(),
-                hooked.min_amount_out()
+                "the solution hook lowered expected_amount_out from {} to {}; it may only raise it",
+                solution.expected_amount_out(),
+                hooked.expected_amount_out()
             )));
         }
         Ok(hooked)
@@ -1088,6 +1087,31 @@ impl Encoder {
         slippage: f64,
         fee_rates: FeeRates,
     ) -> Result<FeeBreakdown, EncodingError> {
+        let (router_fee, client_fee) =
+            Self::calculate_fees(swap_output, client_fee_bps, fee_rates)?;
+        let amount_after_fees = swap_output - &client_fee - &router_fee;
+
+        let precision = BigUint::from(1_000_000u64);
+        let slippage_amount =
+            &amount_after_fees * BigUint::from((slippage * 1_000_000.0) as u64) / &precision;
+
+        let min_amount_received = &amount_after_fees - &slippage_amount;
+
+        Ok(FeeBreakdown::new(router_fee, client_fee, slippage_amount, min_amount_received))
+    }
+
+    /// Mirrors the fee half of the on-chain `FeeCalculator.calculateFee`: the router fee and the
+    /// client's portion the router takes from `swap_output`, in that order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the combined fees exceed 100%, which would make the on-chain
+    /// call revert with `FeeCalculator__FeeTooHigh`.
+    fn calculate_fees(
+        swap_output: &BigUint,
+        client_fee_bps: u16,
+        fee_rates: FeeRates,
+    ) -> Result<(BigUint, BigUint), EncodingError> {
         let max_fee_units = fee_rates.max_fee_units();
         // Scale the client fee from legacy bps (10_000 = 100%) to the fee units the router
         // takes in calldata, so both fee types share the same denominator.
@@ -1124,21 +1148,7 @@ impl Encoder {
 
         let router_fee_on_output = swap_output * fee_on_output / max_fee_units;
         let total_router_fee = router_fee_on_client + router_fee_on_output;
-
-        let amount_after_fees = swap_output - &client_portion - &total_router_fee;
-
-        let precision = BigUint::from(1_000_000u64);
-        let slippage_amount =
-            &amount_after_fees * BigUint::from((slippage * 1_000_000.0) as u64) / &precision;
-
-        let min_amount_received = &amount_after_fees - &slippage_amount;
-
-        Ok(FeeBreakdown::new(
-            total_router_fee,
-            client_portion,
-            slippage_amount,
-            min_amount_received,
-        ))
+        Ok((total_router_fee, client_portion))
     }
 }
 
@@ -2837,32 +2847,27 @@ mod tests {
                 .await
                 .unwrap();
 
-            let floor = without_hook[0].fee_breakdown().unwrap();
+            let unhooked_fees = without_hook[0].fee_breakdown().unwrap();
             let fees = with_hook[0].fee_breakdown().unwrap();
             let rates = FeeRates::new(100_000, 20_000_000, FEE_SCALE);
-            let fees_on_raise =
-                Encoder::calculate_fee_breakdown(&raised_amount_out, 100, 0.01, rates).unwrap();
-            assert_eq!(fees.router_fee(), fees_on_raise.router_fee());
-            assert_eq!(fees.client_fee(), fees_on_raise.client_fee());
-            assert!(fees.router_fee() > floor.router_fee());
-            assert!(fees.client_fee() > floor.client_fee());
-            assert_eq!(fees.min_amount_received(), floor.min_amount_received());
-            assert_eq!(fees.max_slippage(), floor.max_slippage());
+            let (router_fee, client_fee) =
+                Encoder::calculate_fees(&raised_amount_out, 100, rates).unwrap();
+            assert_eq!(*fees.router_fee(), router_fee);
+            assert_eq!(*fees.client_fee(), client_fee);
+            assert_eq!(fees.min_amount_received(), unhooked_fees.min_amount_received());
+            assert_eq!(fees.max_slippage(), unhooked_fees.max_slippage());
             let tx = with_hook[0].transaction().unwrap();
             let (_, _, _, _, min_amount_out, _, _, _) =
                 <SingleSwapCalldata as SolValue>::abi_decode_params(&tx.data()[4..]).unwrap();
-            assert_eq!(min_amount_out, biguint_to_u256(floor.min_amount_received()));
-
-            let received_after_fees = &raised_amount_out - fees.router_fee() - fees.client_fee();
-            let deviation =
-                crate::simulation::deviation::deviation_bps(&with_hook[0], &received_after_fees)
-                    .expect("an encoded quote carries fees");
-            assert!(deviation.abs() < 1e-9, "got {deviation}");
+            assert_eq!(min_amount_out, biguint_to_u256(unhooked_fees.min_amount_received()));
         }
 
         #[rstest]
         #[case::changed_min(Arc::new(SetMinAmountOut(BigUint::from(1u64))))]
         #[case::expected_below_min(Arc::new(SetExpectedAmountOut(BigUint::from(1u64))))]
+        #[case::expected_lowered_above_min(Arc::new(SetExpectedAmountOut(BigUint::from(
+            985u64
+        ))))]
         #[case::changed_receiver(Arc::new(SetReceiver(Bytes::from(make_address(0xCC).as_ref()))))]
         #[case::changed_swaps(Arc::new(SetSwapUserData))]
         #[case::replaced_protocol_state(Arc::new(ReplaceProtocolState))]

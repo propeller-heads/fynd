@@ -22,7 +22,7 @@ use super::{
     is_rankable, Order, OrderQuote, OrderResponses, OrderSide, QuoteOptions, QuoteStatus,
     SolveError, WorkerPoolQuote,
 };
-use crate::{bps, simulation::deviation::deviation_bps, SimulationResult};
+use crate::{bps, simulation::deviation::route_deviation_bps, SimulationResult};
 
 /// Target for the per-quote comparison log. Emitted at TRACE so a plain `RUST_LOG=info` leaves
 /// it off; a deployment that wants it sets `RUST_LOG=...,fynd::quote_comparison=trace`.
@@ -326,6 +326,10 @@ fn record_shortfall_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps
 ///
 /// The outcome is empty when the request asked for no simulation, and the deviation is `None`
 /// whenever the simulated call returned no amount to compare.
+///
+/// The deviation is against the route's own output after fees, not the quote's `amount_out`. A
+/// solution hook's raise is not the pools' to deliver, and an unpaid one would otherwise read as a
+/// shortfall on every protocol the route crosses.
 fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
     match quote.simulation_result() {
         None => ("", None),
@@ -333,7 +337,7 @@ fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
         Some(SimulationResult::Failure { .. }) => ("failed", None),
         Some(SimulationResult::BlockUnavailable { .. }) => ("block_unavailable", None),
         Some(SimulationResult::Success { amount_out, .. }) => {
-            ("success", deviation_bps(quote, amount_out))
+            ("success", route_deviation_bps(quote, amount_out))
         }
     }
 }
