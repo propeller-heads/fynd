@@ -23,6 +23,15 @@ export function findNewestSection(changelog) {
   return { lines, start, end, text: lines.slice(start, end).join("\n") };
 }
 
+/** Returns the version in a section header, e.g. `0.118.5` from `## [0.118.5](...) (date)`. */
+export function sectionVersion(headerLine) {
+  const match = headerLine.match(/\[([^\]]+)\]/);
+  if (!match) {
+    throw new Error(`No version in changelog header: ${headerLine}`);
+  }
+  return match[1];
+}
+
 /** Returns the full commit hashes linked in the section, in order, without duplicates. */
 export function extractCommitHashes(sectionText) {
   const hashes = new Set();
@@ -107,6 +116,11 @@ export function replaceSectionBody(changelog, newBody) {
   ].join("\n");
 }
 
+function isTagged(version) {
+  const out = execFileSync("git", ["tag", "--list", version], { encoding: "utf8" });
+  return out.trim() !== "";
+}
+
 function readCommit(hash) {
   const out = execFileSync("git", ["show", "-s", "--format=%s%x00%b", hash], {
     encoding: "utf8",
@@ -147,6 +161,11 @@ function skip(reason) {
 export async function main(path = "CHANGELOG.md") {
   const changelog = readFileSync(path, "utf8");
   const section = findNewestSection(changelog);
+  const version = sectionVersion(section.lines[section.start]);
+  if (isTagged(version)) {
+    console.log(`Newest section ${version} is already released; nothing to rewrite.`);
+    return;
+  }
   const sectionText = section.text;
   const hashes = extractCommitHashes(sectionText);
   if (hashes.length === 0) {
