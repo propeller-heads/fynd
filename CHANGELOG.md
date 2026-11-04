@@ -1,4 +1,12 @@
 
+## [0.120.0](https://github.com/propeller-heads/fynd/compare/0.119.0...0.120.0) (2026-11-04)
+
+### Bug Fixes
+
+* **encoding:** reject lowered hook amounts and measure shortfall on the route ([8a6d42c](https://github.com/propeller-heads/fynd/commit/8a6d42c01b4a155c6b897aa25e6562216b90880f))
+* **encoding:** compute fees and deviation on the hooked amount out ([6387ce0](https://github.com/propeller-heads/fynd/commit/6387ce0d88d8dbf221433380407d82fb990de2cc))
+
+
 ## [0.119.0](https://github.com/propeller-heads/fynd/compare/0.118.8...0.119.0) (2026-11-03)
 
 ### Features
