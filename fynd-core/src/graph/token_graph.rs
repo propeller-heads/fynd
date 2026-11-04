@@ -12,10 +12,13 @@ use petgraph::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tracing::debug;
+use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
 
-use super::{EdgeData, GraphError, GraphManager, Path, RouteSearch, INLINE_EDGES, INLINE_TOKENS};
+use super::{
+    is_native_wrap, native_wrap_component, EdgeData, GraphError, GraphManager, Path, RouteSearch,
+    INLINE_EDGES, INLINE_TOKENS,
+};
 use crate::{
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
@@ -119,15 +122,49 @@ pub struct TopologyGraph<D> {
     /// The edge for each directed token pair. Only changes when an edge is added or removed, which
     /// only happens when a pair gains its first pool or loses its last.
     pair_index: FxHashMap<(NodeIndex, NodeIndex), EdgeIndex>,
+    /// The two tokens the native wrap converts between, lower index first.
+    wrap_ends: Option<(NodeIndex, NodeIndex)>,
 }
 
 impl<D> TopologyGraph<D> {
-    /// The pools trading `from` for `to`, empty if the pair is not connected.
+    /// The pools trading `from` for `to`, empty if the pair is not connected. On the native wrap
+    /// pair that is only the wrap.
+    ///
+    /// The wrap pays 1:1 and the search counts the step as free, so another pool on the pair
+    /// would be a hop the search did not count.
     pub fn pools_between(&self, from: NodeIndex, to: NodeIndex) -> &[EdgeData<D>] {
-        self.pair_index
+        let pools: &[EdgeData<D>] = self
+            .pair_index
             .get(&(from, to))
             .and_then(|&edge| self.graph.edge_weight(edge))
-            .map_or(&[], PairEdge::pools)
+            .map_or(&[], PairEdge::pools);
+        if !self.is_wrap_pair(from, to) {
+            return pools;
+        }
+        match pools
+            .iter()
+            .position(|pool| is_native_wrap(&pool.component_id))
+        {
+            Some(wrap) => &pools[wrap..=wrap],
+            None => pools,
+        }
+    }
+
+    /// Whether the two tokens are the ones the native wrap converts between.
+    fn is_wrap_pair(&self, from: NodeIndex, to: NodeIndex) -> bool {
+        self.wrap_ends == Some((from.min(to), from.max(to)))
+    }
+
+    /// The other end of the native wrap, if `token` is one of its two ends.
+    pub(crate) fn wrap_twin(&self, token: NodeIndex) -> Option<NodeIndex> {
+        let (a, b) = self.wrap_ends?;
+        if token == a {
+            Some(b)
+        } else if token == b {
+            Some(a)
+        } else {
+            None
+        }
     }
 
     /// The pools trading `from` for `to` that this solve may use.
@@ -155,16 +192,21 @@ impl<D> TopologyGraph<D> {
         )
     }
 
-    /// Whether the pair trades `from` for `to` through a pool this solve may use.
+    /// Whether an allowed pool other than the native wrap trades `from` for `to`. Taking it costs
+    /// one hop.
     ///
     /// `false` for a pair the graph does not hold, and for one whose every pool the request
-    /// excludes. Either way the pair does not connect its two tokens for this search.
-    fn pair_has_allowed_pool(
+    /// excludes. Either way the pair does not connect its two tokens for this search. `false` for
+    /// the wrap pair too, whatever other pools it stores: the wrap pair never counts as a trade.
+    fn pair_has_allowed_trade(
         &self,
         from: NodeIndex,
         to: NodeIndex,
         constraints: &ResolvedRouteConstraints,
     ) -> bool {
+        if self.is_wrap_pair(from, to) {
+            return false;
+        }
         let pools = self.pools_between(from, to);
         if constraints.is_empty() {
             return !pools.is_empty();
@@ -172,6 +214,19 @@ impl<D> TopologyGraph<D> {
         pools
             .iter()
             .any(|pool| !constraints.excludes_pool(&pool.component_id))
+    }
+
+    /// Whether the native wrap converts `from` into `to` and the request allows it. Taking it
+    /// costs no hop.
+    ///
+    /// While the graph holds the wrap, a wrap pair stores it in both directions.
+    fn pair_has_allowed_wrap(
+        &self,
+        from: NodeIndex,
+        to: NodeIndex,
+        constraints: &ResolvedRouteConstraints,
+    ) -> bool {
+        self.is_wrap_pair(from, to) && !constraints.excludes_pool(native_wrap_component())
     }
 
     /// The node holding `token`, or `None` if the market has no such token.
@@ -189,6 +244,9 @@ impl<D> TopologyGraph<D> {
     /// Records that `component_id` trades `from` for `to`, adding the pair's edge if it is the
     /// first pool to do so.
     fn add_component(&mut self, from: NodeIndex, to: NodeIndex, component_id: &ComponentId) {
+        if is_native_wrap(component_id) {
+            self.wrap_ends = Some((from.min(to), from.max(to)));
+        }
         match self.get_edge_ix(from, to) {
             Some(edge) => {
                 if let Some(pair) = self.graph.edge_weight_mut(edge) {
@@ -206,6 +264,10 @@ impl<D> TopologyGraph<D> {
     /// Records that `component_id` no longer trades `from` for `to`, removing the pair's edge if
     /// it was the last pool doing so.
     fn remove_component(&mut self, from: NodeIndex, to: NodeIndex, component_id: &ComponentId) {
+        if is_native_wrap(component_id) {
+            warn!(component_id = %component_id, "cannot remove the native wrap; keeping it");
+            return;
+        }
         let Some(edge) = self.get_edge_ix(from, to) else {
             return;
         };
@@ -364,6 +426,13 @@ impl<D> TopologyGraph<D> {
     ///
     /// Searching one length at a time keeps shorter routes ahead of longer ones in the result.
     ///
+    /// Lengths count pool hops, so a step through the native wrap does not change a sequence's
+    /// level. A route that is only the wrap has no level to join on and is added directly.
+    ///
+    /// A route with the wrap at the split could be joined twice: with the wrap ending the head, or
+    /// starting the tail. The tail walk takes the wrap at every level, so heads that end on the
+    /// wrap are skipped when joining.
+    ///
     /// Consecutive lengths ask for the same half-walks -- lengths 3 and 4 both take a 2-hop head,
     /// lengths 4 and 5 both take a 2-hop tail -- so each side is walked once to its deepest and
     /// every length reads the level it needs.
@@ -382,6 +451,10 @@ impl<D> TopologyGraph<D> {
         let mut midpoint_index: Vec<Option<FxHashMap<NodeIndex, Vec<TokenPath>>>> =
             vec![None; tail_levels.len()];
         let mut token_paths = Vec::new();
+
+        if filter.min_hops == 1 && self.pair_has_allowed_wrap(from, to, search.constraints) {
+            token_paths.push(TokenPath::from_slice(&[from, to]));
+        }
 
         for length in filter.min_hops..=filter.max_hops {
             let head_hops = length.div_ceil(2);
@@ -413,6 +486,11 @@ impl<D> TopologyGraph<D> {
                 let Some(&midpoint) = head.last() else {
                     continue;
                 };
+                if let [.., before, last] = head.as_slice() {
+                    if self.is_wrap_pair(*before, *last) {
+                        continue;
+                    }
+                }
                 let Some(candidates) = tails_by_midpoint.get(&midpoint) else {
                     continue;
                 };
@@ -436,8 +514,12 @@ impl<D> TopologyGraph<D> {
         token_paths
     }
 
-    /// The token sequences leaving `start`, one level per hop count: index `k` holds every
-    /// sequence of exactly `k` edges, up to `hops`. Level 0 is `start` on its own.
+    /// The token sequences leaving `start`, one level per pool-hop count: index `k` holds every
+    /// sequence of exactly `k` hops that are not a native wrap, up to `hops`. Level 0 is `start`
+    /// on its own and, if `start` is a wrap end, `start` followed by the wrap.
+    ///
+    /// A sequence extended by a wrap stays in its level, since the wrap is free. A route holds at
+    /// most one wrap, because it never visits a token twice.
     ///
     /// Walking breadth-first produces every level on the way to the deepest, so they are all kept
     /// rather than the deepest alone.
@@ -451,30 +533,23 @@ impl<D> TopologyGraph<D> {
         endpoints: (NodeIndex, NodeIndex),
         search: RouteSearch<'_>,
     ) -> Vec<Vec<TokenPath>> {
-        let (from, to) = endpoints;
         let mut levels = vec![vec![TokenPath::from_slice(&[start])]];
 
-        for hop in 0..hops {
+        for hop in 0..=hops {
+            if self.wrap_ends.is_some() {
+                let mut wrapped = Vec::new();
+                for sequence in &levels[hop] {
+                    self.maybe_extend_by_wrap(sequence, endpoints, search, &mut wrapped);
+                }
+                levels[hop].extend(wrapped);
+            }
+
+            if hop == hops {
+                break;
+            }
             let mut next = Vec::new();
             for sequence in &levels[hop] {
-                let Some(&last) = sequence.last() else {
-                    continue;
-                };
-                for neighbor in self.neighbors(last) {
-                    if sequence.contains(&neighbor) {
-                        continue;
-                    }
-                    if !search.allows_token(&self[neighbor], (&self[from], &self[to])) {
-                        continue;
-                    }
-                    if !self.pair_has_allowed_pool(last, neighbor, search.constraints) {
-                        continue;
-                    }
-
-                    let mut extended = TokenPath::from_slice(sequence);
-                    extended.push(neighbor);
-                    next.push(extended);
-                }
+                self.extend_by_trade(sequence, endpoints, search, &mut next);
             }
             levels.push(next);
         }
@@ -482,28 +557,107 @@ impl<D> TopologyGraph<D> {
         levels
     }
 
+    /// Appends to `out` every extension of `sequence` by one step through a pool other than the
+    /// native wrap.
+    fn extend_by_trade(
+        &self,
+        sequence: &TokenPath,
+        endpoints: (NodeIndex, NodeIndex),
+        search: RouteSearch<'_>,
+        out: &mut Vec<TokenPath>,
+    ) {
+        let (from, to) = endpoints;
+        let Some(&last) = sequence.last() else {
+            return;
+        };
+        for neighbor in self.neighbors(last) {
+            if sequence.contains(&neighbor) {
+                continue;
+            }
+            if !search.allows_token(&self[neighbor], (&self[from], &self[to])) {
+                continue;
+            }
+            if !self.pair_has_allowed_trade(last, neighbor, search.constraints) {
+                continue;
+            }
+
+            let mut extended = TokenPath::from_slice(sequence);
+            extended.push(neighbor);
+            out.push(extended);
+        }
+    }
+
+    /// Appends to `out` the sequence with the token on the other side of the wrap added, if the
+    /// sequence ends on one side of the wrap.
+    ///
+    /// Appends nothing if the request excludes the wrap or that token, or the sequence already
+    /// visits it.
+    fn maybe_extend_by_wrap(
+        &self,
+        sequence: &TokenPath,
+        endpoints: (NodeIndex, NodeIndex),
+        search: RouteSearch<'_>,
+        out: &mut Vec<TokenPath>,
+    ) {
+        let (from, to) = endpoints;
+        let Some(&last) = sequence.last() else {
+            return;
+        };
+        let Some(twin) = self.wrap_twin(last) else {
+            return;
+        };
+        if sequence.contains(&twin) ||
+            !search.allows_token(&self[twin], (&self[from], &self[to])) ||
+            !self.pair_has_allowed_wrap(last, twin, search.constraints)
+        {
+            return;
+        }
+        let mut extended = TokenPath::from_slice(sequence);
+        extended.push(twin);
+        out.push(extended);
+    }
+
     /// Token sequences that begin and end on the same token.
     ///
     /// Such a route closes a cycle, so it has no midpoint to split on -- both halves would have to
     /// start and end on that token, which the no-revisit rule forbids. Searched from the one end
     /// instead, with the closing hop exempt from that rule.
+    ///
+    /// Each sequence carries its count of non-wrap hops apart from its length, because the native
+    /// wrap costs no hop and a route takes it at most once.
     fn circular_token_paths(&self, target: NodeIndex, search: RouteSearch<'_>) -> Vec<TokenPath> {
         let filter = search.bounds;
         let mut token_paths = Vec::new();
-        let mut frontier = vec![TokenPath::from_slice(&[target])];
+        let mut frontier = vec![(TokenPath::from_slice(&[target]), 0usize)];
+        let mut steps: Vec<(NodeIndex, usize)> = Vec::new();
+        let rounds = filter.max_hops + usize::from(self.wrap_ends.is_some());
 
-        for hops in 1..=filter.max_hops {
+        for _ in 0..rounds {
             let mut next = Vec::new();
-            for sequence in &frontier {
+            for (sequence, non_wrap_hops) in &frontier {
                 let Some(&last) = sequence.last() else {
                     continue;
                 };
-                for neighbor in self.neighbors(last) {
-                    if !self.pair_has_allowed_pool(last, neighbor, search.constraints) {
-                        continue;
+                steps.clear();
+                if *non_wrap_hops < filter.max_hops {
+                    for neighbor in self.neighbors(last) {
+                        if self.pair_has_allowed_trade(last, neighbor, search.constraints) {
+                            steps.push((neighbor, non_wrap_hops + 1));
+                        }
                     }
+                }
+                let used_wrap = sequence.len() - 1 > *non_wrap_hops;
+                if !used_wrap {
+                    if let Some(twin) = self.wrap_twin(last) {
+                        if self.pair_has_allowed_wrap(last, twin, search.constraints) {
+                            steps.push((twin, *non_wrap_hops));
+                        }
+                    }
+                }
+
+                for &(neighbor, new_hops) in &steps {
                     if neighbor == target {
-                        if hops >= filter.min_hops {
+                        if new_hops.max(1) >= filter.min_hops {
                             let mut closed = TokenPath::from_slice(sequence);
                             closed.push(neighbor);
                             token_paths.push(closed);
@@ -522,7 +676,7 @@ impl<D> TopologyGraph<D> {
 
                     let mut extended = TokenPath::from_slice(sequence);
                     extended.push(neighbor);
-                    next.push(extended);
+                    next.push((extended, new_hops));
                 }
             }
             frontier = next;
@@ -546,6 +700,7 @@ impl<D> Default for TopologyGraph<D> {
             graph: TokenGraph::default(),
             tokens: FxHashMap::default(),
             pair_index: FxHashMap::default(),
+            wrap_ends: None,
         }
     }
 }

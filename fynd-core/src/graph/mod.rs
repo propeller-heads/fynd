@@ -7,14 +7,17 @@
 pub mod petgraph;
 pub mod token_graph;
 
+use std::sync::LazyLock;
+
 pub use petgraph::{EdgeData, PetgraphStableDiGraphManager, StableDiGraph};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use thiserror::Error;
 pub use token_graph::{PairEdge, TokenGraph, TokenPath, TopologyGraph, TopologyGraphManager};
 use tycho_simulation::{
+    evm::protocol::native_wrapper::state::NATIVE_WRAPPER_ID,
     tycho_common::{models::Address, simulation::protocol_sim::ProtocolSim},
-    tycho_core::models::token::Token,
+    tycho_core::{models::token::Token, Bytes},
 };
 
 use crate::{
@@ -23,9 +26,28 @@ use crate::{
     types::{ComponentId, ComponentTopology, ResolvedRouteConstraints},
 };
 
-/// Tokens held without allocating. A path of `h` hops names `h + 1` tokens, so this covers every
-/// `max_hops` up to 4. A deeper path still works: `SmallVec` moves to the heap and behaves as a
-/// `Vec` from there.
+/// The market key of the injected native wrapper component.
+///
+/// It is the hex of the wrapper's byte id, as the feed builds it, not the plain
+/// `NATIVE_WRAPPER_ID` text. It matches the id the Tycho stream injects, and
+/// `decode_recorded_messages` uses the same id.
+static NATIVE_WRAP_COMPONENT: LazyLock<ComponentId> =
+    LazyLock::new(|| Bytes::from(NATIVE_WRAPPER_ID.as_bytes()).to_string());
+
+/// The id of the injected native-to-wrapped swap.
+pub(crate) fn native_wrap_component() -> &'static ComponentId {
+    &NATIVE_WRAP_COMPONENT
+}
+
+/// Whether this component is the injected native-to-wrapped swap.
+pub(crate) fn is_native_wrap(component_id: &ComponentId) -> bool {
+    component_id == &*NATIVE_WRAP_COMPONENT
+}
+
+/// Tokens held without allocating. A path of `h` swaps names `h + 1` tokens, and a route that
+/// takes the native wrap holds `max_hops + 2` of them, so this covers every `max_hops` up to 3
+/// with a wrap and up to 4 without. A deeper path still works: `SmallVec` moves to the heap and
+/// behaves as a `Vec` from there.
 pub(crate) const INLINE_TOKENS: usize = 5;
 
 /// Edges held without allocating. A path's edges are its tokens less one, and an edge is a leg of
@@ -76,9 +98,26 @@ impl<'a, D> Path<'a, D> {
         self.edge_data.push(edge_data);
     }
 
-    /// Returns the number of hops in the path.
+    /// Returns the number of swaps in the path, including the native wrap.
     pub fn len(&self) -> usize {
         self.edge_data.len()
+    }
+
+    /// Returns the number of hops checked against the min and max hops: every edge except the
+    /// native wrap, and at least 1 for a route that is only the wrap.
+    pub(crate) fn counted_hops(&self) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+        self.non_wrap_hops().max(1)
+    }
+
+    /// Returns the number of edges that are not the native wrap.
+    pub(crate) fn non_wrap_hops(&self) -> usize {
+        self.edge_data
+            .iter()
+            .filter(|edge| !is_native_wrap(&edge.component_id))
+            .count()
     }
 
     /// Returns true if the path has no hops.
@@ -143,9 +182,11 @@ where
 /// here: that changes per solve and travels beside this as a [`ResolvedRouteConstraints`].
 #[derive(Debug, Clone)]
 pub struct GraphQueryFilter {
-    /// Shortest route to return, in hops. A query with `0` matches nothing.
+    /// Shortest route to return, in hops. A query with `0` matches nothing. A swap through the
+    /// native wrap does not count, and a route that is only the wrap counts as one.
     pub min_hops: usize,
-    /// Longest route to return, in hops.
+    /// Longest route to return, in hops. A swap through the native wrap does not count, and a
+    /// route that is only the wrap counts as one.
     pub max_hops: usize,
     /// Tokens a route may pass *through*. Its own endpoints and the tokens the request requires
     /// are always allowed, whatever this holds. `None` allows every token.
