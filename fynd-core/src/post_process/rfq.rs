@@ -301,10 +301,11 @@ mod tests {
         let market = market();
         add_rfq(&market, "rfq_ab", &[&a, &b], MockProtocolSim::new(3.0).with_gas(10)).await;
         let replacer = replacer(&market).await;
-        let exclusions = ResolvedRouteConstraints::default().with_pools(["rfq_ab".to_string()]);
+        let constraints =
+            ResolvedRouteConstraints::default().with_excluded_pools(["rfq_ab".to_string()]);
 
         let replacement =
-            run(&replacer, &market, &sell_order(&a, &c), &exclusions, sequential_route()).await;
+            run(&replacer, &market, &sell_order(&a, &c), &constraints, sequential_route()).await;
 
         assert!(replacement.is_none());
     }
@@ -501,9 +502,9 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = ResolvedRouteConstraints::default();
+        let constraints = ResolvedRouteConstraints::default();
         let request =
-            PostProcessRequest::new(&order, &market, &derived, &exclusions, Instant::now());
+            PostProcessRequest::new(&order, &market, &derived, &constraints, Instant::now());
 
         let replacement = replacer
             .process(&request, &sequential_route())
@@ -520,10 +521,10 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = ResolvedRouteConstraints::default();
+        let constraints = ResolvedRouteConstraints::default();
         let label = "missing".to_string();
         let request =
-            PostProcessRequest::new(&order, &market, &derived, &exclusions, far_deadline())
+            PostProcessRequest::new(&order, &market, &derived, &constraints, far_deadline())
                 .with_label(Some(&label));
 
         let replacement = replacer
@@ -629,10 +630,10 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = ResolvedRouteConstraints::default();
+        let constraints = ResolvedRouteConstraints::default();
         let drops = |component: &ProtocolComponent| component.id == "rfq_ab";
         let request =
-            PostProcessRequest::new(&order, &market, &derived, &exclusions, far_deadline())
+            PostProcessRequest::new(&order, &market, &derived, &constraints, far_deadline())
                 .with_pool_drops(&drops);
 
         let replacement = replacer

@@ -43,7 +43,7 @@ pub fn find_paths<'a, D>(
 
     let mut paths = Vec::new();
     for token_path in &token_paths {
-        paths.extend(graph.expand_path(token_path, max_paths_per_sequence, search.exclusions));
+        paths.extend(graph.expand_path(token_path, max_paths_per_sequence, search.constraints));
     }
 
     Ok(paths)
@@ -302,7 +302,7 @@ mod tests {
             graph,
             &a,
             &c,
-            RouteSearch { bounds: &hops(2, 2), exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &hops(2, 2), constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -330,7 +330,7 @@ mod tests {
             graph,
             &a,
             &b,
-            RouteSearch { bounds: &hops(1, 1), exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &hops(1, 1), constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -358,7 +358,7 @@ mod tests {
             graph,
             &a,
             &a,
-            RouteSearch { bounds: &hops(2, 2), exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &hops(2, 2), constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -389,7 +389,7 @@ mod tests {
             g,
             &from,
             &to,
-            RouteSearch { bounds: &hops(1, 3), exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &hops(1, 3), constraints: &ResolvedRouteConstraints::default() },
             None,
         );
 
@@ -420,7 +420,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_b.address,
-            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &filter, constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -455,7 +455,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_b.address,
-            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &filter, constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap()
@@ -498,7 +498,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_c.address,
-            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &filter, constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -541,7 +541,7 @@ mod tests {
             manager.graph(),
             &token_a.address,
             &token_a.address,
-            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &filter, constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -594,7 +594,7 @@ mod tests {
             graph,
             &token_a.address,
             &token_c.address,
-            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &filter, constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();
@@ -627,7 +627,7 @@ mod tests {
             graph,
             &token_a.address,
             &token_b.address,
-            RouteSearch { bounds: &filter, exclusions: &ResolvedRouteConstraints::default() },
+            RouteSearch { bounds: &filter, constraints: &ResolvedRouteConstraints::default() },
             None,
         )
         .unwrap();

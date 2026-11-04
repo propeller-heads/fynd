@@ -80,43 +80,43 @@ fn should_drop_component(
 ///
 /// Every order of one request, in every pool it reaches, wants the same answer, and expanding a
 /// protocol system copies that system's whole component set. The answer depends on the market's
-/// components and its unsynced protocols, so a cached one stands until the market's exclusion
+/// components and its unsynced protocols, so a cached one stands until the market's constraint
 /// generation changes.
 ///
 /// Logs what a non-empty filter resolved to, on the one call per generation that resolves it.
-fn resolve_exclusions(
+fn resolve_constraints(
     view: &MarketDataView<'_>,
     params: &SolveParams,
 ) -> Arc<ResolvedRouteConstraints> {
     let generation = view
         .base_market_state()
-        .exclusion_generation();
+        .constraint_generation();
     let mut cache = params
-        .cached_exclusions()
+        .cached_constraints()
         .lock()
-        .expect("route exclusion cache lock poisoned");
-    if let Some((cached_generation, exclusions)) = cache.as_ref() {
+        .expect("route constraint cache lock poisoned");
+    if let Some((cached_generation, constraints)) = cache.as_ref() {
         if *cached_generation == generation {
-            return exclusions.clone();
+            return constraints.clone();
         }
     }
     let filter = params.route_filter();
-    let exclusions = Arc::new(
+    let constraints = Arc::new(
         view.base_market_state()
             .resolve_route_filter(filter),
     );
     if !filter.is_empty() {
         debug!(
-            exclusion_generation = generation,
+            constraint_generation = generation,
             named_pools = filter.excluded_pools().len(),
             named_protocols = filter.excluded_protocols().len(),
-            excluded_pools = exclusions.pools.len(),
-            excluded_tokens = exclusions.tokens.len(),
+            excluded_pools = constraints.excluded_pools.len(),
+            excluded_tokens = constraints.excluded_tokens.len(),
             "resolved a request's route filter"
         );
     }
-    *cache = Some((generation, exclusions.clone()));
-    exclusions
+    *cache = Some((generation, constraints.clone()));
+    constraints
 }
 
 /// Checks that `route` is valid, passes the request's route filter, and uses no unsynced pool.
@@ -124,14 +124,14 @@ fn check_route(
     route: &Route,
     order: &Order,
     filter: &RouteConstraints,
-    exclusions: &ResolvedRouteConstraints,
+    constraints: &ResolvedRouteConstraints,
 ) -> Result<(), String> {
     route
         .validate()
         .map_err(|err| err.to_string())?;
     validate_route_filter(route, order, filter)?;
     for swap in route.swaps() {
-        if exclusions.is_unsynced_pool(swap.component_id()) {
+        if constraints.is_unsynced_pool(swap.component_id()) {
             return Err(format!(
                 "route uses pool {} of out-of-sync protocol {}",
                 swap.component_id(),
@@ -144,7 +144,7 @@ fn check_route(
 }
 
 /// Check every leg, including split branches, against the original request filter. Reading
-/// protocol systems from the returned components also covers pools added after exclusions were
+/// protocol systems from the returned components also covers pools added after constraints were
 /// resolved. The order's endpoints remain allowed by intermediate-token exclusions, and every
 /// token path of the route must pass through every required token.
 fn validate_route_filter(
@@ -752,7 +752,7 @@ where
         &self,
         order: &Order,
         params: &SolveParams,
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
         deadline: Instant,
         result: RouteResult,
     ) -> (RouteResult, Vec<String>) {
@@ -771,7 +771,7 @@ where
             order,
             &self.market_data,
             &self.derived_data,
-            exclusions,
+            constraints,
             deadline
                 .checked_sub(POST_PROCESS_DEADLINE_MARGIN)
                 .unwrap_or(deadline),
@@ -788,7 +788,7 @@ where
         };
         let ProcessedRoute { route: mut processed_route, post_processed_by } = processed;
         let mut checked =
-            check_route(processed_route.route(), order, params.route_filter(), exclusions)
+            check_route(processed_route.route(), order, params.route_filter(), constraints)
                 .and_then(|()| self.check_processed_route(order, &processed_route, scope));
         if checked.is_ok() {
             checked = self
@@ -868,7 +868,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against, exclusions) = {
+        let (block_info, solved_against, constraints) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -888,13 +888,13 @@ where
                 .state_label()
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
-            let exclusions = resolve_exclusions(&view, &params);
-            (block_info, solved_against, exclusions)
+            let constraints = resolve_constraints(&view, &params);
+            (block_info, solved_against, constraints)
         };
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
             .with_derived(self.derived_data.clone())
-            .with_shared_exclusions(Arc::clone(&exclusions));
+            .with_shared_constraints(Arc::clone(&constraints));
         if let Some(label) = params.state_label().cloned() {
             request = request.with_label(label);
         }
@@ -906,7 +906,7 @@ where
         let order_quote = match result {
             Ok(result) => {
                 if let Err(err) =
-                    check_route(result.route(), order, params.route_filter(), &exclusions)
+                    check_route(result.route(), order, params.route_filter(), &constraints)
                 {
                     error!(
                         order_id = %order.id(),
@@ -922,7 +922,7 @@ where
                 }
 
                 let (result, post_processed_by) = self
-                    .post_process(order, &params, &exclusions, deadline, result)
+                    .post_process(order, &params, &constraints, deadline, result)
                     .await;
                 // Extract scalar values before consuming result with into_route()
                 let net_amount_out = result.net_amount_out().clone();
@@ -1532,7 +1532,7 @@ mod tests {
         }
     }
 
-    /// Deliberately ignores exclusions so the worker must enforce them on the result.
+    /// Deliberately ignores constraints so the worker must enforce them on the result.
     struct FilterIgnoringAlgorithm(Route);
 
     impl Algorithm for FilterIgnoringAlgorithm {
@@ -1792,7 +1792,7 @@ mod tests {
         ) -> Result<RouteResult, AlgorithmError> {
             let mut excluded: Vec<&str> = ["p1", "p2"]
                 .into_iter()
-                .filter(|id| request.exclusions().excludes_pool(id))
+                .filter(|id| request.constraints().excludes_pool(id))
                 .collect();
             excluded.sort_unstable();
             Err(AlgorithmError::Other(format!("excluded: {}", excluded.join(","))))
@@ -1916,7 +1916,7 @@ mod tests {
             .update_sync_status([("uniswap_v2".to_string(), status)], Duration::from_secs(15));
     }
 
-    /// One request's cached exclusions follow the protocol going `Stale` and then `Ready` again.
+    /// One request's cached constraints follow the protocol going `Stale` and then `Ready` again.
     #[tokio::test]
     async fn test_quote_unsynced_protocol() {
         let token_a = token(0x01, "A");
@@ -3483,7 +3483,7 @@ mod tests {
             *recorder.lock().unwrap() = Some((
                 request.label().cloned(),
                 request
-                    .exclusions()
+                    .constraints()
                     .excludes_pool("unused"),
             ));
             rfq_route(result)

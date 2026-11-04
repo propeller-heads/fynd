@@ -192,7 +192,7 @@ impl ReplacementLiquidity {
         }
         let mut swaps = Vec::new();
         for id in index.find_touching(&route_tokens) {
-            if request.exclusions().excludes_pool(id) {
+            if request.constraints().excludes_pool(id) {
                 continue;
             }
             let (Some(component), Some(state)) =
@@ -466,7 +466,7 @@ impl<'a, F: ReplacementFinder> ReplacementSolver<'a, F> {
             original_amount_out,
         };
         let required_tokens = request
-            .exclusions()
+            .constraints()
             .required_tokens()
             .clone();
         Some(Self { evaluator, swaps: liquidity.swaps, finder, required_tokens })

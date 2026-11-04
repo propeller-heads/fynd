@@ -20,8 +20,8 @@ pub struct SolveParts<'a, G> {
     pub label: Option<StateLabel>,
     /// The derived data the algorithm declared it needs.
     pub derived: Option<SharedDerivedDataRef>,
-    /// The pools and tokens this solve must not use.
-    pub exclusions: Arc<ResolvedRouteConstraints>,
+    /// The pools and tokens this solve must not use, and the tokens it must pass through.
+    pub constraints: Arc<ResolvedRouteConstraints>,
 }
 
 /// One order to solve, and everything the algorithm reads to solve it.
@@ -31,7 +31,7 @@ pub struct SolveRequest<'a, G> {
     order: &'a Order,
     label: Option<StateLabel>,
     derived: Option<SharedDerivedDataRef>,
-    exclusions: Arc<ResolvedRouteConstraints>,
+    constraints: Arc<ResolvedRouteConstraints>,
 }
 
 impl<'a, G> SolveRequest<'a, G> {
@@ -44,7 +44,7 @@ impl<'a, G> SolveRequest<'a, G> {
             market: self.market,
             label: self.label,
             derived: self.derived,
-            exclusions: self.exclusions,
+            constraints: self.constraints,
         }
     }
 
@@ -56,7 +56,7 @@ impl<'a, G> SolveRequest<'a, G> {
             order,
             label: None,
             derived: None,
-            exclusions: Arc::new(ResolvedRouteConstraints::default()),
+            constraints: Arc::new(ResolvedRouteConstraints::default()),
         }
     }
 
@@ -77,16 +77,16 @@ impl<'a, G> SolveRequest<'a, G> {
 
     /// Liquidity this solve must not route through.
     #[must_use]
-    pub fn with_exclusions(mut self, exclusions: ResolvedRouteConstraints) -> Self {
-        self.exclusions = Arc::new(exclusions);
+    pub fn with_constraints(mut self, constraints: ResolvedRouteConstraints) -> Self {
+        self.constraints = Arc::new(constraints);
         self
     }
 
-    pub(crate) fn with_shared_exclusions(
+    pub(crate) fn with_shared_constraints(
         mut self,
-        exclusions: Arc<ResolvedRouteConstraints>,
+        constraints: Arc<ResolvedRouteConstraints>,
     ) -> Self {
-        self.exclusions = exclusions;
+        self.constraints = constraints;
         self
     }
 
@@ -116,7 +116,7 @@ impl<'a, G> SolveRequest<'a, G> {
     }
 
     /// The pools and tokens this solve request must not use.
-    pub fn exclusions(&self) -> &ResolvedRouteConstraints {
-        &self.exclusions
+    pub fn constraints(&self) -> &ResolvedRouteConstraints {
+        &self.constraints
     }
 }

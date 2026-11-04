@@ -154,23 +154,23 @@ pub struct GraphQueryFilter {
 
 /// One solve's route search: the bounds the algorithm configured, and what the request excludes.
 ///
-/// The two have different lifetimes — the bounds are built with the algorithm, the exclusions
+/// The two have different lifetimes — the bounds are built with the algorithm, the constraints
 /// arrive with the order — so a search borrows both rather than owning either.
 #[derive(Debug, Clone, Copy)]
 pub struct RouteSearch<'a> {
     /// How long a route may be, and which tokens it may pass through.
     pub bounds: &'a GraphQueryFilter,
     /// Pools and tokens this request excludes.
-    pub exclusions: &'a ResolvedRouteConstraints,
+    pub constraints: &'a ResolvedRouteConstraints,
 }
 
 impl RouteSearch<'_> {
     /// Whether a route may pass through this token: an endpoint always may, and an
-    /// intermediate must clear the request's exclusions and either be on the connector list or be
+    /// intermediate must clear the request's constraints and either be on the connector list or be
     /// a token the request requires.
     #[must_use]
     pub fn allows_token(self, token: &Address, endpoints: (&Address, &Address)) -> bool {
-        self.exclusions
+        self.constraints
             .allows_token(token, endpoints) &&
             (token == endpoints.0 ||
                 token == endpoints.1 ||
@@ -178,7 +178,7 @@ impl RouteSearch<'_> {
                     .connector_tokens
                     .as_ref()
                     .is_none_or(|tokens| tokens.contains(token)) ||
-                self.exclusions
+                self.constraints
                     .required_tokens()
                     .contains(token))
     }

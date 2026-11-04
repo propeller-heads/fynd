@@ -578,11 +578,11 @@ mod tests {
         add_exclusive(&market, "excl_ac", (&a, &c), MockProtocolSim::new(10.0).with_gas(5)).await;
         let replacer = replacer(&market).await;
         let required = if require_b { vec![b.address.clone()] } else { vec![] };
-        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(required);
+        let constraints = ResolvedRouteConstraints::default().with_required_tokens(required);
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
         let request =
-            PostProcessRequest::new(&order, &market, &derived, &exclusions, far_deadline())
+            PostProcessRequest::new(&order, &market, &derived, &constraints, far_deadline())
                 .with_exclusive_access(ExclusiveAccess::Granted);
 
         let replacement = replacer
@@ -1003,9 +1003,9 @@ mod tests {
         let replacer = replacer(&market).await;
         let derived = DerivedData::new_shared();
         let order = sell_order(&a, &c);
-        let exclusions = ResolvedRouteConstraints::default();
+        let constraints = ResolvedRouteConstraints::default();
         let request =
-            PostProcessRequest::new(&order, &market, &derived, &exclusions, Instant::now())
+            PostProcessRequest::new(&order, &market, &derived, &constraints, Instant::now())
                 .with_exclusive_access(ExclusiveAccess::Granted);
 
         let replacement = replacer

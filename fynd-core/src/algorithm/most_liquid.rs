@@ -80,7 +80,7 @@ struct SolveContext<'a> {
     graph: &'a TopologyGraph<DepthAndPrice>,
     market: &'a MarketState,
     /// The pools and tokens this request excludes, checked before a pool is simulated.
-    exclusions: &'a ResolvedRouteConstraints,
+    constraints: &'a ResolvedRouteConstraints,
     token_prices: Option<&'a TokenGasPrices>,
     amount_in: &'a BigUint,
     /// What a unit of gas costs, read once off the market snapshot.
@@ -494,7 +494,7 @@ impl MostLiquidAlgorithm {
         market: MarketData,
         label: Option<StateLabel>,
         scored_paths: &[(TokenPath, f64)],
-        exclusions: &ResolvedRouteConstraints,
+        constraints: &ResolvedRouteConstraints,
     ) -> Result<MarketState, AlgorithmError> {
         let mut pairs: FxHashSet<(NodeIndex, NodeIndex)> = FxHashSet::default();
         for (token_path, _) in scored_paths {
@@ -505,7 +505,7 @@ impl MostLiquidAlgorithm {
         let mut component_ids: FxHashSet<&ComponentId> = FxHashSet::default();
         for &(from, to) in &pairs {
             for pool in graph.pools_between(from, to) {
-                if exclusions.excludes_pool(&pool.component_id) {
+                if constraints.excludes_pool(&pool.component_id) {
                     continue;
                 }
                 component_ids.insert(&pool.component_id);
@@ -643,7 +643,7 @@ impl MostLiquidAlgorithm {
         let scored =
             simulate_token_path(&legs, ctx.amount_in, winners, |leg, amount, component_id| {
                 if ctx
-                    .exclusions
+                    .constraints
                     .excludes_pool(component_id)
                 {
                     return None;
@@ -732,7 +732,7 @@ impl Algorithm for MostLiquidAlgorithm {
         &self,
         request: SolveRequest<'_, Self::GraphType>,
     ) -> Result<RouteResult, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
+        let SolveParts { graph, order, market, label, derived, constraints } = request.into_parts();
         let start = Instant::now();
 
         // Exact-out isn't supported yet
@@ -754,7 +754,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 1: Find every route as a sequence of tokens. Pools are chosen per hop during
         // simulation.
-        let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };
+        let search = RouteSearch { bounds: &self.query, constraints: &constraints };
         let all_paths =
             paths::find_token_paths(graph, order.token_in(), order.token_out(), search)?;
         let n_paths = all_paths.len();
@@ -769,7 +769,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 2: Score and sort all paths by estimated output (higher score = better)
         // No lock needed — scoring uses only local graph data.
-        let mut scored_paths = rank_by_heuristic(graph, all_paths, &exclusions);
+        let mut scored_paths = rank_by_heuristic(graph, all_paths, &constraints);
         if scored_paths.is_empty() {
             return Err(no_path(NoPathReason::NoScorablePaths));
         }
@@ -787,7 +787,7 @@ impl Algorithm for MostLiquidAlgorithm {
 
         // Step 3: Fetch all pools in scored_paths.
         let market =
-            Self::snapshot_market_state(graph, market, label, &scored_paths, &exclusions).await?;
+            Self::snapshot_market_state(graph, market, label, &scored_paths, &constraints).await?;
         let gas_price = paths::fetch_gas_price(&market)?;
 
         // Step 4: Solve all paths in score order and return the best one
@@ -798,7 +798,7 @@ impl Algorithm for MostLiquidAlgorithm {
             amount_in: &amount_in,
             gas_price: &gas_price,
             start,
-            exclusions: &exclusions,
+            constraints: &constraints,
         };
 
         self.solve_for_best_path(&scored_paths, &mut report, &ctx)
@@ -1128,9 +1128,12 @@ mod tests {
             AlgorithmConfig::new(1, 2, Duration::from_secs(1), None).unwrap(),
         )
         .unwrap()
-        .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
-            ResolvedRouteConstraints::default().with_tokens([a.address.clone(), c.address.clone()]),
-        ))
+        .find_best_route(
+            SolveRequest::new(manager.graph(), market, &order).with_constraints(
+                ResolvedRouteConstraints::default()
+                    .with_excluded_tokens([a.address.clone(), c.address.clone()]),
+            ),
+        )
         .await
         .unwrap();
         assert_eq!(result.route().swaps().len(), 2);
@@ -1163,7 +1166,7 @@ mod tests {
         .unwrap();
         let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
         let request = SolveRequest::new(manager.graph(), market, &order)
-            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+            .with_constraints(ResolvedRouteConstraints::default().with_required_tokens(required));
 
         let result = algorithm
             .find_best_route(request)
@@ -1197,8 +1200,8 @@ mod tests {
         let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
 
         let result = algorithm
-            .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_exclusions(
-                ResolvedRouteConstraints::default().with_pools(["best".to_string()]),
+            .find_best_route(SolveRequest::new(manager.graph(), market, &order).with_constraints(
+                ResolvedRouteConstraints::default().with_excluded_pools(["best".to_string()]),
             ))
             .await
             .unwrap();

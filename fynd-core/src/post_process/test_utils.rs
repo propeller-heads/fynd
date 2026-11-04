@@ -279,18 +279,18 @@ pub(crate) async fn run(
     processor: &impl RoutePostProcessor,
     market: &MarketData,
     order: &Order,
-    exclusions: &ResolvedRouteConstraints,
+    constraints: &ResolvedRouteConstraints,
     route: RouteResult,
 ) -> Option<RouteResult> {
     let derived = DerivedData::new_shared();
-    let request = PostProcessRequest::new(order, market, &derived, exclusions, far_deadline());
+    let request = PostProcessRequest::new(order, market, &derived, constraints, far_deadline());
     processor
         .process(&request, &route)
         .await
 }
 
 /// Runs `processor` on `route` for a caller with `access` to exclusive liquidity, with
-/// [`far_deadline`] and no exclusions.
+/// [`far_deadline`] and no constraints.
 pub(crate) async fn run_with_access(
     processor: &impl RoutePostProcessor,
     market: &MarketData,
@@ -299,8 +299,8 @@ pub(crate) async fn run_with_access(
     route: RouteResult,
 ) -> Option<RouteResult> {
     let derived = DerivedData::new_shared();
-    let exclusions = ResolvedRouteConstraints::default();
-    let request = PostProcessRequest::new(order, market, &derived, &exclusions, far_deadline())
+    let constraints = ResolvedRouteConstraints::default();
+    let request = PostProcessRequest::new(order, market, &derived, &constraints, far_deadline())
         .with_exclusive_access(access);
     processor
         .process(&request, &route)

@@ -219,10 +219,10 @@ impl WaterFillAlgorithm {
         request: SolveRequest<'a, TopologyGraph<DepthAndPrice>>,
         deadline: Deadline,
     ) -> Result<SetupResult<'a, 'a>, AlgorithmError> {
-        let SolveParts { graph, order, market, label, derived, exclusions } = request.into_parts();
-        // The hop bounds are this algorithm's, the exclusions are the request's; a search borrows
+        let SolveParts { graph, order, market, label, derived, constraints } = request.into_parts();
+        // The hop bounds are this algorithm's, the constraints are the request's; a search borrows
         // both.
-        let search = RouteSearch { bounds: &self.query, exclusions: &exclusions };
+        let search = RouteSearch { bounds: &self.query, constraints: &constraints };
         let token_prices = if let Some(ref derived) = derived {
             derived
                 .read()
@@ -1385,7 +1385,7 @@ where
 
     found.retain(|(path, _)| {
         cfg.search
-            .exclusions
+            .constraints
             .visits_all_required_tokens(path.tokens.iter().copied())
     });
     rank_found_candidate_paths(found, cfg.max_candidates, order)
@@ -1557,7 +1557,7 @@ fn candidate_priority<W>(
     {
         Some(tokens) => (tokens.contains(token) ||
             cfg.search
-                .exclusions
+                .constraints
                 .required_tokens()
                 .contains(token))
         .then_some(1),
@@ -1579,7 +1579,7 @@ fn can_extend_path<W>(
     let next_addr = &graph[next_node];
     if cfg
         .search
-        .exclusions
+        .constraints
         .excludes_pool(&edge.component_id)
     {
         return false;
@@ -1873,7 +1873,7 @@ mod tests {
         let order = whole_weth_order(&a.address, &b.address, 1);
         let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
         let request = SolveRequest::new(gm.graph(), market, &order)
-            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+            .with_constraints(ResolvedRouteConstraints::default().with_required_tokens(required));
 
         let result = water_fill_default()
             .find_best_route(request)
@@ -1911,7 +1911,7 @@ mod tests {
         let order = whole_weth_order(&a.address, &y.address, 1);
         let required: Vec<_> = if require_x { vec![x.address.clone()] } else { vec![] };
         let request = SolveRequest::new(gm.graph(), market, &order)
-            .with_exclusions(ResolvedRouteConstraints::default().with_required_tokens(required));
+            .with_constraints(ResolvedRouteConstraints::default().with_required_tokens(required));
         let algorithm = WaterFillAlgorithm::with_config(
             AlgorithmConfig::new(1, 3, Duration::from_millis(5000), None)
                 .unwrap()
@@ -2079,9 +2079,9 @@ mod tests {
             addr(0xFF),
         );
 
-        let exclusions = if exclude_endpoints {
+        let constraints = if exclude_endpoints {
             ResolvedRouteConstraints::default()
-                .with_tokens([link.address.clone(), weth.address.clone()])
+                .with_excluded_tokens([link.address.clone(), weth.address.clone()])
         } else {
             ResolvedRouteConstraints::default()
         };
@@ -2095,7 +2095,7 @@ mod tests {
             CandidateSearchConfig {
                 search: RouteSearch {
                     bounds: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
-                    exclusions: &exclusions,
+                    constraints: &constraints,
                 },
                 max_candidates: 128,
                 anchor_tokens: &FxHashSet::default(),

@@ -248,7 +248,7 @@ pub(crate) fn simulate_token_path<'g, D, T>(
 fn heuristic_score(
     graph: &TopologyGraph<DepthAndPrice>,
     token_path: &[NodeIndex],
-    exclusions: &ResolvedRouteConstraints,
+    constraints: &ResolvedRouteConstraints,
 ) -> Option<f64> {
     if token_path.len() < 2 {
         return None;
@@ -264,7 +264,7 @@ fn heuristic_score(
         let mut best_depth = f64::MIN;
         let mut has_pool = false;
         for pool in pools {
-            if exclusions.excludes_pool(&pool.component_id) {
+            if constraints.excludes_pool(&pool.component_id) {
                 continue;
             }
             has_pool = true;
@@ -295,12 +295,12 @@ fn heuristic_score(
 pub(crate) fn rank_by_heuristic(
     graph: &TopologyGraph<DepthAndPrice>,
     token_paths: Vec<TokenPath>,
-    exclusions: &ResolvedRouteConstraints,
+    constraints: &ResolvedRouteConstraints,
 ) -> Vec<(TokenPath, f64)> {
     let mut scored: Vec<(TokenPath, f64)> = token_paths
         .into_iter()
         .filter_map(|path| {
-            let score = heuristic_score(graph, &path, exclusions)?;
+            let score = heuristic_score(graph, &path, constraints)?;
             Some((path, score))
         })
         .collect();
@@ -331,7 +331,7 @@ mod tests {
 
         /// Every pool of the A->B pair in `parallel_graph`.
         fn every_pool_excluded() -> ResolvedRouteConstraints {
-            ResolvedRouteConstraints::default().with_pools([
+            ResolvedRouteConstraints::default().with_excluded_pools([
                 "ab1".to_string(),
                 "ab2".to_string(),
                 "ab3".to_string(),
@@ -385,7 +385,7 @@ mod tests {
             let without_deep_pool = heuristic_score(
                 graph,
                 &path,
-                &ResolvedRouteConstraints::default().with_pools(["ab1".to_string()]),
+                &ResolvedRouteConstraints::default().with_excluded_pools(["ab1".to_string()]),
             )
             .unwrap();
 

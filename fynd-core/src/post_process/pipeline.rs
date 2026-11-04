@@ -230,7 +230,7 @@ mod tests {
         order: Order,
         market: MarketData,
         derived: SharedDerivedDataRef,
-        exclusions: ResolvedRouteConstraints,
+        constraints: ResolvedRouteConstraints,
     }
 
     impl Fixture {
@@ -239,7 +239,7 @@ mod tests {
                 order: order(&token(0x01, "A"), &token(0x02, "B"), 100, OrderSide::Sell),
                 market: setup_market_weighted(Vec::new()).0,
                 derived: DerivedData::new_shared(),
-                exclusions: ResolvedRouteConstraints::default(),
+                constraints: ResolvedRouteConstraints::default(),
             }
         }
 
@@ -253,7 +253,7 @@ mod tests {
                 &self.order,
                 &self.market,
                 &self.derived,
-                &self.exclusions,
+                &self.constraints,
                 deadline,
             )
         }

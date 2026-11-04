@@ -221,8 +221,8 @@ pub enum RouteConstraintsError {
 /// [`MarketState::update_sync_status`](crate::feed::market_data::MarketState::update_sync_status).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedRouteConstraints {
-    pub(crate) pools: FxHashSet<ComponentId>,
-    pub(crate) tokens: FxHashSet<Address>,
+    pub(crate) excluded_pools: FxHashSet<ComponentId>,
+    pub(crate) excluded_tokens: FxHashSet<Address>,
     pub(crate) required_tokens: FxHashSet<Address>,
     pub(crate) unsynced_pools: Arc<FxHashSet<ComponentId>>,
 }
@@ -231,16 +231,16 @@ impl ResolvedRouteConstraints {
     /// Excludes these pools, by component id.
     #[must_use]
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
-        self.pools.extend(pools);
+    pub fn with_excluded_pools(mut self, pools: impl IntoIterator<Item = ComponentId>) -> Self {
+        self.excluded_pools.extend(pools);
         self
     }
 
     /// Excludes routes that pass through these tokens.
     #[must_use]
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
-        self.tokens.extend(tokens);
+    pub fn with_excluded_tokens(mut self, tokens: impl IntoIterator<Item = Address>) -> Self {
+        self.excluded_tokens.extend(tokens);
         self
     }
 
@@ -261,13 +261,17 @@ impl ResolvedRouteConstraints {
     /// Whether nothing is excluded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pools.is_empty() && self.tokens.is_empty() && self.unsynced_pools.is_empty()
+        self.excluded_pools.is_empty() &&
+            self.excluded_tokens.is_empty() &&
+            self.unsynced_pools.is_empty()
     }
 
     /// Whether this pool is excluded.
     #[must_use]
     pub fn excludes_pool(&self, component_id: &str) -> bool {
-        self.pools.contains(component_id) || self.is_unsynced_pool(component_id)
+        self.excluded_pools
+            .contains(component_id) ||
+            self.is_unsynced_pool(component_id)
     }
 
     /// Whether this pool belongs to a protocol the market marks out of sync.
@@ -280,7 +284,7 @@ impl ResolvedRouteConstraints {
     /// Whether routes through this token are excluded.
     #[must_use]
     pub fn excludes_token(&self, token: &Address) -> bool {
-        self.tokens.contains(token)
+        self.excluded_tokens.contains(token)
     }
 
     /// The tokens every route must pass through.
@@ -426,7 +430,7 @@ impl QuoteOptions {
     }
 }
 
-type SharedExclusionCache = Arc<Mutex<Option<(u64, Arc<ResolvedRouteConstraints>)>>>;
+type SharedConstraintCache = Arc<Mutex<Option<(u64, Arc<ResolvedRouteConstraints>)>>>;
 
 /// Parameters for a single solve operation.
 ///
@@ -443,9 +447,9 @@ pub struct SolveParams {
     /// Whether the caller may use exclusive liquidity. Public-only pools hand it to their
     /// post-processors.
     exclusive_access: ExclusiveAccess,
-    /// Per-request resolved exclusions shared by all cloned solve tasks.
+    /// Per-request resolved constraints shared by all cloned solve tasks.
     #[doc(hidden)]
-    exclusion_cache: SharedExclusionCache,
+    constraint_cache: SharedConstraintCache,
 }
 
 impl Clone for SolveParams {
@@ -454,7 +458,7 @@ impl Clone for SolveParams {
             state_label: self.state_label.clone(),
             route_filter: self.route_filter.clone(),
             exclusive_access: self.exclusive_access,
-            exclusion_cache: self.exclusion_cache.clone(),
+            constraint_cache: self.constraint_cache.clone(),
         }
     }
 }
@@ -476,7 +480,7 @@ impl Default for SolveParams {
             state_label: None,
             route_filter: RouteConstraints::default(),
             exclusive_access: ExclusiveAccess::default(),
-            exclusion_cache: Arc::new(Mutex::new(None)),
+            constraint_cache: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -491,7 +495,7 @@ impl SolveParams {
     /// Excludes the pools, protocol systems and tokens this filter names.
     pub fn with_route_filter(mut self, filter: RouteConstraints) -> Self {
         self.route_filter = filter;
-        self.exclusion_cache = Arc::new(Mutex::new(None));
+        self.constraint_cache = Arc::new(Mutex::new(None));
         self
     }
 
@@ -516,19 +520,19 @@ impl SolveParams {
         self.exclusive_access
     }
 
-    pub(crate) fn cached_exclusions(&self) -> &SharedExclusionCache {
-        &self.exclusion_cache
+    pub(crate) fn cached_constraints(&self) -> &SharedConstraintCache {
+        &self.constraint_cache
     }
 
     #[cfg(test)]
-    pub(crate) fn cache_exclusions_for_test(
+    pub(crate) fn cache_constraints_for_test(
         &self,
         generation: u64,
-        exclusions: ResolvedRouteConstraints,
+        constraints: ResolvedRouteConstraints,
     ) -> Arc<ResolvedRouteConstraints> {
-        let exclusions = Arc::new(exclusions);
-        *self.exclusion_cache.lock().unwrap() = Some((generation, exclusions.clone()));
-        exclusions
+        let constraints = Arc::new(constraints);
+        *self.constraint_cache.lock().unwrap() = Some((generation, constraints.clone()));
+        constraints
     }
 }
 
@@ -537,21 +541,21 @@ mod solve_params_tests {
     use super::*;
 
     #[test]
-    fn cloned_solve_params_share_exclusion_cache() {
+    fn cloned_solve_params_share_constraint_cache() {
         let params = SolveParams::default();
         let clone = params.clone();
-        let exclusions = params.cache_exclusions_for_test(
+        let constraints = params.cache_constraints_for_test(
             7,
-            ResolvedRouteConstraints::default().with_pools(["pool".to_string()]),
+            ResolvedRouteConstraints::default().with_excluded_pools(["pool".to_string()]),
         );
         let cached = clone
-            .cached_exclusions()
+            .cached_constraints()
             .lock()
             .unwrap()
             .clone()
             .unwrap();
         assert_eq!(cached.0, 7);
-        assert!(Arc::ptr_eq(&exclusions, &cached.1));
+        assert!(Arc::ptr_eq(&constraints, &cached.1));
     }
 }
 
@@ -2763,7 +2767,7 @@ mod tests {
         #[case] path: &[u8],
         #[case] expected: bool,
     ) {
-        let exclusions = ResolvedRouteConstraints::default().with_required_tokens(
+        let constraints = ResolvedRouteConstraints::default().with_required_tokens(
             required
                 .iter()
                 .map(|&byte| token(byte, "T").address),
@@ -2773,7 +2777,7 @@ mod tests {
             .map(|&byte| token(byte, "T").address)
             .collect();
 
-        assert_eq!(exclusions.visits_all_required_tokens(&path), expected);
+        assert_eq!(constraints.visits_all_required_tokens(&path), expected);
     }
 
     #[test]
@@ -2785,10 +2789,10 @@ mod tests {
 
     #[test]
     fn test_exclusions_with_only_required_tokens_exclude_nothing() {
-        let exclusions =
+        let constraints =
             ResolvedRouteConstraints::default().with_required_tokens([token(0x09, "X").address]);
 
-        assert!(exclusions.is_empty());
+        assert!(constraints.is_empty());
     }
 
     #[test]
