@@ -76,7 +76,10 @@ use crate::{
         types::{gas_cost_in_token, TokenGasPrices},
     },
     feed::market_data::{MarketDataView, MarketState},
-    graph::{EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph, TopologyGraphManager},
+    graph::{
+        is_native_wrap, EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph,
+        TopologyGraphManager,
+    },
     types::{ComponentId, Order, RouteResult},
     AlgorithmError,
 };
@@ -1366,7 +1369,9 @@ where
         amount_out: order.amount().clone(),
     }];
 
-    for _depth in 0..cfg.search.bounds.max_hops {
+    // A route holds at most one wrap, and the wrap costs no hop, so it can take one step past
+    // `max_hops`.
+    for _depth in 0..=cfg.search.bounds.max_hops {
         if cfg.deadline.expired() || frontier.is_empty() {
             break;
         }
@@ -1437,16 +1442,32 @@ fn expand_candidate_state<'a, W>(
             path: path.clone(),
             amount_out: candidate.amount_out,
         };
-        if candidate.target == target && path.len() >= cfg.search.bounds.min_hops {
+        if candidate.target == target && path.counted_hops() >= cfg.search.bounds.min_hops {
             found.push((path.clone(), path_state.amount_out.clone()));
         }
-        if path.len() < cfg.search.bounds.max_hops {
+        if stays_on_frontier(graph, &path, candidate.target, cfg.search.bounds.max_hops) {
             next_by_node
                 .entry(candidate.target)
                 .or_default()
                 .push(path_state);
         }
     }
+}
+
+/// Whether a path ending at `node` stays on the frontier.
+///
+/// A path with fewer than `max_hops` pool hops always does. One with `max_hops` pool hops stays
+/// only if it can still take the wrap.
+fn stays_on_frontier<W>(
+    graph: &TopologyGraph<W>,
+    path: &Path<'_, W>,
+    node: NodeIndex,
+    max_hops: usize,
+) -> bool {
+    path.non_wrap_hops() < max_hops ||
+        graph
+            .wrap_twin(node)
+            .is_some_and(|twin| !path.tokens.contains(&&graph[twin]))
 }
 
 fn candidate_edges_for_state<'a, W>(
@@ -1596,6 +1617,12 @@ fn can_extend_path<W>(
         return false;
     }
     if next_addr == cfg.source_token {
+        return false;
+    }
+    // Once the path has `max_hops` pool hops, only the wrap can extend it.
+    if !is_native_wrap(&edge.component_id) &&
+        state.path.non_wrap_hops() >= cfg.search.bounds.max_hops
+    {
         return false;
     }
     cfg.search
