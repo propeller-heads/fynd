@@ -56,11 +56,7 @@ pub type TokenGasPrices = FxHashMap<TokenGasPriceKey, Price>;
 ///
 /// Division rounds up so a fractional raw unit never understates the gas cost. Returns `None`
 /// for a zero price denominator, which every caller treats as an unpriced token.
-pub(crate) fn gas_cost_in_token(
-    gas: &BigUint,
-    gas_price_wei: &BigUint,
-    price: &Price,
-) -> Option<BigUint> {
+pub fn gas_cost_in_token(gas: &BigUint, gas_price_wei: &BigUint, price: &Price) -> Option<BigUint> {
     mul_div_ceil(&(gas * gas_price_wei), &price.numerator, &price.denominator)
 }
 
