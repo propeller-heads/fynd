@@ -36,7 +36,7 @@ use super::{internal::SolveError, primitives::ComponentId};
 use crate::{
     algorithm::NoPathReason,
     encoding::{
-        hooks::{CalldataHook, SolutionHook},
+        hooks::{AddedGas, CalldataHook, SolutionHook},
         router_fees::LEGACY_BPS_DENOMINATOR,
     },
     feed::market_data::StateLabel,
@@ -1494,6 +1494,17 @@ impl OrderQuote {
         self.amount_out = BigUint::ZERO;
         self.amount_out_net_gas = BigUint::ZERO;
         self.gas_estimate = BigUint::ZERO;
+    }
+
+    /// Adds `added_gas` to `gas_estimate` and takes its cost off `amount_out_net_gas`, which stops
+    /// at zero.
+    pub(crate) fn add_gas(&mut self, added_gas: &AddedGas) {
+        self.gas_estimate += added_gas.gas();
+        self.amount_out_net_gas = if self.amount_out_net_gas > *added_gas.cost() {
+            &self.amount_out_net_gas - added_gas.cost()
+        } else {
+            BigUint::ZERO
+        };
     }
 
     /// Overrides the gas-adjusted net output (used by gas refinement and surplus overlay).

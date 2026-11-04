@@ -20,6 +20,7 @@
 
 use std::{fmt::Debug, panic::RefUnwindSafe};
 
+use num_bigint::BigUint;
 use tycho_execution::encoding::models::{EncodedSolution, Solution};
 
 use crate::{OrderQuote, SolveError};
@@ -35,12 +36,48 @@ use crate::{OrderQuote, SolveError};
 /// The quote reports the hooked `expected_amount_out` as `amount_out` and moves
 /// `amount_out_net_gas` by the same difference. The fee breakdown and the per-swap amounts of the
 /// route stay as computed before the hook.
+///
+/// When the hooked `Solution` costs more gas on chain than the route, [`SolutionHook::added_gas`]
+/// reports it: the quote adds the gas to `gas_estimate` and takes its cost off
+/// `amount_out_net_gas`.
 pub trait SolutionHook: Debug + Send + Sync + RefUnwindSafe {
     /// Returns the `Solution` to encode for `quote`.
     ///
     /// # Errors
     /// An error fails this quote only.
     fn apply(&self, quote: &OrderQuote, solution: Solution) -> Result<Solution, SolveError>;
+
+    /// Returns the gas that `hooked`, the `Solution` [`SolutionHook::apply`] returned for `quote`,
+    /// adds on chain beyond the route's, or `None` when it adds none.
+    ///
+    /// The hook prices the gas itself, because the encoder holds no token prices.
+    fn added_gas(&self, _quote: &OrderQuote, _hooked: &Solution) -> Option<AddedGas> {
+        None
+    }
+}
+
+/// Gas a hooked `Solution` adds on chain, and its cost in the order's output token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedGas {
+    gas: BigUint,
+    cost: BigUint,
+}
+
+impl AddedGas {
+    /// `gas` units that cost `cost` raw units of the order's output token.
+    pub fn new(gas: BigUint, cost: BigUint) -> Self {
+        Self { gas, cost }
+    }
+
+    /// The added gas units.
+    pub fn gas(&self) -> &BigUint {
+        &self.gas
+    }
+
+    /// The cost of the added gas, in raw units of the order's output token.
+    pub fn cost(&self) -> &BigUint {
+        &self.cost
+    }
 }
 
 /// Edits a quote's router calldata after encoding and before simulation.

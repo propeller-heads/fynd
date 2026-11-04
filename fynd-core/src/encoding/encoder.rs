@@ -25,7 +25,7 @@ use tycho_simulation::tycho_common::{models::Chain, Bytes};
 use crate::{
     encoding::{
         exclusive_swap::ExclusiveSwapSigner,
-        hooks::SolutionHook,
+        hooks::{AddedGas, SolutionHook},
         router_call::{RouterCall, RouterLayout},
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
@@ -50,6 +50,8 @@ struct PreparedSolution {
     solution: Solution,
     fee_breakdown: FeeBreakdown,
     fee_rates: FeeRates,
+    /// The gas the solution hook adds, and its cost.
+    added_gas: Option<AddedGas>,
 }
 
 /// Encodes solution into tycho compatible transactions.
@@ -502,11 +504,15 @@ impl Encoder {
                 solution
             }
         };
-        let solution = match encoding_options.solution_hook() {
-            Some(hook) => Self::apply_solution_hook(hook, quote, solution)?,
-            None => solution,
+        let (solution, added_gas) = match encoding_options.solution_hook() {
+            Some(hook) => {
+                let hooked = Self::apply_solution_hook(hook, quote, solution)?;
+                let added_gas = hook.added_gas(quote, &hooked);
+                (hooked, added_gas)
+            }
+            None => (solution, None),
         };
-        Ok(PreparedSolution { solution, fee_breakdown, fee_rates })
+        Ok(PreparedSolution { solution, fee_breakdown, fee_rates, added_gas })
     }
 
     /// Runs `hook` and checks the `Solution` it returns: only the fields in `HOOK_MUTABLE_FIELDS`
@@ -588,6 +594,9 @@ impl Encoder {
                 .clone(),
         );
         quote.set_gas_estimate(encoded_solution.estimated_gas().clone());
+        if let Some(added_gas) = &prepared.added_gas {
+            quote.add_gas(added_gas);
+        }
         quote.set_transaction(transaction);
         quote.set_fee_breakdown(fee_breakdown);
         Ok(())

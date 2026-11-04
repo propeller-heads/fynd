@@ -72,7 +72,7 @@ pub use algorithm::{
 };
 // Required for implementing the Algorithm trait externally
 pub use derived::computation::ComputationRequirements;
-pub use encoding::hooks::{CalldataHook, SolutionHook};
+pub use encoding::hooks::{AddedGas, CalldataHook, SolutionHook};
 pub use feed::{
     events::MarketEvent,
     external_liquidity::{ExternalLiquidityConfig, LiquidityComponent, LiquiditySnapshot},
