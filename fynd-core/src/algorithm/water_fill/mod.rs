@@ -1758,7 +1758,7 @@ mod tests {
                 token_with_decimals, ConstantProductSim, DivByZeroSim, MockProtocolSim,
             },
         },
-        graph::GraphManager,
+        graph::{component_ids_with_wrap, GraphManager},
         types::{quote::OrderSide, ResolvedRouteConstraints},
     };
 
@@ -2140,6 +2140,71 @@ mod tests {
             "z_strong_link_weth",
             "discovery should rank by simulated output, not topology or edge weights",
         );
+    }
+
+    /// The native wrap does not count as a hop, so discovery with `max_hops` 3 finds a route of
+    /// three pools and the wrap wherever the wrap sits, and none of four pools and the wrap.
+    #[rstest::rstest]
+    #[case::wrap_in_the_middle(1, 5, Ok(vec!["p1", "wrap", "p2", "p3"]))]
+    #[case::wrap_last(6, 2, Ok(vec!["p4", "p3", "p2", "wrap"]))]
+    #[case::wrap_first(2, 6, Ok(vec!["wrap", "p2", "p3", "p4"]))]
+    #[case::four_pools_and_a_wrap(1, 6, Err(NoPathReason::NoGraphPath))]
+    #[case::pool_after_three_pools_and_a_wrap(6, 7, Err(NoPathReason::NoGraphPath))]
+    #[tokio::test]
+    async fn test_native_wrap_discovery_hop_limit(
+        #[case] source: u8,
+        #[case] destination: u8,
+        #[case] expected: Result<Vec<&str>, NoPathReason>,
+    ) {
+        let tokens: Vec<_> = (1..=7u8)
+            .map(|byte| token_with_decimals(byte, &format!("T{byte}"), 18))
+            .collect();
+        let wrap_id = crate::graph::native_wrap_component().as_str();
+        let pool = || Box::new(v2_component(2_000_000, 2_000_000)) as Box<dyn ProtocolSim>;
+        let (market, graph_manager) = setup_market_unweighted_topology(vec![
+            ("p1", &tokens[0], &tokens[1], pool()),
+            (wrap_id, &tokens[1], &tokens[2], pool()),
+            ("p2", &tokens[2], &tokens[3], pool()),
+            ("p3", &tokens[3], &tokens[4], pool()),
+            ("p4", &tokens[4], &tokens[5], pool()),
+            ("p5", &tokens[2], &tokens[6], pool()),
+        ]);
+        let order = whole_weth_order(&addr(source), &addr(destination), 1);
+        let start = Instant::now();
+        let view = market.read().await;
+
+        let paths = discover_paths(
+            graph_manager.graph(),
+            &view,
+            &order,
+            &mut SwapCache::new(),
+            CandidateSearchConfig {
+                search: RouteSearch {
+                    bounds: &GraphQueryFilter { min_hops: 1, max_hops: 3, connector_tokens: None },
+                    constraints: &ResolvedRouteConstraints::default(),
+                },
+                max_candidates: 128,
+                anchor_tokens: &FxHashSet::default(),
+                source_token: order.token_in(),
+                deadline: Deadline::new(start, Duration::from_millis(2000)),
+            },
+        );
+
+        match expected {
+            Ok(ids) => {
+                let found: Vec<String> = paths.unwrap()[0]
+                    .edge_iter()
+                    .iter()
+                    .map(|edge| edge.component_id.clone())
+                    .collect();
+                assert_eq!(found, component_ids_with_wrap(&ids));
+            }
+            Err(expected_reason) => assert!(
+                matches!(&paths, Err(AlgorithmError::NoPath { reason, .. }) if *reason == expected_reason),
+                "{:?}",
+                paths.map(|paths| paths.len())
+            ),
+        }
     }
 
     // ==================== Ranking the full-amount outcomes ====================
