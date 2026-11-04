@@ -42,7 +42,7 @@ All response fields use output token units:
 | `max_slippage`        | Slippage allowance on the post-fee amount                     |
 | `min_amount_received` | On-chain minimum the user receives (`minAmountOut` in the tx) |
 
-Invariant without client fees: `amount_out = router_fee + max_slippage + min_amount_received`
+Invariant without client fees: `router_fee + max_slippage + min_amount_received` is at most `amount_out`, and equal to it for a quote whose output comes from its route alone.
 
 ### Example
 

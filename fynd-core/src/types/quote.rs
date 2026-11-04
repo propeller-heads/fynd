@@ -627,11 +627,14 @@ pub struct FeeBreakdown {
     /// Client's portion of the fee (after the router takes its share).
     #[serde_as(as = "DisplayFromStr")]
     client_fee: BigUint,
-    /// Maximum slippage amount: (amount_out - router_fee - client_fee) * slippage.
+    /// Maximum slippage amount: (amount_out - router_fee - client_fee) * slippage. When a solution
+    /// hook raises amount_out, this value is not recomputed, so it is at most that product.
     #[serde_as(as = "DisplayFromStr")]
     max_slippage: BigUint,
     /// Minimum amount the user receives on-chain.
-    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    /// Equal to amount_out - router_fee - client_fee - max_slippage. When a solution hook raises
+    /// amount_out, router_fee and client_fee are recomputed on the new amount and this value is
+    /// not, so it is below that difference.
     /// This is the value encoded as min_amount_out in the transaction.
     #[serde_as(as = "DisplayFromStr")]
     min_amount_received: BigUint,

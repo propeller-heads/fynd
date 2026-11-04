@@ -498,12 +498,12 @@ pub struct FeeBreakdown {
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "2800000"))]
     client_fee: BigUint,
-    /// Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+    /// Maximum slippage: at most (amount_out - router_fee - client_fee) * slippage.
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3496850"))]
     max_slippage: BigUint,
     /// Minimum amount the user receives on-chain.
-    /// Equal to amount_out - router_fee - client_fee - max_slippage.
+    /// At most amount_out - router_fee - client_fee - max_slippage.
     #[serde_as(as = "DisplayFromStr")]
     #[cfg_attr(feature = "openapi", schema(value_type = String, example = "3493353150"))]
     min_amount_received: BigUint,

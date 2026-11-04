@@ -296,13 +296,13 @@ export interface components {
              */
             client_fee: string;
             /**
-             * @description Maximum slippage: (amount_out - router_fee - client_fee) * slippage.
+             * @description Maximum slippage: at most (amount_out - router_fee - client_fee) * slippage.
              * @example 3496850
              */
             max_slippage: string;
             /**
              * @description Minimum amount the user receives on-chain.
-             *     Equal to amount_out - router_fee - client_fee - max_slippage.
+             *     At most amount_out - router_fee - client_fee - max_slippage.
              * @example 3493353150
              */
             min_amount_received: string;
