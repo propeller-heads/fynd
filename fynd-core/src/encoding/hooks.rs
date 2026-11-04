@@ -59,24 +59,24 @@ pub trait SolutionHook: Debug + Send + Sync + RefUnwindSafe {
 /// Gas a hooked `Solution` adds on chain, and its cost in the order's output token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddedGas {
-    gas: BigUint,
-    cost: BigUint,
+    gas_units: BigUint,
+    cost_in_token_out: BigUint,
 }
 
 impl AddedGas {
-    /// `gas` units that cost `cost` raw units of the order's output token.
-    pub fn new(gas: BigUint, cost: BigUint) -> Self {
-        Self { gas, cost }
+    /// `gas_units` of gas that cost `cost_in_token_out` raw units of the order's output token.
+    pub fn new(gas_units: BigUint, cost_in_token_out: BigUint) -> Self {
+        Self { gas_units, cost_in_token_out }
     }
 
     /// The added gas units.
-    pub fn gas(&self) -> &BigUint {
-        &self.gas
+    pub fn gas_units(&self) -> &BigUint {
+        &self.gas_units
     }
 
     /// The cost of the added gas, in raw units of the order's output token.
-    pub fn cost(&self) -> &BigUint {
-        &self.cost
+    pub fn cost_in_token_out(&self) -> &BigUint {
+        &self.cost_in_token_out
     }
 }
 

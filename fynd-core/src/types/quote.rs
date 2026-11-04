@@ -1499,9 +1499,9 @@ impl OrderQuote {
     /// Adds `added_gas` to `gas_estimate` and takes its cost off `amount_out_net_gas`, which stops
     /// at zero.
     pub(crate) fn add_gas(&mut self, added_gas: &AddedGas) {
-        self.gas_estimate += added_gas.gas();
-        self.amount_out_net_gas = if self.amount_out_net_gas > *added_gas.cost() {
-            &self.amount_out_net_gas - added_gas.cost()
+        self.gas_estimate += added_gas.gas_units();
+        self.amount_out_net_gas = if self.amount_out_net_gas > *added_gas.cost_in_token_out() {
+            &self.amount_out_net_gas - added_gas.cost_in_token_out()
         } else {
             BigUint::ZERO
         };
