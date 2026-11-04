@@ -39,6 +39,14 @@ pub(crate) fn native_wrap_component() -> &'static ComponentId {
     &NATIVE_WRAP_COMPONENT
 }
 
+/// Component ids for tests, with the placeholder `"wrap"` standing for [`native_wrap_component`].
+#[cfg(test)]
+pub(crate) fn component_ids_with_wrap(ids: &[&str]) -> Vec<ComponentId> {
+    ids.iter()
+        .map(|id| if *id == "wrap" { native_wrap_component().clone() } else { (*id).to_string() })
+        .collect()
+}
+
 /// Whether this component is the injected native-to-wrapped swap.
 pub(crate) fn is_native_wrap(component_id: &ComponentId) -> bool {
     component_id == &*NATIVE_WRAP_COMPONENT
@@ -375,5 +383,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(edges(&manager), [Some(true), None, Some(false)]);
+    }
+
+    /// The feed injects the wrap under the hex of its byte id, and the market keys it by that
+    /// string, so the graph must look for the same string.
+    #[test]
+    fn test_is_native_wrap_injected_component_id() {
+        use tycho_simulation::{
+            evm::protocol::native_wrapper::state::NativeWrapperState, tycho_common::models::Chain,
+        };
+
+        let component = NativeWrapperState::new(Chain::Ethereum)
+            .expect("Ethereum has a native wrapper")
+            .component();
+
+        assert!(is_native_wrap(&component.id.to_string()));
+        assert!(!is_native_wrap(&"native_wrapper".to_string()));
     }
 }

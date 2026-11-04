@@ -1809,4 +1809,208 @@ mod tests {
         assert!(intermediates.contains(&b), "B should appear with no restriction");
         assert!(intermediates.contains(&c), "C should appear with no restriction");
     }
+
+    /// Routes through the native wrap, which a route may cross without it counting as a hop.
+    mod native_wrap {
+        use super::*;
+        use crate::{
+            algorithm::test_utils::topology_with_directions,
+            feed::events::{MarketEvent, MarketEventHandler},
+            graph::{component_ids_with_wrap, native_wrap_component},
+        };
+
+        /// Tokens: A(1) -p1- ETH(2) =wrap= WETH(3) -p2- B(4) -p3- C(5) -p4- D(6).
+        fn wrap_topology() -> FxHashMap<ComponentId, ComponentTopology> {
+            let pair = |x: u8, y: u8| vec![addr(x), addr(y)].into();
+            FxHashMap::from_iter([
+                ("p1".to_string(), pair(1, 2)),
+                (native_wrap_component().clone(), pair(2, 3)),
+                ("p2".to_string(), pair(3, 4)),
+                ("p3".to_string(), pair(4, 5)),
+                ("p4".to_string(), pair(5, 6)),
+            ])
+        }
+
+        fn wrap_manager() -> TopologyGraphManager<()> {
+            let mut manager = TopologyGraphManager::<()>::new();
+            manager.initialize_graph(&wrap_topology());
+            manager
+        }
+
+        /// The component ids of every route from `from` to `to`, one entry per pool path, sorted.
+        fn pool_routes(
+            graph: &TopologyGraph<()>,
+            (from, to): (u8, u8),
+            hops: (usize, usize),
+            constraints: &ResolvedRouteConstraints,
+        ) -> Vec<Vec<String>> {
+            let filter =
+                GraphQueryFilter { min_hops: hops.0, max_hops: hops.1, connector_tokens: None };
+            let search = RouteSearch { bounds: &filter, constraints };
+            let (from, to) = (graph.get_token_ix(&addr(from)), graph.get_token_ix(&addr(to)));
+            let (Some(from), Some(to)) = (from, to) else {
+                return Vec::new();
+            };
+            let mut routes: Vec<Vec<String>> = graph
+                .paths_between_ix(from, to, search)
+                .iter()
+                .flat_map(|token_path| graph.expand_path(token_path, None, constraints))
+                .map(|path| {
+                    path.edge_iter()
+                        .iter()
+                        .map(|edge| edge.component_id.clone())
+                        .collect()
+                })
+                .collect();
+            routes.sort();
+            routes
+        }
+
+        fn expected_routes(routes: &[Vec<&str>]) -> Vec<Vec<String>> {
+            let mut routes: Vec<_> = routes
+                .iter()
+                .map(|ids| component_ids_with_wrap(ids))
+                .collect();
+            routes.sort();
+            routes
+        }
+
+        #[rstest]
+        #[case::three_pools_and_a_wrap((1, 5), (1, 3), vec![vec!["p1", "wrap", "p2", "p3"]])]
+        #[case::wrap_between_two_pools((1, 4), (1, 2), vec![vec!["p1", "wrap", "p2"]])]
+        #[case::four_pools_and_a_wrap((1, 6), (1, 3), vec![])]
+        #[case::four_pools_and_a_wrap_with_one_more_hop(
+            (1, 6), (1, 4), vec![vec!["p1", "wrap", "p2", "p3", "p4"]]
+        )]
+        #[case::wrap_after_three_pools((6, 2), (1, 3), vec![vec!["p4", "p3", "p2", "wrap"]])]
+        #[case::wrap_before_three_pools((2, 6), (1, 3), vec![vec!["wrap", "p2", "p3", "p4"]])]
+        #[case::one_pool_and_a_wrap_below_the_minimum((1, 3), (2, 3), vec![])]
+        #[case::wrap_alone_below_the_minimum((2, 3), (2, 3), vec![])]
+        fn test_native_wrap_hop_limit(
+            #[case] pair: (u8, u8),
+            #[case] hops: (usize, usize),
+            #[case] expected: Vec<Vec<&str>>,
+        ) {
+            let manager = wrap_manager();
+
+            let routes =
+                pool_routes(manager.graph(), pair, hops, &ResolvedRouteConstraints::default());
+
+            assert_eq!(routes, expected_routes(&expected));
+        }
+
+        #[rstest]
+        #[case::enough_hops(2, vec![vec!["p1", "wrap", "p2"], vec!["p2", "wrap", "p1"]])]
+        #[case::one_hop_short(1, vec![])]
+        fn test_native_wrap_circular_route(
+            #[case] max_hops: usize,
+            #[case] expected: Vec<Vec<&str>>,
+        ) {
+            let pair = |x: u8, y: u8| vec![addr(x), addr(y)].into();
+            let mut manager = TopologyGraphManager::<()>::new();
+            manager.initialize_graph(&FxHashMap::from_iter([
+                ("p1".to_string(), pair(1, 2)),
+                (native_wrap_component().clone(), pair(2, 3)),
+                ("p2".to_string(), pair(3, 1)),
+            ]));
+
+            let mut routes = pool_routes(
+                manager.graph(),
+                (1, 1),
+                (1, max_hops),
+                &ResolvedRouteConstraints::default(),
+            );
+            routes.retain(|route| route.contains(native_wrap_component()));
+
+            assert_eq!(routes, expected_routes(&expected));
+        }
+
+        #[test]
+        fn test_native_wrap_only_route() {
+            let manager = wrap_manager();
+
+            let routes =
+                pool_routes(manager.graph(), (2, 3), (1, 1), &ResolvedRouteConstraints::default());
+
+            assert_eq!(routes, expected_routes(&[vec!["wrap"]]));
+        }
+
+        #[rstest]
+        #[case::through_the_wrap((1, 5))]
+        #[case::wrap_alone((2, 3))]
+        fn test_native_wrap_excluded_removes_its_routes(#[case] pair: (u8, u8)) {
+            let manager = wrap_manager();
+            let constraints = ResolvedRouteConstraints::default()
+                .with_excluded_pools([native_wrap_component().clone()]);
+
+            let routes = pool_routes(manager.graph(), pair, (1, 3), &constraints);
+
+            assert!(routes.is_empty(), "{routes:?}");
+        }
+
+        fn wrap_manager_with_extra_pool() -> TopologyGraphManager<()> {
+            let mut topology = wrap_topology();
+            topology.insert("extra".to_string(), vec![addr(2), addr(3)].into());
+            let mut manager = TopologyGraphManager::<()>::new();
+            manager.initialize_graph(&topology);
+            manager
+        }
+
+        #[test]
+        fn test_native_wrap_pair_ignores_other_pools() {
+            let manager = wrap_manager_with_extra_pool();
+
+            let routes =
+                pool_routes(manager.graph(), (1, 5), (1, 3), &ResolvedRouteConstraints::default());
+
+            assert_eq!(routes, expected_routes(&[vec!["p1", "wrap", "p2", "p3"]]));
+        }
+
+        #[rstest]
+        #[case::wrap_in_the_middle((1, 5), 3)]
+        #[case::wrap_at_the_split((1, 4), 2)]
+        #[case::wrap_at_the_start((2, 5), 3)]
+        #[case::wrap_at_the_end((1, 3), 3)]
+        fn test_native_wrap_token_path_dedup(#[case] pair: (u8, u8), #[case] max_hops: usize) {
+            let manager = wrap_manager();
+            let graph = manager.graph();
+            let filter = GraphQueryFilter { min_hops: 1, max_hops, connector_tokens: None };
+            let constraints = ResolvedRouteConstraints::default();
+            let search = RouteSearch { bounds: &filter, constraints: &constraints };
+            let (from, to) = (
+                graph
+                    .get_token_ix(&addr(pair.0))
+                    .unwrap(),
+                graph
+                    .get_token_ix(&addr(pair.1))
+                    .unwrap(),
+            );
+
+            let token_paths = graph.paths_between_ix(from, to, search);
+
+            assert_eq!(token_paths.len(), 1, "{token_paths:?}");
+        }
+
+        #[tokio::test]
+        async fn test_native_wrap_one_direction_removed() {
+            let mut manager = wrap_manager();
+            let (eth, weth) = (addr(2), addr(3));
+            manager
+                .handle_event(&MarketEvent::MarketUpdated {
+                    added_components: FxHashMap::from_iter([(
+                        native_wrap_component().clone(),
+                        topology_with_directions(&[&eth, &weth], &[(&eth, &weth)]),
+                    )]),
+                    removed_components: vec![],
+                    updated_components: vec![],
+                })
+                .await
+                .unwrap();
+
+            let routes =
+                pool_routes(manager.graph(), (1, 5), (1, 3), &ResolvedRouteConstraints::default());
+
+            assert_eq!(routes, expected_routes(&[vec!["p1", "wrap", "p2", "p3"]]));
+        }
+    }
 }
