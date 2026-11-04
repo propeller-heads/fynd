@@ -2778,6 +2778,60 @@ mod tests {
             assert!(*min_amount_received < BigUint::from(990u64));
         }
 
+        /// Raises the expected amount out and reports the gas the raise adds.
+        #[derive(Debug)]
+        struct AddGas {
+            expected_amount_out: BigUint,
+            added_gas: AddedGas,
+        }
+
+        impl SolutionHook for AddGas {
+            fn apply(
+                &self,
+                quote: &OrderQuote,
+                solution: Solution,
+            ) -> Result<Solution, SolveError> {
+                SetExpectedAmountOut(self.expected_amount_out.clone()).apply(quote, solution)
+            }
+
+            fn added_gas(&self, _quote: &OrderQuote, _hooked: &Solution) -> Option<AddedGas> {
+                Some(self.added_gas.clone())
+            }
+        }
+
+        #[rstest]
+        #[case::cost_below_net(200, 1_300)]
+        #[case::cost_above_net(10_000, 0)]
+        #[tokio::test]
+        async fn test_solution_hook_added_gas(#[case] cost: u64, #[case] amount_out_net_gas: u64) {
+            let encoder = real_encoder();
+            let quote = make_order_quote(990)
+                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+            let raise_only = SetExpectedAmountOut(BigUint::from(1_500u64));
+            let add_gas = AddGas {
+                expected_amount_out: BigUint::from(1_500u64),
+                added_gas: AddedGas::new(BigUint::from(50_000u64), BigUint::from(cost)),
+            };
+            let encode = |hook: Arc<dyn SolutionHook>| {
+                let opts = EncodingOptions::new(0.01).with_solution_hook(hook);
+                encoder.encode(vec![quote.clone()], opts)
+            };
+
+            let raised = encode(Arc::new(raise_only))
+                .await
+                .unwrap();
+            let with_gas = encode(Arc::new(add_gas)).await.unwrap();
+
+            assert_eq!(with_gas[0].status(), QuoteStatus::Success);
+            assert_eq!(*raised[0].amount_out_net_gas(), BigUint::from(1_500u64));
+            assert_eq!(*with_gas[0].amount_out(), BigUint::from(1_500u64));
+            assert_eq!(
+                *with_gas[0].gas_estimate(),
+                raised[0].gas_estimate() + BigUint::from(50_000u64)
+            );
+            assert_eq!(*with_gas[0].amount_out_net_gas(), BigUint::from(amount_out_net_gas));
+        }
+
         #[tokio::test]
         async fn test_solution_hook_with_client_fee() {
             let encoder = real_encoder();
