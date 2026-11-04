@@ -3,8 +3,8 @@
 
 ### Bug Fixes
 
-* **encoding:** reject lowered hook amounts and measure shortfall on the route ([8a6d42c](https://github.com/propeller-heads/fynd/commit/8a6d42c01b4a155c6b897aa25e6562216b90880f))
-* **encoding:** compute fees and deviation on the hooked amount out ([6387ce0](https://github.com/propeller-heads/fynd/commit/6387ce0d88d8dbf221433380407d82fb990de2cc))
+- Reject quotes where a solution hook lowers the expected output amount, preventing calldata that would revert on-chain. Report the shortfall for the winning route, measured against the minimum amount received plus max slippage, rather than showing an unpaid subsidy as a per-protocol shortfall. Reword the public fee docs to "at most" so they hold when quotes are raised, and regenerate the OpenAPI spec and TypeScript schema. ([8a6d42c](https://github.com/propeller-heads/fynd/commit/8a6d42c01b4a155c6b897aa25e6562216b90880f))
+- Calculate router and client fees on the hooked output amount, so quotes raised by a solution hook no longer undercharge fees. Compare simulated output against the hooked amount minus fees, so a raised quote no longer appears as a positive deviation. ([6387ce0](https://github.com/propeller-heads/fynd/commit/6387ce0d88d8dbf221433380407d82fb990de2cc))
 
 
 ## [0.119.0](https://github.com/propeller-heads/fynd/compare/0.118.8...0.119.0) (2026-11-03)
