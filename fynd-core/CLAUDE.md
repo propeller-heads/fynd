@@ -51,13 +51,28 @@ where
 }
 ```
 
-### `EdgeWeightUpdaterWithDerived` (`graph/mod.rs`)
+### `EdgeWeightFromSimAndDerived` / `EdgeWeightUpdaterWithDerived` (`graph/mod.rs`)
 
 ```rust
+pub trait EdgeWeightFromSimAndDerived: Sized {
+    const INPUTS: &'static [ComputationId];
+    fn from_sim_and_derived(sim: &dyn ProtocolSim, component_id: &ComponentId, token_in: &Token, token_out: &Token, derived: &DerivedData) -> Option<Self>;
+}
+
 pub trait EdgeWeightUpdaterWithDerived {
+    fn weight_inputs(&self) -> &'static [ComputationId];
     fn update_edge_weights_with_derived(&mut self, market: MarketDataView<'_>, derived: &DerivedData) -> usize;
 }
 ```
+
+A worker rebuilds its edge weights from the computations in the weight type's `INPUTS`
+(`WeightInputsRound` in `worker_pool/worker.rs`). Inputs the algorithm allows stale are batched:
+one rebuild per block, after every input has reported for that block, as complete or failed. An
+input the algorithm requires fresh (`computation_requirements()`) triggers a rebuild as soon as it
+completes, so a solve that waited for it ranks on weights built from it. `DepthAndPrice` lists spot
+prices, token prices and pool depths; every built-in algorithm allows them stale, so the rebuild
+runs once, after the depths stage. `()` lists none, so unit-weight graphs (`bellman_ford`,
+`path_frank_wolfe`) are never rebuilt.
 
 ## Builder
 
@@ -113,7 +128,8 @@ recorded with `tools/record-market`. See `tests/integration/README.md`.
 
 1. `TychoFeed` writes new state into `MarketState` (via `MarketData`, `Arc<RwLock<>>`)
 2. Broadcasts `MarketEvent` → workers update local graph via `GraphManager`
-3. Triggers `ComputationManager` → `DerivedData` → workers update edge weights
+3. Triggers `ComputationManager` → `DerivedData` → workers rebuild edge weights once the last
+   weight input has reported, or at once for an input the algorithm requires fresh
 
 `GasPriceFetcher` runs independently on its own timer (`--gas-refresh-interval-secs`) and writes
 the gas price into `MarketState`.
