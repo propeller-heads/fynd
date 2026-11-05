@@ -1428,7 +1428,10 @@ mod tests {
     use rustc_hash::FxHashMap;
     use tycho_simulation::{
         tycho_client::feed::{BlockHeader, SynchronizerState},
-        tycho_core::{models::token::Token, simulation::protocol_sim::ProtocolSim},
+        tycho_core::{
+            models::token::Token,
+            simulation::protocol_sim::{Price, ProtocolSim},
+        },
     };
 
     use super::*;
@@ -1441,12 +1444,18 @@ mod tests {
             },
         },
         derived::{
-            computation::DerivedComputation,
-            computations::{SpotPriceComputation, TokenGasPriceComputation},
+            computation::{ComputationRequirements, DerivedComputation},
+            computations::{
+                ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation,
+            },
+            types::{ComponentDepths, SpotPrices, TokenGasPrices},
             DerivedData,
         },
         fallback::{manager::PammState, FALLBACK_PREFIX},
-        graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        graph::{
+            petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+            EdgeWeightFromSimAndDerived,
+        },
         post_process::test_utils::{direct_swap, swap_through, MockPostProcessor},
         tests::metrics::recorded_metrics,
         types::{
@@ -3066,6 +3075,279 @@ mod tests {
             .await
             .expect("worker should shutdown")
             .expect("worker task should not panic");
+    }
+
+    /// Every input report the worker receives for one round, in the manager's order: spot and
+    /// token prices in the first stage, depths in the second.
+    fn full_round(block: u64) -> Vec<DerivedDataEvent> {
+        vec![
+            new_block(block),
+            complete(SpotPriceComputation::ID, block),
+            complete(TokenGasPriceComputation::ID, block),
+            complete(ComponentDepthComputation::ID, block),
+        ]
+    }
+
+    fn new_block(block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::NewBlock { block }
+    }
+
+    fn complete(computation_id: ComputationId, block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::ComputationComplete { computation_id, block, failed_items: vec![] }
+    }
+
+    fn failed(computation_id: ComputationId, block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::ComputationFailed { computation_id, block }
+    }
+
+    /// What every built-in algorithm requires: token prices, allowed stale.
+    fn stale_token_prices() -> ComputationRequirements {
+        ComputationRequirements::stale([TokenGasPriceComputation::ID])
+    }
+
+    fn fresh(computation_id: ComputationId) -> ComputationRequirements {
+        ComputationRequirements::fresh([computation_id])
+    }
+
+    /// Feeds `events` to a round tracking `DepthAndPrice`'s inputs for an algorithm with
+    /// `requirements`, and returns which of them call for a rebuild.
+    fn rebuild_calls_with(
+        requirements: &ComputationRequirements,
+        events: &[DerivedDataEvent],
+    ) -> Vec<bool> {
+        let mut round = WeightInputsRound::new(DepthAndPrice::INPUTS, requirements);
+        events
+            .iter()
+            .map(|event| round.record(event))
+            .collect()
+    }
+
+    fn rebuild_calls(events: &[DerivedDataEvent]) -> Vec<bool> {
+        rebuild_calls_with(&stale_token_prices(), events)
+    }
+
+    #[test]
+    fn test_weight_inputs_round_last_input() {
+        assert_eq!(rebuild_calls(&full_round(1)), [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_failed_input() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            failed(ComponentDepthComputation::ID, 1),
+        ]);
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_repeated_reports() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+            complete("custom", 1),
+        ]);
+
+        assert_eq!(calls, [false, false, false, false, true, false, false]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_unrelated_computation() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete("custom", 1),
+        ]);
+
+        assert_eq!(calls, [false, false, false, false]);
+    }
+
+    /// A new block discards the reports of the one before, finished or not.
+    #[test]
+    fn test_weight_inputs_round_new_block() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            new_block(2),
+            complete(ComponentDepthComputation::ID, 2),
+            complete(SpotPriceComputation::ID, 2),
+            complete(TokenGasPriceComputation::ID, 2),
+        ]);
+
+        assert_eq!(calls, [false, false, false, false, false, false, true]);
+    }
+
+    /// Partial blocks run a round for the same block number more than once.
+    #[test]
+    fn test_weight_inputs_round_repeated_block() {
+        let calls = rebuild_calls(&[full_round(1), full_round(1)].concat());
+
+        assert_eq!(calls, [false, false, false, true, false, false, false, true]);
+    }
+
+    /// Reports for a block other than the current one, or before any `NewBlock`, are ignored.
+    #[test]
+    fn test_weight_inputs_round_other_block() {
+        let calls = rebuild_calls(&[
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+            new_block(2),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 2),
+            complete(ComponentDepthComputation::ID, 2),
+        ]);
+
+        assert_eq!(calls, [false; 7]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_no_inputs() {
+        let mut round = WeightInputsRound::new(
+            <() as EdgeWeightFromSimAndDerived>::INPUTS,
+            &fresh(SpotPriceComputation::ID),
+        );
+
+        let calls: Vec<bool> = full_round(1)
+            .iter()
+            .map(|event| round.record(event))
+            .collect();
+
+        assert_eq!(calls, [false; 4]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_fresh_input() {
+        let calls = rebuild_calls_with(&fresh(TokenGasPriceComputation::ID), &full_round(1));
+
+        assert_eq!(calls, [false, false, true, true]);
+    }
+
+    /// A fresh input that is also the last to report calls for one rebuild, not two.
+    #[test]
+    fn test_weight_inputs_round_fresh_last_input() {
+        let calls = rebuild_calls_with(&fresh(ComponentDepthComputation::ID), &full_round(1));
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_fresh_input_failed() {
+        let calls = rebuild_calls_with(
+            &fresh(TokenGasPriceComputation::ID),
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                failed(TokenGasPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    /// A fresh requirement the weights do not read calls for no rebuild.
+    #[test]
+    fn test_weight_inputs_round_fresh_non_input() {
+        let calls = rebuild_calls_with(
+            &fresh("custom"),
+            &[
+                new_block(1),
+                complete("custom", 1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, false, true]);
+    }
+
+    /// The worker loop builds its edge weights once the last input of a block reports, or as soon
+    /// as an input the algorithm requires fresh completes.
+    #[rstest]
+    #[case::full_round(stale_token_prices(), full_round(1), true)]
+    #[case::depths_pending(stale_token_prices(), full_round(1)[..3].to_vec(), false)]
+    #[case::depths_failed(
+        stale_token_prices(),
+        vec![
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            failed(ComponentDepthComputation::ID, 1),
+        ],
+        true
+    )]
+    #[case::fresh_input(fresh(TokenGasPriceComputation::ID), full_round(1)[..3].to_vec(), true)]
+    #[tokio::test]
+    async fn test_worker_edge_weight_rebuild(
+        #[case] requirements: ComputationRequirements,
+        #[case] events: Vec<DerivedDataEvent>,
+        #[case] rebuilt: bool,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) =
+            setup_market_weighted(vec![("p1", &token_a, &token_b, MockProtocolSim::new(2.0))]);
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(
+            market,
+            Arc::clone(&derived),
+            MockAlgorithm::new().with_requirements(requirements),
+            0,
+            "test_pool".to_string(),
+        );
+        worker.initialize_graph().await;
+        {
+            let mut store = derived.write().await;
+            let mut spot_prices = SpotPrices::default();
+            let mut depths = ComponentDepths::default();
+            let mut token_prices = TokenGasPrices::default();
+            for (from, to) in [(&token_a, &token_b), (&token_b, &token_a)] {
+                let key = ("p1".to_string(), from.address.clone(), to.address.clone());
+                spot_prices.insert(key.clone(), 2.0);
+                depths.insert(key, BigUint::from(1_000u64));
+                token_prices.insert(
+                    from.address.clone(),
+                    Price { numerator: BigUint::from(1u64), denominator: BigUint::from(1u64) },
+                );
+            }
+            store.set_spot_prices(spot_prices, vec![], 1);
+            store.set_component_depths(depths, vec![], 1);
+            store.set_token_prices(token_prices, vec![], 1);
+        }
+        let (derived_tx, derived_rx) = broadcast::channel::<DerivedDataEvent>(16);
+        let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
+        let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+        for event in events {
+            derived_tx.send(event).unwrap();
+        }
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(());
+        });
+
+        worker
+            .run(event_rx, derived_rx, task_rx, shutdown_rx)
+            .await;
+
+        let weighted = worker
+            .graph_manager
+            .graph()
+            .edge_weights()
+            .filter(|edge| edge.data.is_some())
+            .count();
+        assert_eq!(weighted > 0, rebuilt);
     }
 
     /// Captures log output for assertions, shared between the subscriber and the test.
