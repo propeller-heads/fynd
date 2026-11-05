@@ -2,8 +2,7 @@
 ## [0.121.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.121.0) (2026-11-05)
 
 ### Features
-
-* **rpc:** record the subsidy amount of each order ([2cc3df9](https://github.com/propeller-heads/fynd/commit/2cc3df94b491a9f7e4845604a84409ebe130ec0d))
+- Record the subsidy amount for each order, so a subsidized route can be compared against its quote. The quote reports the subsidy only inside `amount_out`; the record now shows how much of that amount is subsidy. The field is omitted when an order has no subsidy. The record schema version is now 3. ([2cc3df9](https://github.com/propeller-heads/fynd/commit/2cc3df94b491a9f7e4845604a84409ebe130ec0d))
 
 
 ## [0.120.0](https://github.com/propeller-heads/fynd/compare/0.119.0...0.120.0) (2026-11-04)
