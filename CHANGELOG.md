@@ -1,4 +1,11 @@
 
+## [0.121.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.121.0) (2026-11-05)
+
+### Features
+
+* **rpc:** record the subsidy amount of each order ([2cc3df9](https://github.com/propeller-heads/fynd/commit/2cc3df94b491a9f7e4845604a84409ebe130ec0d))
+
+
 ## [0.120.0](https://github.com/propeller-heads/fynd/compare/0.119.0...0.120.0) (2026-11-04)
 
 ### Bug Fixes
