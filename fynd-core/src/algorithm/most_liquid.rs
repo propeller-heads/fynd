@@ -36,7 +36,8 @@ use crate::{
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
     },
     derived::{
-        computation::ComputationRequirements,
+        computation::{ComputationId, ComputationRequirements, DerivedComputation},
+        computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
         types::{gas_cost_in_token, TokenGasPrices},
     },
     feed::market_data::{MarketData, MarketState, StateLabel},
@@ -319,6 +320,9 @@ impl DepthAndPrice {
 }
 
 impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
+    const INPUTS: &'static [ComputationId] =
+        &[SpotPriceComputation::ID, TokenGasPriceComputation::ID, ComponentDepthComputation::ID];
+
     fn from_sim_and_derived(
         _sim: &dyn ProtocolSim,
         component_id: &ComponentId,

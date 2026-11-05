@@ -1,4 +1,25 @@
 
+## [0.122.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.122.0) (2026-11-05)
+
+### Features
+
+- **Breaking:** Declare which derived computations each edge weight reads. Implementors of `EdgeWeightFromSimAndDerived` must add the new `INPUTS` item, and implementors of `EdgeWeightUpdaterWithDerived` must add `weight_inputs`. ([c17e089](https://github.com/propeller-heads/fynd/commit/c17e0895a488a7758387ab341e75fec63cd09619))
+
+### Bug Fixes
+
+- Rank paths on the current block's pool depths. Workers now rebuild edge weights once per block, after the last weight input has reported, instead of using the previous block's depths. A failed input counts as reported, and an input the algorithm requires fresh still triggers an immediate rebuild. ([fc854a9](https://github.com/propeller-heads/fynd/commit/fc854a9159cb7fcd23c96d0d833bdd5a9f1a9d6a))
+
+### Performance
+
+- Cut CPU usage by reverting the per-input edge weight rebuild from #697. That change rebuilt weights three times per block, and each rebuild walked the whole graph. On BSC prod it raised pod usage from about 1.1 to 2.6 cores at the same traffic. ([dfa59b6](https://github.com/propeller-heads/fynd/commit/dfa59b60bdf28e33061045d3b08beeb0b3e8d08f))
+
+
+## [0.121.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.121.0) (2026-11-05)
+
+### Features
+- Record the subsidy amount for each order, so a subsidized route can be compared against its quote. The quote reports the subsidy only inside `amount_out`; the record now shows how much of that amount is subsidy. The field is omitted when an order has no subsidy. The record schema version is now 3. ([2cc3df9](https://github.com/propeller-heads/fynd/commit/2cc3df94b491a9f7e4845604a84409ebe130ec0d))
+
+
 ## [0.120.0](https://github.com/propeller-heads/fynd/compare/0.119.0...0.120.0) (2026-11-04)
 
 ### Bug Fixes

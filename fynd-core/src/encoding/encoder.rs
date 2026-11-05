@@ -605,6 +605,12 @@ impl Encoder {
                 .clone(),
         );
         quote.set_gas_estimate(encoded_solution.estimated_gas().clone());
+        quote.set_subsidy_amount(
+            prepared
+                .solution
+                .subsidy()
+                .map(|terms| terms.amount.clone()),
+        );
         quote.set_transaction(transaction);
         quote.set_fee_breakdown(fee_breakdown);
         Ok(())
@@ -2941,6 +2947,60 @@ mod tests {
                 Some(5u64.into())
             );
             assert_eq!(*hooked.expected_amount_out(), BigUint::from(995u64));
+        }
+
+        /// Encodes each solution without its subsidy terms, so a test can attach terms that the
+        /// test chain has no subsidizing executor for.
+        struct EncodeWithoutSubsidy(Box<dyn TychoEncoder>);
+
+        impl TychoEncoder for EncodeWithoutSubsidy {
+            fn encode_solutions(
+                &self,
+                solutions: Vec<Solution>,
+            ) -> Result<Vec<EncodedSolution>, EncodingError> {
+                let unsubsidized = solutions
+                    .iter()
+                    .map(|solution| {
+                        rebuilt_solution(
+                            solution,
+                            solution.receiver().clone(),
+                            solution.expected_amount_out().clone(),
+                            solution.min_amount_out().clone(),
+                        )
+                    })
+                    .collect();
+                self.0.encode_solutions(unsubsidized)
+            }
+
+            fn validate_solution(&self, _solution: &Solution) -> Result<(), EncodingError> {
+                Ok(())
+            }
+        }
+
+        #[tokio::test]
+        async fn test_encode_reports_subsidy_amount() {
+            let registry = SwapEncoderRegistry::new(Chain::Ethereum)
+                .add_default_encoders(None)
+                .unwrap();
+            let tycho_encoder = TychoRouterEncoderBuilder::new()
+                .chain(Chain::Ethereum)
+                .swap_encoder_registry(registry)
+                .build()
+                .unwrap();
+            let encoder =
+                encoder_with(Chain::Ethereum, Arc::new(EncodeWithoutSubsidy(tycho_encoder)));
+            let quote = make_order_quote(990)
+                .with_route(make_route_with_tokens(&[(make_address(0x01), make_address(0x02))]));
+            let opts = EncodingOptions::new(0.01).with_solution_hook(Arc::new(AttachSubsidy));
+
+            let result = encoder
+                .encode(vec![quote], opts)
+                .await
+                .unwrap();
+
+            assert_eq!(result[0].status(), QuoteStatus::Success);
+            assert_eq!(result[0].subsidy_amount(), Some(&BigUint::from(5u64)));
+            assert_eq!(*result[0].amount_out(), BigUint::from(995u64));
         }
 
         #[tokio::test]

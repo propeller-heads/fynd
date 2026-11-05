@@ -24,8 +24,7 @@ use tycho_simulation::{
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
     derived::{
-        computation::{ComputationId, ComputationRequirements, DerivedComputation},
-        computations::{ComponentDepthComputation, SpotPriceComputation},
+        computation::{ComputationId, ComputationRequirements},
         events::DerivedDataEvent,
         tracker::ReadinessTracker,
         SharedDerivedDataRef,
@@ -52,11 +51,6 @@ use crate::{
 /// after the deadline. Without this margin, a post-processor that runs to the deadline would also
 /// lose the algorithm's route.
 const POST_PROCESS_DEADLINE_MARGIN: Duration = Duration::from_millis(10);
-
-/// The computations that edge data is built from; a worker rebuilds its edge data when one
-/// completes, whether or not the algorithm requires it.
-const EDGE_DATA_INPUTS: [ComputationId; 2] =
-    [SpotPriceComputation::ID, ComponentDepthComputation::ID];
 
 /// Whether a worker with this scope and exclusion list must keep `component` out of its graph: an
 /// exclusive component in a `PublicOnly` worker pool, or a component of an excluded protocol
@@ -322,6 +316,72 @@ fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity
     .record(duration.as_secs_f64());
 }
 
+/// Decides when, within a block, a worker rebuilds its edge weights from derived data.
+///
+/// Each rebuild walks every edge of the graph, and the computation manager reports each
+/// computation once per block, as complete or failed, stage by stage. Inputs the algorithm allows
+/// stale are batched: the worker rebuilds once, after the last input has reported, so the rebuild
+/// reads every input's output for this block. An input the algorithm requires fresh triggers a
+/// rebuild as soon as it completes, because a solve waits for that input and then expects weights
+/// built from it.
+///
+/// A failed input counts as reported: nothing more comes for it this block, and the batched
+/// rebuild reads whatever it last stored. A failed fresh input triggers no rebuild of its own,
+/// since it stored nothing new.
+struct WeightInputsRound {
+    /// The computations the edge weights read.
+    inputs: &'static [ComputationId],
+    /// The inputs the algorithm requires fresh.
+    fresh_inputs: Vec<ComputationId>,
+    /// The block whose reports are being collected, or `None` before the first `NewBlock`.
+    block: Option<u64>,
+    /// The inputs that have reported for `block`.
+    reported: Vec<ComputationId>,
+}
+
+impl WeightInputsRound {
+    fn new(inputs: &'static [ComputationId], requirements: &ComputationRequirements) -> Self {
+        let fresh_requirements = requirements.fresh_requirements();
+        let fresh_inputs = inputs
+            .iter()
+            .filter(|id| fresh_requirements.contains(*id))
+            .copied()
+            .collect();
+        Self { inputs, fresh_inputs, block: None, reported: Vec::with_capacity(inputs.len()) }
+    }
+
+    /// Records `event` and returns whether the worker should rebuild its edge weights now: a fresh
+    /// input completed, or the last input of the current block reported.
+    ///
+    /// Weights with no inputs are never rebuilt.
+    fn record(&mut self, event: &DerivedDataEvent) -> bool {
+        let (computation_id, block, completed) = match event {
+            DerivedDataEvent::NewBlock { block } => {
+                self.block = Some(*block);
+                self.reported.clear();
+                return false;
+            }
+            DerivedDataEvent::ComputationComplete { computation_id, block, failed_items: _ } => {
+                (*computation_id, *block, true)
+            }
+            DerivedDataEvent::ComputationFailed { computation_id, block } => {
+                (*computation_id, *block, false)
+            }
+        };
+        if self.block != Some(block) ||
+            !self.inputs.contains(&computation_id) ||
+            self.reported.contains(&computation_id)
+        {
+            return false;
+        }
+        self.reported.push(computation_id);
+        let fresh_completed = completed &&
+            self.fresh_inputs
+                .contains(&computation_id);
+        fresh_completed || self.reported.len() == self.inputs.len()
+    }
+}
+
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
 /// probes, and how the calculation ended: `computed`, or the reason `price_impact_bps` was left
 /// off the quote.
@@ -363,8 +423,6 @@ where
     market_data: MarketData,
     /// Reference to shared derived data (component depths, token prices).
     derived_data: SharedDerivedDataRef,
-    /// Algorithm's computation requirements (which derived data to react to).
-    requirements: ComputationRequirements,
     /// Tracks readiness of required derived data computations.
     readiness_tracker: ReadinessTracker,
     /// Notified when readiness state may have changed.
@@ -423,7 +481,6 @@ where
             graph_manager: A::GraphManager::default(),
             market_data,
             derived_data,
-            requirements: requirements.clone(),
             readiness_tracker: ReadinessTracker::new(requirements),
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
@@ -1135,6 +1192,12 @@ where
         // call; keeping the arm in the select would turn this loop into a busy spin. The guard
         // disables the arm so the worker keeps solving with the last derived data it saw.
         let mut derived_closed = false;
+        let mut weight_round = WeightInputsRound::new(
+            self.graph_manager.weight_inputs(),
+            &self
+                .algorithm
+                .computation_requirements(),
+        );
 
         loop {
             tokio::select! {
@@ -1193,22 +1256,16 @@ where
                             // Signal waiters that readiness may have changed
                             self.ready_notify.notify_waiters();
 
-                            // Update edge weights when a relevant computation completes.
-                            if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
-                                if self.requirements.is_required(computation_id)
-                                    || EDGE_DATA_INPUTS.contains(computation_id)
-                                {
-                                    let market = self.market_data.read().await;
-                                    let derived = self.derived_data.read().await;
-                                    let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
-                                    debug!(
-                                        self.worker_id,
-                                        computation_id,
-                                        block,
-                                        updated,
-                                        "updated edge weights with derived data"
-                                    );
-                                }
+                            if weight_round.record(&event) {
+                                let market = self.market_data.read().await;
+                                let derived = self.derived_data.read().await;
+                                let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
+                                debug!(
+                                    self.worker_id,
+                                    block = ?weight_round.block,
+                                    updated,
+                                    "updated edge weights with derived data"
+                                );
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
@@ -1387,13 +1444,18 @@ mod tests {
             },
         },
         derived::{
-            computation::DerivedComputation,
-            computations::{SpotPriceComputation, TokenGasPriceComputation},
+            computation::{ComputationRequirements, DerivedComputation},
+            computations::{
+                ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation,
+            },
             types::{ComponentDepths, SpotPrices, TokenGasPrices},
             DerivedData,
         },
         fallback::{manager::PammState, FALLBACK_PREFIX},
-        graph::petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+        graph::{
+            petgraph::{PetgraphStableDiGraphManager, StableDiGraph},
+            EdgeWeightFromSimAndDerived,
+        },
         post_process::test_utils::{direct_swap, swap_through, MockPostProcessor},
         tests::metrics::recorded_metrics,
         types::{
@@ -3015,15 +3077,221 @@ mod tests {
             .expect("worker task should not panic");
     }
 
-    /// Edge data is rebuilt when a computation it reads completes, even if the algorithm does not
-    /// require that computation, and left alone when an unrelated one completes.
+    /// Every input report the worker receives for one round, in the manager's order: spot and
+    /// token prices in the first stage, depths in the second.
+    fn full_round(block: u64) -> Vec<DerivedDataEvent> {
+        vec![
+            new_block(block),
+            complete(SpotPriceComputation::ID, block),
+            complete(TokenGasPriceComputation::ID, block),
+            complete(ComponentDepthComputation::ID, block),
+        ]
+    }
+
+    fn new_block(block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::NewBlock { block }
+    }
+
+    fn complete(computation_id: ComputationId, block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::ComputationComplete { computation_id, block, failed_items: vec![] }
+    }
+
+    fn failed(computation_id: ComputationId, block: u64) -> DerivedDataEvent {
+        DerivedDataEvent::ComputationFailed { computation_id, block }
+    }
+
+    /// What every built-in algorithm requires: token prices, allowed stale.
+    fn stale_token_prices() -> ComputationRequirements {
+        ComputationRequirements::stale([TokenGasPriceComputation::ID])
+    }
+
+    fn fresh(computation_id: ComputationId) -> ComputationRequirements {
+        ComputationRequirements::fresh([computation_id])
+    }
+
+    /// Feeds `events` to a round tracking `DepthAndPrice`'s inputs for an algorithm with
+    /// `requirements`, and returns which of them call for a rebuild.
+    fn rebuild_calls_with(
+        requirements: &ComputationRequirements,
+        events: &[DerivedDataEvent],
+    ) -> Vec<bool> {
+        let mut round = WeightInputsRound::new(DepthAndPrice::INPUTS, requirements);
+        events
+            .iter()
+            .map(|event| round.record(event))
+            .collect()
+    }
+
+    fn rebuild_calls(events: &[DerivedDataEvent]) -> Vec<bool> {
+        rebuild_calls_with(&stale_token_prices(), events)
+    }
+
+    #[test]
+    fn test_weight_inputs_round_last_input() {
+        assert_eq!(rebuild_calls(&full_round(1)), [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_failed_input() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            failed(ComponentDepthComputation::ID, 1),
+        ]);
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_repeated_reports() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+            complete("custom", 1),
+        ]);
+
+        assert_eq!(calls, [false, false, false, false, true, false, false]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_unrelated_computation() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete("custom", 1),
+        ]);
+
+        assert_eq!(calls, [false, false, false, false]);
+    }
+
+    /// A new block discards the reports of the one before, finished or not.
+    #[test]
+    fn test_weight_inputs_round_new_block() {
+        let calls = rebuild_calls(&[
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            new_block(2),
+            complete(ComponentDepthComputation::ID, 2),
+            complete(SpotPriceComputation::ID, 2),
+            complete(TokenGasPriceComputation::ID, 2),
+        ]);
+
+        assert_eq!(calls, [false, false, false, false, false, false, true]);
+    }
+
+    /// Partial blocks run a round for the same block number more than once.
+    #[test]
+    fn test_weight_inputs_round_repeated_block() {
+        let calls = rebuild_calls(&[full_round(1), full_round(1)].concat());
+
+        assert_eq!(calls, [false, false, false, true, false, false, false, true]);
+    }
+
+    /// Reports for a block other than the current one, or before any `NewBlock`, are ignored.
+    #[test]
+    fn test_weight_inputs_round_other_block() {
+        let calls = rebuild_calls(&[
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            complete(ComponentDepthComputation::ID, 1),
+            new_block(2),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 2),
+            complete(ComponentDepthComputation::ID, 2),
+        ]);
+
+        assert_eq!(calls, [false; 7]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_no_inputs() {
+        let mut round = WeightInputsRound::new(
+            <() as EdgeWeightFromSimAndDerived>::INPUTS,
+            &fresh(SpotPriceComputation::ID),
+        );
+
+        let calls: Vec<bool> = full_round(1)
+            .iter()
+            .map(|event| round.record(event))
+            .collect();
+
+        assert_eq!(calls, [false; 4]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_fresh_input() {
+        let calls = rebuild_calls_with(&fresh(TokenGasPriceComputation::ID), &full_round(1));
+
+        assert_eq!(calls, [false, false, true, true]);
+    }
+
+    /// A fresh input that is also the last to report calls for one rebuild, not two.
+    #[test]
+    fn test_weight_inputs_round_fresh_last_input() {
+        let calls = rebuild_calls_with(&fresh(ComponentDepthComputation::ID), &full_round(1));
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    #[test]
+    fn test_weight_inputs_round_fresh_input_failed() {
+        let calls = rebuild_calls_with(
+            &fresh(TokenGasPriceComputation::ID),
+            &[
+                new_block(1),
+                complete(SpotPriceComputation::ID, 1),
+                failed(TokenGasPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, true]);
+    }
+
+    /// A fresh requirement the weights do not read calls for no rebuild.
+    #[test]
+    fn test_weight_inputs_round_fresh_non_input() {
+        let calls = rebuild_calls_with(
+            &fresh("custom"),
+            &[
+                new_block(1),
+                complete("custom", 1),
+                complete(SpotPriceComputation::ID, 1),
+                complete(TokenGasPriceComputation::ID, 1),
+                complete(ComponentDepthComputation::ID, 1),
+            ],
+        );
+
+        assert_eq!(calls, [false, false, false, false, true]);
+    }
+
+    /// The worker loop builds its edge weights once the last input of a block reports, or as soon
+    /// as an input the algorithm requires fresh completes.
     #[rstest]
-    #[case::pool_depths(ComponentDepthComputation::ID, true)]
-    #[case::spot_prices(SpotPriceComputation::ID, true)]
-    #[case::token_prices(TokenGasPriceComputation::ID, false)]
+    #[case::full_round(stale_token_prices(), full_round(1), true)]
+    #[case::depths_pending(stale_token_prices(), full_round(1)[..3].to_vec(), false)]
+    #[case::depths_failed(
+        stale_token_prices(),
+        vec![
+            new_block(1),
+            complete(SpotPriceComputation::ID, 1),
+            complete(TokenGasPriceComputation::ID, 1),
+            failed(ComponentDepthComputation::ID, 1),
+        ],
+        true
+    )]
+    #[case::fresh_input(fresh(TokenGasPriceComputation::ID), full_round(1)[..3].to_vec(), true)]
     #[tokio::test]
-    async fn worker_rebuilds_edge_data_when_edge_inputs_complete(
-        #[case] completed: ComputationId,
+    async fn test_worker_edge_weight_rebuild(
+        #[case] requirements: ComputationRequirements,
+        #[case] events: Vec<DerivedDataEvent>,
         #[case] rebuilt: bool,
     ) {
         let token_a = token(0x01, "A");
@@ -3034,7 +3302,7 @@ mod tests {
         let mut worker = SolverWorker::new(
             market,
             Arc::clone(&derived),
-            MockAlgorithm::new(),
+            MockAlgorithm::new().with_requirements(requirements),
             0,
             "test_pool".to_string(),
         );
@@ -3061,13 +3329,9 @@ mod tests {
         let (_event_tx, event_rx) = broadcast::channel::<MarketEvent>(16);
         let (_task_tx, task_rx) = async_channel::bounded::<crate::types::internal::SolveTask>(16);
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-        derived_tx
-            .send(DerivedDataEvent::ComputationComplete {
-                computation_id: completed,
-                block: 1,
-                failed_items: vec![],
-            })
-            .unwrap();
+        for event in events {
+            derived_tx.send(event).unwrap();
+        }
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(());

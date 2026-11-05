@@ -28,6 +28,7 @@ pub struct OrderQuoteBuilder {
     price_impact_bps: Option<i32>,
     route: Option<Route>,
     no_route_cause: Option<SolveError>,
+    subsidy_amount: Option<u64>,
     sender: Bytes,
     receiver: Bytes,
 }
@@ -45,6 +46,7 @@ impl OrderQuoteBuilder {
             price_impact_bps: None,
             route: None,
             no_route_cause: None,
+            subsidy_amount: None,
             sender: Bytes::default(),
             receiver: Bytes::default(),
         }
@@ -99,6 +101,12 @@ impl OrderQuoteBuilder {
         self
     }
 
+    /// Sets the subsidy amount the encoded solution carries. It does not change `amount_out`.
+    pub fn subsidy_amount(mut self, amount: u64) -> Self {
+        self.subsidy_amount = Some(amount);
+        self
+    }
+
     /// Returns the assembled quote.
     pub fn build(self) -> OrderQuote {
         let [amount_in, amount_out, gas_estimate, amount_out_net_gas] = self.amounts;
@@ -127,6 +135,7 @@ impl OrderQuoteBuilder {
         if self.no_route_cause.is_some() {
             quote.set_no_route_cause(self.no_route_cause);
         }
+        quote.set_subsidy_amount(self.subsidy_amount.map(BigUint::from));
         quote
     }
 }
