@@ -1,4 +1,19 @@
 
+## [0.122.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.122.0) (2026-11-05)
+
+### Features
+
+* **graph:** declare the derived data each edge weight reads ([c17e089](https://github.com/propeller-heads/fynd/commit/c17e0895a488a7758387ab341e75fec63cd09619))
+
+### Bug Fixes
+
+* **worker:** rebuild edge weights once per block ([fc854a9](https://github.com/propeller-heads/fynd/commit/fc854a9159cb7fcd23c96d0d833bdd5a9f1a9d6a))
+
+### Reverts
+
+* **worker:** undo the per-input edge rebuild from #697 ([dfa59b6](https://github.com/propeller-heads/fynd/commit/dfa59b60bdf28e33061045d3b08beeb0b3e8d08f))
+
+
 ## [0.121.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.121.0) (2026-11-05)
 
 ### Features
