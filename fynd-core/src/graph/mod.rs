@@ -31,25 +31,15 @@ use crate::{
 /// It is the hex of the wrapper's byte id, as the feed builds it, not the plain
 /// `NATIVE_WRAPPER_ID` text. It matches the id the Tycho stream injects, and
 /// `decode_recorded_messages` uses the same id.
-static NATIVE_WRAP_COMPONENT: LazyLock<ComponentId> =
+pub(crate) static NATIVE_WRAP_COMPONENT: LazyLock<ComponentId> =
     LazyLock::new(|| Bytes::from(NATIVE_WRAPPER_ID.as_bytes()).to_string());
 
-/// The id of the injected native-to-wrapped swap.
-pub(crate) fn native_wrap_component() -> &'static ComponentId {
-    &NATIVE_WRAP_COMPONENT
-}
-
-/// Component ids for tests, with the placeholder `"wrap"` standing for [`native_wrap_component`].
+/// Component ids for tests, with the placeholder `"wrap"` standing for [`NATIVE_WRAP_COMPONENT`].
 #[cfg(test)]
 pub(crate) fn component_ids_with_wrap(ids: &[&str]) -> Vec<ComponentId> {
     ids.iter()
-        .map(|id| if *id == "wrap" { native_wrap_component().clone() } else { (*id).to_string() })
+        .map(|id| if *id == "wrap" { NATIVE_WRAP_COMPONENT.clone() } else { (*id).to_string() })
         .collect()
-}
-
-/// Whether this component is the injected native-to-wrapped swap.
-pub(crate) fn is_native_wrap(component_id: &ComponentId) -> bool {
-    component_id == &*NATIVE_WRAP_COMPONENT
 }
 
 /// Tokens held without allocating. A path of `h` swaps names `h + 1` tokens, and a route that
@@ -124,7 +114,7 @@ impl<'a, D> Path<'a, D> {
     pub(crate) fn non_wrap_hops(&self) -> usize {
         self.edge_data
             .iter()
-            .filter(|edge| !is_native_wrap(&edge.component_id))
+            .filter(|edge| edge.component_id != *NATIVE_WRAP_COMPONENT)
             .count()
     }
 
@@ -388,7 +378,7 @@ mod tests {
     /// The feed injects the wrap under the hex of its byte id, and the market keys it by that
     /// string, so the graph must look for the same string.
     #[test]
-    fn test_is_native_wrap_injected_component_id() {
+    fn test_native_wrap_component_matches_injected_id() {
         use tycho_simulation::{
             evm::protocol::native_wrapper::state::NativeWrapperState, tycho_common::models::Chain,
         };
@@ -397,7 +387,7 @@ mod tests {
             .expect("Ethereum has a native wrapper")
             .component();
 
-        assert!(is_native_wrap(&component.id.to_string()));
-        assert!(!is_native_wrap(&"native_wrapper".to_string()));
+        assert_eq!(component.id.to_string(), *NATIVE_WRAP_COMPONENT);
+        assert_ne!(*NATIVE_WRAP_COMPONENT, "native_wrapper");
     }
 }

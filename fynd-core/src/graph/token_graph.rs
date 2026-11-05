@@ -16,8 +16,8 @@ use tracing::{debug, warn};
 use tycho_simulation::tycho_common::models::Address;
 
 use super::{
-    is_native_wrap, native_wrap_component, EdgeData, GraphError, GraphManager, Path, RouteSearch,
-    INLINE_EDGES, INLINE_TOKENS,
+    EdgeData, GraphError, GraphManager, Path, RouteSearch, INLINE_EDGES, INLINE_TOKENS,
+    NATIVE_WRAP_COMPONENT,
 };
 use crate::{
     feed::{
@@ -143,7 +143,7 @@ impl<D> TopologyGraph<D> {
         }
         match pools
             .iter()
-            .position(|pool| is_native_wrap(&pool.component_id))
+            .position(|pool| pool.component_id == *NATIVE_WRAP_COMPONENT)
         {
             Some(wrap) => &pools[wrap..=wrap],
             None => pools,
@@ -226,7 +226,7 @@ impl<D> TopologyGraph<D> {
         to: NodeIndex,
         constraints: &ResolvedRouteConstraints,
     ) -> bool {
-        self.is_wrap_pair(from, to) && !constraints.excludes_pool(native_wrap_component())
+        self.is_wrap_pair(from, to) && !constraints.excludes_pool(&NATIVE_WRAP_COMPONENT)
     }
 
     /// The node holding `token`, or `None` if the market has no such token.
@@ -244,7 +244,7 @@ impl<D> TopologyGraph<D> {
     /// Records that `component_id` trades `from` for `to`, adding the pair's edge if it is the
     /// first pool to do so.
     fn add_component(&mut self, from: NodeIndex, to: NodeIndex, component_id: &ComponentId) {
-        if is_native_wrap(component_id) {
+        if *component_id == *NATIVE_WRAP_COMPONENT {
             self.wrap_ends = Some((from.min(to), from.max(to)));
         }
         match self.get_edge_ix(from, to) {
@@ -264,7 +264,7 @@ impl<D> TopologyGraph<D> {
     /// Records that `component_id` no longer trades `from` for `to`, removing the pair's edge if
     /// it was the last pool doing so.
     fn remove_component(&mut self, from: NodeIndex, to: NodeIndex, component_id: &ComponentId) {
-        if is_native_wrap(component_id) {
+        if *component_id == *NATIVE_WRAP_COMPONENT {
             warn!(component_id = %component_id, "cannot remove the native wrap; keeping it");
             return;
         }
@@ -1816,7 +1816,7 @@ mod tests {
         use crate::{
             algorithm::test_utils::topology_with_directions,
             feed::events::{MarketEvent, MarketEventHandler},
-            graph::{component_ids_with_wrap, native_wrap_component},
+            graph::{component_ids_with_wrap, NATIVE_WRAP_COMPONENT},
         };
 
         /// Tokens: A(1) -p1- ETH(2) =wrap= WETH(3) -p2- B(4) -p3- C(5) -p4- D(6).
@@ -1824,7 +1824,7 @@ mod tests {
             let pair = |x: u8, y: u8| vec![addr(x), addr(y)].into();
             FxHashMap::from_iter([
                 ("p1".to_string(), pair(1, 2)),
-                (native_wrap_component().clone(), pair(2, 3)),
+                (NATIVE_WRAP_COMPONENT.clone(), pair(2, 3)),
                 ("p2".to_string(), pair(3, 4)),
                 ("p3".to_string(), pair(4, 5)),
                 ("p4".to_string(), pair(5, 6)),
@@ -1910,7 +1910,7 @@ mod tests {
             let mut manager = TopologyGraphManager::<()>::new();
             manager.initialize_graph(&FxHashMap::from_iter([
                 ("p1".to_string(), pair(1, 2)),
-                (native_wrap_component().clone(), pair(2, 3)),
+                (NATIVE_WRAP_COMPONENT.clone(), pair(2, 3)),
                 ("p2".to_string(), pair(3, 1)),
             ]));
 
@@ -1920,7 +1920,7 @@ mod tests {
                 (1, max_hops),
                 &ResolvedRouteConstraints::default(),
             );
-            routes.retain(|route| route.contains(native_wrap_component()));
+            routes.retain(|route| route.contains(&NATIVE_WRAP_COMPONENT));
 
             assert_eq!(routes, expected_routes(&expected));
         }
@@ -1941,7 +1941,7 @@ mod tests {
         fn test_native_wrap_excluded_removes_its_routes(#[case] pair: (u8, u8)) {
             let manager = wrap_manager();
             let constraints = ResolvedRouteConstraints::default()
-                .with_excluded_pools([native_wrap_component().clone()]);
+                .with_excluded_pools([NATIVE_WRAP_COMPONENT.clone()]);
 
             let routes = pool_routes(manager.graph(), pair, (1, 3), &constraints);
 
@@ -1998,7 +1998,7 @@ mod tests {
             manager
                 .handle_event(&MarketEvent::MarketUpdated {
                     added_components: FxHashMap::from_iter([(
-                        native_wrap_component().clone(),
+                        NATIVE_WRAP_COMPONENT.clone(),
                         topology_with_directions(&[&eth, &weth], &[(&eth, &weth)]),
                     )]),
                     removed_components: vec![],

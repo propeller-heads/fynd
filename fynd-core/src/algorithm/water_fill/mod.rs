@@ -77,8 +77,8 @@ use crate::{
     },
     feed::market_data::{MarketDataView, MarketState},
     graph::{
-        is_native_wrap, EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph,
-        TopologyGraphManager,
+        EdgeData, GraphQueryFilter, Path, RouteSearch, TopologyGraph, TopologyGraphManager,
+        NATIVE_WRAP_COMPONENT,
     },
     types::{ComponentId, Order, RouteResult},
     AlgorithmError,
@@ -1445,29 +1445,18 @@ fn expand_candidate_state<'a, W>(
         if candidate.target == target && path.counted_hops() >= cfg.search.bounds.min_hops {
             found.push((path.clone(), path_state.amount_out.clone()));
         }
-        if stays_on_frontier(graph, &path, candidate.target, cfg.search.bounds.max_hops) {
+        // A path at `max_hops` pool hops stays on the frontier only if it can still take the wrap.
+        let stays_on_frontier = path.non_wrap_hops() < cfg.search.bounds.max_hops ||
+            graph
+                .wrap_twin(candidate.target)
+                .is_some_and(|twin| !path.tokens.contains(&&graph[twin]));
+        if stays_on_frontier {
             next_by_node
                 .entry(candidate.target)
                 .or_default()
                 .push(path_state);
         }
     }
-}
-
-/// Whether a path ending at `node` stays on the frontier.
-///
-/// A path with fewer than `max_hops` pool hops always does. One with `max_hops` pool hops stays
-/// only if it can still take the wrap.
-fn stays_on_frontier<W>(
-    graph: &TopologyGraph<W>,
-    path: &Path<'_, W>,
-    node: NodeIndex,
-    max_hops: usize,
-) -> bool {
-    path.non_wrap_hops() < max_hops ||
-        graph
-            .wrap_twin(node)
-            .is_some_and(|twin| !path.tokens.contains(&&graph[twin]))
 }
 
 fn candidate_edges_for_state<'a, W>(
@@ -1620,7 +1609,7 @@ fn can_extend_path<W>(
         return false;
     }
     // Once the path has `max_hops` pool hops, only the wrap can extend it.
-    if !is_native_wrap(&edge.component_id) &&
+    if edge.component_id != *NATIVE_WRAP_COMPONENT &&
         state.path.non_wrap_hops() >= cfg.search.bounds.max_hops
     {
         return false;
@@ -2159,7 +2148,7 @@ mod tests {
         let tokens: Vec<_> = (1..=7u8)
             .map(|byte| token_with_decimals(byte, &format!("T{byte}"), 18))
             .collect();
-        let wrap_id = crate::graph::native_wrap_component().as_str();
+        let wrap_id = crate::graph::NATIVE_WRAP_COMPONENT.as_str();
         let pool = || Box::new(v2_component(2_000_000, 2_000_000)) as Box<dyn ProtocolSim>;
         let (market, graph_manager) = setup_market_unweighted_topology(vec![
             ("p1", &tokens[0], &tokens[1], pool()),
