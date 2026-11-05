@@ -9,7 +9,7 @@
 //! --ignored`.
 
 use alloy::{primitives::Address, providers::ProviderBuilder};
-use fynd_tools_common::swap_simulation::{EthCallRunner, SwapOutcome};
+use fynd_tools_common::swap_simulation::{EthCallRunner, SwapCall, SwapOutcome};
 use num_bigint::BigUint;
 
 /// Canonical WETH9 contract on Ethereum mainnet.
@@ -42,7 +42,7 @@ async fn eth_simulate_weth_deposit_returns_exact_amount() {
 
     // token_in = native ETH (zero), token_out = WETH, router = WETH, calldata = deposit().
     let outcome = runner
-        .execute(Address::ZERO, weth, weth, &DEPOSIT_CALLDATA, &value, block)
+        .execute(&SwapCall::new(Address::ZERO, weth, weth, &DEPOSIT_CALLDATA, &value), block)
         .await
         .expect("execute should not error");
     let SwapOutcome::Success { amount_out: amount, gas } = outcome else {
