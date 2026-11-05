@@ -24,7 +24,9 @@ use tycho_simulation::{
 use crate::{
     algorithm::{request::SolveRequest, Algorithm},
     derived::{
-        computation::ComputationRequirements, events::DerivedDataEvent, tracker::ReadinessTracker,
+        computation::{ComputationId, ComputationRequirements},
+        events::DerivedDataEvent,
+        tracker::ReadinessTracker,
         SharedDerivedDataRef,
     },
     exclusive_route::{pin_route_commitment, routes_through_exclusive},
@@ -314,6 +316,72 @@ fn record_worker_activity_duration(pool_name: &str, duration: Duration, activity
     .record(duration.as_secs_f64());
 }
 
+/// Decides when, within a block, a worker rebuilds its edge weights from derived data.
+///
+/// Each rebuild walks every edge of the graph, and the computation manager reports each
+/// computation once per block, as complete or failed, stage by stage. Inputs the algorithm allows
+/// stale are batched: the worker rebuilds once, after the last input has reported, so the rebuild
+/// reads every input's output for this block. An input the algorithm requires fresh triggers a
+/// rebuild as soon as it completes, because a solve waits for that input and then expects weights
+/// built from it.
+///
+/// A failed input counts as reported: nothing more comes for it this block, and the batched
+/// rebuild reads whatever it last stored. A failed fresh input triggers no rebuild of its own,
+/// since it stored nothing new.
+struct WeightInputsRound {
+    /// The computations the edge weights read.
+    inputs: &'static [ComputationId],
+    /// The inputs the algorithm requires fresh.
+    fresh_inputs: Vec<ComputationId>,
+    /// The block whose reports are being collected, or `None` before the first `NewBlock`.
+    block: Option<u64>,
+    /// The inputs that have reported for `block`.
+    reported: Vec<ComputationId>,
+}
+
+impl WeightInputsRound {
+    fn new(inputs: &'static [ComputationId], requirements: &ComputationRequirements) -> Self {
+        let fresh_requirements = requirements.fresh_requirements();
+        let fresh_inputs = inputs
+            .iter()
+            .filter(|id| fresh_requirements.contains(*id))
+            .copied()
+            .collect();
+        Self { inputs, fresh_inputs, block: None, reported: Vec::with_capacity(inputs.len()) }
+    }
+
+    /// Records `event` and returns whether the worker should rebuild its edge weights now: a fresh
+    /// input completed, or the last input of the current block reported.
+    ///
+    /// Weights with no inputs are never rebuilt.
+    fn record(&mut self, event: &DerivedDataEvent) -> bool {
+        let (computation_id, block, completed) = match event {
+            DerivedDataEvent::NewBlock { block } => {
+                self.block = Some(*block);
+                self.reported.clear();
+                return false;
+            }
+            DerivedDataEvent::ComputationComplete { computation_id, block, failed_items: _ } => {
+                (*computation_id, *block, true)
+            }
+            DerivedDataEvent::ComputationFailed { computation_id, block } => {
+                (*computation_id, *block, false)
+            }
+        };
+        if self.block != Some(block) ||
+            !self.inputs.contains(&computation_id) ||
+            self.reported.contains(&computation_id)
+        {
+            return false;
+        }
+        self.reported.push(computation_id);
+        let fresh_completed = completed &&
+            self.fresh_inputs
+                .contains(&computation_id);
+        fresh_completed || self.reported.len() == self.inputs.len()
+    }
+}
+
 /// Records end-to-end price-impact calculation time, including protocol-specific spot-price
 /// probes, and how the calculation ended: `computed`, or the reason `price_impact_bps` was left
 /// off the quote.
@@ -355,8 +423,6 @@ where
     market_data: MarketData,
     /// Reference to shared derived data (component depths, token prices).
     derived_data: SharedDerivedDataRef,
-    /// Algorithm's computation requirements (which derived data to react to).
-    requirements: ComputationRequirements,
     /// Tracks readiness of required derived data computations.
     readiness_tracker: ReadinessTracker,
     /// Notified when readiness state may have changed.
@@ -415,7 +481,6 @@ where
             graph_manager: A::GraphManager::default(),
             market_data,
             derived_data,
-            requirements: requirements.clone(),
             readiness_tracker: ReadinessTracker::new(requirements),
             ready_notify: Arc::new(Notify::new()),
             initialized: false,
@@ -1127,6 +1192,12 @@ where
         // call; keeping the arm in the select would turn this loop into a busy spin. The guard
         // disables the arm so the worker keeps solving with the last derived data it saw.
         let mut derived_closed = false;
+        let mut weight_round = WeightInputsRound::new(
+            self.graph_manager.weight_inputs(),
+            &self
+                .algorithm
+                .computation_requirements(),
+        );
 
         loop {
             tokio::select! {
@@ -1185,20 +1256,16 @@ where
                             // Signal waiters that readiness may have changed
                             self.ready_notify.notify_waiters();
 
-                            // Update edge weights when a relevant computation completes.
-                            if let DerivedDataEvent::ComputationComplete { computation_id, block, .. } = &event {
-                                if self.requirements.is_required(computation_id) {
-                                    let market = self.market_data.read().await;
-                                    let derived = self.derived_data.read().await;
-                                    let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
-                                    debug!(
-                                        self.worker_id,
-                                        computation_id,
-                                        block,
-                                        updated,
-                                        "updated edge weights with derived data"
-                                    );
-                                }
+                            if weight_round.record(&event) {
+                                let market = self.market_data.read().await;
+                                let derived = self.derived_data.read().await;
+                                let updated = self.graph_manager.update_edge_weights_with_derived(market, &derived);
+                                debug!(
+                                    self.worker_id,
+                                    block = ?weight_round.block,
+                                    updated,
+                                    "updated edge weights with derived data"
+                                );
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
