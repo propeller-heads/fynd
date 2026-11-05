@@ -1343,6 +1343,10 @@ pub struct OrderQuote {
     /// reporting data, not part of the wire format.
     #[serde(skip)]
     surplus: Option<SurplusInfo>,
+    /// The subsidy amount the encoded solution's signed terms carry. `None` when the quote is not
+    /// encoded or carries no subsidy. Internal reporting data, not part of the wire format.
+    #[serde(skip)]
+    subsidy_amount: Option<BigUint>,
 }
 
 impl OrderQuote {
@@ -1382,6 +1386,7 @@ impl OrderQuote {
             solved_against,
             no_route_cause: None,
             surplus: None,
+            subsidy_amount: None,
         }
     }
 
@@ -1442,10 +1447,21 @@ impl OrderQuote {
         self.gas_estimate = gas_estimate;
     }
 
+    /// Returns the subsidy amount the encoded solution's signed terms carry. The solution hook
+    /// that attached the terms raised `amount_out` by it, and the gas estimate includes the
+    /// subsidy's gas.
+    pub fn subsidy_amount(&self) -> Option<&BigUint> {
+        self.subsidy_amount.as_ref()
+    }
+
+    pub(crate) fn set_subsidy_amount(&mut self, subsidy_amount: Option<BigUint>) {
+        self.subsidy_amount = subsidy_amount;
+    }
+
     /// Sets the input amount.
     ///
-    /// Clears the transaction, the fee breakdown and the simulation result, because they were built
-    /// for the previous amount. Encode the quote again after this call.
+    /// Clears the transaction, the fee breakdown, the simulation result and the subsidy amount,
+    /// because they were built for the previous amount. Encode the quote again after this call.
     ///
     /// # Arguments
     ///
@@ -1455,6 +1471,7 @@ impl OrderQuote {
         self.transaction = None;
         self.fee_breakdown = None;
         self.simulation_result = None;
+        self.subsidy_amount = None;
     }
 
     /// Sets the output amount, and changes `amount_out_net_gas` by the same difference.
@@ -1484,8 +1501,8 @@ impl OrderQuote {
     /// Changes a solved quote into a quote without a route.
     ///
     /// Sets the status to `status`. Clears the route, the transaction, the fee breakdown, the
-    /// simulation result and the surplus, and sets the output amounts and the gas to zero. The
-    /// input amount does not change.
+    /// simulation result, the surplus and the subsidy amount, and sets the output amounts and the
+    /// gas to zero. The input amount does not change.
     ///
     /// # Arguments
     ///
@@ -1497,6 +1514,7 @@ impl OrderQuote {
         self.fee_breakdown = None;
         self.simulation_result = None;
         self.surplus = None;
+        self.subsidy_amount = None;
         self.price_impact_bps = None;
         self.amount_out = BigUint::ZERO;
         self.amount_out_net_gas = BigUint::ZERO;

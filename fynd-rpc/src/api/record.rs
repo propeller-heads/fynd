@@ -31,7 +31,7 @@ use crate::api::{
 
 /// Version of the record layout. Bump it when a field is added, removed or changes meaning, so a
 /// reader can tell records of different layouts apart.
-pub const SCHEMA_VERSION: u16 = 2;
+pub const SCHEMA_VERSION: u16 = 3;
 
 /// One answered quote request, as the collector receives it.
 #[must_use]
@@ -311,6 +311,10 @@ struct OrderRecord {
     gas_estimate: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     amount_out_net_gas: Option<String>,
+    /// The signed subsidy amount, which `amount_out` includes. Absent when the order carries no
+    /// subsidy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subsidy_amount: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     price_impact_bps: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -333,6 +337,9 @@ impl OrderRecord {
             amount_out: Some(order.amount_out().to_string()),
             gas_estimate: Some(order.gas_estimate().to_string()),
             amount_out_net_gas: Some(order.amount_out_net_gas().to_string()),
+            subsidy_amount: order
+                .subsidy_amount()
+                .map(ToString::to_string),
             price_impact_bps: order.price_impact_bps(),
             algorithm: Some(order.algorithm().to_string()),
             route: route
@@ -351,6 +358,7 @@ impl OrderRecord {
             amount_out: None,
             gas_estimate: None,
             amount_out_net_gas: None,
+            subsidy_amount: None,
             price_impact_bps: None,
             algorithm: None,
             route: Vec::new(),
@@ -565,7 +573,7 @@ mod tests {
     fn test_record_solved_quote() {
         let value = solved_record();
         assert_eq!(value["chain"], "ethereum");
-        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["schema_version"], 3);
         assert_eq!(
             value["client"],
             json!({
@@ -605,6 +613,21 @@ mod tests {
         assert_eq!(swap["amount_out"], "3500000000");
         assert_eq!(swap["gas_estimate"], "180000");
         assert_eq!(swap["split"], "0.5");
+    }
+
+    #[test]
+    fn test_record_subsidy_amount() {
+        let subsidized = routed_order(QuoteStatus::Success)
+            .route(route())
+            .subsidy_amount(40_000)
+            .build();
+
+        let value = solved_json(vec![subsidized], None);
+
+        assert_eq!(value["outcome"]["orders"][0]["subsidy_amount"], "40000");
+        assert!(solved_record()["outcome"]["orders"][0]
+            .get("subsidy_amount")
+            .is_none());
     }
 
     /// The collector reads `served_at` as a fixed-width UTC timestamp, so the precision is part
