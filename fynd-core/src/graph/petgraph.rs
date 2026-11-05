@@ -383,6 +383,10 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager
 impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWithDerived
     for PetgraphStableDiGraphManager<D>
 {
+    fn weight_inputs(&self) -> &'static [crate::derived::computation::ComputationId] {
+        D::INPUTS
+    }
+
     fn update_edge_weights_with_derived(
         &mut self,
         market: MarketDataView<'_>,
