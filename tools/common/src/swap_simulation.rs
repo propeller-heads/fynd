@@ -60,6 +60,45 @@ pub enum SwapOutcome {
     Reverted { reason: String },
 }
 
+/// A swap for [`EthCallRunner::execute`]: `calldata` sent to `router` with `value` wei, selling
+/// `token_in` for `token_out`.
+#[derive(Debug, Clone)]
+pub struct SwapCall<'a> {
+    pub token_in: Address,
+    pub token_out: Address,
+    pub router: Address,
+    pub calldata: &'a [u8],
+    pub value: &'a BigUint,
+    /// The address the sender's `token_in` allowance is given to: the contract that pulls
+    /// `token_in`, such as Permit2 for a router that pulls it through Permit2.
+    pub spender: Address,
+    /// State the swap reads besides the sender's `token_in` balance and allowance, such as a
+    /// router's internal balance of the sender. It may not override the sender or the contract
+    /// that holds the `token_in` balances.
+    pub extra_state: StateOverride,
+}
+
+impl<'a> SwapCall<'a> {
+    /// A swap that `router` pulls `token_in` for itself, with no extra state.
+    pub fn new(
+        token_in: Address,
+        token_out: Address,
+        router: Address,
+        calldata: &'a [u8],
+        value: &'a BigUint,
+    ) -> Self {
+        Self {
+            token_in,
+            token_out,
+            router,
+            calldata,
+            value,
+            spender: router,
+            extra_state: StateOverride::default(),
+        }
+    }
+}
+
 /// Validates quotes by re-executing encoded calldata via simulation at the relevant block,
 /// using state overrides to inject token balance and allowance.
 ///
@@ -82,7 +121,12 @@ impl EthCallRunner {
         // Generate a fresh random address so it has no pre-existing token balances.
         let mut bytes = [0u8; 20];
         fastrand::fill(&mut bytes);
-        let sender = Address::from(bytes);
+        Self::with_sender(provider, Address::from(bytes))
+    }
+
+    /// A runner that sends every swap from `sender`, for a caller that signs as the sender, such
+    /// as a Permit2 permit. The sender's ETH and `token_in` balances are overridden.
+    pub fn with_sender(provider: RootProvider<Ethereum>, sender: Address) -> Self {
         Self {
             provider: Arc::new(provider),
             sender,
@@ -115,9 +159,8 @@ impl EthCallRunner {
         }
     }
 
-    /// Execute `calldata` against `router` at `block`, returning the actual `token_out`
-    /// amount received by the runner's sender and, when `eth_simulateV1` is used, the gas
-    /// consumed.
+    /// Execute `swap` at `block`, returning the actual `token_out` amount received by the
+    /// runner's sender and, when `eth_simulateV1` is used, the gas consumed.
     ///
     /// Tries `eth_simulateV1` first (balance-delta approach). Falls back to `eth_call` +
     /// return-data parsing when the RPC does not support `eth_simulateV1`. Gas is `None`
@@ -125,24 +168,14 @@ impl EthCallRunner {
     ///
     /// Returns [`SwapOutcome::Reverted`] when the swap reverts, and `Err` when the node fails to
     /// answer, for example on a rate limit, a timeout or missing state, or answers with data the
-    /// runner cannot read.
-    pub async fn execute(
-        &self,
-        token_in: Address,
-        token_out: Address,
-        router: Address,
-        calldata: &[u8],
-        value: &BigUint,
-        block: B256,
-    ) -> anyhow::Result<SwapOutcome> {
+    /// runner cannot read, or when `swap.extra_state` overrides the sender or the `token_in`
+    /// balances.
+    pub async fn execute(&self, swap: &SwapCall<'_>, block: B256) -> anyhow::Result<SwapOutcome> {
         if self
             .simulate_supported
             .load(Ordering::Relaxed)
         {
-            match self
-                .try_simulate(token_in, token_out, router, calldata, value, block)
-                .await
-            {
+            match self.try_simulate(swap, block).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(e) => {
                     if is_method_not_found(&e) {
@@ -157,10 +190,8 @@ impl EthCallRunner {
                 }
             }
         }
-        let (amount_res, gas_res) = tokio::join!(
-            self.try_eth_call(token_in, router, calldata, value, block),
-            self.try_estimate_gas(token_in, router, calldata, value, block),
-        );
+        let (amount_res, gas_res) =
+            tokio::join!(self.try_eth_call(swap, block), self.try_estimate_gas(swap, block));
         Ok(match amount_res? {
             SwapOutcome::Success { amount_out, .. } => {
                 SwapOutcome::Success { amount_out, gas: gas_res.ok().flatten() }
@@ -174,20 +205,9 @@ impl EthCallRunner {
     ///
     /// `eth_simulateV1` can drop the revert data of a reverted swap. The swap is then replayed
     /// under the call tracer to read the error off the frame that reverted.
-    async fn try_simulate(
-        &self,
-        token_in: Address,
-        token_out: Address,
-        router: Address,
-        calldata: &[u8],
-        value: &BigUint,
-        block: B256,
-    ) -> anyhow::Result<SwapOutcome> {
-        let mut overrides = self
-            .build_overrides(token_in, router)
-            .await?;
-        let (swap_call, balance_call) =
-            self.build_simulate_calls(token_out, router, calldata, value, &mut overrides);
+    async fn try_simulate(&self, swap: &SwapCall<'_>, block: B256) -> anyhow::Result<SwapOutcome> {
+        let mut overrides = self.build_overrides(swap).await?;
+        let (swap_call, balance_call) = self.build_simulate_calls(swap, &mut overrides);
 
         let state_overrides =
             serde_json::to_value(&overrides).context("serialise state overrides")?;
@@ -219,9 +239,8 @@ impl EthCallRunner {
         if let Some(reason) = decode_error(&return_data) {
             return Ok(SwapOutcome::Reverted { reason });
         }
-        let swap = self.swap_request(router, calldata, value);
         let traced = self
-            .traced_revert_reason(swap, overrides, block)
+            .traced_revert_reason(self.swap_request(swap), overrides, block)
             .await;
         Ok(SwapOutcome::Reverted { reason: traced.unwrap_or(message) })
     }
@@ -266,13 +285,11 @@ impl EthCallRunner {
     /// keeps the post-swap balance equal to the ETH received.
     fn build_simulate_calls(
         &self,
-        token_out: Address,
-        router: Address,
-        calldata: &[u8],
-        value: &BigUint,
+        swap: &SwapCall<'_>,
         overrides: &mut StateOverride,
     ) -> (serde_json::Value, serde_json::Value) {
-        if token_out == Address::ZERO {
+        let SwapCall { token_out, router, calldata, value, .. } = swap;
+        if *token_out == Address::ZERO {
             overrides.insert(
                 self.sender,
                 AccountOverride { balance: Some(U256::ZERO), ..Default::default() },
@@ -322,21 +339,12 @@ impl EthCallRunner {
 
     /// Fallback when `eth_simulateV1` is unavailable: plain `eth_call` with heuristic
     /// return-data decoding.
-    async fn try_eth_call(
-        &self,
-        token_in: Address,
-        router: Address,
-        calldata: &[u8],
-        value: &BigUint,
-        block: B256,
-    ) -> anyhow::Result<SwapOutcome> {
-        let overrides = self
-            .build_overrides(token_in, router)
-            .await?;
+    async fn try_eth_call(&self, swap: &SwapCall<'_>, block: B256) -> anyhow::Result<SwapOutcome> {
+        let overrides = self.build_overrides(swap).await?;
 
         let result = self
             .provider
-            .call(self.swap_request(router, calldata, value))
+            .call(self.swap_request(swap))
             .overrides(overrides)
             .block(pinned(block))
             .await;
@@ -358,17 +366,16 @@ impl EthCallRunner {
 
     /// The swap transaction from the runner's sender, with a zero gas price so that the sender's
     /// native balance is not charged for gas.
-    fn swap_request(
-        &self,
-        router: Address,
-        calldata: &[u8],
-        value: &BigUint,
-    ) -> TransactionRequest {
-        let value_u128: u128 = value.to_string().parse().unwrap_or(0);
+    fn swap_request(&self, swap: &SwapCall<'_>) -> TransactionRequest {
+        let value_u128: u128 = swap
+            .value
+            .to_string()
+            .parse()
+            .unwrap_or(0);
         TransactionRequest {
             from: Some(self.sender),
-            to: Some(TxKind::Call(router)),
-            input: alloy::primitives::Bytes::copy_from_slice(calldata).into(),
+            to: Some(TxKind::Call(swap.router)),
+            input: alloy::primitives::Bytes::copy_from_slice(swap.calldata).into(),
             value: Some(U256::from(value_u128)),
             max_fee_per_gas: Some(0),
             max_priority_fee_per_gas: Some(0),
@@ -382,24 +389,19 @@ impl EthCallRunner {
     /// units including the 21 000-unit base transaction cost.
     async fn try_estimate_gas(
         &self,
-        token_in: Address,
-        router: Address,
-        calldata: &[u8],
-        value: &BigUint,
+        swap: &SwapCall<'_>,
         block: B256,
     ) -> anyhow::Result<Option<u64>> {
-        let overrides = self
-            .build_overrides(token_in, router)
-            .await?;
+        let overrides = self.build_overrides(swap).await?;
         let state_overrides =
             serde_json::to_value(&overrides).context("serialise state overrides")?;
 
         let params = serde_json::json!([
             {
                 "from": format!("0x{}", hex::encode(self.sender)),
-                "to":   format!("0x{}", hex::encode(router)),
-                "data": format!("0x{}", hex::encode(calldata)),
-                "value": format!("0x{:x}", value),
+                "to":   format!("0x{}", hex::encode(swap.router)),
+                "data": format!("0x{}", hex::encode(swap.calldata)),
+                "value": format!("0x{:x}", swap.value),
             },
             {
                 "blockHash": format!("0x{}", hex::encode(block.as_slice())),
@@ -427,17 +429,15 @@ impl EthCallRunner {
     }
 
     /// Build a `StateOverride` that injects sufficient balance and allowance for the sender
-    /// to spend `token_in` via `router`. Probes storage slots on first use and caches.
+    /// to spend `token_in` via `swap.spender`, plus `swap.extra_state`. Probes storage slots on
+    /// first use and caches.
     ///
     /// Always injects a large ETH balance for the sender so that `eth_simulateV1` can charge
     /// gas without rejecting the transaction. For ERC-20 tokens the ERC-20 balance and
     /// allowance storage slots are also overridden. For native ETH (zero address) only the
     /// ETH balance override is needed.
-    async fn build_overrides(
-        &self,
-        token_in: Address,
-        router: Address,
-    ) -> anyhow::Result<StateOverride> {
+    async fn build_overrides(&self, swap: &SwapCall<'_>) -> anyhow::Result<StateOverride> {
+        let SwapCall { token_in, spender, .. } = *swap;
         // Use MAX >> 1: avoids triggering tokens that pack metadata into bit 255 (e.g. USDC).
         let max_val = B256::from(U256::MAX >> 1);
         let eth_balance = U256::MAX >> 1;
@@ -452,11 +452,11 @@ impl EthCallRunner {
         );
 
         if token_in != Address::ZERO {
-            let layout = self.layout(token_in, router).await?;
+            let layout = self.layout(token_in, spender).await?;
 
             let mut state_diff = B256HashMap::default();
             state_diff.insert(layout.balance_slot(self.sender), max_val);
-            state_diff.insert(layout.allowance_slot(self.sender, router), max_val);
+            state_diff.insert(layout.allowance_slot(self.sender, spender), max_val);
 
             // A proxy keeps its balances somewhere other than the address the swap calls, so the
             // write goes to the contract discovery named rather than to the token.
@@ -464,6 +464,15 @@ impl EthCallRunner {
                 layout.storage_contract(),
                 AccountOverride { state_diff: Some(state_diff), ..Default::default() },
             );
+        }
+
+        for (address, account) in &swap.extra_state {
+            anyhow::ensure!(
+                !overrides.contains_key(address),
+                "the extra state overrides {address}, which holds the sender's ETH or token_in \
+                 balance; drop {address} from the extra state"
+            );
+            overrides.insert(*address, account.clone());
         }
 
         Ok(overrides)
@@ -630,6 +639,58 @@ pub fn parse_return_amount(data: &[u8]) -> Option<BigUint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SENDER: Address = Address::repeat_byte(0x11);
+    const ROUTER: Address = Address::repeat_byte(0x22);
+
+    /// A runner on a port nothing listens on: a native `token_in` needs no layout probe.
+    fn offline_runner() -> EthCallRunner {
+        let provider = RootProvider::new_http("http://127.0.0.1:1".parse().unwrap());
+        EthCallRunner::with_sender(provider, SENDER)
+    }
+
+    fn native_swap_with_extra_state(address: Address) -> (StateOverride, BigUint) {
+        let account = AccountOverride { balance: Some(U256::from(7)), ..Default::default() };
+        (StateOverride::from_iter([(address, account)]), BigUint::ZERO)
+    }
+
+    #[tokio::test]
+    async fn test_build_overrides_extra_state() {
+        let (extra_state, value) = native_swap_with_extra_state(ROUTER);
+        let swap = SwapCall {
+            extra_state,
+            ..SwapCall::new(Address::ZERO, Address::ZERO, ROUTER, &[], &value)
+        };
+
+        let overrides = offline_runner()
+            .build_overrides(&swap)
+            .await
+            .unwrap();
+
+        assert_eq!(overrides[&ROUTER].balance, Some(U256::from(7)));
+        assert!(overrides.contains_key(&SENDER));
+    }
+
+    #[tokio::test]
+    async fn test_build_overrides_extra_state_on_sender() {
+        let (extra_state, value) = native_swap_with_extra_state(SENDER);
+        let swap = SwapCall {
+            extra_state,
+            ..SwapCall::new(Address::ZERO, Address::ZERO, ROUTER, &[], &value)
+        };
+
+        let error = offline_runner()
+            .build_overrides(&swap)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(&SENDER.to_string()),
+            "{error}"
+        );
+    }
 
     fn word(value: u8) -> Vec<u8> {
         let mut w = vec![0u8; 32];

@@ -12,7 +12,7 @@ use fynd_tools_common::{
     aggregator::{AggregatorCalldata, AggregatorClient, AggregatorQuote},
     bps::{eth_call_bps_diff, gas_adjusted_bps_diff, raw_bps_diff},
     constants::ETH_SENTINEL_ADDRESS,
-    swap_simulation::{EthCallRunner, SwapOutcome},
+    swap_simulation::{EthCallRunner, SwapCall, SwapOutcome},
 };
 use num_bigint::BigUint;
 use tokio::time::sleep;
@@ -392,7 +392,7 @@ async fn run_eth_call_for_calldata(
     let value: BigUint = cd.value.parse().unwrap_or_default();
 
     match runner
-        .execute(token_in, token_out, router, &calldata_bytes, &value, block)
+        .execute(&SwapCall::new(token_in, token_out, router, &calldata_bytes, &value), block)
         .await
     {
         Ok(SwapOutcome::Success { amount_out, gas }) => {
