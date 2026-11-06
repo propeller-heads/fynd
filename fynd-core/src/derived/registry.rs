@@ -22,7 +22,7 @@
 //! needs no change.
 
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{
     computation::{ComputationId, ComputationRequirements, DerivedComputation, FailedItem},
@@ -91,15 +91,8 @@ where
         block: u64,
     ) -> Result<ComputedWrite, ComputationError> {
         let output = C::compute(self, market, store, changed).await?;
-        if output.has_failures() {
-            warn!(
-                computation = C::ID,
-                failed = output.failed_items.len(),
-                "computation completed with partial failures"
-            );
-            for item in &output.failed_items {
-                debug!(computation = C::ID, key = %item.key, error = %item.error, "failed item");
-            }
+        for item in &output.failed_items {
+            debug!(computation = C::ID, key = %item.key, error = %item.error, "failed item");
         }
         let failed_items = output.failed_items.clone();
         Ok(ComputedWrite {
