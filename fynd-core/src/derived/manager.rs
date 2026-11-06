@@ -522,6 +522,13 @@ impl ComputationManager {
                             "computation" => computation_id
                         )
                         .set(unix_now_seconds());
+                        // Partial failures recur every block, so they are a gauge rather than a
+                        // per-block warning.
+                        gauge!(
+                            "derived_computation_failed_items",
+                            "computation" => computation_id
+                        )
+                        .set(write.failed_items.len() as f64);
                         info!(
                             computation = computation_id,
                             failed = write.failed_items.len(),
