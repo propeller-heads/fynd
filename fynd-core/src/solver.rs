@@ -444,6 +444,24 @@ pub enum SolverBuildError {
     StepControllerChannelClosed,
 }
 
+/// Builds the default encoder without loading executor configuration on quote-only chains.
+///
+/// `SwapEncoderRegistry::add_default_encoders` requires the chain to appear in Tycho's embedded
+/// executor maps. A chain without a router cannot encode in the first place, so an empty registry
+/// is sufficient: [`Encoder::new`] deliberately returns a disabled encoder whose encode path
+/// reports quote-only mode.
+fn default_encoder(chain: Chain) -> Result<Encoder, SolverBuildError> {
+    let registry = SwapEncoderRegistry::new(chain);
+    let registry = if Encoder::is_supported(chain) {
+        registry
+            .add_default_encoders(None)
+            .map_err(|e| SolverBuildError::Encoder(e.to_string()))?
+    } else {
+        registry
+    };
+    Encoder::new(chain, registry).map_err(|e| SolverBuildError::Encoder(e.to_string()))
+}
+
 /// Internal worker pool entry — either a built-in algorithm (by name) or a custom one.
 enum PoolEntry {
     BuiltIn {
@@ -1248,13 +1266,7 @@ impl FyndBuilder {
 
         let encoder = match self.encoder {
             Some(enc) => enc,
-            None => {
-                let registry = SwapEncoderRegistry::new(self.chain)
-                    .add_default_encoders(None)
-                    .map_err(|e| SolverBuildError::Encoder(e.to_string()))?;
-                Encoder::new(self.chain, registry)
-                    .map_err(|e| SolverBuildError::Encoder(e.to_string()))?
-            }
+            None => default_encoder(self.chain)?,
         };
         let encoder = match self.calldata_watermark {
             Some(watermark) => encoder.with_calldata_watermark(watermark),
@@ -1775,12 +1787,7 @@ impl Solver {
         }
 
         // Encoder + router
-        let encoder = {
-            let registry = SwapEncoderRegistry::new(chain)
-                .add_default_encoders(None)
-                .map_err(|e| SolverBuildError::Encoder(e.to_string()))?;
-            Encoder::new(chain, registry).map_err(|e| SolverBuildError::Encoder(e.to_string()))?
-        };
+        let encoder = default_encoder(chain)?;
 
         let router_address = encoder.router_address().cloned();
         // Replay mode has no FeeCalculator to read; seed a zero-fee config at the standard
