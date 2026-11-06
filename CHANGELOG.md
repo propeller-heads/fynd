@@ -1,4 +1,16 @@
 
+## [0.122.1](https://github.com/propeller-heads/fynd/compare/0.122.0...0.122.1) (2026-11-06)
+
+### Features
+
+- Export a `derived_computation_failed_items{computation}` gauge, updated after each successful computation, so dashboards and alerts can track partial failures. ([acba842](https://github.com/propeller-heads/fynd/commit/acba842ca3c5b35714d9ed542c5f5a55deeb9df6))
+
+### Bug Fixes
+
+- Reduce log noise by logging per-block derived computation results and summaries at debug level instead of info. ([407d4ab](https://github.com/propeller-heads/fynd/commit/407d4ab15b41c679b0094472657ffeba67fc3568))
+- Remove the per-block partial-failure warning for derived computations. Track failures with the new gauge instead. ([acba842](https://github.com/propeller-heads/fynd/commit/acba842ca3c5b35714d9ed542c5f5a55deeb9df6)) ([407d4ab](https://github.com/propeller-heads/fynd/commit/407d4ab15b41c679b0094472657ffeba67fc3568))
+
+
 ## [0.122.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.122.0) (2026-11-05)
 
 ### Features
