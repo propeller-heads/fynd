@@ -16,7 +16,7 @@ use futures::future::join_all;
 use metrics::{counter, gauge, histogram};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, RwLock};
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn, Span};
 use tycho_simulation::tycho_common::models::{Address, Chain};
 
 use crate::types::{
@@ -411,6 +411,7 @@ impl ComputationManager {
     /// a stage runs concurrently and is written before the next stage starts, and a
     /// computation whose requirement did not succeed this block is skipped and reported
     /// as failed. Broadcasts a `DerivedDataEvent` per computation.
+    #[instrument(level = "debug", name = "derived_computations", skip_all, fields(block))]
     async fn compute_all(&self, changed: &ChangedComponents) {
         let total_start = Instant::now();
 
@@ -425,6 +426,7 @@ impl ComputationManager {
             warn!("market data has no last updated block, skipping computations");
             return;
         };
+        Span::current().record("block", block);
 
         // Broadcast new block event
         let _ = self
@@ -529,7 +531,7 @@ impl ComputationManager {
                             "computation" => computation_id
                         )
                         .set(write.failed_items.len() as f64);
-                        info!(
+                        debug!(
                             computation = computation_id,
                             failed = write.failed_items.len(),
                             elapsed_ms = elapsed.as_millis(),
@@ -565,11 +567,7 @@ impl ComputationManager {
             }
         }
 
-        info!(
-            block,
-            total_ms = total_start.elapsed().as_millis(),
-            "all derived computations complete"
-        );
+        debug!(total_ms = total_start.elapsed().as_millis(), "all derived computations complete");
     }
 
     /// Recovers from a broadcast lag.
