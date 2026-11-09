@@ -1,8 +1,11 @@
 //! Data types for derived computations.
 
+use std::hash::{Hash, Hasher};
+
+use hashbrown::{Equivalent, HashMap};
 use num_bigint::BigUint;
 use num_traits::Zero;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tycho_simulation::{
     tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
 };
@@ -21,7 +24,26 @@ pub type SpotPriceKey = (ComponentId, Address, Address);
 /// Spot prices map: key -> spot price as f64.
 ///
 /// Represents: 1 token_in = spot_price token_out.
-pub type SpotPrices = FxHashMap<SpotPriceKey, f64>;
+pub type SpotPrices = HashMap<SpotPriceKey, f64, FxBuildHasher>;
+
+/// A directional component key held by reference, so a lookup in [`SpotPrices`] or
+/// [`ComponentDepths`] needs no owned `(ComponentId, Address, Address)`.
+///
+/// Hashes exactly as the owned tuple does, which is what lets the maps accept it as a key.
+#[derive(Debug, Clone, Copy)]
+pub struct ComponentDirectionRef<'a>(pub &'a str, pub &'a Address, pub &'a Address);
+
+impl Hash for ComponentDirectionRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.0, self.1, self.2).hash(state);
+    }
+}
+
+impl Equivalent<(ComponentId, Address, Address)> for ComponentDirectionRef<'_> {
+    fn equivalent(&self, key: &(ComponentId, Address, Address)) -> bool {
+        self.0 == key.0 && self.1 == &key.1 && self.2 == &key.2
+    }
+}
 
 // =============================================================================
 // Component Depth Types
@@ -34,7 +56,7 @@ pub type ComponentDepthKey = (ComponentId, Address, Address);
 
 /// Component depths map: key -> the input after which the pool's net marginal price has fallen by
 /// the configured marginal price drop.
-pub type ComponentDepths = FxHashMap<ComponentDepthKey, BigUint>;
+pub type ComponentDepths = HashMap<ComponentDepthKey, BigUint, FxBuildHasher>;
 
 // =============================================================================
 // Token Gas Price Types

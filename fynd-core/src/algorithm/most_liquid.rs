@@ -38,7 +38,7 @@ use crate::{
     derived::{
         computation::{ComputationId, ComputationRequirements, DerivedComputation},
         computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
-        types::{gas_cost_in_token, TokenGasPrices},
+        types::{gas_cost_in_token, ComponentDirectionRef, TokenGasPrices},
     },
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
@@ -330,7 +330,7 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
         token_out: &Token,
         derived: &crate::derived::DerivedData,
     ) -> Option<Self> {
-        let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+        let key = ComponentDirectionRef(component_id, &token_in.address, &token_out.address);
 
         // Use pre-computed spot price; skip edge if unavailable.
         let spot_price = match derived
