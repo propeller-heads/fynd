@@ -4,7 +4,7 @@ use clap::Parser;
 use fynd_core::nexus::price_levels::PriceLevelVenue;
 use tycho_simulation::evm::tycho_models::Chain;
 
-use crate::price_levels::VenueArgs;
+use crate::{market::market_args::MarketArgs, price_levels::VenueArgs};
 
 /// The arguments of `fynd-nexus`.
 #[derive(Debug, Parser)]
@@ -36,6 +36,10 @@ pub struct Cli {
     /// The venues' credentials and endpoints.
     #[command(flatten)]
     pub venue_args: VenueArgs,
+
+    /// The Tycho market's settings. It runs when `--tycho-url` is set.
+    #[command(flatten)]
+    pub market: MarketArgs,
 }
 
 #[cfg(test)]
