@@ -271,4 +271,11 @@ mod tests {
 
         assert_eq!(error, "none of the listed venues (hashflow) supports base");
     }
+
+    #[test]
+    fn test_streams_are_empty_when_no_venue_is_listed() {
+        assert!(streams_to_serve(Chain::Base, &[])
+            .unwrap()
+            .is_empty());
+    }
 }
