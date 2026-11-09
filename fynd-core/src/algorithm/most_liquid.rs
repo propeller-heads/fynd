@@ -323,12 +323,18 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
     const INPUTS: &'static [ComputationId] =
         &[SpotPriceComputation::ID, TokenGasPriceComputation::ID, ComponentDepthComputation::ID];
 
+    type WeightInput<'a> = &'a crate::derived::DerivedData;
+
+    fn weight_input(derived: &crate::derived::DerivedData) -> Self::WeightInput<'_> {
+        derived
+    }
+
     fn from_sim_and_derived(
         _sim: &dyn ProtocolSim,
         component_id: &ComponentId,
         token_in: &Token,
         token_out: &Token,
-        derived: &crate::derived::DerivedData,
+        derived: &Self::WeightInput<'_>,
     ) -> Option<Self> {
         let key = ComponentDirectionRef(component_id, &token_in.address, &token_out.address);
 
@@ -921,7 +927,13 @@ mod tests {
         let sim = make_mock_sim();
         let result =
             <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
             );
 
         assert!(result.is_none());
@@ -957,7 +969,13 @@ mod tests {
         let sim = make_mock_sim();
         let result =
             <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
             );
 
         assert!(result.is_none());
@@ -996,7 +1014,13 @@ mod tests {
         let sim = make_mock_sim();
         let result =
             <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
             );
 
         assert!(result.is_none());
@@ -1023,7 +1047,13 @@ mod tests {
         let sim = make_mock_sim();
         let result =
             <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
             );
 
         assert!(
@@ -1062,7 +1092,13 @@ mod tests {
         let sim = make_mock_sim();
         let result =
             <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
             );
 
         let data = result.expect("should return Some when all data present");
@@ -1104,7 +1140,13 @@ mod tests {
         let sim = make_mock_sim();
         let result =
             <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
             );
 
         let data = result.expect("should return Some when all data present");
