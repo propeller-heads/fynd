@@ -23,6 +23,7 @@ export type ServerErrorCode =
   | 'INTERNAL_ERROR'
   | 'NOT_READY'
   | 'ALGORITHM_ERROR'
+  | 'SANCTIONED_ADDRESS'
   | { kind: 'UNKNOWN'; raw: string };
 
 /** Error code originating from the client SDK itself. */
@@ -51,6 +52,7 @@ const KNOWN_SERVER_CODES = new Set([
   'INTERNAL_ERROR',
   'NOT_READY',
   'ALGORITHM_ERROR',
+  'SANCTIONED_ADDRESS',
 ]);
 
 const RETRYABLE_CODES = new Set<string>([

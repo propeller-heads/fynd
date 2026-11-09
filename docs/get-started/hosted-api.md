@@ -543,6 +543,8 @@ A `400` carries a `code` naming what to fix. `BAD_REQUEST` means the body did no
 
 A `422` with `REQUIRED_TOKENS_NOT_SUPPORTED` means `route_filter.require_tokens` was set and no solver pool serving the request supports it; drop the filter or use a deployment that runs `most_liquid` or `water_fill`.
 
+A `403` with `SANCTIONED_ADDRESS` means an order's `sender`, or a `receiver` other than the sender, is on the [OFAC sanctions list](https://sanctionslist.ofac.treas.gov/Home/SdnList). The hosted API does not quote for that address on any chain, and retrying does not help. The `error` says which of the two it was.
+
 A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — it means the solver ran but couldn't find a profitable route for the pair at the requested size. Check `/v1/{chain}/health` (`last_update_ms: 0` means the Tycho stream isn't delivering live state yet), try a different token pair or size, or confirm the tokens have [Tycho-indexed liquidity](https://docs.propellerheads.xyz/tycho) on that chain.
 
 ## Scaling beyond the hosted tiers
