@@ -1147,6 +1147,54 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::all_present(Some(2.0), Some(2_000), Some((1, 2000)), Some((2.0, 1.0)))]
+    #[case::fractional_price(Some(0.5), Some(500), Some((2, 3)), Some((0.5, 500.0 * 2.0 / 3.0)))]
+    #[case::missing_spot(None, Some(2_000), Some((1, 2000)), None)]
+    #[case::missing_depth(Some(2.0), None, Some((1, 2000)), None)]
+    #[case::missing_token_price(Some(2.0), Some(2_000), None, None)]
+    #[case::zero_numerator(Some(2.0), Some(2_000), Some((1, 0)), None)]
+    #[case::zero_denominator(Some(2.0), Some(2_000), Some((0, 2000)), None)]
+    fn test_from_sim_and_derived_values(
+        #[case] spot: Option<f64>,
+        #[case] depth: Option<u64>,
+        #[case] price: Option<(u64, u64)>,
+        #[case] expected: Option<(f64, f64)>,
+    ) {
+        let key = pair_key("component1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+        let mut derived = DerivedData::new();
+        let mut spot_prices = crate::derived::types::SpotPrices::default();
+        spot_prices.extend(spot.map(|p| (key.clone(), p)));
+        derived.set_spot_prices(spot_prices, vec![], 10);
+        let mut depths = crate::derived::types::ComponentDepths::default();
+        depths.extend(depth.map(|d| (key.clone(), BigUint::from(d))));
+        derived.set_component_depths(depths, vec![], 10);
+        let mut token_prices = TokenGasPrices::default();
+        token_prices.extend(price.map(|(den, num)| {
+            (
+                tok_in.address.clone(),
+                Price { numerator: BigUint::from(num), denominator: BigUint::from(den) },
+            )
+        }));
+        derived.set_token_prices(token_prices, vec![], 10);
+
+        let sim = make_mock_sim();
+        let result =
+            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
+                &sim,
+                &key.0,
+                &tok_in,
+                &tok_out,
+                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
+                    &derived,
+                ),
+            );
+
+        assert_eq!(result.map(|w| (w.spot_price, w.depth)), expected);
+    }
+
     // ==================== find_best_route Tests ====================
 
     #[tokio::test]
