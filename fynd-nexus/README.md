@@ -33,12 +33,30 @@ BEBOP_KEY=... HASHFLOW_USER=... HASHFLOW_KEY=... METRIC_API_KEY=... \
 | `--hashflow-user`, `--hashflow-key` | `HASHFLOW_USER`, `HASHFLOW_KEY` | | Hashflow credentials. |
 | `--metric-api-key` | `METRIC_API_KEY` | | Metric API key. |
 | `--metric-api-url` | `METRIC_API_URL` | Metric's public endpoint | Another Metric deployment. |
+| `--tycho-url` | `TYCHO_URL` | | Tycho URL without a scheme. Turns the market on; requires `--rpc-url`. |
+| `--tycho-api-key` | `TYCHO_API_KEY` | | Tycho API key. |
+| `--tycho-use-tls` | `TYCHO_USE_TLS` | `true` | Whether to connect to Tycho over TLS. |
+| `--min-tvl` | `MIN_TVL` | the chain's low TVL threshold | Minimum TVL, in the chain's native token, for a component to be tracked. |
+| `--rpc-url` | `RPC_URL` | | Node RPC URL, which the market reads gas prices from. |
 
 Another binary can start the service with `fynd_nexus::run(Cli::parse())`, where `Cli` is
 `fynd_nexus::cli::Cli`, after it sets up logging.
 
-A listed venue without its credentials fails startup. The service has no authentication and it
+A listed venue without its credentials fails startup. Pass `--venues` with no value to run the
+market alone; with no venue and no `--tycho-url`, startup fails. The service has no authentication and it
 serves prices only: expose it inside the cluster.
+
+## Market
+
+With `--tycho-url` set, the service also runs the Tycho client for its chain. It tracks every
+on-chain protocol system Tycho serves, above the TVL floor and without the default blocklist's
+components, and keeps the market and the derived data computed from it (spot prices, depths, token
+gas prices) up to date. No endpoint serves it. Startup fails when `--tycho-url` is set
+without `--rpc-url`.
+
+The service waits up to 15 minutes for the first block and the derived data, and logs while it
+waits. It stops with an error when the Tycho feed ends or the market does not become ready, so the
+orchestrator restarts it.
 
 ## Endpoints
 
