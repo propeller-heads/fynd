@@ -128,6 +128,17 @@ mod tests {
     }
 
     #[test]
+    fn test_component_direction_ref_finds_owned_key() {
+        let (a, b) = (Address::from([1u8; 20]), Address::from([2u8; 20]));
+        let mut prices = SpotPrices::default();
+        prices.insert(("pool".to_string(), a.clone(), b.clone()), 1.5);
+
+        assert_eq!(prices.get(&ComponentDirectionRef("pool", &a, &b)), Some(&1.5));
+        assert_eq!(prices.get(&ComponentDirectionRef("pool", &b, &a)), None);
+        assert_eq!(prices.get(&ComponentDirectionRef("other", &a, &b)), None);
+    }
+
+    #[test]
     fn test_mul_div_ceil() {
         let ceil = |value: u8, multiplier: u8, denominator: u8| {
             mul_div_ceil(&value.into(), &multiplier.into(), &denominator.into())
