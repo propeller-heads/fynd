@@ -98,4 +98,29 @@ mod tests {
         assert_eq!(cli.venue_args.metric.api_key.as_deref(), Some("m"));
         assert_eq!(cli.venue_args.metric.api_url.as_deref(), Some("https://metric.example"));
     }
+
+    #[test]
+    fn test_parse_market_without_venues() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "--tycho-url",
+            "tycho.example",
+            "--rpc-url",
+            "https://node.example",
+        ])
+        .unwrap();
+
+        assert!(cli.venues.is_empty());
+        assert!(cli.market.is_enabled());
+    }
+
+    #[test]
+    fn test_parse_market_off_by_default() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum"]).unwrap();
+
+        assert!(!cli.market.is_enabled());
+    }
 }

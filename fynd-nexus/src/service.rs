@@ -110,3 +110,24 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_run_fails_with_neither_venues_nor_market() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum", "--venues"]).unwrap();
+
+        let error = run(cli).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("nothing to run"),
+            "{error}"
+        );
+    }
+}
