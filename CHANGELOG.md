@@ -1,4 +1,11 @@
 
+## [0.124.0](https://github.com/propeller-heads/fynd/compare/0.123.2...0.124.0) (2026-11-10)
+
+### Features
+
+* **feed:** stream the Elysium Uniswap V3 forks ([06a001d](https://github.com/propeller-heads/fynd/commit/06a001d28b543335a3c70908af82fd2ec1485da4))
+
+
 
 
 ## [0.123.0](https://github.com/propeller-heads/fynd/compare/0.122.0...0.123.0) (2026-11-10)
