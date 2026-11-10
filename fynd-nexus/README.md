@@ -35,7 +35,7 @@ BEBOP_KEY=... HASHFLOW_USER=... HASHFLOW_KEY=... METRIC_API_KEY=... \
 | `--metric-api-url` | `METRIC_API_URL` | Metric's public endpoint | Another Metric deployment. |
 | `--tycho-url` | `TYCHO_URL` | | Tycho URL without a scheme. Turns the market on; requires `--rpc-url`. |
 | `--tycho-api-key` | `TYCHO_API_KEY` | | Tycho API key. |
-| `--tycho-use-tls` | `TYCHO_USE_TLS` | `true` | Whether to connect to Tycho over TLS. |
+| `--disable-tls` | `DISABLE_TLS` | `false` | Disable TLS for the Tycho connection. |
 | `--min-tvl` | `MIN_TVL` | the chain's low TVL threshold | Minimum TVL, in the chain's native token, for a component to be tracked. |
 | `--rpc-url` | `RPC_URL` | | Node RPC URL, which the market reads gas prices from. |
 

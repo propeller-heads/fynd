@@ -16,9 +16,9 @@ pub struct MarketArgs {
     #[arg(long, env = "TYCHO_API_KEY", hide_env_values = true)]
     pub tycho_api_key: Option<String>,
 
-    /// Whether to connect to Tycho over TLS.
-    #[arg(long, env = "TYCHO_USE_TLS", default_value_t = true, action = clap::ArgAction::Set)]
-    pub tycho_use_tls: bool,
+    /// Disable TLS for the Tycho connection.
+    #[arg(long, env = "DISABLE_TLS")]
+    pub disable_tls: bool,
 
     /// Minimum TVL in the chain's native token for a component to be tracked. Defaults to the
     /// chain's low TVL threshold.
@@ -42,7 +42,7 @@ impl fmt::Debug for MarketArgs {
         f.debug_struct("MarketArgs")
             .field("tycho_url", &self.tycho_url)
             .field("tycho_api_key", &self.tycho_api_key.is_some())
-            .field("tycho_use_tls", &self.tycho_use_tls)
+            .field("disable_tls", &self.disable_tls)
             .field("min_tvl", &self.min_tvl)
             .field("rpc_url", &self.rpc_url.is_some())
             .finish()
@@ -73,7 +73,7 @@ pub(crate) mod tests {
         let args = parse(&[]).unwrap();
 
         assert!(!args.is_enabled());
-        assert!(args.tycho_use_tls);
+        assert!(!args.disable_tls);
         assert_eq!((args.min_tvl, args.rpc_url), (None, None));
     }
 
@@ -92,10 +92,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_tls_can_be_turned_off() {
-        let args = parse(&["--tycho-use-tls", "false"]).unwrap();
+    fn test_disable_tls_turns_tls_off() {
+        let args = parse(&["--disable-tls"]).unwrap();
 
-        assert!(!args.tycho_use_tls);
+        assert!(args.disable_tls);
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub async fn launch_market(chain: Chain, args: &MarketArgs) -> anyhow::Result<La
         bail!("the market needs --tycho-url (TYCHO_URL) and --rpc-url (RPC_URL)");
     };
     let protocols =
-        resolve_protocols(tycho_url, args.tycho_api_key.as_deref(), args.tycho_use_tls, chain, &[])
+        resolve_protocols(tycho_url, args.tycho_api_key.as_deref(), !args.disable_tls, chain, &[])
             .await
             .context("cannot resolve the protocol systems to track")?;
     info!(count = protocols.len(), "starting the market");
@@ -49,7 +49,7 @@ pub async fn launch_market(chain: Chain, args: &MarketArgs) -> anyhow::Result<La
         .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Low));
     let mut builder =
         FyndBuilder::new(chain, tycho_url.clone(), rpc_url.clone(), protocols, min_tvl)
-            .tycho_use_tls(args.tycho_use_tls)
+            .tycho_use_tls(!args.disable_tls)
             .blocklisted_components(default_blocklist());
     if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
