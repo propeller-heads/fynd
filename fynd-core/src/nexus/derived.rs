@@ -7,9 +7,12 @@
 use std::{fmt, str::FromStr};
 
 use num_bigint::BigUint;
+use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
+};
 
 use crate::{
     derived::{
@@ -163,6 +166,15 @@ impl SpotPriceSnapshot {
         }
         Self { block, entries }
     }
+
+    /// The prices of the entries. A direction listed twice keeps its last price.
+    pub fn into_spot_prices(self) -> SpotPrices {
+        let mut prices = SpotPrices::with_capacity_and_hasher(self.entries.len(), FxBuildHasher);
+        for entry in self.entries {
+            prices.insert((entry.component_id, entry.token_in, entry.token_out), entry.price);
+        }
+        prices
+    }
 }
 
 impl PoolDepthSnapshot {
@@ -179,6 +191,16 @@ impl PoolDepthSnapshot {
         }
         Self { block, entries }
     }
+
+    /// The depths of the entries. A direction listed twice keeps its last depth.
+    pub fn into_depths(self) -> ComponentDepths {
+        let mut depths =
+            ComponentDepths::with_capacity_and_hasher(self.entries.len(), FxBuildHasher);
+        for entry in self.entries {
+            depths.insert((entry.component_id, entry.token_in, entry.token_out), entry.depth);
+        }
+        depths
+    }
 }
 
 impl TokenGasPriceSnapshot {
@@ -193,6 +215,18 @@ impl TokenGasPriceSnapshot {
             });
         }
         Self { block, entries }
+    }
+
+    /// The prices of the entries. A token listed twice keeps its last price.
+    pub fn into_token_prices(self) -> TokenGasPrices {
+        let mut prices = TokenGasPrices::default();
+        for entry in self.entries {
+            prices.insert(
+                entry.token,
+                Price { numerator: entry.numerator, denominator: entry.denominator },
+            );
+        }
+        prices
     }
 }
 
