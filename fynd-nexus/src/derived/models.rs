@@ -19,3 +19,16 @@ impl EncodedDerivedSnapshot {
         format!("\"{}\"", self.block)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_etag_is_the_quoted_block() {
+        let encoded =
+            EncodedDerivedSnapshot { block: 21_000_000, json: Bytes::new(), gzip: Bytes::new() };
+
+        assert_eq!(encoded.etag(), "\"21000000\"");
+    }
+}

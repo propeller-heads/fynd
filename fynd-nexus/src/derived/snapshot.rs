@@ -83,3 +83,102 @@ fn gzip(plain: &[u8]) -> Bytes {
             .expect("finishing a gzip stream into a vector cannot fail"),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read as _;
+
+    use fynd_core::nexus::derived::SpotPriceEntry;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    fn snapshot(block: u64) -> DerivedSnapshot<Value> {
+        DerivedSnapshot { block, entries: vec![json!({"n": block})] }
+    }
+
+    #[test]
+    fn test_nothing_is_current_before_the_first_replace() {
+        let snapshots = DerivedSnapshots::new(Chain::Base);
+
+        assert!(snapshots
+            .current(DerivedKind::PoolDepths)
+            .is_none());
+        assert_eq!(snapshots.block(DerivedKind::PoolDepths), None);
+    }
+
+    #[test]
+    fn test_replace_replaces_only_its_kind_and_encodes_both_forms() {
+        let snapshots = DerivedSnapshots::new(Chain::Base);
+        snapshots.replace(DerivedKind::PoolDepths, &snapshot(5));
+        snapshots.replace(DerivedKind::PoolDepths, &snapshot(6));
+
+        let current = snapshots
+            .current(DerivedKind::PoolDepths)
+            .unwrap();
+
+        assert_eq!(current.block, 6);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&current.json).unwrap(),
+            json!({"block": 6, "entries": [{"n": 6}]})
+        );
+        let mut decompressed = Vec::new();
+        flate2::read::GzDecoder::new(&current.gzip[..])
+            .read_to_end(&mut decompressed)
+            .unwrap();
+        assert_eq!(decompressed, current.json);
+        assert_eq!(snapshots.block(DerivedKind::SpotPrices), None);
+    }
+
+    #[test]
+    fn test_replace_records_sizes_and_block() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let snapshots = DerivedSnapshots::new(Chain::Base);
+
+        metrics::with_local_recorder(&recorder, || {
+            snapshots.replace(
+                DerivedKind::SpotPrices,
+                &DerivedSnapshot::<SpotPriceEntry> { block: 42, entries: vec![] },
+            );
+        });
+
+        let current = snapshots
+            .current(DerivedKind::SpotPrices)
+            .unwrap();
+        let mut recorded = Vec::new();
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            let label = |name: &str| {
+                key.key()
+                    .labels()
+                    .find(|label| label.key() == name)
+                    .map(|label| label.value().to_string())
+            };
+            assert_eq!(label("computation").as_deref(), Some("spot_prices"));
+            let value = match value {
+                DebugValue::Histogram(sizes) => sizes[0].into_inner(),
+                DebugValue::Gauge(block) => block.into_inner(),
+                DebugValue::Counter(_) => panic!("unexpected counter"),
+            };
+            recorded.push((key.key().name().to_string(), label("encoding"), value as usize));
+        }
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            [
+                ("nexus_derived_block".to_string(), None, 42),
+                (
+                    "nexus_derived_snapshot_bytes".to_string(),
+                    Some("gzip".to_string()),
+                    current.gzip.len()
+                ),
+                (
+                    "nexus_derived_snapshot_bytes".to_string(),
+                    Some("identity".to_string()),
+                    current.json.len()
+                ),
+            ]
+        );
+    }
+}
