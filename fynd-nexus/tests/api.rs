@@ -45,7 +45,11 @@ async fn get_with(
     name: header::HeaderName,
     value: Option<&str>,
 ) -> Response {
-    let mut request = reqwest::Client::new().get(format!("http://{address}{path}"));
+    let client = reqwest::Client::builder()
+        .no_gzip()
+        .build()
+        .unwrap();
+    let mut request = client.get(format!("http://{address}{path}"));
     if let Some(value) = value {
         request = request.header(name, value);
     }
