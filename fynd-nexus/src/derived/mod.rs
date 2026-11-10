@@ -3,3 +3,4 @@
 
 pub mod models;
 pub mod snapshot;
+pub mod writer;
