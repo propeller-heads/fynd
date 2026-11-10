@@ -437,6 +437,14 @@ fn register_exchange(
             builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
         }
         "gigadex_v3" => builder.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None),
+        // Elysium Uniswap V3 forks: their factories deploy Uniswap V3's pool contracts.
+        "kleos_v3" => builder.exchange::<UniswapV3State>("kleos_v3", tvl_filter.clone(), None),
+        "elyspump_v3" => {
+            builder.exchange::<UniswapV3State>("elyspump_v3", tvl_filter.clone(), None)
+        }
+        "stockiumswap_v3" => {
+            builder.exchange::<UniswapV3State>("stockiumswap_v3", tvl_filter.clone(), None)
+        }
         "ramses_v3" => builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None),
         "pancakeswap_v3" => {
             builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
@@ -1139,6 +1147,26 @@ mod tests {
         assert!(
             skipped.is_empty(),
             "expected every Robinhood protocol to register, but got unknown-protocol warnings \
+             for: {skipped:?}"
+        );
+    }
+
+    #[test]
+    fn test_register_exchanges_registers_every_elysium_protocol() {
+        let elysium_protocols = [
+            "uniswap_v2",
+            "uniswap_v3",
+            "uniswap_v4",
+            "kleos_v3",
+            "elyspump_v3",
+            "stockiumswap_v3",
+            "aero_basic",
+            "aero_cl",
+        ];
+        let skipped = skipped_unknown_protocols(&elysium_protocols);
+        assert!(
+            skipped.is_empty(),
+            "expected every Elysium protocol to register, but got unknown-protocol warnings \
              for: {skipped:?}"
         );
     }

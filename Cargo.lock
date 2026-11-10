@@ -2955,12 +2955,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
-
-[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3140,7 +3134,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5785,7 +5779,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6512,7 +6506,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6571,7 +6565,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7285,7 +7279,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7967,9 +7961,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.497.0"
+version = "0.507.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f66217c0cfdf14165b953430f9fe37de16e42d391979bfdfe2b96be0370a945d"
+checksum = "164ae51b7d43de8d04c4ff3dae4c7c7fc0f379bdc93d8e8728d50d56e3cd6cdc"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7998,9 +7992,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.497.0"
+version = "0.507.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd249b2eac069c5090b084583a1058a8711407a16e7b5d69c4f4587d877351a8"
+checksum = "d110a9aaa72c78f18c553fb5d06ec2035f1c158c8d69ad388b2af9b586ae501e"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8027,9 +8021,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.497.0"
+version = "0.507.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d10cb4887cd03fd9bf45b86b2eba0940262088b1c38162a5be97ec0f3f324e5"
+checksum = "edc1915bef9e5a87aa9b94cbee3e21a193a1e64db0dc99d996fb4fcdac9dd707"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8049,9 +8043,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.497.0"
+version = "0.507.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e9951c80e4f2975fec179437544db000db8ad4923f373c4605c437ff79dd3fb"
+checksum = "8d5fc0de55327f907bc1feaa0564775093bf53f3094024c8c08e49c3d93c6b7c"
 dependencies = [
  "alloy",
  "chrono",
@@ -8073,9 +8067,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.497.0"
+version = "0.507.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be2fb6d11931868d002f116337c0ce3b6fe8ae1793917fd92250c70302e5502b"
+checksum = "9d7135f5db25f05cb0f419cfc0a23b26e1680964bc3cee3b4d83ca8cea900de7"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8087,7 +8081,7 @@ dependencies = [
  "bytes",
  "chrono",
  "derive_more 2.1.1",
- "dotenv",
+ "dotenvy",
  "ekubo_sdk",
  "enum_delegate",
  "evm_ekubo_sdk",
@@ -8612,7 +8606,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
