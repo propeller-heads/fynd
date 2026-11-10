@@ -38,11 +38,14 @@ use crate::{
     derived::{
         computation::{ComputationId, ComputationRequirements, DerivedComputation},
         computations::{ComponentDepthComputation, SpotPriceComputation, TokenGasPriceComputation},
-        types::{gas_cost_in_token, TokenGasPrices},
+        types::{
+            gas_cost_in_token, ComponentDepths, ComponentDirectionRef, SpotPrices, TokenGasPrices,
+        },
     },
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
-        GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
+        EdgeWeightFromSimAndDerived, GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph,
+        TopologyGraphManager, INLINE_EDGES,
     },
     types::{ComponentId, ResolvedRouteConstraints, Route, RouteResult, Swap},
     AlgorithmError,
@@ -97,39 +100,6 @@ struct SolvedRoute {
     /// the gross amount when that token has no price, which is what happens before derived data
     /// has been computed.
     net_amount_out: BigInt,
-}
-
-/// One half of a token's gas price as an `f64`, for normalising depth.
-///
-/// `None` when it is zero or too large for an `f64`, either of which makes the edge unusable.
-/// `part` names which half, for the log.
-fn price_part(
-    value: &BigUint,
-    part: &'static str,
-    component_id: &ComponentId,
-    token_in: &Token,
-) -> Option<f64> {
-    match value.to_f64() {
-        Some(v) if v > 0.0 => Some(v),
-        Some(_) => {
-            trace!(
-                component_id = %component_id,
-                token_in = %token_in.address,
-                part,
-                "token price part is zero, skipping edge"
-            );
-            None
-        }
-        None => {
-            trace!(
-                component_id = %component_id,
-                token_in = %token_in.address,
-                part,
-                "token price part overflows f64, skipping edge"
-            );
-            None
-        }
-    }
 }
 
 /// How one solve went: what it looked at, what it dropped, and why.
@@ -319,22 +289,55 @@ impl DepthAndPrice {
     }
 }
 
-impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
+/// What [`DepthAndPrice`] reads from the derived data, resolved once per edge-weight rebuild.
+pub struct DepthAndPriceInput<'a> {
+    spot_prices: Option<&'a SpotPrices>,
+    component_depths: Option<&'a ComponentDepths>,
+    /// Per token, its price's `(denominator, numerator)` as `f64`. A token whose numerator or
+    /// denominator is zero or overflows `f64` is left out.
+    depth_ratios: FxHashMap<&'a Address, (f64, f64)>,
+}
+
+impl EdgeWeightFromSimAndDerived for DepthAndPrice {
     const INPUTS: &'static [ComputationId] =
         &[SpotPriceComputation::ID, TokenGasPriceComputation::ID, ComponentDepthComputation::ID];
+
+    type WeightInput<'a> = DepthAndPriceInput<'a>;
+
+    fn weight_input(derived: &crate::derived::DerivedData) -> Self::WeightInput<'_> {
+        let token_prices = derived.token_prices();
+        let mut depth_ratios = FxHashMap::default();
+        for (address, price) in token_prices.into_iter().flatten() {
+            let (Some(num), Some(den)) = (price.numerator.to_f64(), price.denominator.to_f64())
+            else {
+                trace!(token = %address, "token price part overflows f64, skipping its edges");
+                continue;
+            };
+            if num > 0.0 && den > 0.0 {
+                depth_ratios.insert(address, (den, num));
+            } else {
+                trace!(token = %address, "token price part is zero, skipping its edges");
+            }
+        }
+        DepthAndPriceInput {
+            spot_prices: derived.spot_prices(),
+            component_depths: derived.component_depths(),
+            depth_ratios,
+        }
+    }
 
     fn from_sim_and_derived(
         _sim: &dyn ProtocolSim,
         component_id: &ComponentId,
         token_in: &Token,
         token_out: &Token,
-        derived: &crate::derived::DerivedData,
+        input: &Self::WeightInput<'_>,
     ) -> Option<Self> {
-        let key = (component_id.clone(), token_in.address.clone(), token_out.address.clone());
+        let key = ComponentDirectionRef(component_id, &token_in.address, &token_out.address);
 
         // Use pre-computed spot price; skip edge if unavailable.
-        let spot_price = match derived
-            .spot_prices()
+        let spot_price = match input
+            .spot_prices
             .and_then(|p| p.get(&key).copied())
         {
             Some(p) => p,
@@ -345,8 +348,8 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
         };
 
         // Look up pre-computed depth; skip edge if unavailable.
-        let raw_depth = match derived
-            .component_depths()
+        let raw_depth = match input
+            .component_depths
             .and_then(|d| d.get(&key))
         {
             Some(d) => d.to_f64().unwrap_or(0.0),
@@ -359,26 +362,19 @@ impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
         // Normalize depth from token_in raw units to native gas raw units. TokenGasPrices stores
         // Price { numerator, denominator } with numerator/denominator = token raw units per
         // native gas raw unit, so depth_native = raw_depth * denominator / numerator.
-        let depth = match derived
-            .token_prices()
-            .and_then(|p| p.get(&token_in.address))
-        {
-            Some(price) => {
-                let num = price_part(&price.numerator, "numerator", component_id, token_in)?;
-                let den = price_part(&price.denominator, "denominator", component_id, token_in)?;
-                raw_depth * den / num
-            }
-            None => {
-                trace!(
-                    component_id = %component_id,
-                    token_in = %token_in.address,
-                    "token price not found, skipping edge"
-                );
-                return None;
-            }
+        let Some(&(den, num)) = input
+            .depth_ratios
+            .get(&token_in.address)
+        else {
+            trace!(
+                component_id = %component_id,
+                token_in = %token_in.address,
+                "token price missing or unusable, skipping edge"
+            );
+            return None;
         };
 
-        Some(Self { spot_price, depth })
+        Some(Self { spot_price, depth: raw_depth * den / num })
     }
 }
 
@@ -919,10 +915,13 @@ mod tests {
         );
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(result.is_none());
     }
@@ -955,10 +954,13 @@ mod tests {
         );
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(result.is_none());
     }
@@ -994,10 +996,13 @@ mod tests {
         );
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(result.is_none());
     }
@@ -1021,10 +1026,13 @@ mod tests {
         // No token prices set — normalization should return None
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(
             result.is_none(),
@@ -1060,10 +1068,13 @@ mod tests {
         derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         let data = result.expect("should return Some when all data present");
         assert!((data.spot_price - 2.0).abs() < f64::EPSILON, "spot price should be 2.0");
@@ -1102,10 +1113,13 @@ mod tests {
         derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim, &key.0, &tok_in, &tok_out, &derived,
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         let data = result.expect("should return Some when all data present");
         let expected_depth = 500.0 * 2.0 / 3.0;
@@ -1114,6 +1128,51 @@ mod tests {
             "depth should be {expected_depth}, got {}",
             data.depth
         );
+    }
+
+    #[rstest::rstest]
+    #[case::all_present(Some(2.0), Some(2_000), Some((1, 2000)), Some((2.0, 1.0)))]
+    #[case::fractional_price(Some(0.5), Some(500), Some((2, 3)), Some((0.5, 500.0 * 2.0 / 3.0)))]
+    #[case::missing_spot(None, Some(2_000), Some((1, 2000)), None)]
+    #[case::missing_depth(Some(2.0), None, Some((1, 2000)), None)]
+    #[case::missing_token_price(Some(2.0), Some(2_000), None, None)]
+    #[case::zero_numerator(Some(2.0), Some(2_000), Some((1, 0)), None)]
+    #[case::zero_denominator(Some(2.0), Some(2_000), Some((0, 2000)), None)]
+    fn test_from_sim_and_derived_values(
+        #[case] spot: Option<f64>,
+        #[case] depth: Option<u64>,
+        #[case] price: Option<(u64, u64)>,
+        #[case] expected: Option<(f64, f64)>,
+    ) {
+        let key = pair_key("component1", 0x01, 0x02);
+        let tok_in = token(0x01, "A");
+        let tok_out = token(0x02, "B");
+        let mut derived = DerivedData::new();
+        let mut spot_prices = crate::derived::types::SpotPrices::default();
+        spot_prices.extend(spot.map(|p| (key.clone(), p)));
+        derived.set_spot_prices(spot_prices, vec![], 10);
+        let mut depths = crate::derived::types::ComponentDepths::default();
+        depths.extend(depth.map(|d| (key.clone(), BigUint::from(d))));
+        derived.set_component_depths(depths, vec![], 10);
+        let mut token_prices = TokenGasPrices::default();
+        token_prices.extend(price.map(|(den, num)| {
+            (
+                tok_in.address.clone(),
+                Price { numerator: BigUint::from(num), denominator: BigUint::from(den) },
+            )
+        }));
+        derived.set_token_prices(token_prices, vec![], 10);
+
+        let sim = make_mock_sim();
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
+
+        assert_eq!(result.map(|w| (w.spot_price, w.depth)), expected);
     }
 
     // ==================== find_best_route Tests ====================

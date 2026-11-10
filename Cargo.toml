@@ -185,6 +185,7 @@ zstd = "0.14.3"
 # Graph algorithms
 petgraph = "0.6"
 rustc-hash = "2.1"
+hashbrown = "0.15.5"
 smallvec = "1.15"
 
 # Utilities

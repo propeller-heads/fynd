@@ -8,7 +8,7 @@ pub mod component_depth;
 pub mod spot_price;
 pub mod token_gas_price;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::types::{ComponentId, ComponentTopology};
@@ -16,7 +16,7 @@ use crate::types::{ComponentId, ComponentTopology};
 /// Removes the entries for swap directions that the components in `added` no longer offer.
 /// Without this, a dropped direction keeps its last entry.
 pub(crate) fn drop_unlisted_directions<V>(
-    entries: &mut FxHashMap<(ComponentId, Address, Address), V>,
+    entries: &mut hashbrown::HashMap<(ComponentId, Address, Address), V, FxBuildHasher>,
     added: &FxHashMap<ComponentId, ComponentTopology>,
 ) {
     let listed: FxHashMap<&ComponentId, FxHashSet<(&Address, &Address)>> = added
