@@ -142,6 +142,7 @@ reqwest = { version = "0.12", features = ["json"] }
 # Async
 tokio = { version = "1", features = ["full", "sync"] }
 futures = "0.3"
+flate2 = "1.1.9"
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }

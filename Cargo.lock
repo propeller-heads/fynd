@@ -3608,6 +3608,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "flate2",
  "futures 0.3.32",
  "fynd-core",
  "fynd-rpc",
