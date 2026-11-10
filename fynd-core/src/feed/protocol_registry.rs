@@ -1151,6 +1151,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_register_exchanges_registers_every_elysium_protocol() {
+        let elysium_protocols = [
+            "uniswap_v2",
+            "uniswap_v3",
+            "uniswap_v4",
+            "kleos_v3",
+            "elyspump_v3",
+            "stockiumswap_v3",
+            "aero_basic",
+            "aero_cl",
+        ];
+        let skipped = skipped_unknown_protocols(&elysium_protocols);
+        assert!(
+            skipped.is_empty(),
+            "expected every Elysium protocol to register, but got unknown-protocol warnings \
+             for: {skipped:?}"
+        );
+    }
+
     #[rstest::rstest]
     #[case::liquidityparty("vm:liquidityparty")]
     #[case::ring_swap_v2("ring_swap_v2")]
