@@ -44,7 +44,8 @@ use crate::{
     },
     feed::market_data::{MarketData, MarketState, StateLabel},
     graph::{
-        GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph, TopologyGraphManager, INLINE_EDGES,
+        EdgeWeightFromSimAndDerived, GraphQueryFilter, RouteSearch, TokenPath, TopologyGraph,
+        TopologyGraphManager, INLINE_EDGES,
     },
     types::{ComponentId, ResolvedRouteConstraints, Route, RouteResult, Swap},
     AlgorithmError,
@@ -297,7 +298,7 @@ pub struct DepthAndPriceInput<'a> {
     depth_ratios: FxHashMap<&'a Address, (f64, f64)>,
 }
 
-impl crate::graph::EdgeWeightFromSimAndDerived for DepthAndPrice {
+impl EdgeWeightFromSimAndDerived for DepthAndPrice {
     const INPUTS: &'static [ComputationId] =
         &[SpotPriceComputation::ID, TokenGasPriceComputation::ID, ComponentDepthComputation::ID];
 
@@ -914,16 +915,13 @@ mod tests {
         );
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(result.is_none());
     }
@@ -956,16 +954,13 @@ mod tests {
         );
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(result.is_none());
     }
@@ -1001,16 +996,13 @@ mod tests {
         );
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(result.is_none());
     }
@@ -1034,16 +1026,13 @@ mod tests {
         // No token prices set — normalization should return None
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert!(
             result.is_none(),
@@ -1079,16 +1068,13 @@ mod tests {
         derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         let data = result.expect("should return Some when all data present");
         assert!((data.spot_price - 2.0).abs() < f64::EPSILON, "spot price should be 2.0");
@@ -1127,16 +1113,13 @@ mod tests {
         derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         let data = result.expect("should return Some when all data present");
         let expected_depth = 500.0 * 2.0 / 3.0;
@@ -1181,16 +1164,13 @@ mod tests {
         derived.set_token_prices(token_prices, vec![], 10);
 
         let sim = make_mock_sim();
-        let result =
-            <DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::from_sim_and_derived(
-                &sim,
-                &key.0,
-                &tok_in,
-                &tok_out,
-                &<DepthAndPrice as crate::graph::EdgeWeightFromSimAndDerived>::weight_input(
-                    &derived,
-                ),
-            );
+        let result = DepthAndPrice::from_sim_and_derived(
+            &sim,
+            &key.0,
+            &tok_in,
+            &tok_out,
+            &DepthAndPrice::weight_input(&derived),
+        );
 
         assert_eq!(result.map(|w| (w.spot_price, w.depth)), expected);
     }
