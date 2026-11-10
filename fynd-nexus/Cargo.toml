@@ -15,6 +15,7 @@ fynd-rpc.workspace = true
 tycho-simulation.workspace = true
 actix-web.workspace = true
 bytes.workspace = true
+flate2.workspace = true
 tokio.workspace = true
 futures.workspace = true
 clap.workspace = true

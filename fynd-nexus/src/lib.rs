@@ -11,6 +11,7 @@
 
 pub mod api;
 pub mod cli;
+pub mod derived;
 pub mod feed_runner;
 pub mod latest_prices;
 pub mod market;
