@@ -1316,6 +1316,10 @@ pub struct OrderQuote {
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
+    /// Priority fee per gas (in wei) of the market's gas price when the solve started (internal
+    /// use only). `gas_price` holds it only added to the base fee.
+    #[serde(skip)]
+    priority_fee: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
     transaction: Option<Transaction>,
     /// Fee breakdown (populated when encoding options are provided).
@@ -1378,6 +1382,7 @@ impl OrderQuote {
             worker_pool: String::new(),
             post_processed_by: Vec::new(),
             gas_price: None,
+            priority_fee: None,
             transaction: None,
             fee_breakdown: None,
             simulation_result: None,
@@ -1428,6 +1433,12 @@ impl OrderQuote {
     /// Sets the effective gas price.
     pub(crate) fn with_gas_price(mut self, gas_price: BigUint) -> Self {
         self.gas_price = Some(gas_price);
+        self
+    }
+
+    /// Sets the priority fee per gas.
+    pub(crate) fn with_priority_fee(mut self, priority_fee: Option<BigUint>) -> Self {
+        self.priority_fee = priority_fee;
         self
     }
 
@@ -1617,6 +1628,15 @@ impl OrderQuote {
     /// Returns the effective gas price at the time the route was computed.
     pub fn gas_price(&self) -> Option<&BigUint> {
         self.gas_price.as_ref()
+    }
+
+    /// Returns the priority fee per gas of the market's gas price when the solve started.
+    ///
+    /// [`Self::gas_price`] is the base fee plus this priority fee. The two are read at different
+    /// times in the solve, so they can come from different blocks. `None` on a legacy gas price,
+    /// which has no priority fee apart from the gas price.
+    pub fn priority_fee(&self) -> Option<&BigUint> {
+        self.priority_fee.as_ref()
     }
 
     /// Returns the encoded EVM transaction, if available.

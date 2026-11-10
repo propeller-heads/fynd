@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use tycho_simulation::{
     tycho_common::models::{protocol::ProtocolComponent, Address},
     tycho_core::Bytes,
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
 use crate::{
@@ -925,7 +926,7 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
-        let (block_info, solved_against, constraints) = {
+        let (block_info, solved_against, constraints, priority_fee) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
             let view = self
@@ -946,7 +947,10 @@ where
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
             let constraints = resolve_constraints(&view, &params);
-            (block_info, solved_against, constraints)
+            let priority_fee = view
+                .gas_price()
+                .and_then(read_priority_fee);
+            (block_info, solved_against, constraints, priority_fee)
         };
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
@@ -1068,7 +1072,8 @@ where
                     solved_against,
                 )
                 .with_route(route)
-                .with_gas_price(gas_price);
+                .with_gas_price(gas_price)
+                .with_priority_fee(priority_fee);
                 quote.set_post_processed_by(post_processed_by);
                 if let Some(commitment) = &commitment {
                     let token_prices = self
@@ -1416,6 +1421,17 @@ fn solve_error_from_algorithm_error(
         crate::AlgorithmError::Other(_) => {
             error!(order_id = %order_id, error = %err, "algorithm error");
             SolveError::AlgorithmError(err.to_string())
+        }
+    }
+}
+
+/// Returns the priority fee of `gas_price`, or `None` for a legacy gas price, which has none apart
+/// from the gas price.
+fn read_priority_fee(gas_price: &BlockGasPrice) -> Option<BigUint> {
+    match &gas_price.pricing {
+        GasPrice::Legacy { gas_price: _ } => None,
+        GasPrice::Eip1559 { base_fee_per_gas: _, max_priority_fee_per_gas } => {
+            Some(max_priority_fee_per_gas.clone())
         }
     }
 }
@@ -2088,6 +2104,56 @@ mod tests {
             .expect("split route must quote");
 
         assert_eq!(quote.order().price_impact_bps(), Some(400));
+    }
+
+    /// `None` keeps the legacy gas price that the test market sets.
+    #[rstest]
+    #[case::eip1559(
+        Some(GasPrice::Eip1559 {
+            base_fee_per_gas: BigUint::from(5_000_000u64),
+            max_priority_fee_per_gas: BigUint::from(1_000_000u64),
+        }),
+        Some(BigUint::from(1_000_000u64)),
+    )]
+    #[case::legacy(None, None)]
+    #[tokio::test]
+    async fn test_quote_priority_fee(
+        #[case] pricing: Option<GasPrice>,
+        #[case] expected: Option<BigUint>,
+    ) {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        if let Some(pricing) = pricing {
+            market
+                .write()
+                .await
+                .update_gas_price(BlockGasPrice {
+                    block_number: 1,
+                    block_hash: Default::default(),
+                    block_timestamp: 0,
+                    pricing,
+                });
+        }
+        let derived = DerivedData::new_shared();
+        let mut worker = SolverWorker::new(
+            market,
+            derived,
+            SplitRouteAlgorithm { reported_spot_price: 2.0 },
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default(), far_deadline())
+            .await
+            .expect("split route must quote");
+
+        assert_eq!(quote.order().priority_fee(), expected.as_ref());
     }
 
     #[tokio::test]
