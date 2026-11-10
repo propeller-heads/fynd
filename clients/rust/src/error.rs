@@ -48,8 +48,8 @@ pub enum ErrorCode {
     /// Server code: `NOT_FOUND`.
     NotFound,
 
-    /// The hosted API does not quote for the order: its sender, or a receiver other than the
-    /// sender, is on the OFAC sanctions list. Not retryable.
+    /// The hosted API does not quote for the order: its sender, a receiver other than the
+    /// sender, or the client fee receiver is on the OFAC sanctions list. Not retryable.
     ///
     /// Server code: `SANCTIONED_ADDRESS`.
     SanctionedAddress,
