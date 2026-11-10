@@ -1396,10 +1396,16 @@ impl FyndBuilder {
     /// cannot be set up.
     pub fn build_market(mut self) -> Result<MarketFeed, SolverBuildError> {
         let (stores, services) = self.assemble_market()?;
-        let MarketStores { market_data, derived_data, market_event_tx, derived_event_tx: _ } =
-            stores;
+        let MarketStores { market_data, derived_data, market_event_tx, derived_event_tx } = stores;
         let tasks = services.start(TychoFeed::run);
-        Ok(MarketFeed { market_data, derived_data, market_event_tx, tasks, chain: self.chain })
+        Ok(MarketFeed {
+            market_data,
+            derived_data,
+            market_event_tx,
+            derived_event_tx,
+            tasks,
+            chain: self.chain,
+        })
     }
 
     /// Assembles and starts all solver components, also returning a [`PendingBlockProcessor`]
@@ -1645,6 +1651,7 @@ pub struct MarketFeed {
     market_data: MarketData,
     derived_data: SharedDerivedDataRef,
     market_event_tx: broadcast::Sender<MarketEvent>,
+    derived_event_tx: broadcast::Sender<DerivedDataEvent>,
     tasks: MarketTasks,
     chain: Chain,
 }
@@ -1671,6 +1678,14 @@ impl MarketFeed {
     /// processed miss that block's event.
     pub fn subscribe_market_events(&self) -> broadcast::Receiver<MarketEvent> {
         self.market_event_tx.subscribe()
+    }
+
+    /// Returns a new receiver for the [`DerivedDataEvent`]s of the derived data computations.
+    ///
+    /// Each call returns an independent receiver. Receivers created after an event was sent miss
+    /// it.
+    pub fn subscribe_derived_events(&self) -> broadcast::Receiver<DerivedDataEvent> {
+        self.derived_event_tx.subscribe()
     }
 
     /// Waits until the market holds a block and the derived data has completed one cycle.

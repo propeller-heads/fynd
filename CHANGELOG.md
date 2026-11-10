@@ -1,19 +1,22 @@
 
+
+
 ## [0.123.0](https://github.com/propeller-heads/fynd/compare/0.122.0...0.123.0) (2026-11-10)
 
 ### Features
 
-- Add a gauge, `derived_computation_failed_items{computation}`, that reports the failed items of each derived computation after every successful run. Use it for dashboards and alerts on partial failures. ([acba842](https://github.com/propeller-heads/fynd/commit/acba842ca3c5b35714d9ed542c5f5a55deeb9df6))
-- Gather each edge weight's input once per rebuild instead of once per pool direction. `EdgeWeightFromSimAndDerived` gains `WeightInput` and `weight_input`, and `from_sim_and_derived` now receives the weight input instead of the derived data. This is a breaking change to a public trait: implementors outside this repo must add the two new items. ([f2f5699](https://github.com/propeller-heads/fynd/commit/f2f5699ec379e613a6ffc88d703b10aea940f6b5))
+- Export a `derived_computation_failed_items{computation}` gauge so dashboards and alerts can track partial failures of derived computations. ([acba842](https://github.com/propeller-heads/fynd/commit/acba842ca3c5b35714d9ed542c5f5a55deeb9df6))
+- Add `WeightInput` and `weight_input` to the `EdgeWeightFromSimAndDerived` trait so block-level work is done once per edge-weight update, and pass that input to `from_sim_and_derived` instead of the derived data. This is a breaking change to a public trait: implementors outside this repo must add the two new items. ([f2f5699](https://github.com/propeller-heads/fynd/commit/f2f5699ec379e613a6ffc88d703b10aea940f6b5))
 
 ### Bug Fixes
 
-- Log per-block derived computation results at debug level instead of info, and drop the repeated partial-failure warning. Production logs are no longer flooded every block, and timings and failure counts remain available as metrics. ([407d4ab](https://github.com/propeller-heads/fynd/commit/407d4ab15b41c679b0094472657ffeba67fc3568))
+- Log per-block derived computation results at debug instead of info, and drop the partial-failure warning, so production logs are no longer flooded every block. Timings and failure counts remain available as metrics. ([407d4ab](https://github.com/propeller-heads/fynd/commit/407d4ab15b41c679b0094472657ffeba67fc3568))
 
 ### Performance
 
-- Look up spot prices and depths with a borrowed pool direction key, avoiding address clones and reference-count operations on every lookup. This removes about 40% of the edge-weight rebuild cost on BSC. ([76ea9be](https://github.com/propeller-heads/fynd/commit/76ea9be72e288086277886c25ce4ef50f7fa96fe))
-- Convert each token's price once per edge-weight rebuild instead of once per edge. The BSC rebuild drops from 28.9 ms to 16.8 ms with the same edges weighted. A token with an unusable price is now logged once per rebuild rather than once per edge. ([cf98d27](https://github.com/propeller-heads/fynd/commit/cf98d2700a2a783bc2dab3805d24bd8816bc2903))
+- Look up spot prices and depths with a borrowed direction key, avoiding address clones and reference-count operations on every lookup. On BSC, this removes about 40% of the edge-weight rebuild cost. ([76ea9be](https://github.com/propeller-heads/fynd/commit/76ea9be72e288086277886c25ce4ef50f7fa96fe))
+- Convert each token's price once per edge-weight rebuild instead of once per edge, cutting the BSC rebuild from 28.9 ms to 16.8 ms with the same edges weighted. ([cf98d27](https://github.com/propeller-heads/fynd/commit/cf98d2700a2a783bc2dab3805d24bd8816bc2903))
+- Log a token with an unusable price once per rebuild rather than once per edge. ([cf98d27](https://github.com/propeller-heads/fynd/commit/cf98d2700a2a783bc2dab3805d24bd8816bc2903))
 
 
 ## [0.122.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.122.0) (2026-11-05)
