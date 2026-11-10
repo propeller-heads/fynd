@@ -1316,8 +1316,8 @@ pub struct OrderQuote {
     /// Effective gas price (in wei) at the time the route was computed.
     #[serde_as(as = "Option<DisplayFromStr>")]
     gas_price: Option<BigUint>,
-    /// Priority fee per gas (in wei) of the market's gas price when the solve started (internal
-    /// use only). `gas_price` holds it only added to the base fee.
+    /// Priority fee per gas (in wei) of the market's gas price when the solve started.
+    /// `gas_price` holds it only added to the base fee.
     #[serde(skip)]
     priority_fee: Option<BigUint>,
     /// An encoded EVM transaction ready to be submitted on-chain.
