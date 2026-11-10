@@ -3,7 +3,7 @@
 
 ### Features
 
-* **feed:** stream the Elysium Uniswap V3 forks ([06a001d](https://github.com/propeller-heads/fynd/commit/06a001d28b543335a3c70908af82fd2ec1485da4))
+- Route through Kleos, ElysPump and StockiumSwap V3 pools on Elysium. Fynd now streams these Uniswap V3 forks instead of skipping them as unknown protocol systems. ([06a001d](https://github.com/propeller-heads/fynd/commit/06a001d28b543335a3c70908af82fd2ec1485da4))
 
 
 
