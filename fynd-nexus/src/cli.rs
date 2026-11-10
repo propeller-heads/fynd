@@ -4,7 +4,9 @@ use clap::Parser;
 use fynd_core::nexus::price_levels::PriceLevelVenue;
 use tycho_simulation::evm::tycho_models::Chain;
 
-use crate::{market::market_args::MarketArgs, price_levels::VenueArgs};
+use crate::{
+    market::market_args::MarketArgs, monitor::monitor_args::MonitorArgs, price_levels::VenueArgs,
+};
 
 /// The arguments of `fynd-nexus`.
 #[derive(Debug, Parser)]
@@ -14,8 +16,8 @@ pub struct Cli {
     #[arg(long, env = "CHAIN")]
     pub chain: Chain,
 
-    /// Venues to connect to, comma separated. Pass the flag with no value to run the market
-    /// alone.
+    /// Venues to connect to, comma separated. Pass the flag with no value to run
+    /// the market alone.
     #[arg(
         long,
         env = "VENUES",
@@ -40,6 +42,10 @@ pub struct Cli {
     /// The Tycho market's settings. It runs when `--tycho-url` is set.
     #[command(flatten)]
     pub market: MarketArgs,
+
+    /// The health monitor's settings. It runs when `--monitor-components` is set.
+    #[command(flatten)]
+    pub monitor: MonitorArgs,
 }
 
 #[cfg(test)]
@@ -122,5 +128,26 @@ mod tests {
         let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum"]).unwrap();
 
         assert!(!cli.market.is_enabled());
+    }
+
+    #[test]
+    fn test_parse_monitor_on_the_market() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "--tycho-url",
+            "tycho.example",
+            "--rpc-url",
+            "https://node.example",
+            "--monitor-components",
+            "--probe-rate",
+            "5",
+        ])
+        .unwrap();
+
+        assert!(cli.monitor.monitor_components);
+        assert_eq!(cli.monitor.probe_rate, 5.0);
     }
 }
