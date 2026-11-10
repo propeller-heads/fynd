@@ -329,6 +329,33 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn test_snapshots_convert_back_into_the_maps_they_came_from() {
+        let spot = SpotPriceSnapshot::from_spot_prices(&spot_prices(), 9);
+        let depth = PoolDepthSnapshot::from_depths(&depths(), 9);
+        let token = TokenGasPriceSnapshot::from_token_prices(&token_prices(), 9);
+
+        assert_eq!(spot.into_spot_prices(), spot_prices());
+        assert_eq!(depth.into_depths(), depths());
+        assert_eq!(token.into_token_prices(), token_prices());
+    }
+
+    #[test]
+    fn test_duplicate_entries_keep_the_last() {
+        let entry = |price| SpotPriceEntry {
+            component_id: "pool".to_string(),
+            token_in: address(1),
+            token_out: address(2),
+            price,
+        };
+        let snapshot = SpotPriceSnapshot { block: 1, entries: vec![entry(1.0), entry(2.0)] };
+
+        let prices = snapshot.into_spot_prices();
+
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[&("pool".to_string(), address(1), address(2))], 2.0);
+    }
+
     #[rstest]
     #[case::none_skipped(vec![1.5, 2.0], 2)]
     #[case::non_finite(vec![1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY], 1)]
