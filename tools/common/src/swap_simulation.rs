@@ -6,7 +6,7 @@
 //! `eth_call` with return-data heuristics when the RPC does not support `eth_simulateV1`.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -114,6 +114,8 @@ pub struct EthCallRunner {
     /// Set to `false` after the first `eth_simulateV1` "method not found" error so subsequent
     /// calls skip straight to the `eth_call` fallback without retrying.
     simulate_supported: Arc<AtomicBool>,
+    /// Tokens whose `balanceOf` reads the holder's native balance, such as USDC on Arc.
+    native_balance_tokens: HashSet<Address>,
 }
 
 impl EthCallRunner {
@@ -132,7 +134,24 @@ impl EthCallRunner {
             sender,
             layouts: Arc::new(Mutex::new(HashMap::new())),
             simulate_supported: Arc::new(AtomicBool::new(true)),
+            native_balance_tokens: HashSet::new(),
         }
+    }
+
+    /// Marks `token` as a token whose `balanceOf` reads the holder's native balance.
+    ///
+    /// Such a token is funded by the sender's native balance override, and its allowance is set by
+    /// an `approve` call before the swap, because a node can refuse overrides of its storage. Only
+    /// `eth_simulateV1` runs that call, so a swap that sells `token` fails on the `eth_call`
+    /// fallback.
+    pub fn with_native_balance_token(mut self, token: Address) -> Self {
+        self.native_balance_tokens.insert(token);
+        self
+    }
+
+    fn is_native_balance_token(&self, token: Address) -> bool {
+        self.native_balance_tokens
+            .contains(&token)
     }
 
     pub fn sender_hex(&self) -> String {
@@ -208,6 +227,14 @@ impl EthCallRunner {
     async fn try_simulate(&self, swap: &SwapCall<'_>, block: B256) -> anyhow::Result<SwapOutcome> {
         let mut overrides = self.build_overrides(swap).await?;
         let (swap_call, balance_call) = self.build_simulate_calls(swap, &mut overrides);
+        let approve_call = self
+            .is_native_balance_token(swap.token_in)
+            .then(|| self.build_approve_call(swap));
+        let approves = usize::from(approve_call.is_some());
+        let calls: Vec<serde_json::Value> = approve_call
+            .into_iter()
+            .chain([swap_call, balance_call])
+            .collect();
 
         let state_overrides =
             serde_json::to_value(&overrides).context("serialise state overrides")?;
@@ -215,7 +242,7 @@ impl EthCallRunner {
             {
                 "blockStateCalls": [{
                     "stateOverrides": state_overrides,
-                    "calls": [swap_call, balance_call]
+                    "calls": calls
                 }]
             },
             {
@@ -230,7 +257,7 @@ impl EthCallRunner {
             .await
             .context("eth_simulateV1")?;
 
-        let (return_data, message) = match parse_simulate_result(&result)? {
+        let (return_data, message) = match parse_simulate_result(&result, approves)? {
             SimulatedSwap::Success { amount_out, gas } => {
                 return Ok(SwapOutcome::Success { amount_out, gas: Some(gas) })
             }
@@ -238,6 +265,10 @@ impl EthCallRunner {
         };
         if let Some(reason) = decode_error(&return_data) {
             return Ok(SwapOutcome::Reverted { reason });
+        }
+        // A trace runs the swap alone, without the approve call, so it would blame the allowance.
+        if approves > 0 {
+            return Ok(SwapOutcome::Reverted { reason: message });
         }
         let traced = self
             .traced_revert_reason(self.swap_request(swap), overrides, block)
@@ -282,13 +313,30 @@ impl EthCallRunner {
     /// For ERC-20 output the second call is `balanceOf(sender)` on the token. For native ETH
     /// output (`token_out == ZERO`) the sender's ETH balance is zeroed and a 10-byte
     /// balance-reader contract is injected at a reserved address; `gasPrice=0` on the swap
-    /// keeps the post-swap balance equal to the ETH received.
+    /// keeps the post-swap balance equal to the ETH received. A native balance token's output
+    /// also zeroes the sender's native balance and sets `gasPrice=0`, and reads `balanceOf`.
     fn build_simulate_calls(
         &self,
         swap: &SwapCall<'_>,
         overrides: &mut StateOverride,
     ) -> (serde_json::Value, serde_json::Value) {
         let SwapCall { token_out, router, calldata, value, .. } = swap;
+        if self.is_native_balance_token(*token_out) {
+            overrides.insert(
+                self.sender,
+                AccountOverride { balance: Some(U256::ZERO), ..Default::default() },
+            );
+            return (
+                serde_json::json!({
+                    "from":     format!("0x{}", hex::encode(self.sender)),
+                    "to":       format!("0x{}", hex::encode(router)),
+                    "data":     format!("0x{}", hex::encode(calldata)),
+                    "value":    format!("0x{:x}", value),
+                    "gasPrice": "0x0",
+                }),
+                self.build_balance_of_call(*token_out),
+            );
+        }
         if *token_out == Address::ZERO {
             overrides.insert(
                 self.sender,
@@ -318,9 +366,6 @@ impl EthCallRunner {
                 }),
             )
         } else {
-            let mut bal_data = vec![0x70u8, 0xa0, 0x82, 0x31];
-            bal_data.extend_from_slice(&[0u8; 12]);
-            bal_data.extend_from_slice(self.sender.as_slice());
             (
                 serde_json::json!({
                     "from":  format!("0x{}", hex::encode(self.sender)),
@@ -328,18 +373,45 @@ impl EthCallRunner {
                     "data":  format!("0x{}", hex::encode(calldata)),
                     "value": format!("0x{:x}", value),
                 }),
-                serde_json::json!({
-                    "from": "0x0000000000000000000000000000000000000000",
-                    "to":   format!("0x{}", hex::encode(token_out)),
-                    "data": format!("0x{}", hex::encode(&bal_data)),
-                }),
+                self.build_balance_of_call(*token_out),
             )
         }
+    }
+
+    /// `token.balanceOf(sender)`, from the zero address.
+    fn build_balance_of_call(&self, token: Address) -> serde_json::Value {
+        let mut bal_data = vec![0x70u8, 0xa0, 0x82, 0x31];
+        bal_data.extend_from_slice(&[0u8; 12]);
+        bal_data.extend_from_slice(self.sender.as_slice());
+        serde_json::json!({
+            "from": "0x0000000000000000000000000000000000000000",
+            "to":   format!("0x{}", hex::encode(token)),
+            "data": format!("0x{}", hex::encode(&bal_data)),
+        })
+    }
+
+    /// The sender's `token_in.approve(spender, MAX >> 1)`, run before the swap.
+    fn build_approve_call(&self, swap: &SwapCall<'_>) -> serde_json::Value {
+        let mut data = vec![0x09u8, 0x5e, 0xa7, 0xb3];
+        data.extend_from_slice(&[0u8; 12]);
+        data.extend_from_slice(swap.spender.as_slice());
+        data.extend_from_slice(B256::from(U256::MAX >> 1).as_slice());
+        serde_json::json!({
+            "from":     format!("0x{}", hex::encode(self.sender)),
+            "to":       format!("0x{}", hex::encode(swap.token_in)),
+            "data":     format!("0x{}", hex::encode(&data)),
+            "gasPrice": "0x0",
+        })
     }
 
     /// Fallback when `eth_simulateV1` is unavailable: plain `eth_call` with heuristic
     /// return-data decoding.
     async fn try_eth_call(&self, swap: &SwapCall<'_>, block: B256) -> anyhow::Result<SwapOutcome> {
+        anyhow::ensure!(
+            !self.is_native_balance_token(swap.token_in),
+            "selling {:#x} needs eth_simulateV1 to approve it, and the node did not run it",
+            swap.token_in
+        );
         let overrides = self.build_overrides(swap).await?;
 
         let result = self
@@ -434,8 +506,8 @@ impl EthCallRunner {
     ///
     /// Always injects a large ETH balance for the sender so that `eth_simulateV1` can charge
     /// gas without rejecting the transaction. For ERC-20 tokens the ERC-20 balance and
-    /// allowance storage slots are also overridden. For native ETH (zero address) only the
-    /// ETH balance override is needed.
+    /// allowance storage slots are also overridden. For native ETH (zero address) and a native
+    /// balance token only the ETH balance override is needed.
     async fn build_overrides(&self, swap: &SwapCall<'_>) -> anyhow::Result<StateOverride> {
         let SwapCall { token_in, spender, .. } = *swap;
         // Use MAX >> 1: avoids triggering tokens that pack metadata into bit 255 (e.g. USDC).
@@ -451,7 +523,7 @@ impl EthCallRunner {
             AccountOverride { balance: Some(eth_balance), ..Default::default() },
         );
 
-        if token_in != Address::ZERO {
+        if token_in != Address::ZERO && !self.is_native_balance_token(token_in) {
             let layout = self.layout(token_in, spender).await?;
 
             let mut state_diff = B256HashMap::default();
@@ -513,23 +585,30 @@ fn pinned(block: B256) -> BlockId {
     BlockId::Hash(RpcBlockHash { block_hash: block, require_canonical: Some(false) })
 }
 
-/// Parse an `eth_simulateV1` result: check whether the swap succeeded, then read the balance
-/// call's `returnData` (a uint256). Fails when the result holds no calls or no balance word.
-fn parse_simulate_result(result: &serde_json::Value) -> anyhow::Result<SimulatedSwap> {
-    let calls = result
+/// Parse an `eth_simulateV1` result whose first `approves` calls are approvals: check that they
+/// succeeded and whether the swap succeeded, then read the balance call's `returnData` (a
+/// uint256). Fails when an approval failed, or the result holds no calls or no balance word.
+fn parse_simulate_result(
+    result: &serde_json::Value,
+    approves: usize,
+) -> anyhow::Result<SimulatedSwap> {
+    let all_calls = result
         .get(0)
         .and_then(|b| b.get("calls"))
         .and_then(|c| c.as_array())
         .ok_or_else(|| anyhow::anyhow!("eth_simulateV1: missing calls array in result"))?;
+    let (approve_calls, calls) = all_calls.split_at(approves.min(all_calls.len()));
+    for approve_call in approve_calls {
+        anyhow::ensure!(
+            is_success(approve_call),
+            "eth_simulateV1: the approve call before the swap failed: {approve_call}"
+        );
+    }
 
     let swap_call = calls
         .first()
         .ok_or_else(|| anyhow::anyhow!("eth_simulateV1: calls array is empty"))?;
-    let swap_ok = swap_call
-        .get("status")
-        .map(|s| s == "0x1" || s.as_u64() == Some(1))
-        .unwrap_or(false);
-    if !swap_ok {
+    if !is_success(swap_call) {
         let return_data = hex_field(swap_call, "returnData")?;
         let message = swap_call
             .get("error")
@@ -559,6 +638,13 @@ fn parse_simulate_result(result: &serde_json::Value) -> anyhow::Result<Simulated
         anyhow::bail!("eth_simulateV1: balance call returned {} bytes", amount_bytes.len());
     };
     Ok(SimulatedSwap::Success { amount_out: BigUint::from_bytes_be(amount_word), gas: gas_used })
+}
+
+/// Whether an `eth_simulateV1` call result has status 1.
+fn is_success(call: &serde_json::Value) -> bool {
+    call.get("status")
+        .map(|s| s == "0x1" || s.as_u64() == Some(1))
+        .unwrap_or(false)
 }
 
 /// Decodes the hex string `call` holds under `field`. A missing field reads as empty.
@@ -692,6 +778,108 @@ mod tests {
         );
     }
 
+    const NATIVE_BALANCE_TOKEN: Address = Address::repeat_byte(0x36);
+    const OTHER_TOKEN: Address = Address::repeat_byte(0x44);
+
+    fn native_balance_runner() -> EthCallRunner {
+        offline_runner().with_native_balance_token(NATIVE_BALANCE_TOKEN)
+    }
+
+    /// The runner is offline, so a layout probe of the token would fail the call.
+    #[tokio::test]
+    async fn test_build_overrides_native_balance_token_in() {
+        let value = BigUint::ZERO;
+        let swap = SwapCall::new(NATIVE_BALANCE_TOKEN, OTHER_TOKEN, ROUTER, &[], &value);
+
+        let overrides = native_balance_runner()
+            .build_overrides(&swap)
+            .await
+            .unwrap();
+
+        assert_eq!(overrides.keys().collect::<Vec<_>>(), [&SENDER]);
+        assert_eq!(overrides[&SENDER].balance, Some(U256::MAX >> 1));
+    }
+
+    #[test]
+    fn test_build_simulate_calls_native_balance_token_out() {
+        let value = BigUint::ZERO;
+        let swap = SwapCall::new(OTHER_TOKEN, NATIVE_BALANCE_TOKEN, ROUTER, &[], &value);
+        let mut overrides = StateOverride::default();
+
+        let (swap_call, balance_call) =
+            native_balance_runner().build_simulate_calls(&swap, &mut overrides);
+
+        assert_eq!(overrides[&SENDER].balance, Some(U256::ZERO));
+        assert_eq!(swap_call["gasPrice"], "0x0");
+        assert_eq!(balance_call["to"], format!("0x{}", hex::encode(NATIVE_BALANCE_TOKEN)));
+    }
+
+    #[test]
+    fn test_build_approve_call() {
+        let value = BigUint::ZERO;
+        let swap = SwapCall {
+            spender: Address::repeat_byte(0x55),
+            ..SwapCall::new(NATIVE_BALANCE_TOKEN, OTHER_TOKEN, ROUTER, &[], &value)
+        };
+
+        let approve_call = native_balance_runner().build_approve_call(&swap);
+
+        let expected_data = format!(
+            "0x095ea7b3{}{}{}",
+            "00".repeat(12),
+            "55".repeat(20),
+            hex::encode(B256::from(U256::MAX >> 1))
+        );
+        assert_eq!(approve_call["to"], format!("0x{}", hex::encode(NATIVE_BALANCE_TOKEN)));
+        assert_eq!(approve_call["from"], format!("0x{}", hex::encode(SENDER)));
+        assert_eq!(approve_call["data"], expected_data);
+    }
+
+    #[tokio::test]
+    async fn test_eth_call_selling_native_balance_token() {
+        let value = BigUint::ZERO;
+        let swap = SwapCall::new(NATIVE_BALANCE_TOKEN, OTHER_TOKEN, ROUTER, &[], &value);
+
+        let error = native_balance_runner()
+            .try_eth_call(&swap, B256::ZERO)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("needs eth_simulateV1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_parse_simulate_result_after_approve() {
+        let amount = format!("0x{}", hex::encode(word(100)));
+        let result = serde_json::json!([{ "calls": [
+            { "status": "0x1" },
+            { "status": "0x1", "gasUsed": "0x5208" },
+            { "returnData": amount }
+        ] }]);
+
+        assert_eq!(
+            parse_simulate_result(&result, 1).unwrap(),
+            SimulatedSwap::Success { amount_out: BigUint::from(100u32), gas: 0x5208 }
+        );
+    }
+
+    #[test]
+    fn test_parse_simulate_result_failed_approve() {
+        let amount = format!("0x{}", hex::encode(word(100)));
+        let result = serde_json::json!([{ "calls": [
+            { "status": "0x0" },
+            { "status": "0x1", "gasUsed": "0x5208" },
+            { "returnData": amount }
+        ] }]);
+
+        assert!(parse_simulate_result(&result, 1).is_err());
+    }
+
     fn word(value: u8) -> Vec<u8> {
         let mut w = vec![0u8; 32];
         w[31] = value;
@@ -738,7 +926,7 @@ mod tests {
             { "returnData": "0x" }
         ] }]);
         assert_eq!(
-            parse_simulate_result(&result).unwrap(),
+            parse_simulate_result(&result, 0).unwrap(),
             SimulatedSwap::Reverted {
                 return_data: vec![0xde, 0xad, 0xbe, 0xef],
                 message: "execution reverted".to_string(),
@@ -750,7 +938,7 @@ mod tests {
     fn test_parse_simulate_result_short_balance_word() {
         let result =
             serde_json::json!([{ "calls": [{ "status": "0x1" }, { "returnData": "0x" }] }]);
-        assert!(parse_simulate_result(&result).is_err());
+        assert!(parse_simulate_result(&result, 0).is_err());
     }
 
     #[test]
@@ -763,7 +951,7 @@ mod tests {
             ]
         }]);
         assert_eq!(
-            parse_simulate_result(&result).unwrap(),
+            parse_simulate_result(&result, 0).unwrap(),
             SimulatedSwap::Success { amount_out: BigUint::from(100u32), gas: 0x5208 }
         );
     }
@@ -805,6 +993,6 @@ mod tests {
     #[test]
     fn parse_simulate_result_missing_calls_errors() {
         let result = serde_json::json!([{}]);
-        assert!(parse_simulate_result(&result).is_err());
+        assert!(parse_simulate_result(&result, 0).is_err());
     }
 }

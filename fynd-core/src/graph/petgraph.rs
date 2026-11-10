@@ -338,6 +338,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager
         derived: &crate::derived::DerivedData,
     ) -> usize {
         let tokens = market.token_registry_ref();
+        let input = D::weight_input(derived);
 
         // First pass: collect edge info and compute weights (immutable borrow).
         // `None` in the inner Option means derived data is unavailable — the edge weight will be
@@ -360,7 +361,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> PetgraphStableDiGraphManager
 
                 Some((
                     edge_idx,
-                    D::from_sim_and_derived(sim_state, component_id, token_in, token_out, derived),
+                    D::from_sim_and_derived(sim_state, component_id, token_in, token_out, &input),
                 ))
             })
             .collect();
