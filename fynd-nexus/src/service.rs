@@ -8,11 +8,13 @@ use std::{
 
 use anyhow::Context as _;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::{
     api::{self, Streams},
     cli::Cli,
+    derived::{snapshot::DerivedSnapshots, writer::DerivedSnapshotWriter},
     latest_prices::{spawn_snapshot_age_reports, LatestPrices},
     market::market_launch::{launch_market, LaunchedMarket},
     price_levels,
@@ -69,6 +71,17 @@ async fn market_ended(launched: Option<&mut LaunchedMarket>) -> anyhow::Result<(
         .context("the market stopped")
 }
 
+/// Waits for the derived snapshot writer's task to end, which is an error. Never returns without a
+/// writer.
+async fn writer_ended(task: Option<&mut JoinHandle<()>>) -> anyhow::Result<()> {
+    let Some(task) = task else {
+        return std::future::pending().await;
+    };
+    task.await
+        .context("the derived snapshot writer task failed")?;
+    anyhow::bail!("the derived snapshot writer stopped: the market's event channel closed")
+}
+
 /// Starts the prices feeds, the Tycho market and the HTTP and metrics servers, and returns when
 /// one stops.
 ///
@@ -93,20 +106,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         streams.push(latest_prices);
     }
     let mut market = None;
+    let mut derived = None;
+    let mut writer_task = None;
     if cli.market.is_enabled() {
         info!("starting the market");
-        market = Some(launch_market(cli.chain, &cli.market).await?);
+        let launched = launch_market(cli.chain, &cli.market).await?;
+        let snapshots = Arc::new(DerivedSnapshots::new(cli.chain));
+        let writer =
+            DerivedSnapshotWriter::new(launched.feed.derived_data(), Arc::clone(&snapshots));
+        writer_task = Some(writer.spawn(launched.feed.subscribe_derived_events()));
+        derived = Some(snapshots);
+        market = Some(launched);
     }
     spawn_snapshot_age_reports(streams.clone());
 
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cli.http_port));
-    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), None, address)
+    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), derived, address)
         .with_context(|| format!("cannot bind the HTTP port {}", cli.http_port))?;
     info!(%bound, "HTTP API listening");
     tokio::select! {
         result = http_server => result.context("the HTTP server failed")?,
         result = metrics_server => result.context("the metrics server failed")?,
         result = market_ended(market.as_mut()) => result?,
+        result = writer_ended(writer_task.as_mut()) => result?,
     }
     Ok(())
 }
