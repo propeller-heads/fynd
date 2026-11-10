@@ -1,4 +1,21 @@
 
+## [0.123.0](https://github.com/propeller-heads/fynd/compare/0.122.0...0.123.0) (2026-11-10)
+
+### Features
+
+* **graph:** gather each edge weight's input once per rebuild ([f2f5699](https://github.com/propeller-heads/fynd/commit/f2f5699ec379e613a6ffc88d703b10aea940f6b5))
+* **derived:** export failed items per computation as a gauge ([acba842](https://github.com/propeller-heads/fynd/commit/acba842ca3c5b35714d9ed542c5f5a55deeb9df6))
+
+### Bug Fixes
+
+* **derived:** log per-block computation results at debug ([407d4ab](https://github.com/propeller-heads/fynd/commit/407d4ab15b41c679b0094472657ffeba67fc3568))
+
+### Performance Improvements
+
+* **derived:** key spot price and depth maps by a borrowed direction ([76ea9be](https://github.com/propeller-heads/fynd/commit/76ea9be72e288086277886c25ce4ef50f7fa96fe))
+* **core:** convert token prices once per edge-weight rebuild ([cf98d27](https://github.com/propeller-heads/fynd/commit/cf98d2700a2a783bc2dab3805d24bd8816bc2903))
+
+
 ## [0.122.0](https://github.com/propeller-heads/fynd/compare/0.120.0...0.122.0) (2026-11-05)
 
 ### Features
