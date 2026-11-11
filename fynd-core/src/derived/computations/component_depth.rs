@@ -425,6 +425,21 @@ mod tests {
     }
 
     #[test]
+    fn test_requires_spot_prices_only_when_it_computes() {
+        let client = NexusClient::new("http://nexus:3000").unwrap();
+
+        let computing = ComponentDepthComputation::default().requirements();
+        let loading = ComponentDepthComputation::default()
+            .with_nexus_client(client)
+            .requirements();
+
+        assert!(computing
+            .require_fresh
+            .contains(SpotPriceComputation::ID));
+        assert!(loading.require_fresh.is_empty());
+    }
+
+    #[test]
     fn test_default_marginal_price_drop() {
         let comp = ComponentDepthComputation::default();
         assert!((comp.marginal_price_drop - 0.015).abs() < f64::EPSILON);
