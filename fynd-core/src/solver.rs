@@ -792,10 +792,14 @@ impl FyndBuilder {
         self
     }
 
-    /// Reads Bebop, Hashflow and Metric prices from the `fynd-nexus` service at `url`, such
-    /// as `http://fynd-nexus:3000`, instead of connecting to those venues (default: connect
-    /// directly). Native and Liquorice always connect directly. The books are still built here,
-    /// and firm quotes still go straight to the venue.
+    /// Reads Bebop, Hashflow and Metric prices, and the spot prices, pool depths and token
+    /// prices of the market, from the `fynd-nexus` service at `url`, such as
+    /// `http://fynd-nexus:3000`, instead of connecting to those venues and computing them
+    /// (default: connect and compute). Native and Liquorice always connect directly. The
+    /// books are still built here, and firm quotes still go straight to the venue.
+    ///
+    /// The service must run the market, which it does with `--tycho-url`. Computations added
+    /// with [`with_computation`](Self::with_computation) still run here.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
         self.nexus_url = Some(url.into());
         self
