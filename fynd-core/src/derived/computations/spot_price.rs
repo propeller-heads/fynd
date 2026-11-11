@@ -17,13 +17,17 @@ use crate::{
         computation::{
             ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
         },
-        computations::drop_unlisted_directions,
+        computations::{components_without_entries, drop_unlisted_directions},
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::SpotPrices,
     },
     feed::market_data::MarketData,
+    nexus::{
+        client::{NexusClient, NexusDerivedClient},
+        derived::SpotPriceSnapshot,
+    },
 };
 
 /// Computes spot prices for all components.
@@ -31,12 +35,22 @@ use crate::{
 /// Computes the spot price for each swap direction of a component.
 ///
 /// Uses `ProtocolSim::spot_price()` to compute the instantaneous exchange rate.
+///
+/// With a nexus client it loads the spot prices from `fynd-nexus` instead.
 #[derive(Debug, Default)]
-pub struct SpotPriceComputation;
+pub struct SpotPriceComputation {
+    nexus: Option<NexusDerivedClient<SpotPrices>>,
+}
 
 impl SpotPriceComputation {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Loads the spot prices from the `fynd-nexus` service behind `client` instead of computing
+    /// them.
+    pub fn with_nexus_client(self, client: NexusClient) -> Self {
+        Self { nexus: Some(NexusDerivedClient::new(client, Self::ID, true)) }
     }
 }
 
@@ -57,6 +71,18 @@ impl DerivedComputation for SpotPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        if let Some(nexus) = &self.nexus {
+            let prices = nexus
+                .get_latest_snapshot(
+                    market,
+                    SpotPriceSnapshot::into_spot_prices,
+                    |market, prices| {
+                        components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
+                    },
+                )
+                .await?;
+            return Ok(ComputationOutput::success(prices));
+        }
         // Start from the stored prices and recompute only the changed components.
         let stored = store
             .read()

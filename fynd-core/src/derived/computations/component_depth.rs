@@ -31,13 +31,19 @@ use crate::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
             FailedItem, FailedItemError,
         },
-        computations::{drop_unlisted_directions, spot_price::SpotPriceComputation},
+        computations::{
+            components_without_entries, drop_unlisted_directions, spot_price::SpotPriceComputation,
+        },
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::{ComponentDepthKey, ComponentDepths, SpotPrices},
     },
     feed::market_data::{MarketData, MarketState},
+    nexus::{
+        client::{NexusClient, NexusDerivedClient},
+        derived::PoolDepthSnapshot,
+    },
     types::{ComponentId, SwapDirection},
 };
 
@@ -73,11 +79,13 @@ pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
 pub struct ComponentDepthComputation {
     /// The share by which the pool's net marginal price falls at the depth.
     marginal_price_drop: f64,
+    /// Loads the depths from `fynd-nexus` instead of computing them.
+    nexus: Option<NexusDerivedClient<ComponentDepths>>,
 }
 
 impl Default for ComponentDepthComputation {
     fn default() -> Self {
-        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP }
+        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP, nexus: None }
     }
 }
 
@@ -96,7 +104,12 @@ impl ComponentDepthComputation {
                 "marginal_price_drop must be between 0 and 1 exclusive, got {marginal_price_drop}"
             )));
         }
-        Ok(Self { marginal_price_drop })
+        Ok(Self { marginal_price_drop, nexus: None })
+    }
+
+    /// Loads the depths from the `fynd-nexus` service behind `client` instead of computing them.
+    pub fn with_nexus_client(self, client: NexusClient) -> Self {
+        Self { nexus: Some(NexusDerivedClient::new(client, Self::ID, true)), ..self }
     }
 }
 
@@ -109,6 +122,9 @@ impl DerivedComputation for ComponentDepthComputation {
     const ID: ComputationId = "pool_depths";
 
     fn requirements(&self) -> ComputationRequirements {
+        if self.nexus.is_some() {
+            return ComputationRequirements::none();
+        }
         ComputationRequirements::fresh([SpotPriceComputation::ID])
     }
 
@@ -123,6 +139,14 @@ impl DerivedComputation for ComponentDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        if let Some(nexus) = &self.nexus {
+            let depths = nexus
+                .get_latest_snapshot(market, PoolDepthSnapshot::into_depths, |market, depths| {
+                    components_without_entries(market, depths.keys().map(|key| key.0.as_str()))
+                })
+                .await?;
+            return Ok(ComputationOutput::success(depths));
+        }
         let (spot_prices, mut component_depths) = read_stored_data(store).await?;
         for component_id in &changed.removed {
             component_depths.retain(|key, _| &key.0 != component_id);
