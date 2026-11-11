@@ -2235,6 +2235,24 @@ mod tests {
         assert!(matches!(error, SolverBuildError::RpcClient(_)), "got: {error:?}");
     }
 
+    #[tokio::test]
+    async fn test_build_market_invalid_nexus_url() {
+        let Err(error) = market_builder("https://example.invalid")
+            .nexus_url("shared:3000")
+            .build_market()
+        else {
+            panic!("a nexus URL without a scheme must not build");
+        };
+
+        assert!(matches!(error, SolverBuildError::ComputationManager(_)), "got: {error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("http:// or https://"),
+            "got: {error}"
+        );
+    }
+
     /// A pool budget above the router deadline cannot take effect for a request that does not
     /// raise its own `timeout_ms`: the router stops waiting first.
     #[test]

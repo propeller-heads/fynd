@@ -1756,4 +1756,64 @@ mod tests {
             other => panic!("derived_computation_failures_total is not a counter: {other:?}"),
         }
     }
+
+    #[rstest::rstest]
+    #[case::served(Some(1), 0, true)]
+    #[case::no_snapshot_yet(None, 3, false)]
+    #[tokio::test]
+    async fn nexus_defaults_complete_once_the_service_serves_them(
+        #[case] served_block: Option<u64>,
+        #[case] expected_failures: usize,
+        #[case] expected_ready: bool,
+    ) {
+        use serde_json::json;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let (eth, usdc) = (token(1, "ETH").address, token(2, "USDC").address);
+        let direction = json!({"component_id": "eth_usdc", "token_in": eth, "token_out": usdc});
+        let with = |extra: serde_json::Value| {
+            let mut entry = direction.clone();
+            entry
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            entry
+        };
+        let token_price = json!({"token": usdc, "numerator": "3", "denominator": "4"});
+        let server = MockServer::start().await;
+        for (id, entry) in [
+            ("spot_prices", with(json!({"price": 2000.0}))),
+            ("pool_depths", with(json!({"depth": "7"}))),
+            ("token_prices", token_price),
+        ] {
+            let response = match served_block {
+                Some(block) => ResponseTemplate::new(200)
+                    .set_body_json(json!({"block": block, "entries": [entry]})),
+                None => ResponseTemplate::new(204),
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/derived/{id}")))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+        }
+        let config = ComputationManagerConfig::new()
+            .with_nexus_client(NexusClient::new(&server.uri()).unwrap());
+        let (manager, mut event_rx) = ComputationManager::new(config, market_with_block()).unwrap();
+        let store = manager.store();
+
+        manager
+            .compute_all(&ChangedComponents::default())
+            .await;
+
+        let failures = drain_events(&mut event_rx)
+            .iter()
+            .filter(|event| matches!(event, DerivedDataEvent::ComputationFailed { .. }))
+            .count();
+        assert_eq!(failures, expected_failures);
+        assert_eq!(store.read().await.derived_data_ready(), expected_ready);
+    }
 }
