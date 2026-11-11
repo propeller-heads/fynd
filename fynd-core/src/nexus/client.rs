@@ -247,9 +247,24 @@ async fn fetch_derived_snapshot<Entry: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     use super::*;
+    use crate::{
+        algorithm::test_utils::{setup_market_weighted, token, MockProtocolSim},
+        derived::{computations::components_without_entries, types::SpotPrices},
+        nexus::derived::{SpotPriceEntry, SpotPriceSnapshot},
+    };
+
+    const TOKEN: &str = "0x0101010101010101010101010101010101010101";
 
     #[rstest]
     #[case::http("http://fynd-nexus:3000")]
@@ -274,5 +289,247 @@ mod tests {
                 .contains("http:// or https://"),
             "got {error}"
         );
+    }
+
+    fn snapshot_body(block: u64) -> serde_json::Value {
+        json!({"block": block, "entries": [{
+            "component_id": "pool", "token_in": TOKEN, "token_out": TOKEN, "price": 1.5,
+        }]})
+    }
+
+    async fn fetch_from(
+        response: ResponseTemplate,
+        known_block: Option<u64>,
+    ) -> Result<Option<DerivedSnapshot<SpotPriceEntry>>, DerivedFetchError> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/derived/spot_prices"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let client = NexusClient::new(&server.uri()).unwrap();
+
+        fetch_derived_snapshot(&client, "spot_prices", known_block).await
+    }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_ok() {
+        let response = ResponseTemplate::new(200).set_body_json(snapshot_body(7));
+
+        let snapshot = fetch_from(response, None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(snapshot.block, 7);
+        assert_eq!(snapshot.entries.len(), 1);
+    }
+
+    #[rstest]
+    #[case::not_modified(304)]
+    #[case::no_snapshot_yet(204)]
+    #[tokio::test]
+    async fn test_fetch_snapshot_none(#[case] status: u16) {
+        let snapshot = fetch_from(ResponseTemplate::new(status), Some(7))
+            .await
+            .unwrap();
+
+        assert!(snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_snapshot_sends_the_known_block_as_etag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/derived/spot_prices"))
+            .and(header("if-none-match", "\"7\""))
+            .respond_with(ResponseTemplate::new(304))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = NexusClient::new(&server.uri()).unwrap();
+
+        let snapshot = fetch_derived_snapshot::<SpotPriceEntry>(&client, "spot_prices", Some(7))
+            .await
+            .unwrap();
+
+        assert!(snapshot.is_none());
+    }
+
+    #[rstest]
+    #[case::not_found(ResponseTemplate::new(404), "HTTP status 404")]
+    #[case::server_error(ResponseTemplate::new(503), "HTTP status 503")]
+    #[case::not_json(ResponseTemplate::new(200).set_body_string("nope"), "malformed")]
+    #[case::wrong_shape(
+        ResponseTemplate::new(200).set_body_json(json!({"block": 9, "entries": [{"x": 1}]})),
+        "malformed"
+    )]
+    #[tokio::test]
+    async fn test_fetch_snapshot_error(#[case] response: ResponseTemplate, #[case] reason: &str) {
+        let error = fetch_from(response, None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains(reason), "got {error}");
+        assert!(error.contains("spot_prices"), "got {error}");
+        assert!(error.contains("/v1/derived/spot_prices"), "got {error}");
+    }
+
+    fn market() -> MarketData {
+        let (eth, usdc, dai) = (token(1, "ETH"), token(2, "USDC"), token(3, "DAI"));
+        let (market, _) = setup_market_weighted(vec![
+            ("eth_usdc", &eth, &usdc, MockProtocolSim::new(2000.0)),
+            ("eth_dai", &eth, &dai, MockProtocolSim::new(2000.0)),
+        ]);
+        market
+    }
+
+    fn served(block: u64, price: f64, components: &[&str]) -> ResponseTemplate {
+        let (eth, usdc) = (token(1, "ETH").address, token(2, "USDC").address);
+        let entries: Vec<_> = components
+            .iter()
+            .map(|component| {
+                json!({"component_id": component, "token_in": eth, "token_out": usdc,
+                       "price": price})
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"block": block, "entries": entries}))
+    }
+
+    async fn serve(server: &MockServer, response: ResponseTemplate) {
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/derived/spot_prices"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn derived_client(server: &MockServer) -> NexusDerivedClient<SpotPrices> {
+        NexusDerivedClient::new(NexusClient::new(&server.uri()).unwrap(), "spot_prices", true)
+    }
+
+    async fn latest_price(
+        client: &NexusDerivedClient<SpotPrices>,
+    ) -> Result<Option<f64>, ComputationError> {
+        let prices = client
+            .get_latest_snapshot::<SpotPriceEntry>(
+                &market(),
+                SpotPriceSnapshot::into_spot_prices,
+                |market, prices| {
+                    components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
+                },
+            )
+            .await?;
+        Ok(prices.values().next().copied())
+    }
+
+    /// The value of every metric by name. Reading drains the recorder.
+    fn metrics(recorder: &DebuggingRecorder) -> HashMap<String, f64> {
+        let mut values = HashMap::new();
+        for (key, _, _, value) in recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+        {
+            match value {
+                DebugValue::Gauge(gauge) => {
+                    values.insert(key.key().name().to_string(), gauge.into_inner());
+                }
+                DebugValue::Counter(count) => {
+                    values.insert(key.key().name().to_string(), count as f64);
+                }
+                DebugValue::Histogram(_) => {}
+            }
+        }
+        values
+    }
+
+    #[tokio::test]
+    async fn test_first_fetch_failing_is_no_valid_result() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let server = MockServer::start().await;
+        serve(&server, ResponseTemplate::new(503)).await;
+
+        let result = latest_price(&derived_client(&server)).await;
+
+        assert!(matches!(result, Err(ComputationError::NoValidResult { .. })), "{result:?}");
+        assert_eq!(metrics(&recorder)["nexus_client_failed_polls_total"], 1.0);
+    }
+
+    #[rstest]
+    #[case::newer_block(7, 8, 2.0)]
+    #[case::equal_block(7, 7, 1.0)]
+    #[case::older_block(7, 5, 1.0)]
+    #[tokio::test]
+    async fn test_second_snapshot_replaces_only_a_newer_block(
+        #[case] first_block: u64,
+        #[case] second_block: u64,
+        #[case] expected_price: f64,
+    ) {
+        let server = MockServer::start().await;
+        let client = derived_client(&server);
+        serve(&server, served(first_block, 1.0, &["eth_usdc"])).await;
+        latest_price(&client).await.unwrap();
+        serve(&server, served(second_block, 2.0, &["eth_usdc"])).await;
+
+        let price = latest_price(&client).await.unwrap();
+
+        assert_eq!(price, Some(expected_price));
+    }
+
+    #[rstest]
+    #[case::unchanged(ResponseTemplate::new(304), false)]
+    #[case::error_status(ResponseTemplate::new(500), true)]
+    #[tokio::test]
+    async fn test_cached_output_survives_a_fetch_without_a_snapshot(
+        #[case] response: ResponseTemplate,
+        #[case] counted: bool,
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let server = MockServer::start().await;
+        let client = derived_client(&server);
+        serve(&server, served(7, 1.0, &["eth_usdc"])).await;
+        latest_price(&client).await.unwrap();
+        serve(&server, response).await;
+
+        let price = latest_price(&client).await.unwrap();
+
+        assert_eq!(price, Some(1.0));
+        let failed = metrics(&recorder).contains_key("nexus_client_failed_polls_total");
+        assert_eq!(failed, counted);
+    }
+
+    #[rstest]
+    #[case::complete(&["eth_usdc", "eth_dai"], 0.0)]
+    #[case::one_component_missing(&["eth_usdc"], 1.0)]
+    #[case::none_listed(&[], 2.0)]
+    #[tokio::test]
+    async fn test_missing_components_and_block_lag_metrics(
+        #[case] listed: &[&str],
+        #[case] missing: f64,
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let market_block = market()
+            .read()
+            .await
+            .last_updated()
+            .unwrap()
+            .number();
+        let server = MockServer::start().await;
+        serve(&server, served(market_block + 3, 1.0, listed)).await;
+
+        latest_price(&derived_client(&server))
+            .await
+            .unwrap();
+
+        let metrics = metrics(&recorder);
+        assert_eq!(metrics["nexus_derived_missing_components"], missing);
+        assert_eq!(metrics["nexus_derived_block_lag"], -3.0);
+        assert!(metrics.contains_key("nexus_derived_snapshot_age_seconds"));
     }
 }
