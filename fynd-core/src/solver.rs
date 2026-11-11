@@ -50,6 +50,7 @@ use crate::{
         DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    nexus::client::NexusClient,
     post_process::{
         registry::check_post_processor_order, PostProcessorOrderError, PostProcessorRegistry,
         UnknownPostProcessorError,
@@ -1084,8 +1085,9 @@ impl FyndBuilder {
         .aggregate_rfqs(self.aggregate_rfqs)
         .external_liquidity(std::mem::take(&mut self.external_liquidity));
 
-        let tycho_feed_config = match self.nexus_url.take() {
-            Some(url) => tycho_feed_config.nexus_url(url),
+        let nexus_url = self.nexus_url.take();
+        let tycho_feed_config = match &nexus_url {
+            Some(url) => tycho_feed_config.nexus_url(url.clone()),
             None => tycho_feed_config,
         };
         let tycho_feed_config = match self.tycho_subscription_buffer_size {
@@ -1111,6 +1113,11 @@ impl FyndBuilder {
         }
         if let Some(interval) = self.pricing_min_pass_interval {
             computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
+        if let Some(url) = &nexus_url {
+            let client = NexusClient::new(url)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+            computation_config = computation_config.with_nexus_client(client);
         }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.

@@ -108,9 +108,12 @@ use super::{
     registry::ErasedComputation,
     store::DerivedData,
 };
-use crate::feed::{
-    events::{EventError, MarketEvent, MarketEventHandler},
-    market_data::MarketData,
+use crate::{
+    feed::{
+        events::{EventError, MarketEvent, MarketEventHandler},
+        market_data::MarketData,
+    },
+    nexus::client::NexusClient,
 };
 
 /// Thread-safe handle to shared derived data store.
@@ -138,6 +141,9 @@ pub struct ComputationManagerConfig {
     /// Overrides how long after a token-pricing pass starts the next one may start; `None`
     /// keeps the computation's default.
     pricing_min_pass_interval: Option<Duration>,
+    /// The `fynd-nexus` service the default computations load their data from; `None` computes
+    /// it here.
+    nexus: Option<NexusClient>,
 }
 
 impl ComputationManagerConfig {
@@ -179,6 +185,14 @@ impl ComputationManagerConfig {
     /// Overrides how long after a token-pricing pass starts the next one may start.
     pub fn with_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_min_pass_interval = Some(interval);
+        self
+    }
+
+    /// Makes the default computations (spot prices, token prices and component depths) load their
+    /// data from the `fynd-nexus` service behind `client` instead of computing it. The service
+    /// must run the market.
+    pub fn with_nexus_client(mut self, client: NexusClient) -> Self {
+        self.nexus = Some(client);
         self
     }
 
@@ -249,6 +263,7 @@ impl Default for ComputationManagerConfig {
             pricing_max_tokens_per_pass: None,
             pricing_max_sell_solves_per_pass: None,
             pricing_min_pass_interval: None,
+            nexus: None,
         }
     }
 }
@@ -275,7 +290,8 @@ struct ComputationSchedule {
 
 impl ComputationManager {
     /// Creates a manager with the default computation set: spot prices, token prices, and
-    /// component depths, run for every block by [`run`](Self::run).
+    /// component depths, run for every block by [`run`](Self::run). With a nexus client in
+    /// `config`, they load their data from the service instead of computing it.
     ///
     /// Returns the manager and a receiver for derived data events.
     /// Workers can subscribe to the event sender via `event_sender()` to track
@@ -285,9 +301,17 @@ impl ComputationManager {
         market_data: MarketData,
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
-        manager.register(SpotPriceComputation::new())?;
-        manager.register(config.build_token_price_computation())?;
-        manager.register(ComponentDepthComputation::new(config.depth_marginal_price_drop())?)?;
+        let mut spot_prices = SpotPriceComputation::new();
+        let mut token_prices = config.build_token_price_computation();
+        let mut depths = ComponentDepthComputation::new(config.depth_marginal_price_drop())?;
+        if let Some(client) = &config.nexus {
+            spot_prices = spot_prices.with_nexus_client(client.clone());
+            token_prices = token_prices.with_nexus_client(client.clone());
+            depths = depths.with_nexus_client(client.clone());
+        }
+        manager.register(spot_prices)?;
+        manager.register(token_prices)?;
+        manager.register(depths)?;
         Ok((manager, event_rx))
     }
 
