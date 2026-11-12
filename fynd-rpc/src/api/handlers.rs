@@ -4,6 +4,7 @@
 use std::{sync::Arc, time::Instant};
 
 use actix_web::{web, HttpRequest, HttpResponse};
+use num_traits::ToPrimitive;
 use tracing::instrument;
 #[cfg(feature = "experimental")]
 use tracing::{debug, info, warn};
@@ -124,7 +125,8 @@ pub async fn quote(
 /// [`ApiError::InvalidRequest`] naming the rule the request broke: no orders, an order that fails
 /// [`fynd_core::Order::validate`], encoding options that fail
 /// [`fynd_core::EncodingOptions::validate`], or a route filter that fails
-/// [`fynd_core::RouteConstraints::validate`].
+/// [`fynd_core::RouteConstraints::validate`]. [`ApiError::BadRequest`] when `priority_fee` does
+/// not fit in 64 bits.
 pub fn validate_quote_request(
     request: dto::QuoteRequest,
 ) -> Result<fynd_core::QuoteRequest, ApiError> {
@@ -145,6 +147,13 @@ pub fn validate_quote_request(
         encoding_options
             .validate()
             .map_err(RequestValidationError::from)?;
+    }
+    if core_request
+        .options()
+        .priority_fee()
+        .is_some_and(|priority_fee| priority_fee.to_u64().is_none())
+    {
+        return Err(ApiError::BadRequest("priority_fee must fit in 64 bits".to_string()));
     }
     if let Err(fynd_core::RouteConstraintsError::RequiredTokenExcluded { token }) = core_request
         .options()
@@ -770,6 +779,23 @@ mod tests {
                 None => {
                     validate_quote_request(request).expect("the route filter is satisfiable");
                 }
+            }
+        }
+
+        #[rstest]
+        #[case::u64_max("18446744073709551615", true)]
+        #[case::above_u64_max("18446744073709551616", false)]
+        fn test_validate_quote_request_priority_fee(#[case] priority_fee: &str, #[case] ok: bool) {
+            let request: dto::QuoteRequest = serde_json::from_value(serde_json::json!({
+                "orders": [dto_order()],
+                "options": {"priority_fee": priority_fee}
+            }))
+            .expect("valid request json");
+
+            match validate_quote_request(request) {
+                Ok(_) => assert!(ok, "{priority_fee} must be rejected"),
+                Err(ApiError::BadRequest(_)) => assert!(!ok, "{priority_fee} must be accepted"),
+                Err(other) => panic!("expected a BadRequest rejection, got {other:?}"),
             }
         }
 

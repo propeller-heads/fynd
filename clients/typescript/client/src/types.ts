@@ -142,6 +142,11 @@ export interface QuoteOptions {
   encodingOptions?: EncodingOptions;
   /** Liquidity this request excludes from a route. */
   routeFilter?: RouteFilter;
+  /**
+   * Priority fee per gas, in wei, that the transaction will pay. Fynd prices gas at the base fee
+   * plus this fee in place of the node's suggested priority fee.
+   */
+  priorityFee?: bigint;
 }
 
 /** Input parameters for {@link FyndClient.quote}. */

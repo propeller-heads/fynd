@@ -66,6 +66,9 @@ export function toWireRequest(params: QuoteParams): WireSolutionRequest {
             ...(params.options.routeFilter !== undefined
                 ? {route_filter: toWireRouteFilter(params.options.routeFilter)}
                 : {}),
+            ...(params.options.priorityFee !== undefined
+                ? {priority_fee: params.options.priorityFee.toString()}
+                : {}),
         }
         : undefined;
     return {
