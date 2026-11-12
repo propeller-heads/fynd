@@ -544,17 +544,27 @@ where
     /// # Errors
     ///
     /// [`SolveError::NotReady`] when `label` names no registered overlay.
-    async fn read_market(
-        &self,
+    async fn read_market<'m>(
+        market: &'m MarketData,
         label: Option<&StateLabel>,
-    ) -> Result<MarketDataView<'_>, SolveError> {
+    ) -> Result<MarketDataView<'m>, SolveError> {
         match label {
-            Some(label) => self
-                .market_data
+            Some(label) => market
                 .read_labeled(label)
                 .await
                 .map_err(|e| SolveError::NotReady(e.to_string())),
-            None => Ok(self.market_data.read().await),
+            None => Ok(market.read().await),
+        }
+    }
+
+    /// Returns the market handle a solve with `params` reads: its gas price carries the request's
+    /// priority fee when the request sets one.
+    fn apply_priority_fee(&self, params: &SolveParams) -> MarketData {
+        match params.priority_fee() {
+            Some(priority_fee) => self
+                .market_data
+                .with_priority_fee(priority_fee.clone()),
+            None => self.market_data.clone(),
         }
     }
 
@@ -759,17 +769,16 @@ where
     async fn price_fallback_legs(
         &self,
         order: &Order,
-        params: &SolveParams,
+        ctx: SolveContext<'_>,
         route: &mut Route,
     ) -> Result<(), SolveError> {
         if !has_fallback_leg(route) {
             return Ok(());
         }
+        let SolveContext { params, market_data } = ctx;
         // The same view the algorithm solved against, so the fallback is selected and priced on
         // the requested overlay rather than the base state.
-        let market = self
-            .read_market(params.state_label())
-            .await?;
+        let market = Self::read_market(market_data, params.state_label()).await?;
         match price_through_fallbacks(
             route,
             &market,
@@ -808,7 +817,7 @@ where
     async fn post_process(
         &self,
         order: &Order,
-        params: &SolveParams,
+        ctx: SolveContext<'_>,
         constraints: &ResolvedRouteConstraints,
         deadline: Instant,
         result: RouteResult,
@@ -816,6 +825,7 @@ where
         if self.post_processors.is_empty() {
             return (result, Vec::new());
         }
+        let SolveContext { params, market_data } = ctx;
         let exclusive_access = self.post_process_exclusive_access(params);
         let scope = match exclusive_access {
             ExclusiveAccess::Granted => LiquidityScope::IncludeExclusive,
@@ -826,7 +836,7 @@ where
         };
         let request = PostProcessRequest::new(
             order,
-            &self.market_data,
+            market_data,
             &self.derived_data,
             constraints,
             deadline
@@ -849,7 +859,7 @@ where
                 .and_then(|()| self.check_processed_route(order, &processed_route, scope));
         if checked.is_ok() {
             checked = self
-                .price_fallback_legs(order, params, processed_route.route_mut())
+                .price_fallback_legs(order, ctx, processed_route.route_mut())
                 .await
                 .map_err(|err| err.to_string());
         }
@@ -924,12 +934,12 @@ where
 
         // Read the block before solving, to fail fast when the market is not ready and as a
         // fallback for algorithms that do not record the block they solved against.
+        let market_data = self.apply_priority_fee(&params);
+        let ctx = SolveContext { params: &params, market_data: &market_data };
         let (block_info, solved_against, constraints) = {
             // Read briefly; drop the lock before solving so it is not held across the
             // algorithm's own read call.
-            let view = self
-                .read_market(params.state_label())
-                .await?;
+            let view = Self::read_market(&market_data, params.state_label()).await?;
             let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
@@ -948,7 +958,7 @@ where
             (block_info, solved_against, constraints)
         };
 
-        let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
+        let mut request = SolveRequest::new(graph, market_data.clone(), order)
             .with_derived(self.derived_data.clone())
             .with_shared_constraints(Arc::clone(&constraints));
         if let Some(label) = params.state_label().cloned() {
@@ -992,7 +1002,7 @@ where
                 };
 
                 let (result, post_processed_by) = self
-                    .post_process(order, &params, &constraints, deadline, result)
+                    .post_process(order, ctx, &constraints, deadline, result)
                     .await;
                 // Extract scalar values before consuming result with into_route()
                 let net_amount_out = result.net_amount_out().clone();
@@ -1005,7 +1015,7 @@ where
 
                 // The worker priced a processed route in `post_process`.
                 if post_processed_by.is_empty() {
-                    self.price_fallback_legs(order, &params, &mut route)
+                    self.price_fallback_legs(order, ctx, &mut route)
                         .await?;
                 }
 
@@ -1388,6 +1398,14 @@ where
             }
         }
     }
+}
+
+/// The request parameters of one solve and the market handle it reads, which carries the request's
+/// priority fee.
+#[derive(Clone, Copy)]
+struct SolveContext<'a> {
+    params: &'a SolveParams,
+    market_data: &'a MarketData,
 }
 
 /// Maps an [`AlgorithmError`](crate::AlgorithmError) to the [`SolveError`] class

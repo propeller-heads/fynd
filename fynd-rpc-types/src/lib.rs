@@ -260,6 +260,13 @@ pub struct QuoteOptions {
     /// Liquidity this request excludes from a route. If None, nothing is excluded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     route_filter: Option<RouteFilter>,
+    /// Priority fee per gas, in wei, that the transaction will pay. If set, Fynd prices gas at the
+    /// base fee plus this fee in place of the node's suggested priority fee. Ignored when the node
+    /// returns only a legacy gas price. Must fit in 64 bits.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>, example = "100000000"))]
+    priority_fee: Option<BigUint>,
 }
 
 impl QuoteOptions {
@@ -293,6 +300,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Set the priority fee per gas, in wei, that the transaction will pay.
+    pub fn with_priority_fee(mut self, priority_fee: BigUint) -> Self {
+        self.priority_fee = Some(priority_fee);
+        self
+    }
+
     /// Timeout in milliseconds, if set.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -316,6 +329,11 @@ impl QuoteOptions {
     /// What this request excludes from a route, if set.
     pub fn route_filter(&self) -> Option<&RouteFilter> {
         self.route_filter.as_ref()
+    }
+
+    /// Priority fee per gas the transaction will pay, if set.
+    pub fn priority_fee(&self) -> Option<&BigUint> {
+        self.priority_fee.as_ref()
     }
 }
 
@@ -1927,6 +1945,9 @@ mod conversions {
             if let Some(filter) = self.route_filter {
                 opts = opts.with_route_filter(filter.into());
             }
+            if let Some(priority_fee) = self.priority_fee {
+                opts = opts.with_priority_fee(priority_fee);
+            }
             opts
         }
     }
@@ -2255,6 +2276,7 @@ mod conversions {
                     max_gas: None,
                     encoding_options: None,
                     route_filter: None,
+                    priority_fee: Some(BigUint::from(100_000_000u64)),
                 },
             };
 
@@ -2262,6 +2284,7 @@ mod conversions {
             assert_eq!(core.orders().len(), 1);
             assert_eq!(core.orders()[0].id(), "test-id");
             assert_eq!(core.options().timeout_ms(), Some(5000));
+            assert_eq!(core.options().priority_fee(), Some(&BigUint::from(100_000_000u64)));
         }
 
         #[test]

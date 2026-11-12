@@ -140,6 +140,9 @@ impl TryFrom<QuoteOptions> for dto::QuoteOptions {
         if let Some(filter) = opts.route_filter {
             dto_opts = dto_opts.with_route_filter(filter);
         }
+        if let Some(priority_fee) = opts.priority_fee {
+            dto_opts = dto_opts.with_priority_fee(priority_fee);
+        }
         Ok(dto_opts)
     }
 }

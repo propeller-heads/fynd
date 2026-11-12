@@ -34,6 +34,8 @@ struct ReplayOptions {
     max_gas: Option<String>,
     #[serde(skip_serializing_if = "ReplayRouteFilter::is_empty")]
     route_filter: ReplayRouteFilter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority_fee: Option<String>,
 }
 
 /// The liquidity a captured request excluded and the tokens it required, sorted so two captures
@@ -95,12 +97,12 @@ impl ReplayRouteFilter {
 /// Owned, routing-essential view of a whole quote request.
 ///
 /// Captured (the fields that determine the route): per order `token_in`, `token_out`, `amount`,
-/// `side`; plus the solve options `timeout_ms`, `min_responses`, `max_gas`, `route_filter`; plus
-/// `exclusive_access` — the access the authenticating proxy granted, which decides the worker pool
-/// allocation. Everything else is dropped: the rest of `encoding_options` (slippage / transfer
-/// type / price guard, and every Permit2 / client-fee **signature**), the server-generated order
-/// `id`, and `sender` / `receiver` (routing-irrelevant and PII). Built from an explicit allowlist,
-/// so no request field can leak into the logs.
+/// `side`; plus the solve options `timeout_ms`, `min_responses`, `max_gas`, `route_filter`,
+/// `priority_fee`; plus `exclusive_access` — the access the authenticating proxy granted, which
+/// decides the worker pool allocation. Everything else is dropped: the rest of `encoding_options`
+/// (slippage / transfer type / price guard, and every Permit2 / client-fee **signature**), the
+/// server-generated order `id`, and `sender` / `receiver` (routing-irrelevant and PII). Built from
+/// an explicit allowlist, so no request field can leak into the logs.
 ///
 /// This is NOT a full [`QuoteRequest`] — it omits the required `sender`, so a replay harness
 /// supplies a placeholder sender before re-issuing. `exclusive_access` is not a body field: a
@@ -145,6 +147,9 @@ impl ReplayRequest {
                     .max_gas()
                     .map(ToString::to_string),
                 route_filter: ReplayRouteFilter::capture(options.route_filter()),
+                priority_fee: options
+                    .priority_fee()
+                    .map(ToString::to_string),
             },
             exclusive_access: access == ExclusiveAccess::Granted,
         }
@@ -395,6 +400,7 @@ pub(crate) mod test_utils {
             .with_timeout_ms(2000)
             .with_min_responses(1)
             .with_max_gas(BigUint::from(500_000u64))
+            .with_priority_fee(BigUint::from(100_000_000u64))
             .with_encoding_options(encoding)
             .with_route_filter(
                 fynd_rpc_types::RouteFilter::default()
@@ -476,6 +482,7 @@ mod tests {
         assert_eq!(options["timeout_ms"], 2000);
         assert_eq!(options["min_responses"], 1);
         assert_eq!(options["max_gas"], "500000");
+        assert_eq!(options["priority_fee"], "100000000");
     }
 
     /// The filter decides the route, so a replay has to see what the original request excluded

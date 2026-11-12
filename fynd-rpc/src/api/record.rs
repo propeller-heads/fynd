@@ -31,7 +31,7 @@ use crate::api::{
 
 /// Version of the record layout. Bump it when a field is added, removed or changes meaning, so a
 /// reader can tell records of different layouts apart.
-pub const SCHEMA_VERSION: u16 = 3;
+pub const SCHEMA_VERSION: u16 = 4;
 
 /// One answered quote request, as the collector receives it.
 #[must_use]
@@ -501,7 +501,10 @@ mod tests {
         let request = &value["request"];
         expect(request, &["orders", "options", "exclusive_access", "encoding"]);
         expect(&request["orders"][0], &["token_in", "token_out", "amount", "side"]);
-        expect(&request["options"], &["timeout_ms", "min_responses", "max_gas", "route_filter"]);
+        expect(
+            &request["options"],
+            &["timeout_ms", "min_responses", "max_gas", "route_filter", "priority_fee"],
+        );
         expect(&request["options"]["route_filter"], &["exclude_pools"]);
         expect(&request["encoding"], &["slippage", "transfer_type", "client_fee_bps"]);
         let outcome = &value["outcome"];
@@ -573,7 +576,7 @@ mod tests {
     fn test_record_solved_quote() {
         let value = solved_record();
         assert_eq!(value["chain"], "ethereum");
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(
             value["client"],
             json!({
