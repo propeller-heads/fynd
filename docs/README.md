@@ -65,6 +65,7 @@ Fynd currently supports **sell orders** only (exact input amount). You specify t
 * Polygon
 * BNB Smart Chain
 * Robinhood Chain
+* Elysium
 
 ### Supported Protocols
 
