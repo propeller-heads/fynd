@@ -1244,7 +1244,8 @@ impl Algorithm for BellmanFordAlgorithm {
     ) -> Result<RouteResult, AlgorithmError> {
         let order = request.order();
         let ctx = self.build_context(request).await?;
-        self.find_single_route(&ctx, order, FindRouteOptions::default())
+        let result = self.find_single_route(&ctx, order, FindRouteOptions::default())?;
+        Ok(paths::with_market_block(result, &ctx.market_data))
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {

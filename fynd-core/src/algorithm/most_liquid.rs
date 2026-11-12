@@ -801,7 +801,8 @@ impl Algorithm for MostLiquidAlgorithm {
             constraints: &constraints,
         };
 
-        self.solve_for_best_path(&scored_paths, &mut report, &ctx)
+        let result = self.solve_for_best_path(&scored_paths, &mut report, &ctx)?;
+        Ok(paths::with_market_block(result, &market))
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {

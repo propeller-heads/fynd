@@ -786,7 +786,9 @@ mod tests {
     use crate::{
         algorithm::{
             bellman_ford::BellmanFordAlgorithm,
+            most_liquid::MostLiquidAlgorithm,
             path_frank_wolfe::{PathFrankWolfeAlgorithm, PathFrankWolfeConfig},
+            water_fill::WaterFillAlgorithm,
             AlgorithmConfig,
         },
         types::{BlockInfo, OrderQuote, QuoteStatus},
@@ -1014,6 +1016,65 @@ mod tests {
             scenario.trade_amount,
             "'{}': solution amount_in mismatch",
             scenario.name,
+        );
+    }
+
+    /// Moves `market` to block 7, solves `scenario` with `algo`, and returns the block number the
+    /// result records.
+    async fn solved_block_number<A: Algorithm>(
+        algo: &A,
+        scenario: &TestScenario,
+        market: MarketData,
+        graph_manager: A::GraphManager,
+    ) -> Option<u64> {
+        set_last_updated_block(&mut *market.write().await, 7, 84);
+        let order = Order::new(
+            scenario.token_in.address.clone(),
+            scenario.token_out.address.clone(),
+            scenario.trade_amount.clone(),
+            OrderSide::Sell,
+            Address::default(),
+        );
+        let request = SolveRequest::new(graph_manager.graph(), market, &order)
+            .with_derived(scenario.build_derived_data());
+        algo.find_best_route(request)
+            .await
+            .unwrap_or_else(|e| panic!("{} must solve '{}': {e}", algo.name(), scenario.name))
+            .block()
+            .map(BlockInfo::number)
+    }
+
+    /// Every built-in algorithm records the block of the market state it solved against, so the
+    /// worker quotes that block and not the one it read before the solve.
+    #[tokio::test]
+    async fn test_built_in_algorithms_record_block() {
+        let scenario = split_scenarios::symmetric_split();
+        let config = AlgorithmConfig::new(1, 4, Duration::from_millis(5000), None).unwrap();
+
+        let (market, graph_manager) = scenario.build_market();
+        assert_eq!(
+            solved_block_number(&bf_default(), &scenario, market, graph_manager).await,
+            Some(7)
+        );
+
+        let (market, graph_manager) = scenario.build_market();
+        assert_eq!(
+            solved_block_number(&pfw_default(), &scenario, market, graph_manager).await,
+            Some(7)
+        );
+
+        let most_liquid = MostLiquidAlgorithm::with_config(config.clone()).unwrap();
+        let (market, graph_manager) = scenario.build_market_weighted();
+        assert_eq!(
+            solved_block_number(&most_liquid, &scenario, market, graph_manager).await,
+            Some(7)
+        );
+
+        let water_fill = WaterFillAlgorithm::with_config(config).unwrap();
+        let (market, graph_manager) = scenario.build_market_weighted();
+        assert_eq!(
+            solved_block_number(&water_fill, &scenario, market, graph_manager).await,
+            Some(7)
         );
     }
 }

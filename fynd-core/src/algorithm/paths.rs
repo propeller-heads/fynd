@@ -251,6 +251,15 @@ pub async fn read_market(
     }
 }
 
+/// `result` with the block of the `market` snapshot it was priced against, when the snapshot
+/// has one. See [`RouteResult::with_block`].
+pub fn with_market_block(result: RouteResult, market: &MarketState) -> RouteResult {
+    match market.last_updated() {
+        Some(block) => result.with_block(block.clone()),
+        None => result,
+    }
+}
+
 /// The view's effective gas price, for algorithms that cannot price a route without one.
 ///
 /// # Errors
