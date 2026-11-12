@@ -1910,6 +1910,8 @@ pub struct RouteResult {
     /// The amount the route commits to pay, when it has an exclusive leg that no router
     /// comparison priced.
     commitment: Option<Commitment>,
+    /// The block of the market state the route was priced against.
+    block: Option<BlockInfo>,
 }
 
 /// The amount an exclusive route commits to pay the user, and the amount of the route it was
@@ -1940,7 +1942,23 @@ impl Commitment {
 impl RouteResult {
     /// Creates a new route result.
     pub fn new(route: Route, net_amount_out: BigInt, gas_price: BigUint) -> Self {
-        Self { route, net_amount_out, gas_price, commitment: None }
+        Self { route, net_amount_out, gas_price, commitment: None, block: None }
+    }
+
+    /// Records the block of the market state the route was priced against.
+    ///
+    /// The market can move on while a solve runs, so the worker quotes this block rather than the
+    /// one it read before the solve. Without it, the worker falls back to that earlier block.
+    #[must_use]
+    pub fn with_block(mut self, block: BlockInfo) -> Self {
+        self.block = Some(block);
+        self
+    }
+
+    /// The block of the market state the route was priced against, if the algorithm recorded it.
+    #[must_use]
+    pub fn block(&self) -> Option<&BlockInfo> {
+        self.block.as_ref()
     }
 
     /// Commits the route to pay `committed_amount_out`, measured against a route that paid

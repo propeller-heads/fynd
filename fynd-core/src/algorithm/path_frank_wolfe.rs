@@ -20,7 +20,7 @@ use tycho_simulation::tycho_core::models::Address;
 
 use super::{
     bellman_ford::{BellmanFordContext, FindRouteOptions},
-    sim_meter,
+    paths, sim_meter,
     split_primitives::{
         build_post_swap_overrides, build_split_route, compute_marginal_price_product,
         evaluate_total_output, golden_section_search, normalize_fractions, simulate_path,
@@ -704,17 +704,18 @@ impl Algorithm for PathFrankWolfeAlgorithm {
         });
 
         // Step 3: return whichever route nets more after gas.
-        match split_result {
+        let result = match split_result {
             Some(split) if split.net_amount_out() > single_path_result.net_amount_out() => {
                 debug!(
                     split_net = %split.net_amount_out(),
                     initial_net = %single_path_result.net_amount_out(),
                     "split route beats single path"
                 );
-                Ok(split)
+                split
             }
-            _ => Ok(single_path_result),
-        }
+            _ => single_path_result,
+        };
+        Ok(paths::with_market_block(result, &ctx.market_data))
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {

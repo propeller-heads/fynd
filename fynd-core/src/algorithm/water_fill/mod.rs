@@ -59,7 +59,7 @@ use super::{
 };
 use crate::{
     algorithm::{
-        paths::read_market,
+        paths::{read_market, with_market_block},
         request::{SolveParts, SolveRequest},
         swap_cache::{PoolDirection, Refusal, SwapCache, SwapResult},
         water_fill::config::{
@@ -537,11 +537,12 @@ impl Algorithm for WaterFillAlgorithm {
             "water-fill selected {}",
             if split_won { "split candidate" } else { "single path" }
         );
-        match best {
-            Some((net, cand)) => Ok(RouteResult::new(cand.route, net, input.gas_price.clone())),
+        let result = match best {
+            Some((net, cand)) => RouteResult::new(cand.route, net, input.gas_price.clone()),
             // No split won: return the single path if there is one, else nothing fills the order.
-            None => best_single.ok_or(AlgorithmError::InsufficientLiquidity),
-        }
+            None => best_single.ok_or(AlgorithmError::InsufficientLiquidity)?,
+        };
+        Ok(with_market_block(result, &input.market))
     }
 
     fn computation_requirements(&self) -> ComputationRequirements {
