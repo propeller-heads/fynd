@@ -1344,6 +1344,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_best_route_at_a_request_priority_fee() {
+        // The same three components as `test_find_best_route_ranks_by_net_amount_out`. The feed
+        // prices gas at a 5 wei base fee plus a 95 wei priority fee, so "best" wins at 100
+        // wei/gas. A request priority fee of 5 wei prices gas at 10 wei/gas:
+        //
+        // | Component | Output | Gas Cost (gas*10) | Net  |
+        // |-----------|--------|-------------------|------|
+        // | best      | 3000   | 100               | 2900 |
+        // | low_out   | 2000   | 50                | 1950 |
+        // | high_gas  | 4000   | 300               | 3700 |
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, manager) = setup_market_weighted(vec![
+            ("best", &token_a, &token_b, MockProtocolSim::new(3.0).with_gas(10)),
+            ("low_out", &token_a, &token_b, MockProtocolSim::new(2.0).with_gas(5)),
+            ("high_gas", &token_a, &token_b, MockProtocolSim::new(4.0).with_gas(30)),
+        ]);
+        market
+            .write()
+            .await
+            .update_gas_price(BlockGasPrice {
+                block_number: 1,
+                block_hash: Default::default(),
+                block_timestamp: 0,
+                pricing: GasPrice::Eip1559 {
+                    base_fee_per_gas: BigUint::from(5u64),
+                    max_priority_fee_per_gas: BigUint::from(95u64),
+                },
+            });
+        let algorithm = MostLiquidAlgorithm::with_config(
+            AlgorithmConfig::new(1, 1, Duration::from_millis(100), None).unwrap(),
+        )
+        .unwrap();
+        let order = order(&token_a, &token_b, 1000, OrderSide::Sell);
+        let derived = setup_derived_with_token_prices(std::slice::from_ref(&token_b.address));
+
+        let at_feed = algorithm
+            .find_best_route(
+                SolveRequest::new(manager.graph(), market.clone(), &order)
+                    .with_derived(std::sync::Arc::clone(&derived)),
+            )
+            .await
+            .unwrap();
+        let at_request = algorithm
+            .find_best_route(
+                SolveRequest::new(
+                    manager.graph(),
+                    market.with_priority_fee(BigUint::from(5u64)),
+                    &order,
+                )
+                .with_derived(derived),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(at_feed.route().swaps()[0].component_id(), "best");
+        assert_eq!(at_feed.gas_price(), &BigUint::from(100u64));
+        assert_eq!(at_request.route().swaps()[0].component_id(), "high_gas");
+        assert_eq!(at_request.net_amount_out(), &BigInt::from(3700));
+        assert_eq!(at_request.gas_price(), &BigUint::from(10u64));
+    }
+
+    #[tokio::test]
     async fn test_find_best_route_no_path_returns_error() {
         let token_a = token(0x01, "A");
         let token_b = token(0x02, "B");

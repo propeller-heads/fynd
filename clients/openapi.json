@@ -7,7 +7,7 @@
       "name": "Fynd License 1.0",
       "url": "https://github.com/propeller-heads/fynd/blob/main/LICENSE.md"
     },
-    "version": "0.118.4"
+    "version": "0.124.0"
   },
   "paths": {
     "/v1/health": {
@@ -1104,6 +1104,14 @@
             ],
             "description": "Minimum number of solver responses to wait for before returning.\nIf `None` or `0`, waits for all solvers to respond (or timeout).\n\nUse the `/health` endpoint to check `num_solver_pools` before setting this value.\nValues exceeding the number of active solver pools are clamped internally.",
             "minimum": 0
+          },
+          "priority_fee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Priority fee per gas, in wei, that the transaction will pay. If set, Fynd prices gas at the\nbase fee plus this fee in place of the node's suggested priority fee.",
+            "example": "100000000"
           },
           "route_filter": {
             "oneOf": [

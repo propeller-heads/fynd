@@ -664,6 +664,12 @@ export interface components {
              *     Values exceeding the number of active solver pools are clamped internally.
              */
             min_responses?: number | null;
+            /**
+             * @description Priority fee per gas, in wei, that the transaction will pay. If set, Fynd prices gas at the
+             *     base fee plus this fee in place of the node's suggested priority fee.
+             * @example 100000000
+             */
+            priority_fee?: string | null;
             route_filter?: components["schemas"]["RouteFilter"] | null;
             /**
              * Format: int64

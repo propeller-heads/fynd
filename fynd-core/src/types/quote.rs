@@ -342,6 +342,11 @@ pub struct QuoteOptions {
     /// wire type owns the request shape.
     #[serde(skip)]
     route_filter: RouteConstraints,
+    /// Priority fee per gas, in wei, to solve at in place of the node's suggestion. `None` solves
+    /// at the market gas price.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_fee: Option<BigUint>,
 }
 
 impl QuoteOptions {
@@ -387,6 +392,12 @@ impl QuoteOptions {
         self
     }
 
+    /// Solves at `priority_fee` wei per gas in place of the node's suggested priority fee.
+    pub fn with_priority_fee(mut self, priority_fee: BigUint) -> Self {
+        self.priority_fee = Some(priority_fee);
+        self
+    }
+
     /// Returns the timeout in milliseconds.
     #[must_use]
     pub fn timeout_ms(&self) -> Option<u64> {
@@ -428,6 +439,12 @@ impl QuoteOptions {
     pub fn route_filter(&self) -> &RouteConstraints {
         &self.route_filter
     }
+
+    /// Returns the priority fee per gas to solve at, if one was set.
+    #[must_use]
+    pub fn priority_fee(&self) -> Option<&BigUint> {
+        self.priority_fee.as_ref()
+    }
 }
 
 type SharedConstraintCache = Arc<Mutex<Option<(u64, Arc<ResolvedRouteConstraints>)>>>;
@@ -447,6 +464,8 @@ pub struct SolveParams {
     /// Whether the caller may use exclusive liquidity. Public-only pools hand it to their
     /// post-processors.
     exclusive_access: ExclusiveAccess,
+    /// Priority fee per gas, in wei, to solve at. `None` uses the market gas price.
+    priority_fee: Option<BigUint>,
     /// Per-request resolved constraints shared by all cloned solve tasks.
     #[doc(hidden)]
     constraint_cache: SharedConstraintCache,
@@ -458,6 +477,7 @@ impl Clone for SolveParams {
             state_label: self.state_label.clone(),
             route_filter: self.route_filter.clone(),
             exclusive_access: self.exclusive_access,
+            priority_fee: self.priority_fee.clone(),
             constraint_cache: self.constraint_cache.clone(),
         }
     }
@@ -470,6 +490,7 @@ impl std::fmt::Debug for SolveParams {
             .field("state_label", &self.state_label)
             .field("route_filter", &self.route_filter)
             .field("exclusive_access", &self.exclusive_access)
+            .field("priority_fee", &self.priority_fee)
             .finish()
     }
 }
@@ -480,6 +501,7 @@ impl Default for SolveParams {
             state_label: None,
             route_filter: RouteConstraints::default(),
             exclusive_access: ExclusiveAccess::default(),
+            priority_fee: None,
             constraint_cache: Arc::new(Mutex::new(None)),
         }
     }
@@ -515,9 +537,20 @@ impl SolveParams {
         &self.route_filter
     }
 
+    /// Solves at `priority_fee` wei per gas in place of the node's suggested priority fee.
+    pub fn with_priority_fee(mut self, priority_fee: BigUint) -> Self {
+        self.priority_fee = Some(priority_fee);
+        self
+    }
+
     /// Returns whether the caller may use exclusive liquidity.
     pub fn exclusive_access(&self) -> ExclusiveAccess {
         self.exclusive_access
+    }
+
+    /// Returns the priority fee per gas to solve at, if one was set.
+    pub fn priority_fee(&self) -> Option<&BigUint> {
+        self.priority_fee.as_ref()
     }
 
     pub(crate) fn cached_constraints(&self) -> &SharedConstraintCache {

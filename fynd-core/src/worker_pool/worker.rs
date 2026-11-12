@@ -545,17 +545,27 @@ where
     /// # Errors
     ///
     /// [`SolveError::NotReady`] when `label` names no registered overlay.
-    async fn read_market(
-        &self,
+    async fn read_market<'m>(
+        market: &'m MarketData,
         label: Option<&StateLabel>,
-    ) -> Result<MarketDataView<'_>, SolveError> {
+    ) -> Result<MarketDataView<'m>, SolveError> {
         match label {
-            Some(label) => self
-                .market_data
+            Some(label) => market
                 .read_labeled(label)
                 .await
                 .map_err(|e| SolveError::NotReady(e.to_string())),
-            None => Ok(self.market_data.read().await),
+            None => Ok(market.read().await),
+        }
+    }
+
+    /// The market handle a solve with `params` reads: its gas price carries the request's
+    /// priority fee when the request sets one.
+    fn market_for(&self, params: &SolveParams) -> MarketData {
+        match params.priority_fee() {
+            Some(priority_fee) => self
+                .market_data
+                .with_priority_fee(priority_fee.clone()),
+            None => self.market_data.clone(),
         }
     }
 
@@ -768,9 +778,8 @@ where
         }
         // The same view the algorithm solved against, so the fallback is selected and priced on
         // the requested overlay rather than the base state.
-        let market = self
-            .read_market(params.state_label())
-            .await?;
+        let market_data = self.market_for(params);
+        let market = Self::read_market(&market_data, params.state_label()).await?;
         match price_through_fallbacks(
             route,
             &market,
@@ -825,9 +834,10 @@ where
         let drops_component = |component: &ProtocolComponent| {
             should_drop_component(scope, &self.exclude_protocols, component)
         };
+        let market_data = self.market_for(params);
         let request = PostProcessRequest::new(
             order,
-            &self.market_data,
+            &market_data,
             &self.derived_data,
             constraints,
             deadline
@@ -926,12 +936,11 @@ where
         // Get block info and resolve the effective state label.
         // TODO: maybe the algorithm should return the block info with the route? The block might
         // update while solving and the route returned might be for the newer block.
+        let market_data = self.market_for(&params);
         let (block_info, solved_against, constraints, priority_fee) = {
             // Read briefly to capture block info; drop the lock before solving so it is not held
             // across the algorithm's own read call.
-            let view = self
-                .read_market(params.state_label())
-                .await?;
+            let view = Self::read_market(&market_data, params.state_label()).await?;
             let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
@@ -953,7 +962,7 @@ where
             (block_info, solved_against, constraints, priority_fee)
         };
 
-        let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
+        let mut request = SolveRequest::new(graph, market_data.clone(), order)
             .with_derived(self.derived_data.clone())
             .with_shared_constraints(Arc::clone(&constraints));
         if let Some(label) = params.state_label().cloned() {
@@ -2113,12 +2122,23 @@ mod tests {
             base_fee_per_gas: BigUint::from(5_000_000u64),
             max_priority_fee_per_gas: BigUint::from(1_000_000u64),
         }),
+        None,
         Some(BigUint::from(1_000_000u64)),
     )]
-    #[case::legacy(None, None)]
+    #[case::eip1559_request_priority_fee(
+        Some(GasPrice::Eip1559 {
+            base_fee_per_gas: BigUint::from(5_000_000u64),
+            max_priority_fee_per_gas: BigUint::from(1_000_000u64),
+        }),
+        Some(BigUint::from(100_000_000u64)),
+        Some(BigUint::from(100_000_000u64)),
+    )]
+    #[case::legacy(None, None, None)]
+    #[case::legacy_request_priority_fee(None, Some(BigUint::from(100_000_000u64)), None)]
     #[tokio::test]
     async fn test_quote_priority_fee(
         #[case] pricing: Option<GasPrice>,
+        #[case] request_priority_fee: Option<BigUint>,
         #[case] expected: Option<BigUint>,
     ) {
         let token_a = token(0x01, "A");
@@ -2147,9 +2167,13 @@ mod tests {
             "test_pool".to_string(),
         );
         let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+        let mut params = SolveParams::default();
+        if let Some(priority_fee) = request_priority_fee {
+            params = params.with_priority_fee(priority_fee);
+        }
 
         let quote = worker
-            .quote(&ord, SolveParams::default(), far_deadline())
+            .quote(&ord, params, far_deadline())
             .await
             .expect("split route must quote");
 
