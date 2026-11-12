@@ -131,7 +131,7 @@ See `docs/ARCHITECTURE.md` for the full architecture diagram and detailed compon
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--simulate-on-quote-block` (simulate on the quote's block instead of the latest), `--encoding-retry-budget-ms` (default `5`), `--partial-blocks` (enable flashblock/partial-block updates from Tycho stream) |
+| `serve` | Run the solver: Tycho feed + HTTP RPC server. Notable flags: `--enable-price-guard` and `--enable-simulation` (both default `false`), `--simulate-on-quote-block` (simulate on the quote's block instead of the latest), `--encoding-retry-budget-ms` (default `5`), `--partial-blocks` (enable partial-block updates from the Tycho stream) |
 | `openapi` | Print the OpenAPI spec JSON to stdout |
 | `derive-connector-tokens` | Derive and print connector token lists for configured protocols |
 
