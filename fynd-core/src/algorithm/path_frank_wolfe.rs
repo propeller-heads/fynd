@@ -501,10 +501,8 @@ impl PathFrankWolfeAlgorithm {
                 hop.gas = gas;
             }
 
-            // Later paths must see the reserves this path consumed.
-            for (component_id, state) in sim.post_swap_states {
-                post_swap = post_swap.with_override(component_id, state);
-            }
+            // Later paths must see the reserves and the maker wallets this path consumed.
+            post_swap.apply_path(sim.post_swap_states, sim.wallet_spend);
         }
 
         Ok(())
@@ -587,7 +585,18 @@ impl PathFrankWolfeAlgorithm {
                 break;
             }
 
-            self.apply_step(&mut allocations, &candidate, step_size, total_amount, ctx)?;
+            // The step re-simulates the split at renormalised fractions, which can overdraw a
+            // maker wallet the line search kept within. Keep the split from before the step then.
+            let before_step = allocations.clone();
+            match self.apply_step(&mut allocations, &candidate, step_size, total_amount, ctx) {
+                Ok(()) => {}
+                Err(error @ AlgorithmError::SimulationFailed { .. }) => {
+                    debug!(iteration, %error, "step failed, keeping the split from before it");
+                    allocations = before_step;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
             debug!(iteration, paths = allocations.len(), step_size, "pfw iteration complete");
         }
 
@@ -703,9 +712,18 @@ impl Algorithm for PathFrankWolfeAlgorithm {
             start.elapsed().as_millis() as u64
         });
 
-        // Step 3: return whichever route nets more after gas.
+        // Step 3: return whichever route nets more after gas. The single path is found without
+        // the maker wallets, so a split that fits them wins over a single path that overdraws one.
+        let single_path_fits = ctx
+            .market_data
+            .maker_wallets()
+            .check_route(single_path_result.route())
+            .is_ok();
         let result = match split_result {
-            Some(split) if split.net_amount_out() > single_path_result.net_amount_out() => {
+            Some(split)
+                if !single_path_fits ||
+                    split.net_amount_out() > single_path_result.net_amount_out() =>
+            {
                 debug!(
                     split_net = %split.net_amount_out(),
                     initial_net = %single_path_result.net_amount_out(),

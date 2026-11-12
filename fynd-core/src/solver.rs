@@ -16,7 +16,7 @@ use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{broadcast, oneshot},
+    sync::{broadcast, oneshot, RwLock},
     task::JoinHandle,
 };
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
@@ -44,12 +44,13 @@ use crate::{
         events::{MarketEvent, MarketEventHandler},
         external_liquidity::{ExternalLiquidityConfig, LiquiditySnapshot},
         gas::GasPriceFetcher,
-        market_data::MarketData,
+        market_data::{MarketData, MarketState},
         metrics_sampler::MetricsSampler,
         tycho_feed::{PendingFeedSetup, TychoFeed},
         DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    maker_wallet::{MakerWalletConfig, MakerWalletFetcher, MakerWallets},
     post_process::{
         registry::check_post_processor_order, PostProcessorOrderError, PostProcessorRegistry,
         UnknownPostProcessorError,
@@ -90,6 +91,8 @@ pub mod defaults {
     pub const MAX_SYNC_LAG: Duration = Duration::from_secs(15);
     /// How often the gas price is refreshed from the RPC node.
     pub const GAS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+    /// How often the maker wallet balances are refreshed from the RPC node.
+    pub const MAKER_WALLET_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
     /// How often per-protocol market metrics are sampled and exported.
     pub const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
     /// How often router fees are refreshed from the on-chain FeeCalculator contract.
@@ -395,6 +398,10 @@ pub enum SolverBuildError {
     /// The router fee fetcher could not be created (e.g. malformed RPC URL).
     #[error("failed to create router fee fetcher: {0}")]
     RouterFeeFetcher(String),
+    /// The maker wallets are misconfigured, or their fetcher could not be created (e.g. malformed
+    /// RPC URL).
+    #[error("invalid maker wallets: {0}")]
+    MakerWallets(String),
     /// The quote simulator could not be created (e.g. malformed RPC URL).
     #[error("failed to create quote simulator: {0}")]
     QuoteSimulator(String),
@@ -537,6 +544,8 @@ struct MarketStores {
 struct MarketServices {
     tycho_feed: TychoFeed,
     gas_price_fetcher: GasPriceFetcher<EthereumRpcClient>,
+    /// Reads the maker wallet balances. `None` when the deployment lists no maker wallet.
+    maker_wallet_fetcher: Option<MakerWalletFetcher>,
     computation_manager: ComputationManager,
     computation_event_rx: broadcast::Receiver<MarketEvent>,
     metrics_sampler: MetricsSampler,
@@ -584,6 +593,7 @@ pub struct FyndBuilder {
     max_sync_lag: Duration,
     aggregate_rfqs: bool,
     external_liquidity: Vec<ExternalLiquidity>,
+    maker_wallets: Vec<MakerWalletConfig>,
     nexus_url: Option<String>,
     pricing_max_hops: usize,
     /// Shortest time between two full token-pricing passes; `None` keeps the computation's
@@ -635,6 +645,7 @@ impl FyndBuilder {
             max_sync_lag: defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
             external_liquidity: Vec::new(),
+            maker_wallets: Vec::new(),
             nexus_url: None,
             pricing_max_hops: defaults::PRICING_MAX_HOPS,
             pricing_max_tokens_per_pass: None,
@@ -737,6 +748,15 @@ impl FyndBuilder {
     /// `Stale` or `Ended` protocol is excluded regardless.
     pub fn max_sync_lag(mut self, lag: Duration) -> Self {
         self.max_sync_lag = lag;
+        self
+    }
+
+    /// Sets the maker wallets that pAMM pools pay from (default: none).
+    ///
+    /// Fynd then returns no route that asks a wallet for more than it holds, as read from the RPC
+    /// node every [`defaults::MAKER_WALLET_REFRESH_INTERVAL`]. See [`crate::maker_wallet`].
+    pub fn maker_wallets(mut self, wallets: Vec<MakerWalletConfig>) -> Self {
+        self.maker_wallets = wallets;
         self
     }
 
@@ -1064,7 +1084,11 @@ impl FyndBuilder {
     ///
     /// Takes the settings it consumes out of the builder, which the caller no longer reads.
     fn assemble_market(&mut self) -> Result<(MarketStores, MarketServices), SolverBuildError> {
-        let market_data = MarketData::new_shared();
+        let mut market_state = MarketState::new();
+        market_state.set_maker_wallets(
+            MakerWallets::new(&self.maker_wallets).map_err(SolverBuildError::MakerWallets)?,
+        );
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_state)));
 
         let tycho_feed_config = TychoFeedConfig::new(
             std::mem::take(&mut self.tycho_url),
@@ -1098,6 +1122,17 @@ impl FyndBuilder {
 
         let gas_price_fetcher =
             GasPriceFetcher::new(ethereum_client, market_data.clone(), self.gas_refresh_interval);
+        let maker_wallet_fetcher = if self.maker_wallets.is_empty() {
+            None
+        } else {
+            let fetcher = MakerWalletFetcher::new(
+                self.rpc_url.as_str(),
+                market_data.clone(),
+                defaults::MAKER_WALLET_REFRESH_INTERVAL,
+            )
+            .map_err(SolverBuildError::MakerWallets)?;
+            Some(fetcher)
+        };
 
         let tycho_feed = TychoFeed::new(tycho_feed_config, market_data.clone());
         let market_event_tx = tycho_feed.event_sender();
@@ -1136,6 +1171,7 @@ impl FyndBuilder {
         let services = MarketServices {
             tycho_feed,
             gas_price_fetcher,
+            maker_wallet_fetcher,
             computation_manager,
             computation_event_rx,
             metrics_sampler,
@@ -1576,6 +1612,7 @@ impl MarketServices {
         let Self {
             tycho_feed,
             mut gas_price_fetcher,
+            maker_wallet_fetcher,
             computation_manager,
             computation_event_rx,
             metrics_sampler,
@@ -1589,8 +1626,15 @@ impl MarketServices {
                 tracing::error!(error = %e, "tycho feed error");
             }
         });
+        // The maker wallet fetcher shares the gas price task: both poll the RPC node, and a
+        // separate handle would change `SolverParts::into_components`.
         let gas_price_handle = tokio::spawn(async move {
-            gas_price_fetcher.run().await;
+            let maker_wallets = async {
+                if let Some(fetcher) = maker_wallet_fetcher {
+                    fetcher.run().await;
+                }
+            };
+            tokio::join!(gas_price_fetcher.run(), maker_wallets);
         });
         let metrics_sampler_handle = tokio::spawn(async move { metrics_sampler.run().await });
         let computation_handle = tokio::spawn(async move {
@@ -2064,7 +2108,7 @@ pub struct SolverParts {
     router_fees: SharedRouterFees,
     /// Background task running the Tycho market-data feed.
     feed_handle: JoinHandle<()>,
-    /// Background task polling the RPC node for gas prices.
+    /// Background task polling the RPC node for gas prices and maker wallet balances.
     gas_price_handle: JoinHandle<()>,
     /// Background task exporting per-protocol market metrics.
     metrics_sampler_handle: JoinHandle<()>,

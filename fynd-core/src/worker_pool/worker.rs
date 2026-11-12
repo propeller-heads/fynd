@@ -40,8 +40,12 @@ use crate::{
         market_data::{MarketData, MarketDataView, StateLabel},
     },
     graph::{EdgeWeightUpdaterWithDerived, GraphManager},
+    maker_wallet::MakerWallets,
     post_process::{PostProcessRequest, PostProcessors, ProcessedRoute, RoutePostProcessor},
-    types::{internal::SolveTask, ResolvedRouteConstraints, Route, RouteConstraints, RouteResult},
+    types::{
+        internal::SolveTask, ResolvedRouteConstraints, Route, RouteConstraints, RouteRejection,
+        RouteResult,
+    },
     worker_pool_router::{ExclusiveAccess, LiquidityScope},
     BlockInfo, Order, OrderQuote, QuoteStatus, SingleOrderQuote, SolveError, SolveParams,
 };
@@ -870,6 +874,29 @@ where
         }
     }
 
+    /// Rejects `route` when it asks a maker wallet for more than the wallet holds.
+    ///
+    /// Catches an algorithm that simulates swaps without charging the maker wallets. The built-in
+    /// post-processors add only RFQ and exclusive swaps, which pay from no maker wallet.
+    fn check_maker_wallets(
+        &self,
+        maker_wallets: &MakerWallets,
+        order: &Order,
+        route: &Route,
+    ) -> Result<(), SolveError> {
+        let Err(overdrawn) = maker_wallets.check_route(route) else {
+            return Ok(());
+        };
+        warn!(
+            order_id = %order.id(),
+            worker_pool = %self.pool_name,
+            algorithm = self.algorithm.name(),
+            error = %overdrawn,
+            "algorithm route overdraws a maker wallet"
+        );
+        Err(SolveError::route_rejected(order.id(), RouteRejection::MakerWalletOverdrawn))
+    }
+
     /// Returns a quote for an order, optionally solved against a named state overlay.
     ///
     /// `deadline` is when the caller stops waiting. Post-processors stop
@@ -924,7 +951,7 @@ where
 
         // Read the block before solving, to fail fast when the market is not ready and as a
         // fallback for algorithms that do not record the block they solved against.
-        let (block_info, solved_against, constraints) = {
+        let (block_info, solved_against, constraints, maker_wallets) = {
             // Read briefly; drop the lock before solving so it is not held across the
             // algorithm's own read call.
             let view = self
@@ -945,7 +972,8 @@ where
                 .cloned()
                 .unwrap_or_else(|| last_block.number().to_string());
             let constraints = resolve_constraints(&view, &params);
-            (block_info, solved_against, constraints)
+            let maker_wallets = Arc::clone(view.base_market_state().maker_wallets());
+            (block_info, solved_against, constraints, maker_wallets)
         };
 
         let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
@@ -976,6 +1004,7 @@ where
                         self.algorithm.name()
                     )));
                 }
+                self.check_maker_wallets(&maker_wallets, order, result.route())?;
 
                 // The market can move on while the algorithm solves, so quote the block its
                 // route was priced against. Read before post-processing, which builds new

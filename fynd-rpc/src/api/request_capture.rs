@@ -225,6 +225,7 @@ pub(crate) fn failure_reason_slug(status: QuoteStatus, cause: Option<&SolveError
             RouteRejection::FallbackPoolMissing => "route/fallback_pool_missing",
             RouteRejection::FallbackNotSimulatable => "route/fallback_not_simulatable",
             RouteRejection::FallbackBelowMinAmountOut => "route/fallback_below_min_amount_out",
+            RouteRejection::MakerWalletOverdrawn => "route/maker_wallet_overdrawn",
             _ => "route/other",
         },
         SolveError::InsufficientLiquidity { .. } => "graph/insufficient_liquidity",

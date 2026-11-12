@@ -453,7 +453,7 @@ fn is_fallback_candidate(component: &ProtocolComponent) -> bool {
 /// Uniswap V4 uses the zero address; Curve and Fluid use the all-`0xee` sentinel.
 /// `TychoFallbackRouter` moves a leg's tokens with ERC20 transfers and states that native ETH is
 /// unsupported, so neither can be one side of a fallback swap.
-fn is_native_token(token: &Address) -> bool {
+pub(crate) fn is_native_token(token: &Address) -> bool {
     let bytes = token.as_ref();
     bytes.len() == 20 &&
         (bytes.iter().all(|byte| *byte == 0) || bytes.iter().all(|byte| *byte == 0xEE))

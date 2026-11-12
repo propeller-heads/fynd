@@ -111,6 +111,9 @@ pub enum RouteRejection {
     /// The route has a `fallback:` leg whose fallback fill pays less than the user's
     /// `min_amount_out`, so the router would revert if the maker quote did not land.
     FallbackBelowMinAmountOut,
+    /// The route asks a pAMM maker wallet for more of a token than the wallet holds, so a pool
+    /// paying from it would pay short or revert.
+    MakerWalletOverdrawn,
 }
 
 impl std::fmt::Display for RouteRejection {
@@ -127,6 +130,9 @@ impl std::fmt::Display for RouteRejection {
             }
             Self::FallbackBelowMinAmountOut => {
                 write!(f, "pAMM route dropped: the fallback pays less than min_amount_out")
+            }
+            Self::MakerWalletOverdrawn => {
+                write!(f, "pAMM route dropped: the route overdraws a maker wallet")
             }
         }
     }

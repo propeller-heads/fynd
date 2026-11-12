@@ -14,8 +14,12 @@
 //! `MarketState` lock. This decouples overlay writes from base-state reads: a TychoFeed block
 //! update no longer stalls overlay registrations and vice versa.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -30,6 +34,7 @@ use tycho_simulation::{
 
 use crate::{
     feed::component_filter::protocol_matches,
+    maker_wallet::{MakerWallets, WalletToken},
     types::{
         swap_directions, BlockInfo, ComponentId, ComponentTopology, ResolvedRouteConstraints,
         RouteConstraints, SwapDirection,
@@ -442,6 +447,8 @@ pub struct MarketState {
     /// things a resolved [`ResolvedRouteConstraints`] depends on. Not when a component's state
     /// changes.
     constraint_generation: u64,
+    /// The maker wallets that pAMM pools pay from, and their balances. Shared with every subset.
+    maker_wallets: Arc<MakerWallets>,
 }
 
 impl StoredComponent {
@@ -498,6 +505,7 @@ impl MarketState {
             unsynced_pools: Arc::default(),
             components_by_protocol: FxHashMap::default(),
             constraint_generation: 0,
+            maker_wallets: Arc::default(),
         }
     }
 
@@ -816,6 +824,30 @@ impl MarketState {
         self.gas_price = Some(gas_price);
     }
 
+    /// The maker wallets that pAMM pools pay from, and their balances.
+    pub fn maker_wallets(&self) -> &Arc<MakerWallets> {
+        &self.maker_wallets
+    }
+
+    /// Sets the maker wallets that pAMM pools pay from.
+    pub(crate) fn set_maker_wallets(&mut self, wallets: MakerWallets) {
+        self.maker_wallets = Arc::new(wallets);
+    }
+
+    /// Replaces the maker wallet balances with those read at `read_at`.
+    pub(crate) fn update_maker_wallet_balances(
+        &mut self,
+        balances: FxHashMap<WalletToken, BigUint>,
+        read_at: Instant,
+    ) {
+        // A new value, not `Arc::make_mut`: the subsets still hold the old one, so make_mut would
+        // copy the old balances only to replace them.
+        self.maker_wallets = Arc::new(
+            self.maker_wallets
+                .with_balances(balances, read_at),
+        );
+    }
+
     /// Creates a filtered subset containing only data needed for the given components.
     ///
     /// This is used to create a local snapshot of market data that can be used for
@@ -869,6 +901,7 @@ impl MarketState {
             unsynced_pools: Arc::clone(&self.unsynced_pools),
             components_by_protocol,
             constraint_generation: self.constraint_generation,
+            maker_wallets: Arc::clone(&self.maker_wallets),
         }
     }
 

@@ -7,8 +7,8 @@ use std::{
 use actix_web::{dev::ServerHandle, App, HttpServer};
 use anyhow::{Context, Result};
 use fynd_core::{
-    encoding::encoder::Encoder, worker_pool::pool::WorkerPool, ExternalLiquidityConfig,
-    FyndBuilder, LiquiditySnapshot, SolverBuildError,
+    encoding::encoder::Encoder, maker_wallet::MakerWalletConfig, worker_pool::pool::WorkerPool,
+    ExternalLiquidityConfig, FyndBuilder, LiquiditySnapshot, SolverBuildError,
 };
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -276,6 +276,13 @@ impl FyndRPCBuilder {
     /// `Stale` or `Ended` protocol is excluded regardless.
     pub fn max_sync_lag(mut self, lag: Duration) -> Self {
         self.fynd_builder = self.fynd_builder.max_sync_lag(lag);
+        self
+    }
+
+    /// Sets the maker wallets that pAMM pools pay from (default: none). See
+    /// [`FyndBuilder::maker_wallets`].
+    pub fn maker_wallets(mut self, wallets: Vec<MakerWalletConfig>) -> Self {
+        self.fynd_builder = self.fynd_builder.maker_wallets(wallets);
         self
     }
 

@@ -19,6 +19,7 @@ use crate::{
     derived::types::{gas_cost_in_token, TokenGasPrices},
     feed::market_data::{MarketData, MarketDataView, MarketState},
     graph::{GraphError, Path, RouteSearch, TokenPath, TopologyGraph},
+    maker_wallet::{charge_hop, WalletSpend},
     types::{ComponentId, Route, RouteResult, Swap},
     AlgorithmError, StateLabel,
 };
@@ -120,7 +121,8 @@ pub fn try_score_path(path: &Path<DepthAndPrice>) -> Option<f64> {
 /// # Errors
 ///
 /// [`AlgorithmError::DataNotFound`] for a token, component, state or gas price the market does not
-/// hold, and [`AlgorithmError::Other`] when a pool refuses the swap.
+/// hold, [`AlgorithmError::Other`] when a pool refuses the swap, and
+/// [`AlgorithmError::SimulationFailed`] when the path overdraws a maker wallet.
 #[instrument(level = "trace", skip(path, market, token_prices), fields(hop_count = path.len()))]
 pub fn simulate_pool_path<D>(
     path: &Path<D>,
@@ -133,6 +135,7 @@ pub fn simulate_pool_path<D>(
 
     // Track state overrides for components we've already swapped through.
     let mut state_overrides: FxHashMap<&ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+    let mut wallet_spend = WalletSpend::default();
     let mut tokens: FxHashMap<Address, Token> = FxHashMap::default();
 
     for (address_in, edge_data, address_out) in path.iter() {
@@ -163,6 +166,7 @@ pub fn simulate_pool_path<D>(
         let result = state
             .get_amount_out_guarded(current_amount.clone(), token_in, token_out)
             .map_err(|e| AlgorithmError::Other(format!("simulation error: {:?}", e)))?;
+        charge_hop(market, &mut wallet_spend, component_id, &token_out.address, &result.amount)?;
 
         // Record the swap
         swaps.push(Swap::new(

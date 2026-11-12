@@ -17,6 +17,7 @@ use super::{sim_meter, sim_meter::MeteredProtocolSim};
 use crate::{
     algorithm::AlgorithmError,
     feed::market_data::MarketState,
+    maker_wallet::{charge_hop, WalletSpend},
     types::{ComponentId, Order, Route, Swap},
 };
 
@@ -123,11 +124,21 @@ pub struct SimResult {
     /// Per-hop post-swap component states in path order. Apply these as overrides
     /// before simulating another path so shared components see depleted reserves.
     pub post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
+    /// What the overrides' swaps and this path's swaps took from the maker wallets. Apply it with
+    /// the post-swap states through [`MarketOverrides::apply_path`].
+    pub wallet_spend: WalletSpend,
 }
 
 /// Component state overrides for passing degraded states to `find_single_route`.
+///
+/// Also carries what the swaps behind those states took from the maker wallets. Only
+/// [`simulate_path`] and the split plans that score or build a route read it; `find_single_route`
+/// does not.
 #[derive(Default)]
-pub struct MarketOverrides(FxHashMap<ComponentId, Box<dyn ProtocolSim>>);
+pub struct MarketOverrides {
+    states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+    wallet_spend: WalletSpend,
+}
 
 impl MarketOverrides {
     /// No overrides: every component is read from the market.
@@ -138,7 +149,7 @@ impl MarketOverrides {
 
     /// Insert a degraded component state as an override.
     pub fn with_override(mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) -> Self {
-        self.0.insert(id, sim);
+        self.states.insert(id, sim);
         self
     }
 
@@ -153,7 +164,7 @@ impl MarketOverrides {
     /// Multiple calls for the same component accumulate pairs. If the ID has no
     /// override entry, this is a no-op.
     pub fn with_zero_gas(mut self, id: ComponentId, token_in: Bytes, token_out: Bytes) -> Self {
-        if let Some(sim) = self.0.remove(&id) {
+        if let Some(sim) = self.states.remove(&id) {
             // If already wrapped, add the new pair to the existing set.
             let wrapped = if let Some(selective) = sim
                 .as_any()
@@ -170,7 +181,7 @@ impl MarketOverrides {
                 pairs.insert((token_in, token_out));
                 Box::new(SelectiveZeroGasSim { inner: sim, zero_gas_pairs: pairs })
             };
-            self.0.insert(id, wrapped);
+            self.states.insert(id, wrapped);
         }
         self
     }
@@ -178,7 +189,7 @@ impl MarketOverrides {
     /// The overridden state for `id`, if one was set.
     #[must_use]
     pub fn get(&self, id: &ComponentId) -> Option<&dyn ProtocolSim> {
-        self.0.get(id).map(|b| b.as_ref())
+        self.states.get(id).map(|b| b.as_ref())
     }
 
     /// Commits a post-swap component state, replacing whatever was there.
@@ -186,7 +197,19 @@ impl MarketOverrides {
     /// The building counterpart to [`MarketOverrides::with_override`], for the passes that fill an
     /// overlay chunk by chunk rather than declaring one up front.
     pub fn insert(&mut self, id: ComponentId, sim: Box<dyn ProtocolSim>) {
-        self.0.insert(id, sim);
+        self.states.insert(id, sim);
+    }
+
+    /// Applies a path that [`simulate_path`] ran against these overrides: its post-swap states and
+    /// the wallet spend it ended with, so the next path sees the reserves and the maker wallets
+    /// this one used. The path's wallet spend includes these overrides' own, so it replaces it.
+    pub fn apply_path(
+        &mut self,
+        post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)>,
+        wallet_spend: WalletSpend,
+    ) {
+        self.states.extend(post_swap_states);
+        self.wallet_spend = wallet_spend;
     }
 }
 
@@ -460,6 +483,7 @@ pub fn simulate_path(
     let mut post_swap_states: Vec<(ComponentId, Box<dyn ProtocolSim>)> =
         Vec::with_capacity(hops.len());
     let mut marginal_price_product = 1.0;
+    let mut wallet_spend = overrides.wallet_spend.clone();
 
     for hop in hops {
         // Prefer this path's own post-swap state so a component reused by an
@@ -497,6 +521,14 @@ pub fn simulate_path(
                 error: e.to_string(),
             })?;
 
+        charge_hop(
+            market,
+            &mut wallet_spend,
+            &hop.component_id,
+            &hop.token_out.address,
+            &result.amount,
+        )?;
+
         hop_results.push((result.amount.clone(), result.gas));
         current_amount = result.amount;
         post_swap_states.push((hop.component_id.clone(), result.new_state));
@@ -507,6 +539,7 @@ pub fn simulate_path(
         marginal_price_product,
         hop_results,
         post_swap_states,
+        wallet_spend,
     })
 }
 
@@ -543,7 +576,7 @@ pub fn build_post_swap_overrides(
         &root_hop.descriptor.token_in.address,
         &total_amount,
         &MarketOverrides::empty(),
-        StateCapture::Skip,
+        PlanPurpose::Discovery,
     )?
     .post_swap)
 }
@@ -572,6 +605,34 @@ struct SimulatedSplitSwap {
     ///
     /// `None` when the plan ran under [`StateCapture::Skip`], which is every scoring pass.
     pre_swap_state: Option<Box<dyn ProtocolSim>>,
+}
+
+/// What a split plan runs for, which sets what it records.
+#[derive(Clone, Copy)]
+enum PlanPurpose {
+    /// Leave post-swap states for candidate discovery. Bellman-Ford reads no wallet spend, so the
+    /// plan charges no maker wallet, and a seed path that overdraws one still yields its states.
+    Discovery,
+    /// Score a split for the line search: charge the maker wallets, keep no swap state.
+    Scoring,
+    /// Build the route: charge the maker wallets and keep each swap's state.
+    Assembly,
+}
+
+impl PlanPurpose {
+    fn capture(self) -> StateCapture {
+        match self {
+            Self::Discovery | Self::Scoring => StateCapture::Skip,
+            Self::Assembly => StateCapture::Keep,
+        }
+    }
+
+    fn charges_wallets(self) -> bool {
+        match self {
+            Self::Discovery => false,
+            Self::Scoring | Self::Assembly => true,
+        }
+    }
 }
 
 /// Whether the plan keeps the component state each swap ran against.
@@ -1027,7 +1088,7 @@ fn execute_split_plan(
     start_token: &Bytes,
     start_amount: &BigUint,
     base_overrides: &MarketOverrides,
-    capture: StateCapture,
+    purpose: PlanPurpose,
 ) -> Result<SplitExecution, AlgorithmError> {
     for path in paths {
         path.validate_token_cycles()?;
@@ -1041,6 +1102,7 @@ fn execute_split_plan(
     let mut balances = TokenBalances::starting(start_token, start_amount);
     let mut swaps = Vec::new();
     let mut post_swap = MarketOverrides::empty();
+    let mut wallet_spend = base_overrides.wallet_spend.clone();
     let mut total_gas: u64 = 0;
 
     while let Some(token_addr) = ready.pop_front() {
@@ -1064,7 +1126,16 @@ fn execute_split_plan(
 
             balances.spend(&token_in, &component_id, &split_swap.amount_in)?;
             let (executed, new_state) =
-                run_merged_swap(split_swap, market, base_overrides, &post_swap, capture)?;
+                run_merged_swap(split_swap, market, base_overrides, &post_swap, purpose.capture())?;
+            if purpose.charges_wallets() {
+                charge_hop(
+                    market,
+                    &mut wallet_spend,
+                    &component_id,
+                    &token_out,
+                    &executed.amount_out,
+                )?;
+            }
             balances.credit(&token_out, &executed.amount_out);
 
             // Hand the output back to the paths that fed this swap, in proportion to what each put
@@ -1185,7 +1256,7 @@ pub fn evaluate_total_output(
         &first_hop.token_in.address,
         total_amount,
         overrides,
-        StateCapture::Skip,
+        PlanPurpose::Scoring,
     )?;
     let total_out = terminal_tokens
         .iter()
@@ -1260,7 +1331,7 @@ pub fn build_split_route(
         order.token_in(),
         order.amount(),
         &MarketOverrides::empty(),
-        StateCapture::Keep,
+        PlanPurpose::Assembly,
     )?;
     let mut swaps = Vec::new();
     let mut route_tokens: FxHashMap<Bytes, Token> = FxHashMap::default();
@@ -1318,10 +1389,14 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::{
-            component, order, token, ConstantProductSim, DivByZeroSim, MockProtocolSim,
+            component, component_with_protocol, order, token, ConstantProductSim, DivByZeroSim,
+            MockProtocolSim,
         },
+        maker_wallet::MakerWallets,
         types::OrderSide,
     };
+
+    const FERMISWAP: &str = "fallback:fermiswap";
 
     fn make_market(components: Vec<(&str, Vec<Token>, Box<dyn ProtocolSim>)>) -> MarketState {
         let mut market = MarketState::new();
@@ -1754,6 +1829,89 @@ mod tests {
 
         assert_eq!(total_out, BigUint::from(2500u64));
         assert_eq!(total_gas, 110_000);
+    }
+
+    /// Two Fermiswap pools that pay B from one maker wallet, priced 2.0 and 3.0, and the wallet
+    /// holding `balance` of B.
+    fn market_with_shared_wallet(token_a: &Token, token_b: &Token, balance: u64) -> MarketState {
+        let mut market = MarketState::new();
+        for (component_id, price) in [("pamm_1", 2.0), ("pamm_2", 3.0)] {
+            let tokens = [token_a.clone(), token_b.clone()];
+            market.upsert_components(std::iter::once(component_with_protocol(
+                component_id,
+                FERMISWAP,
+                &tokens,
+            )));
+            market.update_states([(
+                component_id.to_string(),
+                Box::new(MockProtocolSim::new(price)) as Box<dyn ProtocolSim>,
+            )]);
+            market.upsert_tokens(tokens);
+        }
+        market.set_maker_wallets(MakerWallets::holding(
+            FERMISWAP,
+            &Bytes::from(vec![0xAA; 20]),
+            &token_b.address,
+            balance,
+        ));
+        market
+    }
+
+    // A 50/50 split of 1000 asks the wallet for 1000 + 1500 = 2500 of B.
+    #[rstest]
+    #[case::wallet_covers_both(2_500, true)]
+    #[case::wallet_short(2_499, false)]
+    fn test_evaluate_total_output_shared_maker_wallet(#[case] balance: u64, #[case] fits: bool) {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let market = market_with_shared_wallet(&token_a, &token_b, balance);
+        let hops_1 = [HopDescriptor::new("pamm_1".to_string(), token_a.clone(), token_b.clone())];
+        let hops_2 = [HopDescriptor::new("pamm_2".to_string(), token_a, token_b)];
+        let paths: Vec<&[HopDescriptor]> = vec![&hops_1, &hops_2];
+
+        let result = evaluate_total_output(
+            &paths,
+            &[0.5, 0.5],
+            &BigUint::from(1000u64),
+            &market,
+            &MarketOverrides::empty(),
+        );
+
+        match result {
+            Ok((total_out, _)) => {
+                assert!(fits, "the split overdraws the wallet but was priced");
+                assert_eq!(total_out, BigUint::from(2500u64));
+            }
+            Err(AlgorithmError::SimulationFailed { component_id, .. }) => {
+                assert!(!fits, "the split fits the wallet but failed");
+                assert_eq!(component_id, "pamm_2");
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_simulate_path_after_overrides_drew_on_wallet() {
+        let token_a = token(0x0A, "A");
+        let token_b = token(0x0B, "B");
+        let market = market_with_shared_wallet(&token_a, &token_b, 2_000);
+        let hops_1 = [HopDescriptor::new("pamm_1".to_string(), token_a.clone(), token_b.clone())];
+        let hops_2 = [HopDescriptor::new("pamm_2".to_string(), token_a, token_b)];
+        let amount_in = BigUint::from(500u64);
+
+        let first = simulate_path(&hops_1, &amount_in, &market, &MarketOverrides::empty())
+            .expect("1000 of B fits the wallet");
+        let mut overrides = MarketOverrides::empty();
+        overrides.apply_path(first.post_swap_states, first.wallet_spend);
+
+        let fresh = simulate_path(&hops_2, &amount_in, &market, &MarketOverrides::empty());
+        let after_first = simulate_path(&hops_2, &amount_in, &market, &overrides);
+
+        assert!(fresh.is_ok(), "1500 of B alone fits the wallet");
+        assert!(
+            matches!(after_first, Err(AlgorithmError::SimulationFailed { .. })),
+            "1000 + 1500 of B overdraws the wallet"
+        );
     }
 
     #[test]
