@@ -1765,9 +1765,9 @@ mod tests {
 
     #[rstest::rstest]
     #[case::served(Some(1), 0, true)]
-    #[case::no_snapshot_yet(None, 3, false)]
+    #[case::no_snapshot_computes_locally(None, 0, true)]
     #[tokio::test]
-    async fn nexus_defaults_complete_once_the_service_serves_them(
+    async fn test_nexus_defaults_complete_with_or_without_a_snapshot(
         #[case] served_block: Option<u64>,
         #[case] expected_failures: usize,
         #[case] expected_ready: bool,

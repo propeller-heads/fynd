@@ -464,19 +464,17 @@ mod tests {
         assert_eq!(ComponentDepthComputation::ID, "pool_depths");
     }
 
-    #[test]
-    fn test_requires_spot_prices_only_when_it_computes() {
-        let client = NexusClient::new("http://nexus:3000").unwrap();
-
-        let computing = ComponentDepthComputation::default().requirements();
-        let loading = ComponentDepthComputation::default()
-            .with_nexus_client(client)
-            .requirements();
-
-        assert!(computing
+    #[rstest]
+    #[case::computing(ComponentDepthComputation::default())]
+    #[case::with_nexus_client(
+        ComponentDepthComputation::default()
+            .with_nexus_client(NexusClient::new("http://nexus:3000").unwrap())
+    )]
+    fn test_requires_fresh_spot_prices(#[case] computation: ComponentDepthComputation) {
+        assert!(computation
+            .requirements()
             .require_fresh
             .contains(SpotPriceComputation::ID));
-        assert!(loading.require_fresh.is_empty());
     }
 
     #[test]

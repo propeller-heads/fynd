@@ -531,22 +531,32 @@ mod tests {
     }
 
     fn derived_client(server: &MockServer) -> NexusDerivedClient<SpotPrices> {
-        NexusDerivedClient::new(NexusClient::new(&server.uri()).unwrap(), "spot_prices", true)
+        NexusDerivedClient::new(
+            NexusClient::new(&server.uri()).unwrap(),
+            "spot_prices",
+            true,
+            u64::MAX,
+        )
     }
 
-    async fn latest_price(
-        client: &NexusDerivedClient<SpotPrices>,
-    ) -> Result<Option<f64>, ComputationError> {
-        let prices = client
-            .get_latest_snapshot::<SpotPriceEntry>(
+    async fn latest_snapshot(client: &NexusDerivedClient<SpotPrices>) -> NexusSnapshot<SpotPrices> {
+        client
+            .get_in_sync_snapshot::<SpotPriceEntry>(
                 &market(),
                 SpotPriceSnapshot::into_spot_prices,
                 |market, prices| {
                     components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
                 },
             )
-            .await?;
-        Ok(prices.values().next().copied())
+            .await
+    }
+
+    /// The price of the held snapshot, or `None` when the client does not answer `InSync`.
+    async fn latest_price(client: &NexusDerivedClient<SpotPrices>) -> Option<f64> {
+        match latest_snapshot(client).await {
+            NexusSnapshot::InSync(prices) => prices.values().next().copied(),
+            NexusSnapshot::FellOutOfSync | NexusSnapshot::OutOfSync => None,
+        }
     }
 
     /// The value of every metric by name. Reading drains the recorder.
@@ -571,15 +581,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_first_fetch_failing_is_no_valid_result() {
+    async fn test_first_fetch_failing_falls_out_of_sync() {
         let recorder = DebuggingRecorder::new();
         let _guard = metrics::set_default_local_recorder(&recorder);
         let server = MockServer::start().await;
         serve(&server, ResponseTemplate::new(503)).await;
 
-        let result = latest_price(&derived_client(&server)).await;
+        let snapshot = latest_snapshot(&derived_client(&server)).await;
 
-        assert!(matches!(result, Err(ComputationError::NoValidResult { .. })), "{result:?}");
+        assert_eq!(snapshot, NexusSnapshot::FellOutOfSync);
         assert_eq!(metrics(&recorder)["nexus_client_failed_polls_total"], 1.0);
     }
 
@@ -596,10 +606,10 @@ mod tests {
         let server = MockServer::start().await;
         let client = derived_client(&server);
         serve(&server, served(first_block, 1.0, &["eth_usdc"])).await;
-        latest_price(&client).await.unwrap();
+        latest_price(&client).await;
         serve(&server, served(second_block, 2.0, &["eth_usdc"])).await;
 
-        let price = latest_price(&client).await.unwrap();
+        let price = latest_price(&client).await;
 
         assert_eq!(price, Some(expected_price));
     }
@@ -617,10 +627,10 @@ mod tests {
         let server = MockServer::start().await;
         let client = derived_client(&server);
         serve(&server, served(7, 1.0, &["eth_usdc"])).await;
-        latest_price(&client).await.unwrap();
+        latest_price(&client).await;
         serve(&server, response).await;
 
-        let price = latest_price(&client).await.unwrap();
+        let price = latest_price(&client).await;
 
         assert_eq!(price, Some(1.0));
         let failed = metrics(&recorder).contains_key("nexus_client_failed_polls_total");
@@ -645,15 +655,13 @@ mod tests {
             .unwrap()
             .number();
         let server = MockServer::start().await;
-        serve(&server, served(market_block + 3, 1.0, listed)).await;
+        serve(&server, served(market_block - 1, 1.0, listed)).await;
 
-        latest_price(&derived_client(&server))
-            .await
-            .unwrap();
+        latest_price(&derived_client(&server)).await;
 
         let metrics = metrics(&recorder);
         assert_eq!(metrics["nexus_derived_missing_components"], missing);
-        assert_eq!(metrics["nexus_derived_block_lag"], -3.0);
+        assert_eq!(metrics["nexus_derived_block_lag"], 1.0);
         assert!(metrics.contains_key("nexus_derived_snapshot_age_seconds"));
     }
 }
