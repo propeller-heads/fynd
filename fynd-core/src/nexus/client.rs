@@ -772,6 +772,33 @@ mod tests {
         assert!(matches!(resumed, NexusSnapshot::InSync(_)), "got {resumed:?}");
     }
 
+    #[tokio::test]
+    async fn test_missing_ids_are_scanned_only_for_a_replacing_snapshot() {
+        static SCANS: AtomicUsize = AtomicUsize::new(0);
+        fn count_scan(_: &MarketState, _: &SpotPrices) -> Vec<String> {
+            SCANS.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
+        let server = MockServer::start().await;
+        let client = derived_client(&server);
+        let market = market();
+        let mut scans_after_call = Vec::new();
+
+        for served_block in [7, 7, 8] {
+            serve(&server, served(served_block, 1.0, &["eth_usdc"])).await;
+            client
+                .get_in_sync_snapshot::<SpotPriceEntry>(
+                    &market,
+                    SpotPriceSnapshot::into_spot_prices,
+                    count_scan,
+                )
+                .await;
+            scans_after_call.push(SCANS.load(Ordering::Relaxed));
+        }
+
+        assert_eq!(scans_after_call, [1, 1, 2]);
+    }
+
     #[rstest]
     #[case::ethereum(30, 12, 2)]
     #[case::base(30, 2, 15)]
