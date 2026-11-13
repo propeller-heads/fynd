@@ -421,7 +421,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{setup_market_weighted, token, MockProtocolSim},
+        algorithm::test_utils::{
+            set_last_updated_block, setup_market_weighted, token, MockProtocolSim,
+        },
         derived::{computations::components_without_entries, types::SpotPrices},
         nexus::derived::{SpotPriceEntry, SpotPriceSnapshot},
     };
@@ -579,15 +581,26 @@ mod tests {
     }
 
     async fn latest_snapshot(client: &NexusDerivedClient<SpotPrices>) -> NexusSnapshot<SpotPrices> {
+        latest_snapshot_at(client, &market()).await
+    }
+
+    async fn latest_snapshot_at(
+        client: &NexusDerivedClient<SpotPrices>,
+        market: &MarketData,
+    ) -> NexusSnapshot<SpotPrices> {
         client
             .get_in_sync_snapshot::<SpotPriceEntry>(
-                &market(),
+                market,
                 SpotPriceSnapshot::into_spot_prices,
                 |market, prices| {
                     components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
                 },
             )
             .await
+    }
+
+    async fn move_market_to_block(market: &MarketData, block: u64) {
+        set_last_updated_block(&mut *market.write().await, block, 0);
     }
 
     /// The price of the held snapshot, or `None` when the client does not answer `InSync`.
@@ -702,6 +715,56 @@ mod tests {
         assert_eq!(metrics["nexus_derived_missing_components"], missing);
         assert_eq!(metrics["nexus_derived_block_lag"], 1.0);
         assert!(metrics.contains_key("nexus_derived_snapshot_age_seconds"));
+    }
+
+    /// A client that allows a lag of 2 blocks, fallen out of sync at market block 10 and now
+    /// served a snapshot of block 10.
+    async fn client_recovering_at_block_10(
+        server: &MockServer,
+    ) -> (NexusDerivedClient<SpotPrices>, MarketData) {
+        let client = NexusDerivedClient::new(
+            NexusClient::new(&server.uri()).unwrap(),
+            "spot_prices",
+            true,
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        );
+        let market = market();
+        move_market_to_block(&market, 10).await;
+        serve(server, served(1, 1.0, &["eth_usdc"])).await;
+        assert_eq!(latest_snapshot_at(&client, &market).await, NexusSnapshot::FellOutOfSync);
+        serve(server, served(10, 1.0, &["eth_usdc"])).await;
+        (client, market)
+    }
+
+    #[tokio::test]
+    async fn test_calls_in_one_block_do_not_resume_the_service() {
+        let server = MockServer::start().await;
+        let (client, market) = client_recovering_at_block_10(&server).await;
+
+        for _ in 0..5 {
+            let snapshot = latest_snapshot_at(&client, &market).await;
+
+            assert_eq!(snapshot, NexusSnapshot::OutOfSync);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_three_advancing_blocks_resume_the_service() {
+        let server = MockServer::start().await;
+        let (client, market) = client_recovering_at_block_10(&server).await;
+
+        let mut answers = Vec::new();
+        for block in [10, 10, 11, 11, 12] {
+            move_market_to_block(&market, block).await;
+            answers.push(latest_snapshot_at(&client, &market).await);
+        }
+
+        let (resumed, waiting) = answers.split_last().unwrap();
+        assert!(waiting
+            .iter()
+            .all(|answer| *answer == NexusSnapshot::OutOfSync));
+        assert!(matches!(resumed, NexusSnapshot::InSync(_)), "got {resumed:?}");
     }
 
     #[rstest]
