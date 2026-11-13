@@ -68,7 +68,7 @@ pub(crate) struct TychoFeedConfig {
     pub(crate) traded_n_days_ago: Option<u64>,
     /// Component IDs to exclude from the Tycho stream.
     pub(crate) blocklisted_components: FxHashSet<String>,
-    /// Enable partial block (flashblock) updates from the Tycho stream.
+    /// Enable partial block updates from the Tycho stream, on chains that have them.
     /// When enabled, component state updates are delivered mid-block rather than only at
     /// finalization, reducing effective latency at the cost of processing more frequent,
     /// smaller updates.

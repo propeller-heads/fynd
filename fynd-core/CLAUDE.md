@@ -85,7 +85,7 @@ Simulation is deployment-gated with `simulation_enabled(bool)` and attached to t
 `WorkerPoolRouter::with_simulator`; `simulation_block(SimulationBlock)` picks the block it runs on.
 `with_computation(C)` adds a caller's `DerivedComputation` (see `derived/` above).
 
-Additional builder methods: `partial_blocks(bool)` (enable flashblock/partial-block updates),
+Additional builder methods: `partial_blocks(bool)` (enable partial-block updates on chains that have them),
 `with_pending_indexer(...)` (attach a pending-block indexer), `build_with_pending()` (build with
 pending-block support), `build_with_pending_and_step_controller()` (the same, plus a
 `BlockStepController` that holds each block until the caller releases it; feature `experimental`). `Solver::subscribe_market_events()` returns a broadcast receiver for
