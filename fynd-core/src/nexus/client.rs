@@ -92,6 +92,8 @@ struct DerivedClientState<Output> {
     cached: Option<CachedSnapshot<Output>>,
     /// Blocks in a row the held snapshot was within `max_block_lag`; 0 when it is not now.
     in_sync_blocks: u32,
+    /// The latest market block counted in `in_sync_blocks`.
+    last_counted_block: Option<u64>,
     last_answer: LastAnswer,
 }
 
@@ -174,6 +176,7 @@ impl<Output: Clone> NexusDerivedClient<Output> {
             state: Mutex::new(DerivedClientState {
                 cached: None,
                 in_sync_blocks: 0,
+                last_counted_block: None,
                 last_answer: LastAnswer::Nothing,
             }),
             reported_missing: AtomicUsize::new(0),
@@ -182,10 +185,11 @@ impl<Output: Clone> NexusDerivedClient<Output> {
 
     /// The latest snapshot from the service, when it is in sync with the market.
     ///
-    /// Call it once per block. A fetched snapshot replaces the held one only if its block is
-    /// newer. When the fetch fails, the held snapshot stays and the failure is logged and counted.
-    /// `convert` turns a snapshot into the output and `missing` lists the ids of `market` that
-    /// the output has no entry for. See [`classify`] for when a snapshot is in sync.
+    /// It may be called several times per block: blocks are counted by market block number. A
+    /// fetched snapshot replaces the held one only if its block is newer. When the fetch fails,
+    /// the held snapshot stays and the failure is logged and counted. `convert` turns a snapshot
+    /// into the output and `missing` lists the ids of `market` that the output has no entry for.
+    /// See [`classify`] for when a snapshot is in sync.
     ///
     /// Logs a warning when the snapshot falls out of sync and a message when it is in sync again.
     pub(crate) async fn get_in_sync_snapshot<Entry: DeserializeOwned>(
@@ -195,7 +199,8 @@ impl<Output: Clone> NexusDerivedClient<Output> {
         missing: fn(&MarketState, &Output) -> Vec<String>,
     ) -> NexusSnapshot<Output> {
         let mut state_guard = self.state.lock().await;
-        let DerivedClientState { cached, in_sync_blocks, last_answer } = &mut *state_guard;
+        let DerivedClientState { cached, in_sync_blocks, last_counted_block, last_answer } =
+            &mut *state_guard;
         let known_block = cached
             .as_ref()
             .map(|cached| cached.block);
@@ -215,9 +220,10 @@ impl<Output: Clone> NexusDerivedClient<Output> {
             }
         }
         let mut block_lag = None;
+        let mut market_block = None;
         if let Some(cached) = cached.as_ref() {
             let view = market.read().await;
-            let market_block = view
+            market_block = view
                 .last_updated()
                 .map(|block| block.number());
             let lag = market_block.map_or(0, |block| block.saturating_sub(cached.block));
@@ -230,7 +236,12 @@ impl<Output: Clone> NexusDerivedClient<Output> {
             .as_ref()
             .filter(|_| block_lag.is_some_and(|lag| lag <= self.max_block_lag))
             .map(|cached| &cached.output);
-        *in_sync_blocks = if within_lag.is_some() { in_sync_blocks.saturating_add(1) } else { 0 };
+        if within_lag.is_some() {
+            count_in_sync_block(in_sync_blocks, last_counted_block, market_block);
+        } else {
+            *in_sync_blocks = 0;
+            *last_counted_block = None;
+        }
 
         let answer = classify(*last_answer, *in_sync_blocks, within_lag);
         self.log_answer(&answer, *last_answer, block_lag);
@@ -320,6 +331,23 @@ impl<Output: Clone> NexusDerivedClient<Output> {
 /// seconds and a zero block time cannot divide by zero.
 fn max_block_lag(max_age: Duration, block_time: Duration) -> u64 {
     max_age.as_secs() / block_time.as_secs().max(1)
+}
+
+/// Adds one to `in_sync_blocks` when `market_block` is newer than the last block counted.
+///
+/// Without a market block nothing is counted.
+fn count_in_sync_block(
+    in_sync_blocks: &mut u32,
+    last_counted_block: &mut Option<u64>,
+    market_block: Option<u64>,
+) {
+    let Some(market_block) = market_block else {
+        return;
+    };
+    if last_counted_block.is_none_or(|counted| market_block > counted) {
+        *in_sync_blocks = in_sync_blocks.saturating_add(1);
+        *last_counted_block = Some(market_block);
+    }
 }
 
 /// Whether the snapshot is in sync, given what the last call answered, the blocks in a row the
