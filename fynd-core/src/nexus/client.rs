@@ -188,8 +188,9 @@ impl<Output: Clone> NexusDerivedClient<Output> {
     /// It may be called several times per block: blocks are counted by market block number. A
     /// fetched snapshot replaces the held one only if its block is newer. When the fetch fails,
     /// the held snapshot stays and the failure is logged and counted. `convert` turns a snapshot
-    /// into the output and `missing` lists the ids of `market` that the output has no entry for.
-    /// See [`classify`] for when a snapshot is in sync.
+    /// into the output and `missing` lists the ids of `market` that the output has no entry for;
+    /// it runs only when a fetched snapshot replaced the held one. See [`classify`] for when a
+    /// snapshot is in sync.
     ///
     /// Logs a warning when the snapshot falls out of sync and a message when it is in sync again.
     pub(crate) async fn get_in_sync_snapshot<Entry: DeserializeOwned>(
@@ -204,6 +205,7 @@ impl<Output: Clone> NexusDerivedClient<Output> {
         let known_block = cached
             .as_ref()
             .map(|cached| cached.block);
+        let mut replaced = false;
         match fetch_derived_snapshot::<Entry>(&self.client, self.computation, known_block).await {
             Ok(Some(snapshot)) if known_block.is_none_or(|known| snapshot.block > known) => {
                 *cached = Some(CachedSnapshot {
@@ -211,6 +213,7 @@ impl<Output: Clone> NexusDerivedClient<Output> {
                     received_at: Instant::now(),
                     output: convert(snapshot),
                 });
+                replaced = true;
             }
             Ok(_) => {}
             Err(error) => {
@@ -226,10 +229,13 @@ impl<Output: Clone> NexusDerivedClient<Output> {
             market_block = view
                 .last_updated()
                 .map(|block| block.number());
-            let lag = market_block.map_or(0, |block| block.saturating_sub(cached.block));
-            let missing = missing(view.base_market_state(), &cached.output);
+            let missing_ids = replaced.then(|| missing(view.base_market_state(), &cached.output));
             drop(view);
-            self.report_held_snapshot(cached, market_block.map(|_| lag), &missing);
+            let lag = market_block.map_or(0, |block| block.saturating_sub(cached.block));
+            self.report_held_snapshot(cached, market_block.map(|_| lag));
+            if let Some(missing_ids) = missing_ids {
+                self.report_missing_ids(&missing_ids);
+            }
             block_lag = Some(lag);
         }
         let within_lag = cached
@@ -288,14 +294,9 @@ impl<Output: Clone> NexusDerivedClient<Output> {
         }
     }
 
-    /// Exports the gauges of the held snapshot and warns when the missing ids change. The lag is
-    /// `None` while the market has no block.
-    fn report_held_snapshot(
-        &self,
-        cached: &CachedSnapshot<Output>,
-        lag: Option<u64>,
-        missing: &[String],
-    ) {
+    /// Exports the lag and age gauges of the held snapshot. The lag is `None` while the market has
+    /// no block.
+    fn report_held_snapshot(&self, cached: &CachedSnapshot<Output>, lag: Option<u64>) {
         if let Some(lag) = lag {
             gauge!("nexus_derived_block_lag", "computation" => self.computation).set(lag as f64);
         }
@@ -305,6 +306,10 @@ impl<Output: Clone> NexusDerivedClient<Output> {
                 .elapsed()
                 .as_secs_f64(),
         );
+    }
+
+    /// Exports the number of ids the held snapshot lacks and warns when it changes.
+    fn report_missing_ids(&self, missing: &[String]) {
         gauge!("nexus_derived_missing_components", "computation" => self.computation)
             .set(missing.len() as f64);
         self.warn_if_missing_changed(missing);
