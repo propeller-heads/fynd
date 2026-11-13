@@ -160,15 +160,31 @@ use crate::{
     },
     fallback::is_pamm,
     feed::{
-        component_filter::remove_components, market_data::MarketData,
+        component_filter::remove_components,
+        market_data::{MarketData, MarketState},
         protocol_registry::is_rfq_protocol,
     },
     graph::{GraphManager, PetgraphStableDiGraphManager},
+    nexus::{
+        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
+        derived::TokenGasPriceSnapshot,
+    },
     types::{
         constants::GasTokenConfig, ComponentId, ComponentTopology, Order, OrderSide,
         ResolvedRouteConstraints,
     },
 };
+
+/// The tokens of the market's registry that `prices` has no price for.
+fn tokens_without_price(market: &MarketState, prices: &TokenGasPrices) -> Vec<String> {
+    let mut unpriced = Vec::new();
+    for token in market.token_registry_ref().keys() {
+        if !prices.contains_key(token) {
+            unpriced.push(token.to_string());
+        }
+    }
+    unpriced
+}
 
 /// Whether pricing leaves `component` out of its graph.
 fn is_left_out_of_pricing(component: &ProtocolComponent) -> bool {
@@ -956,6 +972,9 @@ pub struct TokenGasPriceComputation {
     /// Shared because `compute` takes `&self`, and because the struct derives `Clone` for the
     /// `spawn_blocking` handoff.
     pass_history: Arc<Mutex<PassHistory>>,
+    /// Loads the prices from `fynd-nexus` while its snapshot is in sync. Shared like
+    /// `pass_history`.
+    nexus_client: Option<Arc<NexusDerivedClient<TokenGasPrices>>>,
 }
 
 /// What earlier pricing passes left behind for the next one.
@@ -1147,6 +1166,10 @@ const FLAGGED_POOL_PASSES: u64 = 100;
 /// price only through this refresh. Passes for the tokens of added components count too.
 const MAX_PRICE_AGE_PASSES: u64 = 100;
 
+/// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
+/// block time, before the pod computes token prices itself.
+const NEXUS_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(30);
+
 /// Default wall-clock budget for a pricing pass after its first buy pass.
 ///
 /// `DEFAULT_MAX_TOKENS_PER_PASS` is what sizes a pass. This only stops one pathological token
@@ -1186,6 +1209,7 @@ impl Default for TokenGasPriceComputation {
             min_pass_interval: DEFAULT_MIN_PASS_INTERVAL,
             min_sell_out_bps: DEFAULT_MIN_SELL_OUT_BPS,
             pass_history: Arc::new(Mutex::new(PassHistory::default())),
+            nexus_client: None,
         }
     }
 }
@@ -1208,6 +1232,14 @@ impl TokenGasPriceComputation {
             min_pass_interval: Duration::ZERO,
             ..Self::default()
         }
+    }
+
+    /// Loads the prices from the `fynd-nexus` service behind `client` while its snapshot is in
+    /// sync, and computes them otherwise.
+    pub fn with_nexus_client(self, client: NexusClient, block_time: Duration) -> Self {
+        let nexus_client =
+            NexusDerivedClient::new(client, Self::ID, false, NEXUS_MAX_SNAPSHOT_AGE, block_time);
+        Self { nexus_client: Some(Arc::new(nexus_client)), ..self }
     }
 
     /// Sets the wall-clock budget for a pricing pass after its first buy pass.
@@ -1787,6 +1819,29 @@ impl DerivedComputation for TokenGasPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
+        if let Some(nexus_client) = &self.nexus_client {
+            let snapshot = nexus_client
+                .get_in_sync_snapshot(
+                    market,
+                    TokenGasPriceSnapshot::into_token_prices,
+                    tokens_without_price,
+                )
+                .await;
+            match snapshot {
+                NexusSnapshot::InSync(prices) => return Ok(ComputationOutput::success(prices)),
+                NexusSnapshot::FellOutOfSync => {
+                    *self.lock_pass_history() = PassHistory::default();
+                    store
+                        .write()
+                        .await
+                        .clear_token_prices_deps();
+                    return self
+                        .seed_all_prices(market, store)
+                        .await;
+                }
+                NexusSnapshot::OutOfSync => {}
+            }
+        }
         let changed = self
             .without_left_out_arrivals(market, changed)
             .await;

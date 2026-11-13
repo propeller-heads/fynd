@@ -11,6 +11,8 @@
 //! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::{Float, One};
@@ -31,13 +33,19 @@ use crate::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
             FailedItem, FailedItemError,
         },
-        computations::{drop_unlisted_directions, spot_price::SpotPriceComputation},
+        computations::{
+            components_without_entries, drop_unlisted_directions, spot_price::SpotPriceComputation,
+        },
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::{ComponentDepthKey, ComponentDepths, SpotPrices},
     },
     feed::market_data::{MarketData, MarketState},
+    nexus::{
+        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
+        derived::PoolDepthSnapshot,
+    },
     types::{ComponentId, SwapDirection},
 };
 
@@ -61,6 +69,10 @@ fn to_raw_price(price: f64, decimals_in: u32, decimals_out: u32) -> Price {
     Price::new(numerator, denominator)
 }
 
+/// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
+/// block time, before the pod computes pool depths itself.
+const NEXUS_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(30);
+
 /// The default share by which a pool's net marginal price falls at its depth.
 pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
 
@@ -73,11 +85,13 @@ pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
 pub struct ComponentDepthComputation {
     /// The share by which the pool's net marginal price falls at the depth.
     marginal_price_drop: f64,
+    /// Loads the depths from `fynd-nexus` while its snapshot is in sync.
+    nexus_client: Option<NexusDerivedClient<ComponentDepths>>,
 }
 
 impl Default for ComponentDepthComputation {
     fn default() -> Self {
-        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP }
+        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP, nexus_client: None }
     }
 }
 
@@ -96,7 +110,15 @@ impl ComponentDepthComputation {
                 "marginal_price_drop must be between 0 and 1 exclusive, got {marginal_price_drop}"
             )));
         }
-        Ok(Self { marginal_price_drop })
+        Ok(Self { marginal_price_drop, nexus_client: None })
+    }
+
+    /// Loads the depths from the `fynd-nexus` service behind `client` while its snapshot is in
+    /// sync, and computes them otherwise.
+    pub fn with_nexus_client(self, client: NexusClient, block_time: Duration) -> Self {
+        let nexus_client =
+            NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_SNAPSHOT_AGE, block_time);
+        Self { nexus_client: Some(nexus_client), ..self }
     }
 }
 
@@ -123,7 +145,46 @@ impl DerivedComputation for ComponentDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        let (spot_prices, mut component_depths) = read_stored_data(store).await?;
+        if let Some(nexus_client) = &self.nexus_client {
+            let snapshot = nexus_client
+                .get_in_sync_snapshot(market, PoolDepthSnapshot::into_depths, |market, depths| {
+                    components_without_entries(market, depths.keys().map(|key| key.0.as_str()))
+                })
+                .await;
+            match snapshot {
+                NexusSnapshot::InSync(depths) => return Ok(ComputationOutput::success(depths)),
+                NexusSnapshot::FellOutOfSync => {
+                    let every_component = ChangedComponents::every_component(
+                        market.read().await.component_topology(),
+                    );
+                    return self
+                        .compute_locally(
+                            market,
+                            store,
+                            ComponentDepths::default(),
+                            &every_component,
+                        )
+                        .await;
+                }
+                NexusSnapshot::OutOfSync => {}
+            }
+        }
+        let stored = read_stored_depths(store).await;
+        self.compute_locally(market, store, stored, changed)
+            .await
+    }
+}
+
+impl ComponentDepthComputation {
+    /// Recomputes the depths of the `changed` components on top of `component_depths`.
+    async fn compute_locally(
+        &self,
+        market: &MarketData,
+        store: &SharedDerivedDataRef,
+        mut component_depths: ComponentDepths,
+        changed: &ChangedComponents,
+    ) -> Result<ComputationOutput<ComponentDepths>, ComputationError> {
+        let spot_prices = read_stored_spot_prices(store).await?;
         for component_id in &changed.removed {
             component_depths.retain(|key, _| &key.0 != component_id);
         }
@@ -180,20 +241,26 @@ impl DerivedComputation for ComponentDepthComputation {
 /// The depth of one swap direction of a component, or why it has none.
 type PairDepth = (ComponentDepthKey, Result<BigUint, FailedItemError>);
 
-/// Reads the stored spot prices, and the stored depths to start from.
-async fn read_stored_data(
+/// Reads the stored spot prices.
+async fn read_stored_spot_prices(
     store: &SharedDerivedDataRef,
-) -> Result<(SpotPrices, ComponentDepths), ComputationError> {
-    let store_guard = store.read().await;
-    let spot_prices = store_guard
+) -> Result<SpotPrices, ComputationError> {
+    store
+        .read()
+        .await
         .spot_prices()
-        .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
-        .clone();
-    let component_depths = store_guard
+        .cloned()
+        .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))
+}
+
+/// Reads the stored depths, empty when none were stored yet.
+async fn read_stored_depths(store: &SharedDerivedDataRef) -> ComponentDepths {
+    store
+        .read()
+        .await
         .component_depths()
         .cloned()
-        .unwrap_or_default();
-    Ok((spot_prices, component_depths))
+        .unwrap_or_default()
 }
 
 /// Returns the added and updated components, whose depths need computing, and a market snapshot
@@ -398,6 +465,22 @@ mod tests {
     #[test]
     fn computation_id() {
         assert_eq!(ComponentDepthComputation::ID, "pool_depths");
+    }
+
+    #[rstest]
+    #[case::computing(ComponentDepthComputation::default())]
+    #[case::with_nexus_client(
+        ComponentDepthComputation::default()
+            .with_nexus_client(
+                NexusClient::new("http://nexus:3000").unwrap(),
+                Duration::from_secs(12),
+            )
+    )]
+    fn test_requires_fresh_spot_prices(#[case] computation: ComponentDepthComputation) {
+        assert!(computation
+            .requirements()
+            .require_fresh
+            .contains(SpotPriceComputation::ID));
     }
 
     #[test]

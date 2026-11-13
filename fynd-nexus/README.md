@@ -167,4 +167,7 @@ serves.
 | `nexus_derived_skipped_entries_total` | counter | Spot prices left out of a snapshot for not being finite. |
 
 Pods that read from the service export `nexus_client_snapshot_age_seconds` (the age of the
-prices when applied) and `nexus_client_failed_polls_total`, labelled by `venue`.
+prices when applied) and `nexus_client_failed_polls_total`, labelled by `venue`. Pods that read
+derived data export `nexus_client_failed_polls_total` labelled by `computation`, and
+`nexus_derived_block_lag`, `nexus_derived_snapshot_age_seconds` and
+`nexus_derived_missing_components`.

@@ -168,10 +168,10 @@ impl DerivedData {
         self.slots.remove(id);
     }
 
-    /// Returns `true` if all derived data types has been computed at least once.
+    /// Returns `true` if token prices, component depths and spot prices have each been computed
+    /// at least once.
     pub fn derived_data_ready(&self) -> bool {
         self.token_prices_block().is_some() &&
-            self.token_prices_deps_block().is_some() &&
             self.component_depths_block().is_some() &&
             self.spot_prices_block().is_some()
     }
@@ -277,6 +277,11 @@ impl DerivedData {
     /// Sets token prices with path dependencies.
     pub fn set_token_prices_deps(&mut self, prices: TokenPricesWithDeps, block: u64) {
         self.token_prices_deps = Some(ComputedValue { data: prices, block });
+    }
+
+    /// Forgets the stored token price dependencies.
+    pub(crate) fn clear_token_prices_deps(&mut self) {
+        self.token_prices_deps = None;
     }
 
     /// Edits the stored dependency map in place and stamps it with `block`.
@@ -603,9 +608,6 @@ mod tests {
         assert!(!store.derived_data_ready());
 
         store.set_token_prices(Default::default(), vec![], 10);
-        assert!(!store.derived_data_ready());
-
-        store.set_token_prices_deps(Default::default(), 10);
         assert!(!store.derived_data_ready());
 
         store.set_component_depths(Default::default(), vec![], 9);

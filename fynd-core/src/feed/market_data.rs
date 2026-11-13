@@ -528,6 +528,14 @@ impl MarketState {
         self.last_updated.as_ref()
     }
 
+    /// The id of every component with at least one swap direction.
+    pub(crate) fn routable_component_ids(&self) -> impl Iterator<Item = &ComponentId> {
+        self.components
+            .iter()
+            .filter(|(_, stored)| !stored.swap_directions.is_empty())
+            .map(|(id, _)| id)
+    }
+
     /// Number of protocol components (components) currently tracked.
     pub fn component_count(&self) -> usize {
         self.components.len()
