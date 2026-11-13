@@ -1,17 +1,18 @@
 
+
 ## [0.124.1](https://github.com/propeller-heads/fynd/compare/0.124.0...0.124.1) (2026-11-13)
 
 ### Features
 
-- Support Metric on Elysium. Fynd now accepts `rfq:metric` and `fallback:rfq:metric` on Elysium, and the server configuration guide lists Elysium as a Metric chain. The executor check still rejects both entries there until the tycho-execution release in the lockfile includes the Elysium Metric executors. ([2715639](https://github.com/propeller-heads/fynd/commit/271563983a1ce15c999ec690d56935de18f44fb3))
+- Add support for serving Metric on Elysium. Fynd now accepts `rfq:metric` and `fallback:rfq:metric` there, and the server configuration guide lists Elysium. Startup with Metric on Elysium will keep failing the executor check until the lockfile's tycho-execution release includes the Elysium Metric executors. ([2715639](https://github.com/propeller-heads/fynd/commit/271563983a1ce15c999ec690d56935de18f44fb3))
 
 ### Bug Fixes
 
-- Report the block a route was actually solved against. Previously, a block landing mid-solve could make a quote show a block older than the state its route was priced on. ([e243ca5](https://github.com/propeller-heads/fynd/commit/e243ca59e46825ced2c48201ea08a31735cc2998))
+- Fix quotes reporting a block older than the state the route was priced against. Quotes now report the block of the market snapshot the algorithm actually solved against. ([e243ca5](https://github.com/propeller-heads/fynd/commit/e243ca59e46825ced2c48201ea08a31735cc2998))
 
 ### Other
 
-- Update `quinn-proto` to 0.11.19 and `quinn-udp` to 0.5.16 to resolve RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538 and fix the failing security audit. No enabled feature builds quinn, so builds are unchanged. ([29977df](https://github.com/propeller-heads/fynd/commit/29977df251f197a175cde0c87f48a00ba1cf8caa))
+- Bump `quinn-proto` to 0.11.19 and `quinn-udp` to 0.5.16 to resolve RustSec advisories RUSTSEC-2026-0523, RUSTSEC-2026-0524 and RUSTSEC-2026-0538. The build is unaffected, since no enabled feature uses quinn. ([29977df](https://github.com/propeller-heads/fynd/commit/29977df251f197a175cde0c87f48a00ba1cf8caa))
 
 
 ## [0.124.0](https://github.com/propeller-heads/fynd/compare/0.123.2...0.124.0) (2026-11-10)
