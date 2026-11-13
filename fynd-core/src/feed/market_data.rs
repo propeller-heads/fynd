@@ -16,6 +16,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -25,7 +26,7 @@ use tycho_simulation::{
         models::{protocol::ProtocolComponent, token::Token, Address},
         simulation::protocol_sim::ProtocolSim,
     },
-    tycho_ethereum::gas::BlockGasPrice,
+    tycho_ethereum::gas::{BlockGasPrice, GasPrice},
 };
 
 use crate::{
@@ -75,12 +76,17 @@ pub struct MarketData {
     /// Per-label overlay states. Stored separately from the base data lock so that
     /// overlay writes do not block base-state reads.
     overlays: OverlayRegistry,
+    /// Priority fee per gas, in wei, that this handle reports in place of the feed's.
+    ///
+    /// Set by [`MarketData::with_priority_fee`]. It lives on the handle, not on the shared state,
+    /// so one request can solve at its own priority fee without any other request seeing it.
+    priority_fee: Option<BigUint>,
 }
 
 impl MarketData {
     /// Creates a new handle wrapping the given data store.
     pub fn new(data: Arc<RwLock<MarketState>>) -> Self {
-        Self { data, overlays: Arc::new(RwLock::new(FxHashMap::default())) }
+        Self { data, overlays: Arc::new(RwLock::new(FxHashMap::default())), priority_fee: None }
     }
 
     /// Creates a new empty market data store wrapped in a `MarketData`.
@@ -88,9 +94,54 @@ impl MarketData {
         Self::new(Arc::new(RwLock::new(MarketState::new())))
     }
 
+    /// A handle over the same shared state and overlays whose gas price carries `priority_fee`,
+    /// in wei per gas, in place of the priority fee the feed wrote.
+    ///
+    /// The base fee and the block the price was read at stay the feed's. A legacy gas price has
+    /// no priority fee apart from the gas price, so it stays the feed's too. While the feed has
+    /// written no gas price, this handle reports none, like every other handle.
+    #[must_use]
+    pub fn with_priority_fee(&self, priority_fee: BigUint) -> Self {
+        Self {
+            data: Arc::clone(&self.data),
+            overlays: Arc::clone(&self.overlays),
+            priority_fee: Some(priority_fee),
+        }
+    }
+
+    /// Builds a view over `guard` that reports this handle's gas price.
+    fn view<'a>(
+        &self,
+        guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
+        overlay: Option<(StateLabel, OverlayStates)>,
+    ) -> MarketDataView<'a> {
+        let gas_price = self.replace_priority_fee(guard.gas_price());
+        MarketDataView { guard, overlay, gas_price }
+    }
+
+    /// Returns `gas_price` with this handle's priority fee, or `None` when the handle carries no
+    /// priority fee or the gas price is legacy.
+    fn replace_priority_fee(&self, gas_price: Option<&BlockGasPrice>) -> Option<BlockGasPrice> {
+        let priority_fee = self.priority_fee.as_ref()?;
+        let gas_price = gas_price?;
+        match &gas_price.pricing {
+            GasPrice::Legacy { gas_price: _ } => None,
+            GasPrice::Eip1559 { base_fee_per_gas, max_priority_fee_per_gas: _ } => {
+                Some(BlockGasPrice {
+                    pricing: GasPrice::Eip1559 {
+                        base_fee_per_gas: base_fee_per_gas.clone(),
+                        max_priority_fee_per_gas: priority_fee.clone(),
+                    },
+                    ..gas_price.clone()
+                })
+            }
+        }
+    }
+
     /// Acquires a base view of the market data with no overlay applied.
     pub async fn read(&self) -> MarketDataView<'_> {
-        MarketDataView { guard: self.data.read().await, overlay: None }
+        let guard = self.data.read().await;
+        self.view(guard, None)
     }
 
     /// Acquires an overlay-aware view scoped to `label`.
@@ -108,10 +159,10 @@ impl MarketData {
         let guard = self.data.read().await;
         if let Some(e) = self.overlays.read().await.get(label) {
             let states = Arc::clone(&e.states);
-            return Ok(MarketDataView { guard, overlay: Some((label.clone(), states)) });
+            return Ok(self.view(guard, Some((label.clone(), states))));
         }
         if &guard.label == label {
-            return Ok(MarketDataView { guard, overlay: None });
+            return Ok(self.view(guard, None));
         }
         Err(ReadLabeledError::NotFound(label.clone()))
     }
@@ -132,13 +183,19 @@ impl MarketData {
     /// After three attempts it falls back to one guard for the full set: a feed advancing faster
     /// than the batched clone completes would otherwise starve it forever.
     ///
-    /// No overlay is applied — this reads base data only.
+    /// No overlay is applied — this reads base data only. The subset reports this handle's gas
+    /// price.
     pub async fn extract_subset_batched(
         &self,
         component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
-        self.extract_subset_in_batches(component_ids, 512, || {})
-            .await
+        let mut subset = self
+            .extract_subset_in_batches(component_ids, 512, || {})
+            .await;
+        if let Some(gas_price) = self.replace_priority_fee(subset.gas_price()) {
+            subset.update_gas_price(gas_price);
+        }
+        subset
     }
 
     /// `extract_subset_batched` with the batch size injectable, plus a hook that runs after each
@@ -216,7 +273,7 @@ impl MarketData {
         self.data
             .try_read()
             .ok()
-            .map(|guard| MarketDataView { guard, overlay: None })
+            .map(|guard| self.view(guard, None))
     }
 
     // ==================== Overlay CRUD ====================
@@ -281,11 +338,14 @@ impl MarketData {
 /// An overlay-aware view of the market data, held for the duration of a read lock.
 ///
 /// Holds a read lock on the base `MarketState` and an optional overlay snapshot.
-/// Use `get_simulation_state` for overlay-aware component lookups. All other accessors
-/// delegate to the base data.
+/// Use `get_simulation_state` for overlay-aware component lookups. `gas_price` and
+/// `extract_subset` report the handle's gas price; all other accessors delegate to the base data.
 pub struct MarketDataView<'a> {
     guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
     overlay: Option<(StateLabel, OverlayStates)>,
+    /// Gas price this view reports in place of the base data's, set when the handle it came from
+    /// carries a priority fee. Built once per view so `gas_price` can hand out a reference.
+    gas_price: Option<BlockGasPrice>,
 }
 
 impl<'a> MarketDataView<'a> {
@@ -314,7 +374,7 @@ impl<'a> MarketDataView<'a> {
         &self,
         component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
-        let mut subset = self.guard.extract_subset(component_ids);
+        let mut subset = self.extract_subset(component_ids);
         if let Some((ref label, ref states)) = self.overlay {
             for (id, state) in states.iter() {
                 if subset
@@ -347,8 +407,14 @@ impl<'a> MarketDataView<'a> {
     }
 
     /// Extracts a base-data subset for the given component IDs (no overlay applied).
+    ///
+    /// The subset reports this view's gas price, because algorithms price routes off the subset.
     pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
-        self.guard.extract_subset(component_ids)
+        let mut subset = self.guard.extract_subset(component_ids);
+        if let Some(gas_price) = self.gas_price.clone() {
+            subset.update_gas_price(gas_price);
+        }
+        subset
     }
 
     /// Returns a reference to the token registry from the base data.
@@ -356,9 +422,12 @@ impl<'a> MarketDataView<'a> {
         self.guard.token_registry_ref()
     }
 
-    /// Returns the current gas price from the base data.
+    /// Returns the gas price to solve at: the base data's, with the handle's priority fee when
+    /// it carries one.
     pub fn gas_price(&self) -> Option<&BlockGasPrice> {
-        self.guard.gas_price()
+        self.gas_price
+            .as_ref()
+            .or_else(|| self.guard.gas_price())
     }
 
     /// Returns the block info for the last base-state update.
@@ -1676,5 +1745,94 @@ mod tests {
             2,
             "tokens are not removed with their components"
         );
+    }
+
+    /// Market data over `market_with_two_components`, with `pricing` as the feed's gas price.
+    async fn market_priced_at(pricing: GasPrice) -> MarketData {
+        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+        market_data
+            .write()
+            .await
+            .update_gas_price(BlockGasPrice {
+                block_number: 42,
+                block_hash: Default::default(),
+                block_timestamp: 1_700_000_000,
+                pricing,
+            });
+        market_data
+    }
+
+    fn eip1559(base_fee: u64, priority_fee: u64) -> GasPrice {
+        GasPrice::Eip1559 {
+            base_fee_per_gas: BigUint::from(base_fee),
+            max_priority_fee_per_gas: BigUint::from(priority_fee),
+        }
+    }
+
+    /// Algorithms read the gas price off the view and off the subsets they extract, so every one
+    /// of them has to carry the handle's priority fee.
+    #[tokio::test]
+    async fn test_with_priority_fee_eip1559() {
+        let market_data = market_priced_at(eip1559(30, 2)).await;
+        let priced = market_data.with_priority_fee(BigUint::from(100u64));
+        let ab = "component_ab".to_string();
+        let ids: FxHashSet<&ComponentId> = [&ab].into_iter().collect();
+
+        let view = priced.read().await;
+        let view_price = view
+            .gas_price()
+            .expect("the feed wrote a gas price")
+            .clone();
+        let subsets = [
+            ("extract_subset", view.extract_subset(&ids)),
+            ("extract_subset_with_overlay", view.extract_subset_with_overlay(&ids)),
+        ];
+        drop(view);
+        let batched = priced
+            .extract_subset_batched(&ids)
+            .await;
+
+        assert_eq!(view_price.pricing, eip1559(30, 100));
+        assert_eq!(view_price.block_number, 42);
+        assert_eq!(view_price.block_timestamp, 1_700_000_000);
+        for (name, subset) in subsets
+            .into_iter()
+            .chain([("extract_subset_batched", batched)])
+        {
+            assert_eq!(subset.gas_price().map(|p| &p.pricing), Some(&eip1559(30, 100)), "{name}");
+        }
+        assert_eq!(
+            market_data
+                .read()
+                .await
+                .gas_price()
+                .map(|p| &p.pricing),
+            Some(&eip1559(30, 2)),
+            "the handle it was made from keeps the feed's priority fee"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_with_priority_fee_legacy() {
+        let legacy = GasPrice::Legacy { gas_price: BigUint::from(7u64) };
+        let market_data = market_priced_at(legacy.clone()).await;
+        let priced = market_data.with_priority_fee(BigUint::from(100u64));
+
+        let view = priced.read().await;
+
+        assert_eq!(view.gas_price().map(|p| &p.pricing), Some(&legacy));
+    }
+
+    #[tokio::test]
+    async fn test_with_priority_fee_without_a_feed_price() {
+        let priced = MarketData::new_shared().with_priority_fee(BigUint::from(100u64));
+
+        let view = priced.read().await;
+
+        assert!(view.gas_price().is_none());
+        assert!(view
+            .extract_subset(&FxHashSet::default())
+            .gas_price()
+            .is_none());
     }
 }

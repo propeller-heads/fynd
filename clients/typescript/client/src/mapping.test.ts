@@ -79,6 +79,11 @@ describe('toWireRequest', () => {
     });
   });
 
+  it('sends the priority fee as a decimal string', () => {
+    const wire = toWireRequest({ ...baseParams, options: { priorityFee: 100_000_000n } });
+    expect(wire.options?.priority_fee).toBe('100000000');
+  });
+
   it('omits receiver key when order.receiver is undefined', () => {
     const wire = toWireRequest(baseParams);
     expect(wire.orders[0]).not.toHaveProperty('receiver');

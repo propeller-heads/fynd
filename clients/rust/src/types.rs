@@ -553,6 +553,7 @@ pub struct QuoteOptions {
     pub(crate) max_gas: Option<BigUint>,
     pub(crate) encoding_options: Option<EncodingOptions>,
     pub(crate) route_filter: Option<RouteFilter>,
+    pub(crate) priority_fee: Option<BigUint>,
 }
 
 impl QuoteOptions {
@@ -590,6 +591,13 @@ impl QuoteOptions {
         self
     }
 
+    /// Price gas at the base fee plus `priority_fee` wei per gas, the priority fee the
+    /// transaction will pay, in place of the node's suggestion.
+    pub fn with_priority_fee(mut self, priority_fee: BigUint) -> Self {
+        self.priority_fee = Some(priority_fee);
+        self
+    }
+
     /// The configured timeout in milliseconds, or `None` if using the server default.
     pub fn timeout_ms(&self) -> Option<u64> {
         self.timeout_ms
@@ -608,6 +616,11 @@ impl QuoteOptions {
     /// What this request excludes from a route, or `None` if nothing is excluded.
     pub fn route_filter(&self) -> Option<&RouteFilter> {
         self.route_filter.as_ref()
+    }
+
+    /// The priority fee per gas the transaction will pay, or `None` to use the node's suggestion.
+    pub fn priority_fee(&self) -> Option<&BigUint> {
+        self.priority_fee.as_ref()
     }
 }
 
