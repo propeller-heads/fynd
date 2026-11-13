@@ -9,6 +9,8 @@
 //! hold time is negligible (microseconds per component), so we hold it for the full loop rather
 //! than paying the cost of cloning simulation states via `extract_subset()`.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tracing::{debug, instrument, warn, Span};
 
@@ -30,9 +32,9 @@ use crate::{
     },
 };
 
-/// The most blocks the snapshot from `fynd-nexus` may be behind the market before the pod
-/// computes spot prices itself.
-const NEXUS_MAX_BLOCK_LAG: u64 = 2;
+/// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
+/// block time, before the pod computes spot prices itself.
+const NEXUS_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(30);
 
 /// Computes spot prices for all components.
 ///
@@ -53,8 +55,9 @@ impl SpotPriceComputation {
 
     /// Loads the spot prices from the `fynd-nexus` service behind `client` while its snapshot is
     /// in sync, and computes them otherwise.
-    pub fn with_nexus_client(self, client: NexusClient) -> Self {
-        let nexus_client = NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_BLOCK_LAG);
+    pub fn with_nexus_client(self, client: NexusClient, block_time: Duration) -> Self {
+        let nexus_client =
+            NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_SNAPSHOT_AGE, block_time);
         Self { nexus_client: Some(nexus_client) }
     }
 }

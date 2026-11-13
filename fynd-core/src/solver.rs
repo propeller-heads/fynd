@@ -1125,7 +1125,9 @@ impl FyndBuilder {
         if let Some(url) = &nexus_url {
             let client = NexusClient::new(url)
                 .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
-            computation_config = computation_config.with_nexus_client(client);
+            computation_config = computation_config
+                .with_nexus_client(client, &self.chain)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
         }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.

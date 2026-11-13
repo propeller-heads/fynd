@@ -157,18 +157,20 @@ impl<Output: Clone> NexusDerivedClient<Output> {
     ///
     /// A change in the number of missing ids is logged as a warning when
     /// `warn_when_missing_ids_change` is set. It is always exported as a gauge. A snapshot is
-    /// within the lag while it is at most `max_block_lag` blocks behind the market.
+    /// within the lag while it is at most `max_age` behind the market, counted in market blocks
+    /// of `block_time` each (see [`max_block_lag`]).
     pub(crate) fn new(
         client: NexusClient,
         computation: ComputationId,
         warn_when_missing_ids_change: bool,
-        max_block_lag: u64,
+        max_age: Duration,
+        block_time: Duration,
     ) -> Self {
         Self {
             computation,
             client,
             warn_when_missing_ids_change,
-            max_block_lag,
+            max_block_lag: max_block_lag(max_age, block_time),
             state: Mutex::new(DerivedClientState {
                 cached: None,
                 in_sync_blocks: 0,
@@ -310,6 +312,14 @@ impl<Output: Clone> NexusDerivedClient<Output> {
             );
         }
     }
+}
+
+/// How many market blocks `max_age` spans when each block takes `block_time`.
+///
+/// A block time under one second counts as one second, so the lag never exceeds the age in
+/// seconds and a zero block time cannot divide by zero.
+fn max_block_lag(max_age: Duration, block_time: Duration) -> u64 {
+    max_age.as_secs() / block_time.as_secs().max(1)
 }
 
 /// Whether the snapshot is in sync, given what the last call answered, the blocks in a row the

@@ -11,6 +11,8 @@
 //! available in the [`DerivedData`](crate::derived::store::DerivedData).
 //! Ensure `SpotPriceComputation` runs before this computation.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use num_bigint::BigUint;
 use num_traits::{Float, One};
@@ -67,9 +69,9 @@ fn to_raw_price(price: f64, decimals_in: u32, decimals_out: u32) -> Price {
     Price::new(numerator, denominator)
 }
 
-/// The most blocks the snapshot from `fynd-nexus` may be behind the market before the pod
-/// computes pool depths itself.
-const NEXUS_MAX_BLOCK_LAG: u64 = 2;
+/// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
+/// block time, before the pod computes pool depths itself.
+const NEXUS_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(30);
 
 /// The default share by which a pool's net marginal price falls at its depth.
 pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
@@ -113,8 +115,9 @@ impl ComponentDepthComputation {
 
     /// Loads the depths from the `fynd-nexus` service behind `client` while its snapshot is in
     /// sync, and computes them otherwise.
-    pub fn with_nexus_client(self, client: NexusClient) -> Self {
-        let nexus_client = NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_BLOCK_LAG);
+    pub fn with_nexus_client(self, client: NexusClient, block_time: Duration) -> Self {
+        let nexus_client =
+            NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_SNAPSHOT_AGE, block_time);
         Self { nexus_client: Some(nexus_client), ..self }
     }
 }

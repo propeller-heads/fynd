@@ -1166,9 +1166,9 @@ const FLAGGED_POOL_PASSES: u64 = 100;
 /// price only through this refresh. Passes for the tokens of added components count too.
 const MAX_PRICE_AGE_PASSES: u64 = 100;
 
-/// The most blocks the snapshot from `fynd-nexus` may be behind the market before the pod
-/// computes token prices itself.
-const NEXUS_MAX_BLOCK_LAG: u64 = 5;
+/// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
+/// block time, before the pod computes token prices itself.
+const NEXUS_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(30);
 
 /// Default wall-clock budget for a pricing pass after its first buy pass.
 ///
@@ -1236,8 +1236,9 @@ impl TokenGasPriceComputation {
 
     /// Loads the prices from the `fynd-nexus` service behind `client` while its snapshot is in
     /// sync, and computes them otherwise.
-    pub fn with_nexus_client(self, client: NexusClient) -> Self {
-        let nexus_client = NexusDerivedClient::new(client, Self::ID, false, NEXUS_MAX_BLOCK_LAG);
+    pub fn with_nexus_client(self, client: NexusClient, block_time: Duration) -> Self {
+        let nexus_client =
+            NexusDerivedClient::new(client, Self::ID, false, NEXUS_MAX_SNAPSHOT_AGE, block_time);
         Self { nexus_client: Some(Arc::new(nexus_client)), ..self }
     }
 

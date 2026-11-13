@@ -17,7 +17,7 @@ use metrics::{counter, gauge, histogram};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, instrument, trace, warn, Span};
-use tycho_simulation::tycho_common::models::{Address, Chain};
+use tycho_simulation::tycho_common::models::{chain_config::ChainConfigError, Address, Chain};
 
 use crate::types::{
     constants::{gas_token_config, GasTokenConfig, UnsupportedChainError},
@@ -148,7 +148,14 @@ pub struct ComputationManagerConfig {
     pricing_min_pass_interval: Option<Duration>,
     /// The `fynd-nexus` service the default computations load their data from while it is
     /// healthy; `None` computes it here.
-    nexus: Option<NexusClient>,
+    nexus: Option<NexusSetting>,
+}
+
+/// The `fynd-nexus` client of a [`ComputationManagerConfig`] and the block time of its chain.
+#[derive(Debug, Clone)]
+struct NexusSetting {
+    client: NexusClient,
+    block_time: Duration,
 }
 
 impl ComputationManagerConfig {
@@ -196,9 +203,20 @@ impl ComputationManagerConfig {
     /// Makes the default computations (spot prices, token prices and component depths) load their
     /// data from the `fynd-nexus` service behind `client` while it is healthy, and compute it
     /// here while it is not. The service must run the market.
-    pub fn with_nexus_client(mut self, client: NexusClient) -> Self {
-        self.nexus = Some(client);
-        self
+    ///
+    /// A snapshot may be 30 seconds old, counted in market blocks of `chain`'s block time.
+    ///
+    /// # Errors
+    /// Returns [`ChainConfigError`] when `chain` is a custom chain with no registered config, so
+    /// its block time is unknown.
+    pub fn with_nexus_client(
+        mut self,
+        client: NexusClient,
+        chain: &Chain,
+    ) -> Result<Self, ChainConfigError> {
+        let block_time = Duration::from_secs(chain.try_block_time_secs()?);
+        self.nexus = Some(NexusSetting { client, block_time });
+        Ok(self)
     }
 
     /// Prices gas against `gas_token` as an 18-decimal wrapper of the native asset, replacing
@@ -310,10 +328,10 @@ impl ComputationManager {
         let mut spot_prices = SpotPriceComputation::new();
         let mut token_prices = config.build_token_price_computation();
         let mut depths = ComponentDepthComputation::new(config.depth_marginal_price_drop())?;
-        if let Some(client) = &config.nexus {
-            spot_prices = spot_prices.with_nexus_client(client.clone());
-            token_prices = token_prices.with_nexus_client(client.clone());
-            depths = depths.with_nexus_client(client.clone());
+        if let Some(NexusSetting { client, block_time }) = &config.nexus {
+            spot_prices = spot_prices.with_nexus_client(client.clone(), *block_time);
+            token_prices = token_prices.with_nexus_client(client.clone(), *block_time);
+            depths = depths.with_nexus_client(client.clone(), *block_time);
         }
         manager.register(spot_prices)?;
         manager.register(token_prices)?;
