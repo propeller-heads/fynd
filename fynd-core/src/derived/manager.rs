@@ -1825,7 +1825,8 @@ mod tests {
                 .await;
         }
         let config = ComputationManagerConfig::new()
-            .with_nexus_client(NexusClient::new(&server.uri()).unwrap());
+            .with_nexus_client(NexusClient::new(&server.uri()).unwrap(), &Chain::Ethereum)
+            .unwrap();
         let (manager, mut event_rx) = ComputationManager::new(config, market_with_block()).unwrap();
         let store = manager.store();
 

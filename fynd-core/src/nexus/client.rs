@@ -545,7 +545,8 @@ mod tests {
             NexusClient::new(&server.uri()).unwrap(),
             "spot_prices",
             true,
-            u64::MAX,
+            Duration::MAX,
+            Duration::from_secs(1),
         )
     }
 
@@ -673,5 +674,22 @@ mod tests {
         assert_eq!(metrics["nexus_derived_missing_components"], missing);
         assert_eq!(metrics["nexus_derived_block_lag"], 1.0);
         assert!(metrics.contains_key("nexus_derived_snapshot_age_seconds"));
+    }
+
+    #[rstest]
+    #[case::ethereum(30, 12, 2)]
+    #[case::base(30, 2, 15)]
+    #[case::one_second_blocks(30, 1, 30)]
+    #[case::zero_block_time(30, 0, 30)]
+    #[case::block_longer_than_age(30, 60, 0)]
+    fn test_max_block_lag_from_age_and_block_time(
+        #[case] age_secs: u64,
+        #[case] block_time_secs: u64,
+        #[case] expected: u64,
+    ) {
+        let lag =
+            max_block_lag(Duration::from_secs(age_secs), Duration::from_secs(block_time_secs));
+
+        assert_eq!(lag, expected);
     }
 }

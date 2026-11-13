@@ -471,7 +471,10 @@ mod tests {
     #[case::computing(ComponentDepthComputation::default())]
     #[case::with_nexus_client(
         ComponentDepthComputation::default()
-            .with_nexus_client(NexusClient::new("http://nexus:3000").unwrap())
+            .with_nexus_client(
+                NexusClient::new("http://nexus:3000").unwrap(),
+                Duration::from_secs(12),
+            )
     )]
     fn test_requires_fresh_spot_prices(#[case] computation: ComponentDepthComputation) {
         assert!(computation
