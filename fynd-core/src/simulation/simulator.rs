@@ -110,6 +110,8 @@ pub(crate) struct SimulatedCall<'a> {
     pub(crate) data: &'a [u8],
     /// The block whose state the call runs on.
     pub(crate) block: BlockNumberOrTag,
+    /// The timestamp of the simulated block, or none to take the node's.
+    pub(crate) time: Option<u64>,
     /// How the simulated block sets `prevrandao`.
     pub(crate) prev_randao: PrevRandaoOverride,
 }
@@ -168,8 +170,9 @@ pub enum SimulationBlock {
     /// The block that the quote was priced on.
     ///
     /// The simulated output then differs from the quote only by what the quote did not model,
-    /// and not by the blocks that came after the solve. A node that does not have the block yet
-    /// is asked again, for at most two block times.
+    /// and not by the blocks that came after the solve. The simulated block comes one block time
+    /// after the quote's block, as the block that would carry the transaction does. A node that
+    /// does not have the block yet is asked again, for at most two block times.
     Quote,
 }
 
@@ -257,6 +260,7 @@ impl<'a> SimulationSetup<'a> {
         client_fee: Option<&ClientFeeParams>,
         block: SimulationBlock,
         prev_randao: PrevRandaoOverride,
+        block_time: Duration,
     ) -> Result<Self, String> {
         let transaction = quote
             .transaction()
@@ -275,6 +279,15 @@ impl<'a> SimulationSetup<'a> {
             block: match block {
                 SimulationBlock::Latest => BlockNumberOrTag::Latest,
                 SimulationBlock::Quote => BlockNumberOrTag::Number(quote.block().number()),
+            },
+            time: match block {
+                SimulationBlock::Latest => None,
+                SimulationBlock::Quote => Some(
+                    quote
+                        .block()
+                        .timestamp()
+                        .saturating_add(block_time.as_secs()),
+                ),
             },
             prev_randao,
         };
@@ -374,11 +387,16 @@ impl QuoteSimulator {
         quote: &OrderQuote,
         client_fee: Option<&ClientFeeParams>,
     ) -> SimulationAttempt {
-        let setup =
-            match SimulationSetup::for_quote(quote, client_fee, self.block, self.prev_randao) {
-                Ok(value) => value,
-                Err(error) => return failure_with(format!("simulation setup failed: {error}")),
-            };
+        let setup = match SimulationSetup::for_quote(
+            quote,
+            client_fee,
+            self.block,
+            self.prev_randao,
+            self.block_time,
+        ) {
+            Ok(value) => value,
+            Err(error) => return failure_with(format!("simulation setup failed: {error}")),
+        };
         let mut overrides = match self
             .overrides(setup.call.sender, setup.token_in, setup.call.router)
             .await
@@ -696,8 +714,12 @@ fn failure_with(reason: String) -> SimulationAttempt {
 /// `eth_simulateV1` takes the other block fields from the block that it runs on. It leaves the
 /// fee recipient and `prevrandao` at zero, and a pool can read these to detect a simulation. This
 /// sets them, and the block gas limit, to realistic values. `prevrandao` is random, except on BSC,
-/// where it is left to the node because BSC rejects an override of 1000 or more.
-fn block_environment(prev_randao: PrevRandaoOverride) -> SimulationBlockEnvironment {
+/// where it is left to the node because BSC rejects an override of 1000 or more. The timestamp is
+/// `time`, or the node's when none. A pool can read it, for example to reject a stale price feed.
+fn block_environment(
+    prev_randao: PrevRandaoOverride,
+    time: Option<u64>,
+) -> SimulationBlockEnvironment {
     let prev_randao = match prev_randao {
         PrevRandaoOverride::Random => Some(B256::from(rand::random::<[u8; 32]>())),
         PrevRandaoOverride::NodeValue => None,
@@ -705,6 +727,7 @@ fn block_environment(prev_randao: PrevRandaoOverride) -> SimulationBlockEnvironm
     SimulationBlockEnvironment {
         fee_recipient: Some(SIMULATION_COINBASE),
         prev_randao,
+        time,
         gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
         ..Default::default()
     }
@@ -751,7 +774,7 @@ async fn simulate_with_overrides(
     // The trace has to observe the same environment as `eth_simulateV1` to reproduce the same
     // revert. A random `prevrandao` is drawn per call, so it is built once and reused rather
     // than regenerated.
-    let environment = block_environment(simulated.prev_randao);
+    let environment = block_environment(simulated.prev_randao, simulated.time);
     let payload =
         SimulationRequest::single_call(call.clone(), overrides.clone(), environment.clone());
     let response = match timeout(

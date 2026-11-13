@@ -202,8 +202,8 @@ pub struct ServeArgs {
     pub enable_simulation: bool,
 
     /// Simulate each quote on the block that it was priced on, instead of the latest block.
-    /// A node that does not have that block yet is asked again, for at most two block times.
-    /// Disabled by default.
+    /// The simulated block is timestamped one block time after that block. A node that does not
+    /// have that block yet is asked again, for at most two block times. Disabled by default.
     #[arg(long)]
     pub simulate_on_quote_block: bool,
 
