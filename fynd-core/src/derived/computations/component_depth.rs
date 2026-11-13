@@ -41,7 +41,7 @@ use crate::{
     },
     feed::market_data::{MarketData, MarketState},
     nexus::{
-        client::{NexusClient, NexusDerivedClient},
+        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
         derived::PoolDepthSnapshot,
     },
     types::{ComponentId, SwapDirection},
@@ -67,6 +67,10 @@ fn to_raw_price(price: f64, decimals_in: u32, decimals_out: u32) -> Price {
     Price::new(numerator, denominator)
 }
 
+/// The most blocks the snapshot from `fynd-nexus` may be behind the market before the pod
+/// computes pool depths itself.
+const NEXUS_MAX_BLOCK_LAG: u64 = 2;
+
 /// The default share by which a pool's net marginal price falls at its depth.
 pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
 
@@ -79,13 +83,13 @@ pub(crate) const DEFAULT_MARGINAL_PRICE_DROP: f64 = 0.015;
 pub struct ComponentDepthComputation {
     /// The share by which the pool's net marginal price falls at the depth.
     marginal_price_drop: f64,
-    /// Loads the depths from `fynd-nexus` instead of computing them.
-    nexus: Option<NexusDerivedClient<ComponentDepths>>,
+    /// Loads the depths from `fynd-nexus` while its snapshot is in sync.
+    nexus_client: Option<NexusDerivedClient<ComponentDepths>>,
 }
 
 impl Default for ComponentDepthComputation {
     fn default() -> Self {
-        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP, nexus: None }
+        Self { marginal_price_drop: DEFAULT_MARGINAL_PRICE_DROP, nexus_client: None }
     }
 }
 
@@ -104,12 +108,14 @@ impl ComponentDepthComputation {
                 "marginal_price_drop must be between 0 and 1 exclusive, got {marginal_price_drop}"
             )));
         }
-        Ok(Self { marginal_price_drop, nexus: None })
+        Ok(Self { marginal_price_drop, nexus_client: None })
     }
 
-    /// Loads the depths from the `fynd-nexus` service behind `client` instead of computing them.
+    /// Loads the depths from the `fynd-nexus` service behind `client` while its snapshot is in
+    /// sync, and computes them otherwise.
     pub fn with_nexus_client(self, client: NexusClient) -> Self {
-        Self { nexus: Some(NexusDerivedClient::new(client, Self::ID, true)), ..self }
+        let nexus_client = NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_BLOCK_LAG);
+        Self { nexus_client: Some(nexus_client), ..self }
     }
 }
 
@@ -122,9 +128,6 @@ impl DerivedComputation for ComponentDepthComputation {
     const ID: ComputationId = "pool_depths";
 
     fn requirements(&self) -> ComputationRequirements {
-        if self.nexus.is_some() {
-            return ComputationRequirements::none();
-        }
         ComputationRequirements::fresh([SpotPriceComputation::ID])
     }
 
@@ -139,13 +142,29 @@ impl DerivedComputation for ComponentDepthComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        if let Some(nexus) = &self.nexus {
-            let depths = nexus
-                .get_latest_snapshot(market, PoolDepthSnapshot::into_depths, |market, depths| {
+        if let Some(nexus_client) = &self.nexus_client {
+            let snapshot = nexus_client
+                .get_in_sync_snapshot(market, PoolDepthSnapshot::into_depths, |market, depths| {
                     components_without_entries(market, depths.keys().map(|key| key.0.as_str()))
                 })
-                .await?;
-            return Ok(ComputationOutput::success(depths));
+                .await;
+            match snapshot {
+                NexusSnapshot::InSync(depths) => return Ok(ComputationOutput::success(depths)),
+                NexusSnapshot::FellOutOfSync => {
+                    let every_component = ChangedComponents::every_component(
+                        market.read().await.component_topology(),
+                    );
+                    return self
+                        .compute_locally(
+                            market,
+                            store,
+                            ComponentDepths::default(),
+                            &every_component,
+                        )
+                        .await;
+                }
+                NexusSnapshot::OutOfSync => {}
+            }
         }
         let stored = read_stored_depths(store).await;
         self.compute_locally(market, store, stored, changed)

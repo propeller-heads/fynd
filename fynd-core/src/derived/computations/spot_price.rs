@@ -25,10 +25,14 @@ use crate::{
     },
     feed::market_data::MarketData,
     nexus::{
-        client::{NexusClient, NexusDerivedClient},
+        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
         derived::SpotPriceSnapshot,
     },
 };
+
+/// The most blocks the snapshot from `fynd-nexus` may be behind the market before the pod
+/// computes spot prices itself.
+const NEXUS_MAX_BLOCK_LAG: u64 = 2;
 
 /// Computes spot prices for all components.
 ///
@@ -36,10 +40,10 @@ use crate::{
 ///
 /// Uses `ProtocolSim::spot_price()` to compute the instantaneous exchange rate.
 ///
-/// With a nexus client it loads the spot prices from `fynd-nexus` instead.
+/// With a nexus client it loads the spot prices from `fynd-nexus` while its snapshot is in sync.
 #[derive(Debug, Default)]
 pub struct SpotPriceComputation {
-    nexus: Option<NexusDerivedClient<SpotPrices>>,
+    nexus_client: Option<NexusDerivedClient<SpotPrices>>,
 }
 
 impl SpotPriceComputation {
@@ -47,10 +51,11 @@ impl SpotPriceComputation {
         Self::default()
     }
 
-    /// Loads the spot prices from the `fynd-nexus` service behind `client` instead of computing
-    /// them.
+    /// Loads the spot prices from the `fynd-nexus` service behind `client` while its snapshot is
+    /// in sync, and computes them otherwise.
     pub fn with_nexus_client(self, client: NexusClient) -> Self {
-        Self { nexus: Some(NexusDerivedClient::new(client, Self::ID, true)) }
+        let nexus_client = NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_BLOCK_LAG);
+        Self { nexus_client: Some(nexus_client) }
     }
 }
 
@@ -71,17 +76,28 @@ impl DerivedComputation for SpotPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        if let Some(nexus) = &self.nexus {
-            let prices = nexus
-                .get_latest_snapshot(
+        if let Some(nexus_client) = &self.nexus_client {
+            let snapshot = nexus_client
+                .get_in_sync_snapshot(
                     market,
                     SpotPriceSnapshot::into_spot_prices,
                     |market, prices| {
                         components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
                     },
                 )
-                .await?;
-            return Ok(ComputationOutput::success(prices));
+                .await;
+            match snapshot {
+                NexusSnapshot::InSync(prices) => return Ok(ComputationOutput::success(prices)),
+                NexusSnapshot::FellOutOfSync => {
+                    let every_component = ChangedComponents::every_component(
+                        market.read().await.component_topology(),
+                    );
+                    return self
+                        .compute_locally(market, None, &every_component)
+                        .await;
+                }
+                NexusSnapshot::OutOfSync => {}
+            }
         }
         self.compute_locally(market, read_stored_spot_prices(store).await, changed)
             .await

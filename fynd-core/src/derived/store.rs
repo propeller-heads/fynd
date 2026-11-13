@@ -279,6 +279,11 @@ impl DerivedData {
         self.token_prices_deps = Some(ComputedValue { data: prices, block });
     }
 
+    /// Forgets the stored token price dependencies.
+    pub(crate) fn clear_token_prices_deps(&mut self) {
+        self.token_prices_deps = None;
+    }
+
     /// Edits the stored dependency map in place and stamps it with `block`.
     ///
     /// Returns `false` when nothing is stored yet, in which case `edit` never runs.

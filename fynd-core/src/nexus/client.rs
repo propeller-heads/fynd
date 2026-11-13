@@ -9,19 +9,23 @@ use metrics::{counter, gauge};
 use reqwest::{header::IF_NONE_MATCH, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::{
     derived::DerivedSnapshot,
     price_levels::{PriceLevelsAssembler, PriceLevelsFeed},
 };
 use crate::{
-    derived::{ComputationError, ComputationId},
+    derived::ComputationId,
     feed::market_data::{MarketData, MarketState},
 };
 
 /// How long a derived snapshot request may take. A snapshot is a few megabytes.
 const DERIVED_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many blocks in a row a snapshot must be within `max_block_lag` before a computation that
+/// stopped using the service uses it again.
+const IN_SYNC_BLOCKS_TO_RESUME: u32 = 3;
 
 /// How many missing ids a warning lists.
 const MISSING_SAMPLE_SIZE: usize = 10;
@@ -66,7 +70,8 @@ pub struct NexusClient {
 
 /// A client for one derived computation's latest snapshot on a `fynd-nexus` service.
 ///
-/// It caches the latest snapshot it accepted.
+/// It caches the latest snapshot it accepted and counts the blocks it has been in sync with the
+/// market.
 ///
 /// Exports `nexus_derived_block_lag`, `nexus_derived_snapshot_age_seconds` and
 /// `nexus_derived_missing_components` per computation, and counts failed fetches in
@@ -76,8 +81,38 @@ pub(crate) struct NexusDerivedClient<Output> {
     computation: ComputationId,
     client: NexusClient,
     warn_when_missing_ids_change: bool,
-    cached: Mutex<Option<CachedSnapshot<Output>>>,
+    max_block_lag: u64,
+    state: Mutex<DerivedClientState<Output>>,
     reported_missing: AtomicUsize,
+}
+
+/// What a [`NexusDerivedClient`] keeps between blocks.
+#[derive(Debug)]
+struct DerivedClientState<Output> {
+    cached: Option<CachedSnapshot<Output>>,
+    /// Blocks in a row the held snapshot was within `max_block_lag`; 0 when it is not now.
+    in_sync_blocks: u32,
+    last_answer: LastAnswer,
+}
+
+/// What the client's last call answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastAnswer {
+    Nothing,
+    InSync,
+    NotInSync,
+}
+
+/// The latest snapshot from `fynd-nexus`, by how it follows this pod's market.
+#[derive(Debug, PartialEq, Eq)]
+#[expect(clippy::enum_variant_names, reason = "the variants name the three sync outcomes")]
+pub(crate) enum NexusSnapshot<Output> {
+    /// The snapshot is in sync: use it.
+    InSync(Output),
+    /// The last block's snapshot was in sync and this one is not.
+    FellOutOfSync,
+    /// The snapshot is out of sync, or none is held.
+    OutOfSync,
 }
 
 /// The latest snapshot a client accepted, converted into the computation's output.
@@ -121,43 +156,50 @@ impl<Output: Clone> NexusDerivedClient<Output> {
     /// A client for `computation`'s snapshots from the service behind `client`.
     ///
     /// A change in the number of missing ids is logged as a warning when
-    /// `warn_when_missing_ids_change` is set. It is always exported as a gauge.
+    /// `warn_when_missing_ids_change` is set. It is always exported as a gauge. A snapshot is
+    /// within the lag while it is at most `max_block_lag` blocks behind the market.
     pub(crate) fn new(
         client: NexusClient,
         computation: ComputationId,
         warn_when_missing_ids_change: bool,
+        max_block_lag: u64,
     ) -> Self {
         Self {
             computation,
             client,
             warn_when_missing_ids_change,
-            cached: Mutex::new(None),
+            max_block_lag,
+            state: Mutex::new(DerivedClientState {
+                cached: None,
+                in_sync_blocks: 0,
+                last_answer: LastAnswer::Nothing,
+            }),
             reported_missing: AtomicUsize::new(0),
         }
     }
 
-    /// The output of the latest snapshot the service has served, converted by `convert`.
+    /// The latest snapshot from the service, when it is in sync with the market.
     ///
-    /// A fetched snapshot replaces the cached one only if its block is newer. When the fetch
-    /// fails, the cached snapshot is returned and the failure is logged and counted. `missing`
-    /// lists the ids of `market` that the output has no entry for.
+    /// Call it once per block. A fetched snapshot replaces the held one only if its block is
+    /// newer. When the fetch fails, the held snapshot stays and the failure is logged and counted.
+    /// `convert` turns a snapshot into the output and `missing` lists the ids of `market` that
+    /// the output has no entry for. See [`classify`] for when a snapshot is in sync.
     ///
-    /// # Errors
-    ///
-    /// [`ComputationError::NoValidResult`] when the service has not served a snapshot yet.
-    pub(crate) async fn get_latest_snapshot<Entry: DeserializeOwned>(
+    /// Logs a warning when the snapshot falls out of sync and a message when it is in sync again.
+    pub(crate) async fn get_in_sync_snapshot<Entry: DeserializeOwned>(
         &self,
         market: &MarketData,
         convert: fn(DerivedSnapshot<Entry>) -> Output,
         missing: fn(&MarketState, &Output) -> Vec<String>,
-    ) -> Result<Output, ComputationError> {
-        let mut cached_guard = self.cached.lock().await;
-        let known_block = cached_guard
+    ) -> NexusSnapshot<Output> {
+        let mut state_guard = self.state.lock().await;
+        let DerivedClientState { cached, in_sync_blocks, last_answer } = &mut *state_guard;
+        let known_block = cached
             .as_ref()
             .map(|cached| cached.block);
         match fetch_derived_snapshot::<Entry>(&self.client, self.computation, known_block).await {
             Ok(Some(snapshot)) if known_block.is_none_or(|known| snapshot.block > known) => {
-                *cached_guard = Some(CachedSnapshot {
+                *cached = Some(CachedSnapshot {
                     block: snapshot.block,
                     received_at: Instant::now(),
                     output: convert(snapshot),
@@ -170,19 +212,67 @@ impl<Output: Clone> NexusDerivedClient<Output> {
                 warn!(computation = self.computation, "fetching from Fynd Nexus failed: {error}");
             }
         }
-        let Some(cached) = cached_guard.as_ref() else {
-            return Err(ComputationError::NoValidResult {
-                reason: format!("{} has no snapshot from fynd-nexus yet", self.computation),
-            });
-        };
-        let view = market.read().await;
-        let lag = view
-            .last_updated()
-            .map(|block| i128::from(block.number()) - i128::from(cached.block));
-        let missing = missing(view.base_market_state(), &cached.output);
-        drop(view);
-        self.report_held_snapshot(cached, lag, &missing);
-        Ok(cached.output.clone())
+        let mut block_lag = None;
+        if let Some(cached) = cached.as_ref() {
+            let view = market.read().await;
+            let market_block = view
+                .last_updated()
+                .map(|block| block.number());
+            let lag = market_block.map_or(0, |block| block.saturating_sub(cached.block));
+            let missing = missing(view.base_market_state(), &cached.output);
+            drop(view);
+            self.report_held_snapshot(cached, market_block.map(|_| lag), &missing);
+            block_lag = Some(lag);
+        }
+        let within_lag = cached
+            .as_ref()
+            .filter(|_| block_lag.is_some_and(|lag| lag <= self.max_block_lag))
+            .map(|cached| &cached.output);
+        *in_sync_blocks = if within_lag.is_some() { in_sync_blocks.saturating_add(1) } else { 0 };
+
+        let answer = classify(*last_answer, *in_sync_blocks, within_lag);
+        self.log_answer(&answer, *last_answer, block_lag);
+        match answer {
+            NexusSnapshot::InSync(output) => {
+                *last_answer = LastAnswer::InSync;
+                NexusSnapshot::InSync(output.clone())
+            }
+            NexusSnapshot::FellOutOfSync => {
+                *last_answer = LastAnswer::NotInSync;
+                NexusSnapshot::FellOutOfSync
+            }
+            NexusSnapshot::OutOfSync => {
+                *last_answer = LastAnswer::NotInSync;
+                NexusSnapshot::OutOfSync
+            }
+        }
+    }
+
+    fn log_answer(
+        &self,
+        answer: &NexusSnapshot<&Output>,
+        last_answer: LastAnswer,
+        block_lag: Option<u64>,
+    ) {
+        match (answer, last_answer) {
+            (NexusSnapshot::FellOutOfSync, _) => match block_lag {
+                Some(lag) => warn!(
+                    computation = self.computation,
+                    lag,
+                    max_block_lag = self.max_block_lag,
+                    "fynd-nexus snapshot is out of sync, computing locally"
+                ),
+                None => warn!(
+                    computation = self.computation,
+                    "no snapshot from fynd-nexus, computing locally"
+                ),
+            },
+            (NexusSnapshot::InSync(_), LastAnswer::NotInSync) => {
+                info!(computation = self.computation, "fynd-nexus is in sync again, using it");
+            }
+            (NexusSnapshot::InSync(_), LastAnswer::Nothing | LastAnswer::InSync) |
+            (NexusSnapshot::OutOfSync, _) => {}
+        }
     }
 
     /// Exports the gauges of the held snapshot and warns when the missing ids change. The lag is
@@ -190,7 +280,7 @@ impl<Output: Clone> NexusDerivedClient<Output> {
     fn report_held_snapshot(
         &self,
         cached: &CachedSnapshot<Output>,
-        lag: Option<i128>,
+        lag: Option<u64>,
         missing: &[String],
     ) {
         if let Some(lag) = lag {
@@ -219,6 +309,28 @@ impl<Output: Clone> NexusDerivedClient<Output> {
                 "the fynd-nexus snapshot lacks entries for part of this pod's market"
             );
         }
+    }
+}
+
+/// Whether the snapshot is in sync, given what the last call answered, the blocks in a row the
+/// snapshot was within the lag and `within_lag`, the snapshot when it is within the lag now.
+///
+/// The first call and a call after an in-sync one use a snapshot that is within the lag. After
+/// an out-of-sync call, the snapshot must be within the lag for [`IN_SYNC_BLOCKS_TO_RESUME`]
+/// blocks in a row. The first call without such a snapshot counts as falling out of sync, since
+/// the store holds no local data yet.
+fn classify<Output>(
+    last_answer: LastAnswer,
+    in_sync_blocks: u32,
+    within_lag: Option<Output>,
+) -> NexusSnapshot<Output> {
+    match (within_lag, last_answer) {
+        (Some(output), LastAnswer::Nothing | LastAnswer::InSync) => NexusSnapshot::InSync(output),
+        (Some(output), LastAnswer::NotInSync) if in_sync_blocks >= IN_SYNC_BLOCKS_TO_RESUME => {
+            NexusSnapshot::InSync(output)
+        }
+        (Some(_) | None, LastAnswer::NotInSync) => NexusSnapshot::OutOfSync,
+        (None, LastAnswer::Nothing | LastAnswer::InSync) => NexusSnapshot::FellOutOfSync,
     }
 }
 

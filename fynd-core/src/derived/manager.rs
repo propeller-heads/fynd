@@ -40,6 +40,11 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
+    /// Every component of `topology` as added, as at startup.
+    pub(crate) fn every_component(topology: FxHashMap<ComponentId, ComponentTopology>) -> Self {
+        Self { added: topology, ..Self::default() }
+    }
+
     /// Returns a HashSet of all changed component IDs.
     pub fn all_changed_ids(&self) -> FxHashSet<ComponentId> {
         let mut all = FxHashSet::default();
@@ -141,8 +146,8 @@ pub struct ComputationManagerConfig {
     /// Overrides how long after a token-pricing pass starts the next one may start; `None`
     /// keeps the computation's default.
     pricing_min_pass_interval: Option<Duration>,
-    /// The `fynd-nexus` service the default computations load their data from; `None` computes
-    /// it here.
+    /// The `fynd-nexus` service the default computations load their data from while it is
+    /// healthy; `None` computes it here.
     nexus: Option<NexusClient>,
 }
 
@@ -189,8 +194,8 @@ impl ComputationManagerConfig {
     }
 
     /// Makes the default computations (spot prices, token prices and component depths) load their
-    /// data from the `fynd-nexus` service behind `client` instead of computing it. The service
-    /// must run the market.
+    /// data from the `fynd-nexus` service behind `client` while it is healthy, and compute it
+    /// here while it is not. The service must run the market.
     pub fn with_nexus_client(mut self, client: NexusClient) -> Self {
         self.nexus = Some(client);
         self
@@ -291,7 +296,8 @@ struct ComputationSchedule {
 impl ComputationManager {
     /// Creates a manager with the default computation set: spot prices, token prices, and
     /// component depths, run for every block by [`run`](Self::run). With a nexus client in
-    /// `config`, they load their data from the service instead of computing it.
+    /// `config`, they load their data from the service while it is healthy and compute it here
+    /// otherwise.
     ///
     /// Returns the manager and a receiver for derived data events.
     /// Workers can subscribe to the event sender via `event_sender()` to track

@@ -798,6 +798,10 @@ impl FyndBuilder {
     /// (default: connect and compute). Native and Liquorice always connect directly. The
     /// books are still built here, and firm quotes still go straight to the venue.
     ///
+    /// While the service's snapshots are out of sync (none yet, or too many blocks old) the pod
+    /// computes the spot prices, pool depths and token prices itself, and is not kept from becoming
+    /// ready. It goes back to the service after its snapshots have been in sync for a few blocks.
+    ///
     /// The service must run the market, which it does with `--tycho-url`. Computations added
     /// with [`with_computation`](Self::with_computation) still run here.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
