@@ -1,4 +1,16 @@
 
+## [0.124.1](https://github.com/propeller-heads/fynd/compare/0.124.0...0.124.1) (2026-11-13)
+
+### Features
+
+* **core:** serve Metric on Elysium ([2715639](https://github.com/propeller-heads/fynd/commit/271563983a1ce15c999ec690d56935de18f44fb3))
+
+### Bug Fixes
+
+* **deps:** bump quinn-proto and quinn-udp past new advisories ([29977df](https://github.com/propeller-heads/fynd/commit/29977df251f197a175cde0c87f48a00ba1cf8caa))
+* **core:** quote the block the algorithm solved against ([e243ca5](https://github.com/propeller-heads/fynd/commit/e243ca59e46825ced2c48201ea08a31735cc2998))
+
+
 ## [0.124.0](https://github.com/propeller-heads/fynd/compare/0.123.2...0.124.0) (2026-11-10)
 
 ### Features
