@@ -18,8 +18,15 @@ use crate::feed::{protocol_registry::require_executor, DataFeedError};
 /// Each entry must also have its own executor in tycho-execution's `executor_addresses.json`, or
 /// its legs would price from the book feed and then fail to encode: Ethereum and BSC have only the
 /// fallback executor.
-pub const METRIC_CHAINS: &[Chain] =
-    &[Chain::Ethereum, Chain::Base, Chain::Robinhood, Chain::Bsc, Chain::Arbitrum, Chain::Polygon];
+pub const METRIC_CHAINS: &[Chain] = &[
+    Chain::Ethereum,
+    Chain::Base,
+    Chain::Robinhood,
+    Chain::Bsc,
+    Chain::Arbitrum,
+    Chain::Polygon,
+    Chain::Elysium,
+];
 
 /// Rejects Metric on a chain outside [`METRIC_CHAINS`] or where tycho-execution has no executor
 /// for the entry.
