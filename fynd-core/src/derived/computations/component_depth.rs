@@ -147,7 +147,22 @@ impl DerivedComputation for ComponentDepthComputation {
                 .await?;
             return Ok(ComputationOutput::success(depths));
         }
-        let (spot_prices, mut component_depths) = read_stored_data(store).await?;
+        let stored = read_stored_depths(store).await;
+        self.compute_locally(market, store, stored, changed)
+            .await
+    }
+}
+
+impl ComponentDepthComputation {
+    /// Recomputes the depths of the `changed` components on top of `component_depths`.
+    async fn compute_locally(
+        &self,
+        market: &MarketData,
+        store: &SharedDerivedDataRef,
+        mut component_depths: ComponentDepths,
+        changed: &ChangedComponents,
+    ) -> Result<ComputationOutput<ComponentDepths>, ComputationError> {
+        let spot_prices = read_stored_spot_prices(store).await?;
         for component_id in &changed.removed {
             component_depths.retain(|key, _| &key.0 != component_id);
         }
@@ -204,20 +219,26 @@ impl DerivedComputation for ComponentDepthComputation {
 /// The depth of one swap direction of a component, or why it has none.
 type PairDepth = (ComponentDepthKey, Result<BigUint, FailedItemError>);
 
-/// Reads the stored spot prices, and the stored depths to start from.
-async fn read_stored_data(
+/// Reads the stored spot prices.
+async fn read_stored_spot_prices(
     store: &SharedDerivedDataRef,
-) -> Result<(SpotPrices, ComponentDepths), ComputationError> {
-    let store_guard = store.read().await;
-    let spot_prices = store_guard
+) -> Result<SpotPrices, ComputationError> {
+    store
+        .read()
+        .await
         .spot_prices()
-        .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))?
-        .clone();
-    let component_depths = store_guard
+        .cloned()
+        .ok_or(ComputationError::MissingDependency(SpotPriceComputation::ID))
+}
+
+/// Reads the stored depths, empty when none were stored yet.
+async fn read_stored_depths(store: &SharedDerivedDataRef) -> ComponentDepths {
+    store
+        .read()
+        .await
         .component_depths()
         .cloned()
-        .unwrap_or_default();
-    Ok((spot_prices, component_depths))
+        .unwrap_or_default()
 }
 
 /// Returns the added and updated components, whose depths need computing, and a market snapshot

@@ -176,12 +176,26 @@ impl<Output: Clone> NexusDerivedClient<Output> {
             });
         };
         let view = market.read().await;
-        if let Some(block) = view.last_updated() {
-            let lag = i128::from(block.number()) - i128::from(cached.block);
-            gauge!("nexus_derived_block_lag", "computation" => self.computation).set(lag as f64);
-        }
+        let lag = view
+            .last_updated()
+            .map(|block| i128::from(block.number()) - i128::from(cached.block));
         let missing = missing(view.base_market_state(), &cached.output);
         drop(view);
+        self.report_held_snapshot(cached, lag, &missing);
+        Ok(cached.output.clone())
+    }
+
+    /// Exports the gauges of the held snapshot and warns when the missing ids change. The lag is
+    /// `None` while the market has no block.
+    fn report_held_snapshot(
+        &self,
+        cached: &CachedSnapshot<Output>,
+        lag: Option<i128>,
+        missing: &[String],
+    ) {
+        if let Some(lag) = lag {
+            gauge!("nexus_derived_block_lag", "computation" => self.computation).set(lag as f64);
+        }
         gauge!("nexus_derived_snapshot_age_seconds", "computation" => self.computation).set(
             cached
                 .received_at
@@ -190,9 +204,7 @@ impl<Output: Clone> NexusDerivedClient<Output> {
         );
         gauge!("nexus_derived_missing_components", "computation" => self.computation)
             .set(missing.len() as f64);
-        let output = cached.output.clone();
-        self.warn_if_missing_changed(&missing);
-        Ok(output)
+        self.warn_if_missing_changed(missing);
     }
 
     fn warn_if_missing_changed(&self, missing: &[String]) {

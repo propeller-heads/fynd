@@ -83,12 +83,29 @@ impl DerivedComputation for SpotPriceComputation {
                 .await?;
             return Ok(ComputationOutput::success(prices));
         }
-        // Start from the stored prices and recompute only the changed components.
-        let stored = store
-            .read()
+        self.compute_locally(market, read_stored_spot_prices(store).await, changed)
             .await
-            .spot_prices()
-            .cloned();
+    }
+}
+
+/// The stored spot prices, or `None` when none were stored yet.
+async fn read_stored_spot_prices(store: &SharedDerivedDataRef) -> Option<SpotPrices> {
+    store
+        .read()
+        .await
+        .spot_prices()
+        .cloned()
+}
+
+impl SpotPriceComputation {
+    /// Recomputes the spot prices of the `changed` components on top of `stored`, or from nothing
+    /// when `stored` is `None`.
+    async fn compute_locally(
+        &self,
+        market: &MarketData,
+        stored: Option<SpotPrices>,
+        changed: &ChangedComponents,
+    ) -> Result<ComputationOutput<SpotPrices>, ComputationError> {
         let first_run = stored.is_none();
         let mut spot_prices = stored.unwrap_or_default();
         // Remove spot prices for removed components.
