@@ -922,12 +922,11 @@ where
         // Get the graph from the graph manager
         let graph = self.graph_manager.graph();
 
-        // Get block info and resolve the effective state label.
-        // TODO: maybe the algorithm should return the block info with the route? The block might
-        // update while solving and the route returned might be for the newer block.
+        // Read the block before solving, to fail fast when the market is not ready and as a
+        // fallback for algorithms that do not record the block they solved against.
         let (block_info, solved_against, constraints) = {
-            // Read briefly to capture block info; drop the lock before solving so it is not held
-            // across the algorithm's own read call.
+            // Read briefly; drop the lock before solving so it is not held across the
+            // algorithm's own read call.
             let view = self
                 .read_market(params.state_label())
                 .await?;
@@ -977,6 +976,20 @@ where
                         self.algorithm.name()
                     )));
                 }
+
+                // The market can move on while the algorithm solves, so quote the block its
+                // route was priced against. Read before post-processing, which builds new
+                // results.
+                let (block_info, solved_against) = match result.block() {
+                    Some(block) => {
+                        let solved_against = match params.state_label() {
+                            Some(_) => solved_against,
+                            None => block.number().to_string(),
+                        };
+                        (block.clone(), solved_against)
+                    }
+                    None => (block_info, solved_against),
+                };
 
                 let (result, post_processed_by) = self
                     .post_process(order, &params, &constraints, deadline, result)
@@ -1440,7 +1453,7 @@ mod tests {
             most_liquid::DepthAndPrice,
             test_utils::{
                 component, component_with_directions, component_with_protocol, order,
-                setup_market_weighted, token, MockProtocolSim,
+                set_last_updated_block, setup_market_weighted, token, MockProtocolSim,
             },
         },
         derived::{
@@ -2062,6 +2075,81 @@ mod tests {
             }
             other => panic!("expected the route to be rejected, got {other:?}"),
         }
+    }
+
+    /// Moves the market to block 2 while it solves, as a feed update landing mid-solve would, and
+    /// prices the split route against that block. Records the block on the result only when
+    /// `record_block` is set.
+    struct BlockAdvancingAlgorithm {
+        record_block: bool,
+    }
+
+    impl Algorithm for BlockAdvancingAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "block_advancing_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let market = request.market().clone();
+            set_last_updated_block(&mut *market.write().await, 2, 24);
+            let solved_block = market
+                .read()
+                .await
+                .last_updated()
+                .cloned();
+            let result = SplitRouteAlgorithm { reported_spot_price: 2.0 }
+                .find_best_route(request)
+                .await?;
+            Ok(match (self.record_block, solved_block) {
+                (true, Some(block)) => result.with_block(block),
+                _ => result,
+            })
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    /// The market starts at block 1 and reaches block 2 during the solve. The quote reports the
+    /// block the algorithm recorded, else the block the worker read before solving.
+    #[rstest]
+    #[case::recorded(true, 2)]
+    #[case::not_recorded(false, 1)]
+    #[tokio::test]
+    async fn test_quote_solved_block(#[case] record_block: bool, #[case] expected_block: u64) {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            BlockAdvancingAlgorithm { record_block },
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default(), far_deadline())
+            .await
+            .expect("split route must quote");
+
+        assert_eq!(quote.order().block().number(), expected_block);
+        assert_eq!(quote.order().solved_against(), &expected_block.to_string());
     }
 
     #[tokio::test]
