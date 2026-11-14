@@ -714,7 +714,9 @@ mod tests {
     };
 
     use tokio::sync::broadcast;
-    use tycho_simulation::tycho_common::models::token::Token;
+    use tycho_simulation::tycho_common::{
+        models::token::Token, simulation::protocol_sim::ProtocolSim,
+    };
 
     use super::*;
     use crate::{
@@ -1498,8 +1500,10 @@ mod tests {
         set_last_updated_block(&mut market, 10, 0);
         market.upsert_components([component1, component2]);
         // Only component1 has simulation state; component2 intentionally has none
-        market
-            .update_states([("eth_usdc".to_string(), Box::new(MockProtocolSim::new(2000.0)) as _)]);
+        market.update_states([(
+            "eth_usdc".to_string(),
+            Box::new(MockProtocolSim::new(2000.0)) as Box<dyn ProtocolSim>,
+        )]);
         market.upsert_tokens([eth, usdc, dai]);
         MarketData::new(std::sync::Arc::new(tokio::sync::RwLock::new(market)))
     }

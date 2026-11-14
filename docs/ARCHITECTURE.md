@@ -80,7 +80,7 @@ This modular architecture allows users to:
 │                         MarketState (Arc<RwLock<>>, via MarketData handle)          │
 │  ┌────────────────────────────────────────────────────────────────────────────┐    │
 │  │  components: HashMap<ComponentId, ProtocolComponent>                       │    │
-│  │  simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>             │    │
+│  │  simulation_states: HashMap<ComponentId, Arc<dyn ProtocolSim>>             │    │
 │  │  tokens: HashMap<Address, Token>                                           │    │
 │  │  gas_price: Option<BlockGasPrice>                                          │    │
 │  │  protocol_sync_status: HashMap<String, SynchronizerState>                  │    │
@@ -241,7 +241,7 @@ Graph management infrastructure:
 
 `MarketState` is the single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status, and block info. Protected by `Arc<RwLock<>>` (write-preferring). `MarketData` is the cheap-to-clone shared handle used to access it — call `read()` for a base view or `read_labeled(label)` for an overlay-aware view.
 
-Provides `extract_subset_with_overlay()` for creating filtered snapshots that algorithms can use without holding the main lock.
+Provides `extract_subset_with_overlay()` for creating filtered snapshots that algorithms can use without holding the main lock. A snapshot shares the simulation states with the market (`Arc`), so taking one costs a pointer copy per component, not a copy of each state.
 
 ***
 
