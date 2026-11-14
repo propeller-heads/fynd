@@ -43,7 +43,7 @@ use crate::{
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
-pub type OverlayStates = Arc<FxHashMap<ComponentId, Box<dyn ProtocolSim>>>;
+pub type OverlayStates = Arc<FxHashMap<ComponentId, Arc<dyn ProtocolSim>>>;
 
 /// A named simulation-state overlay with a block-number expiry.
 pub struct OverlayEntry {
@@ -225,7 +225,7 @@ impl MarketData {
     pub async fn register_labeled_state(
         &self,
         label: StateLabel,
-        states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+        states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
         valid_until: u64,
     ) {
         self.overlays
@@ -323,7 +323,7 @@ impl<'a> MarketDataView<'a> {
                 {
                     subset
                         .simulation_states
-                        .insert(id.clone(), state.clone_box());
+                        .insert(id.clone(), Arc::clone(state));
                 }
             }
             subset.label = label.clone();
@@ -418,7 +418,7 @@ pub struct MarketState {
     /// All components indexed by their ID, each with its swap directions.
     components: FxHashMap<ComponentId, StoredComponent>,
     /// All states indexed by their component ID.
-    simulation_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+    simulation_states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
     /// All tokens indexed by their address. Shared for the same reason as `components`.
     tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
@@ -802,12 +802,15 @@ impl MarketState {
     }
 
     /// Updates a component's state.
-    pub fn update_states(
+    ///
+    /// Accepts boxed states from the indexer as well as already shared ones.
+    pub fn update_states<S: Into<Arc<dyn ProtocolSim>>>(
         &mut self,
-        states: impl IntoIterator<Item = (ComponentId, Box<dyn ProtocolSim>)>,
+        states: impl IntoIterator<Item = (ComponentId, S)>,
     ) {
         for (id, state) in states {
-            self.simulation_states.insert(id, state);
+            self.simulation_states
+                .insert(id, state.into());
         }
     }
 
@@ -821,7 +824,7 @@ impl MarketState {
     /// This is used to create a local snapshot of market data that can be used for
     /// simulation without holding the main lock. The subset includes:
     /// - Components matching the provided IDs
-    /// - Simulation states for those components (cloned via `clone_box`)
+    /// - Simulation states for those components (shared, not copied)
     /// - Tokens referenced by those components
     /// - Gas price and block info
     /// - The unsynced protocols and their pools
@@ -843,7 +846,7 @@ impl MarketState {
             // A component without a simulation state is legitimate: the recording skips `vm:*`
             // states, and a component can be announced a block before its first state arrives.
             if let Some(state) = self.simulation_states.get(id) {
-                simulation_states.insert(id.clone(), state.clone_box());
+                simulation_states.insert(id.clone(), Arc::clone(state));
             }
         }
 

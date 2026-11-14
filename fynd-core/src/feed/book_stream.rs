@@ -53,7 +53,7 @@ pub struct BookUpdate {
     /// because an all-pairs venue keeps its id while the swap directions it lists change.
     pub updated: Vec<ProtocolComponent>,
     /// The state of every book the venue currently serves, the added ones included.
-    pub states: HashMap<ComponentId, Box<dyn ProtocolSim>>,
+    pub states: HashMap<ComponentId, Arc<dyn ProtocolSim>>,
 }
 
 impl BookUpdate {
@@ -327,9 +327,7 @@ impl BookStream {
             } else {
                 added.push(component.clone());
             }
-            // The snapshot is shared with every other reader of the channel, so the state has to
-            // be copied out to be owned by the market.
-            states.insert(id.clone(), state.clone_box());
+            states.insert(id.clone(), Arc::clone(state));
             current.insert(id);
         }
         let removed = served

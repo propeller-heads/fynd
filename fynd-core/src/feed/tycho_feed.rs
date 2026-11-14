@@ -8,6 +8,7 @@
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
+    sync::Arc,
     time::Instant,
 };
 
@@ -677,7 +678,7 @@ struct BookUpdateParts<'a> {
     added: &'a mut Vec<ProtocolComponent>,
     removed: &'a mut Vec<ComponentId>,
     updated: &'a mut Vec<ProtocolComponent>,
-    states: &'a mut HashMap<ComponentId, Box<dyn ProtocolSim>>,
+    states: &'a mut HashMap<ComponentId, Arc<dyn ProtocolSim>>,
 }
 
 /// Removes from a book update every component the market holds under another protocol system.
