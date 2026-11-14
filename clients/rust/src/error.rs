@@ -48,6 +48,11 @@ pub enum ErrorCode {
     /// Server code: `NOT_FOUND`.
     NotFound,
 
+    /// A wallet in the order is on the OFAC sanctions list. Not retryable.
+    ///
+    /// Server code: `SANCTIONED_ADDRESS`.
+    SanctionedAddress,
+
     /// A truly unrecognised server error code. The raw string is preserved for debugging.
     Unknown(String),
 }
@@ -78,6 +83,7 @@ impl ErrorCode {
                 Self::ServerError
             }
             "NOT_FOUND" => Self::NotFound,
+            "SANCTIONED_ADDRESS" => Self::SanctionedAddress,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -204,6 +210,13 @@ mod tests {
     #[test]
     fn error_code_not_found_for_not_found_code() {
         assert_eq!(ErrorCode::from_server_code("NOT_FOUND"), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn error_code_sanctioned_address_is_known_and_not_retryable() {
+        let code = ErrorCode::from_server_code("SANCTIONED_ADDRESS");
+        assert_eq!(code, ErrorCode::SanctionedAddress);
+        assert!(!code.is_retryable());
     }
 
     #[test]

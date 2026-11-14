@@ -67,6 +67,15 @@ describe('FyndError.fromWireError', () => {
     expect(err.isRetryable()).toBe(false);
   });
 
+  it('maps SANCTIONED_ADDRESS as a known, non-retryable code', () => {
+    const err = FyndError.fromWireError({
+      code: 'SANCTIONED_ADDRESS',
+      error: 'the sender is on the OFAC sanctions list, so Fynd does not quote for it',
+    });
+    expect(err.code).toBe('SANCTIONED_ADDRESS');
+    expect(err.isRetryable()).toBe(false);
+  });
+
   it('maps NO_ROUTE_FOUND correctly', () => {
     const err = FyndError.fromWireError({ code: 'NO_ROUTE_FOUND', error: 'no route' });
     expect(err.code).toBe('NO_ROUTE_FOUND');
