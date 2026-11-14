@@ -989,7 +989,8 @@ mod tests {
                 label.clone(),
                 FxHashMap::from_iter([(
                     BETTER_POOL.to_string(),
-                    Box::new(util::MockProtocolSim::new(0.5)) as Box<dyn ProtocolSim>,
+                    std::sync::Arc::new(util::MockProtocolSim::new(0.5))
+                        as std::sync::Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
