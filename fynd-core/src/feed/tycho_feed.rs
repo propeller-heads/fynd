@@ -1408,7 +1408,10 @@ mod tests {
                     added,
                     removed: vec![],
                     updated,
-                    states,
+                    states: states
+                        .into_iter()
+                        .map(|(id, state)| (id, Arc::from(state)))
+                        .collect(),
                 };
                 feed.handle_book_update(update)
                     .await
@@ -1482,7 +1485,7 @@ mod tests {
             if !added.is_empty() {
                 states.insert(
                     VENUE.to_string(),
-                    Box::new(FeedMockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(FeedMockProtocolSim::new(2.0)) as Arc<dyn ProtocolSim>,
                 );
             }
             BookUpdate {

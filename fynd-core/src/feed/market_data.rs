@@ -1400,6 +1400,39 @@ mod tests {
             .contains_key(&bc));
     }
 
+    #[test]
+    fn test_extract_subset_shares_states() {
+        let market = market_with_two_components();
+        let ab = "component_ab".to_string();
+
+        let subset = market.extract_subset(&[&ab].into_iter().collect());
+
+        assert!(Arc::ptr_eq(&market.simulation_states[&ab], &subset.simulation_states[&ab]));
+    }
+
+    #[test]
+    fn test_extract_subset_keeps_state_replaced_later() {
+        let mut market = market_with_two_components();
+        let ab = "component_ab".to_string();
+        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
+        let subset = market.extract_subset(&[&ab].into_iter().collect());
+
+        market.update_states([(
+            ab.clone(),
+            Box::new(MockProtocolSim::new(9.0)) as Box<dyn ProtocolSim>,
+        )]);
+
+        let price = |state: &MarketState| {
+            state
+                .get_simulation_state(&ab)
+                .expect("state is present")
+                .spot_price(&token_a, &token_b)
+                .expect("mock prices every pair")
+        };
+        assert_eq!(price(&subset), 2.0);
+        assert_eq!(price(&market), 9.0);
+    }
+
     // ==================== MarketData overlay tests ====================
 
     #[tokio::test]
@@ -1407,10 +1440,10 @@ mod tests {
         let market_ref = MarketData::new_shared();
 
         let label = "test_label".to_string();
-        let mut states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+        let mut states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>> = FxHashMap::default();
         states.insert(
             "component_ab".to_string(),
-            Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
+            Arc::new(MockProtocolSim::new(99.0)) as Arc<dyn ProtocolSim>,
         );
 
         market_ref
@@ -1435,7 +1468,7 @@ mod tests {
                 "my_label".to_string(),
                 FxHashMap::from_iter([(
                     "component1".to_string(),
-                    Box::new(MockProtocolSim::new(5.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(5.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
@@ -1458,7 +1491,7 @@ mod tests {
                 label.clone(),
                 FxHashMap::from_iter([(
                     "component".to_string(),
-                    Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(1.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
@@ -1482,7 +1515,7 @@ mod tests {
                     format!("label_{i}"),
                     FxHashMap::from_iter([(
                         format!("component_{i}"),
-                        Box::new(MockProtocolSim::new(f64::from(i))) as Box<dyn ProtocolSim>,
+                        Arc::new(MockProtocolSim::new(f64::from(i))) as Arc<dyn ProtocolSim>,
                     )]),
                     u64::MAX,
                 )
@@ -1508,7 +1541,7 @@ mod tests {
             "shared".to_string(),
             FxHashMap::from_iter([(
                 "component_x".to_string(),
-                Box::new(MockProtocolSim::new(7.0)) as Box<dyn ProtocolSim>,
+                Arc::new(MockProtocolSim::new(7.0)) as Arc<dyn ProtocolSim>,
             )]),
             u64::MAX,
         )
@@ -1548,7 +1581,7 @@ mod tests {
             data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
             data.update_states([(
                 "component_ab".to_string(),
-                Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                Arc::new(MockProtocolSim::new(2.0)) as Arc<dyn ProtocolSim>,
             )]);
         }
 
@@ -1558,7 +1591,7 @@ mod tests {
                 label.clone(),
                 FxHashMap::from_iter([(
                     "component_ab".to_string(),
-                    Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(99.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
@@ -1592,7 +1625,7 @@ mod tests {
                 "stale".to_string(),
                 FxHashMap::from_iter([(
                     "component_stale".to_string(),
-                    Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(1.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 10,
             )
@@ -1602,7 +1635,7 @@ mod tests {
                 "fresh".to_string(),
                 FxHashMap::from_iter([(
                     "component_fresh".to_string(),
-                    Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(2.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 20,
             )
