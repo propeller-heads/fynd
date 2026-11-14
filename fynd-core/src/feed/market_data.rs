@@ -121,78 +121,6 @@ impl MarketData {
         self.data.write().await
     }
 
-    /// Extracts a base-data subset for `component_ids` without holding the read guard across the
-    /// whole clone.
-    ///
-    /// `extract_subset` deep-clones one simulation state per component, so one guard held over a
-    /// near-whole-market set stalls the feed's writer — and every reader queued behind it — for
-    /// the whole clone. This clones in batches of 512 components, releasing the guard between
-    /// batches. A batch whose label differs from the first batch's means the feed advanced
-    /// mid-clone; the clone restarts so the returned snapshot stays single-block consistent.
-    /// After three attempts it falls back to one guard for the full set: a feed advancing faster
-    /// than the batched clone completes would otherwise starve it forever.
-    ///
-    /// No overlay is applied — this reads base data only.
-    pub async fn extract_subset_batched(
-        &self,
-        component_ids: &FxHashSet<&ComponentId>,
-    ) -> MarketState {
-        self.extract_subset_in_batches(component_ids, 512, || {})
-            .await
-    }
-
-    /// `extract_subset_batched` with the batch size injectable, plus a hook that runs after each
-    /// batch — the window where no guard is held and a feed write can land mid-clone. Tests use
-    /// the two to drive the merge, restart, and fallback paths deterministically.
-    async fn extract_subset_in_batches(
-        &self,
-        component_ids: &FxHashSet<&ComponentId>,
-        batch_size: usize,
-        between_batches: impl Fn(),
-    ) -> MarketState {
-        if component_ids.is_empty() {
-            // The chunk loop would yield a blank default; extract_subset carries the label,
-            // block, and gas price even for an empty set.
-            return self
-                .data
-                .read()
-                .await
-                .extract_subset(component_ids);
-        }
-        let ids: Vec<&ComponentId> = component_ids.iter().copied().collect();
-        'attempt: for _ in 0..3 {
-            let mut merged: Option<MarketState> = None;
-            for chunk in ids.chunks(batch_size) {
-                let chunk_ids: FxHashSet<&ComponentId> = chunk.iter().copied().collect();
-                let part = self
-                    .data
-                    .read()
-                    .await
-                    .extract_subset(&chunk_ids);
-                match &mut merged {
-                    None => merged = Some(part),
-                    Some(snapshot) => {
-                        if part.label != snapshot.label {
-                            continue 'attempt;
-                        }
-                        snapshot.merge_subset(part);
-                    }
-                }
-                between_batches();
-            }
-            return merged.unwrap_or_default();
-        }
-        warn!(
-            components = ids.len(),
-            "batched market snapshot restarted three times; falling back to one guard over the \
-             full set"
-        );
-        self.data
-            .read()
-            .await
-            .extract_subset(component_ids)
-    }
-
     /// Attempts a non-blocking read of the base data store.
     ///
     /// Returns `None` if the lock is currently held for writing.
@@ -873,17 +801,6 @@ impl MarketState {
             components_by_protocol,
             constraint_generation: self.constraint_generation,
         }
-    }
-
-    /// Absorbs another subset extracted from the same base state (the caller checks the labels
-    /// match), keeping this one's metadata. Component sets from `extract_subset` batches are
-    /// disjoint, so components and simulation states are never overwritten; a token shared by
-    /// two batches is overwritten with an identical clone from the same base state.
-    fn merge_subset(&mut self, other: MarketState) {
-        self.components.extend(other.components);
-        self.simulation_states
-            .extend(other.simulation_states);
-        self.tokens.extend(other.tokens);
     }
 }
 
