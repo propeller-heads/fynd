@@ -1,4 +1,24 @@
 
+## [0.125.0](https://github.com/propeller-heads/fynd/compare/0.124.1...0.125.0) (2026-11-16)
+
+### Features
+
+* **core:** use a time limit for nexus snapshots ([aa9a50e](https://github.com/propeller-heads/fynd/commit/aa9a50e10a0c4cb863dd34439c8a3c46aabd2155))
+* **core:** compute locally while nexus snapshots are out of sync ([11fbfe8](https://github.com/propeller-heads/fynd/commit/11fbfe861bc6c50233a3092dd3c89b99e6444b2f))
+* **core:** load the default computations from nexus when a URL is set ([e7f92e2](https://github.com/propeller-heads/fynd/commit/e7f92e214e416165899079b3971eb34515342ab4))
+* **derived:** let the default computations load from nexus ([2b6effd](https://github.com/propeller-heads/fynd/commit/2b6effd2edb373b61235456d55169d457c76e710))
+* **nexus:** load a derived computation's latest snapshot ([5bf882a](https://github.com/propeller-heads/fynd/commit/5bf882a61a1979ddb25448bec7dd5daaac0208ff))
+* **derived:** convert derived snapshots back into the store's maps ([0922420](https://github.com/propeller-heads/fynd/commit/0922420e5d0b0a96602facb3ca729bcba1c9e515))
+
+### Bug Fixes
+
+* **core:** count distinct blocks when returning to nexus ([33686f4](https://github.com/propeller-heads/fynd/commit/33686f45b9a78405b404714b2e03a519757f5bf9))
+
+### Performance Improvements
+
+* **core:** check missing components only on snapshot replacement ([f25bdc5](https://github.com/propeller-heads/fynd/commit/f25bdc53fb1ed232e0409d7477260f7adb98e127))
+
+
 ## [0.124.1](https://github.com/propeller-heads/fynd/compare/0.124.0...0.124.1) (2026-11-13)
 
 ### Features
