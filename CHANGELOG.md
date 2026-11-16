@@ -1,27 +1,23 @@
 
+
 ## [0.125.0](https://github.com/propeller-heads/fynd/compare/0.124.1...0.125.0) (2026-11-16)
 
 ### Features
 
-- Load spot prices, pool depths and token prices from fynd-nexus when a nexus URL is set, so pods no longer compute them separately. Custom computations still run locally, and an invalid nexus URL now fails the build with a message naming the expected scheme. ([e7f92e2](https://github.com/propeller-heads/fynd/commit/e7f92e214e416165899079b3971eb34515342ab4)) ([2b6effd](https://github.com/propeller-heads/fynd/commit/2b6effd2edb373b61235456d55169d457c76e710))
-- Fall back to local computation while the nexus snapshot is out of sync, and return to nexus once it has stayed in sync for 3 blocks. Pods now become ready even if the service has never served a snapshot or answers 404, and they stop serving ever-older data when the service is down or stuck. ([11fbfe8](https://github.com/propeller-heads/fynd/commit/11fbfe861bc6c50233a3092dd3c89b99e6444b2f))
-- Limit the age of nexus snapshots by time instead of a fixed block count. The default is 30 seconds, converted to blocks using the chain's block time (2 blocks on Ethereum, 15 on Base), so fast chains no longer drop the service almost all the time. A custom chain with no registered block time now returns an error. ([aa9a50e](https://github.com/propeller-heads/fynd/commit/aa9a50e10a0c4cb863dd34439c8a3c46aabd2155))
-- Fetch the latest snapshot of a derived computation from fynd-nexus on each run. The client keeps the last snapshot when the service is briefly unreachable, logs a warning and counts failed polls in `nexus_client_failed_polls_total`. It also exports block lag, snapshot age and missing-component metrics, and warns with a sample of up to 10 missing ids when that number changes. ([5bf882a](https://github.com/propeller-heads/fynd/commit/5bf882a61a1979ddb25448bec7dd5daaac0208ff))
-- Convert snapshots served by nexus back into the store's maps for spot prices, depths and token prices. A direction or token listed twice keeps its last entry. ([0922420](https://github.com/propeller-heads/fynd/commit/0922420e5d0b0a96602facb3ca729bcba1c9e515))
+- Load spot prices, pool depths and token prices from fynd-nexus when a nexus URL is set, so pods no longer compute them locally. An invalid nexus URL now fails the build with a `ComputationManager` error that names the expected scheme. Without a nexus URL, nothing changes. ([e7f92e2](https://github.com/propeller-heads/fynd/commit/e7f92e214e416165899079b3971eb34515342ab4))
+- Add `with_nexus_client` to `SpotPriceComputation`, `ComponentDepthComputation` and `TokenGasPriceComputation` so each can return the latest snapshot served by fynd-nexus instead of computing. Pool depths no longer wait on another computation when they use nexus data. **Breaking:** `SpotPriceComputation` is no longer a unit struct, so code that builds it by name alone, without `new()`, no longer compiles. ([2b6effd](https://github.com/propeller-heads/fynd/commit/2b6effd2edb373b61235456d55169d457c76e710))
+- Compute locally while the nexus snapshot is out of sync, and return to nexus after it stays in sync for 3 blocks. Pods now become ready even if the service has never served a snapshot or answers 404, and no longer serve ever-older data when the service is down or stuck. Pool depths always require fresh spot prices again, since they may compute locally in any block. A warning is logged when the snapshot falls out of sync and an info line when it recovers. `nexus_derived_block_lag` no longer goes negative when the nexus snapshot is ahead of the pod's market. ([11fbfe8](https://github.com/propeller-heads/fynd/commit/11fbfe861bc6c50233a3092dd3c89b99e6444b2f))
+- Limit nexus snapshot age to 30 seconds instead of a fixed number of blocks, so the limit behaves consistently across chains (2 blocks on Ethereum, 15 on Base). **Breaking:** `NexusDerivedClient::new` and the computations' `with_nexus_client` signatures change, and `ComputationManagerConfig::with_nexus_client` now takes the chain. It returns `ChainConfigError` for a custom chain with no registered block time. ([aa9a50e](https://github.com/propeller-heads/fynd/commit/aa9a50e10a0c4cb863dd34439c8a3c46aabd2155))
+- Add a client that loads a derived computation's latest snapshot from fynd-nexus. It sends the held block as `If-None-Match` with a 5 s timeout, and keeps the held snapshot with a warning and a `nexus_client_failed_polls_total` count when the service is briefly unreachable. It exports block lag, snapshot age and missing-component gauges, and warns with a sample of up to 10 ids when the missing count changes. ([5bf882a](https://github.com/propeller-heads/fynd/commit/5bf882a61a1979ddb25448bec7dd5daaac0208ff))
+- Convert derived snapshots served by fynd-nexus back into the store's maps with `into_spot_prices`, `into_depths` and `into_token_prices`. A direction or token listed twice keeps its last entry. ([0922420](https://github.com/propeller-heads/fynd/commit/0922420e5d0b0a96602facb3ca729bcba1c9e515))
 
 ### Bug Fixes
 
-- Count distinct blocks when deciding to return to nexus. Several market updates within one block, such as RFQ order book updates and partial blocks, no longer trigger an early return after fewer than 3 in-sync blocks. ([33686f4](https://github.com/propeller-heads/fynd/commit/33686f45b9a78405b404714b2e03a519757f5bf9))
-- Clamp `nexus_derived_block_lag` at 0 instead of letting it go negative when the nexus snapshot is ahead of the pod's market. ([11fbfe8](https://github.com/propeller-heads/fynd/commit/11fbfe861bc6c50233a3092dd3c89b99e6444b2f))
+- Count distinct blocks, not market updates, when deciding to return to nexus. Pods no longer resume after 3 updates within a single block, for example from RFQ order book or partial-block updates. ([33686f4](https://github.com/propeller-heads/fynd/commit/33686f45b9a78405b404714b2e03a519757f5bf9))
 
 ### Performance
 
-- Check for missing market components only when a new snapshot replaces the cached one, instead of on every call. This avoids taking the market read lock needlessly. ([f25bdc5](https://github.com/propeller-heads/fynd/commit/f25bdc53fb1ed232e0409d7477260f7adb98e127))
-
-### Other
-
-- Breaking: `SpotPriceComputation` is no longer a unit struct, so construct it with `new()` or `Default`. The `with_nexus_client` signatures on the computations and `ComputationManagerConfig` now take the block time or the chain. ([2b6effd](https://github.com/propeller-heads/fynd/commit/2b6effd2edb373b61235456d55169d457c76e710)) ([aa9a50e](https://github.com/propeller-heads/fynd/commit/aa9a50e10a0c4cb863dd34439c8a3c46aabd2155))
-- Always require fresh spot prices for pool depths, since depths may now compute locally in any block. ([11fbfe8](https://github.com/propeller-heads/fynd/commit/11fbfe861bc6c50233a3092dd3c89b99e6444b2f))
+- Check for missing components only when a fetched snapshot replaces the cached one, instead of taking the market read lock on every call. A component added between snapshots shows as missing only with the next snapshot. ([f25bdc5](https://github.com/propeller-heads/fynd/commit/f25bdc53fb1ed232e0409d7477260f7adb98e127))
 
 
 ## [0.124.1](https://github.com/propeller-heads/fynd/compare/0.124.0...0.124.1) (2026-11-13)
