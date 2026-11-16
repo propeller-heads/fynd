@@ -1434,8 +1434,26 @@ mod tests {
             panic!("expected rfq:metric to be rejected where Fynd does not serve Metric");
         };
         assert!(
-            err.to_string()
-                .contains("only served on ethereum, base, robinhood, bsc, arbitrum, polygon"),
+            err.to_string().contains(
+                "only served on ethereum, base, robinhood, bsc, arbitrum, polygon, elysium"
+            ),
+            "got {err}"
+        );
+    }
+
+    /// Elysium passes the chain gate. Whether its entries also pass the executor check depends on
+    /// the tycho-execution release in the lockfile, so the test asserts only the chain gate.
+    #[rstest::rstest]
+    #[case::direct("rfq:metric")]
+    #[case::via_fallback_router("fallback:rfq:metric")]
+    fn test_open_book_metric_on_elysium(#[case] entry: &str) {
+        env::remove_var("METRIC_API_KEY");
+        let Err(err) = open_book_stream(Chain::Elysium, &[entry]) else {
+            panic!("expected {entry} on elysium to fail without METRIC_API_KEY");
+        };
+        assert!(
+            !err.to_string()
+                .contains("only served on"),
             "got {err}"
         );
     }

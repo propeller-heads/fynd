@@ -483,12 +483,13 @@ Each chain is served from its own Fynd backend behind the shared gateway. Send t
 | Polygon | `polygon` | 137 | POL |
 | Unichain | `unichain` | 130 | ETH |
 | Robinhood Chain | `robinhood` | 4663 | ETH |
+| Elysium | `elysium` | 99901 | HYPE |
 
 A request to `/v1/{chain}/…` for a chain that isn't configured returns `404` with `{"error": "unknown_chain", ...}`.
 
 ### Native token swaps
 
-Use the zero address (`0x0000000000000000000000000000000000000000`) as `token_in` or `token_out` to swap the chain's native gas token (ETH on Ethereum/Base/Arbitrum/Unichain/Robinhood Chain, BNB on BSC, POL on Polygon). Native-token `token_in` skips the approval step — the router wraps native gas for you.
+Use the zero address (`0x0000000000000000000000000000000000000000`) as `token_in` or `token_out` to swap the chain's native gas token (ETH on Ethereum/Base/Arbitrum/Unichain/Robinhood Chain, BNB on BSC, POL on Polygon, HYPE on Elysium). Native-token `token_in` skips the approval step — the router wraps native gas for you.
 
 ## API key limits by tier
 

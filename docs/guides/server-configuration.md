@@ -58,7 +58,7 @@ fynd serve \
 
 * `rfq:` venues cannot serve quotes on their own. At least one on-chain protocol is required. Fynd does start and the feed does publish, but books carry no block, so with no on-chain protocol the market never gets a block label, derived data never builds, and every quote returns `not_ready`.
 * When encoding is enabled (`encoding_options` in the quote request), the RFQ venues `rfq:bebop`, `rfq:hashflow`, `rfq:native` and `rfq:liquorice` require an additional round-trip to the provider to fetch a signed quote. This can add significant tail latency to solve times. If you are using these venues, consider quoting first without encoding to evaluate the price, and only request encoding once you are confident the quote is worth executing. `rfq:metric` encodes locally and needs no such round-trip — its executor reads the on-chain oracle Metric updates every block.
-* Metric runs on Ethereum, Base, Robinhood, BSC, Arbitrum and Polygon only. Each entry also needs its executor on the chain: `fallback:rfq:metric` runs on all six, and `rfq:metric` on Base, Robinhood, Arbitrum and Polygon. Ethereum and BSC have only the fallback executor. Naming an entry where its executor is missing fails at startup rather than producing quotes that cannot be encoded.
+* Metric runs on Ethereum, Base, Robinhood, BSC, Arbitrum, Polygon and Elysium only. Each entry also needs its executor on the chain: `fallback:rfq:metric` runs on all seven, and `rfq:metric` on Base, Robinhood, Arbitrum, Polygon and Elysium. Ethereum and BSC have only the fallback executor. Naming an entry where its executor is missing fails at startup rather than producing quotes that cannot be encoded.
 * On Ethereum, Metric can come from either source: `fallback:rfq:metric` (Metric's API, executing through `MetricFallbackRouter`) or `pricelevelstream:metric` (Titan's price level stream, executing through Titan's Metric router). Both price the same pools, so name only one of them; a list naming both fails at startup.
 * On Ethereum, a Metric pool fills only in blocks whose builder places Metric's oracle update before the trade (Titan and the other builders taking part in Metric's conditional updates). In any other block the `MetricFallbackRouter` fills the leg on the fallback pool Fynd names instead.
 
@@ -107,7 +107,7 @@ Notes:
 
 * **TLS** — hosted endpoints use TLS; a local or plain-HTTP Tycho does not. Add `--disable-tls` when your endpoint is not served over TLS.
 * **API key** — the self-hosted indexer's RPC key is its `AUTH_API_KEY` (default `local-dev-key`). Pass it with `--tycho-api-key` / `TYCHO_API_KEY` if your deployment sets one.
-* **Built-in chains** — Fynd's built-in chains are `ethereum`, `base`, `unichain`, `arbitrum`, `polygon`, `bsc`, `robinhood`, `starknet`, `zksync`. Self-hosting Tycho for one of these works out of the box.
+* **Built-in chains** — Fynd's built-in chains are `ethereum`, `base`, `unichain`, `arbitrum`, `polygon`, `bsc`, `robinhood`, `elysium`, `starknet`, `zksync`. Self-hosting Tycho for one of these works out of the box.
 
 #### Custom chains
 
