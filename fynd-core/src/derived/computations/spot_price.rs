@@ -9,6 +9,8 @@
 //! hold time is negligible (microseconds per component), so we hold it for the full loop rather
 //! than paying the cost of cloning simulation states via `extract_subset()`.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use tracing::{debug, instrument, warn, Span};
 
@@ -17,26 +19,46 @@ use crate::{
         computation::{
             ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
         },
-        computations::drop_unlisted_directions,
+        computations::{components_without_entries, drop_unlisted_directions},
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::SpotPrices,
     },
     feed::market_data::MarketData,
+    nexus::{
+        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
+        derived::SpotPriceSnapshot,
+    },
 };
+
+/// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
+/// block time, before the pod computes spot prices itself.
+const NEXUS_MAX_SNAPSHOT_AGE: Duration = Duration::from_secs(30);
 
 /// Computes spot prices for all components.
 ///
 /// Computes the spot price for each swap direction of a component.
 ///
 /// Uses `ProtocolSim::spot_price()` to compute the instantaneous exchange rate.
+///
+/// With a nexus client it loads the spot prices from `fynd-nexus` while its snapshot is in sync.
 #[derive(Debug, Default)]
-pub struct SpotPriceComputation;
+pub struct SpotPriceComputation {
+    nexus_client: Option<NexusDerivedClient<SpotPrices>>,
+}
 
 impl SpotPriceComputation {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Loads the spot prices from the `fynd-nexus` service behind `client` while its snapshot is
+    /// in sync, and computes them otherwise.
+    pub fn with_nexus_client(self, client: NexusClient, block_time: Duration) -> Self {
+        let nexus_client =
+            NexusDerivedClient::new(client, Self::ID, true, NEXUS_MAX_SNAPSHOT_AGE, block_time);
+        Self { nexus_client: Some(nexus_client) }
     }
 }
 
@@ -57,12 +79,52 @@ impl DerivedComputation for SpotPriceComputation {
         store: &SharedDerivedDataRef,
         changed: &ChangedComponents,
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
-        // Start from the stored prices and recompute only the changed components.
-        let stored = store
-            .read()
+        if let Some(nexus_client) = &self.nexus_client {
+            let snapshot = nexus_client
+                .get_in_sync_snapshot(
+                    market,
+                    SpotPriceSnapshot::into_spot_prices,
+                    |market, prices| {
+                        components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
+                    },
+                )
+                .await;
+            match snapshot {
+                NexusSnapshot::InSync(prices) => return Ok(ComputationOutput::success(prices)),
+                NexusSnapshot::FellOutOfSync => {
+                    let every_component = ChangedComponents::every_component(
+                        market.read().await.component_topology(),
+                    );
+                    return self
+                        .compute_locally(market, None, &every_component)
+                        .await;
+                }
+                NexusSnapshot::OutOfSync => {}
+            }
+        }
+        self.compute_locally(market, read_stored_spot_prices(store).await, changed)
             .await
-            .spot_prices()
-            .cloned();
+    }
+}
+
+/// The stored spot prices, or `None` when none were stored yet.
+async fn read_stored_spot_prices(store: &SharedDerivedDataRef) -> Option<SpotPrices> {
+    store
+        .read()
+        .await
+        .spot_prices()
+        .cloned()
+}
+
+impl SpotPriceComputation {
+    /// Recomputes the spot prices of the `changed` components on top of `stored`, or from nothing
+    /// when `stored` is `None`.
+    async fn compute_locally(
+        &self,
+        market: &MarketData,
+        stored: Option<SpotPrices>,
+        changed: &ChangedComponents,
+    ) -> Result<ComputationOutput<SpotPrices>, ComputationError> {
         let first_run = stored.is_none();
         let mut spot_prices = stored.unwrap_or_default();
         // Remove spot prices for removed components.

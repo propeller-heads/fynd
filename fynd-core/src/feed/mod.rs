@@ -84,7 +84,8 @@ pub(crate) struct TychoFeedConfig {
     /// External liquidity a caller added beside the `--protocols` venues.
     pub(crate) external_liquidity: Vec<book_stream::ExternalLiquidity>,
     /// The `fynd-nexus` service of this chain supplying Bebop, Hashflow and Metric prices. When
-    /// unset, Fynd connects to those venues directly.
+    /// unset, Fynd connects to those venues directly. Derived data is sourced from it by the
+    /// computation manager, not by the feed.
     pub(crate) nexus_url: Option<String>,
 }
 

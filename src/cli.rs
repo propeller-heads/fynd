@@ -184,10 +184,11 @@ pub struct ServeArgs {
     #[arg(long, env)]
     pub aggregate_rfqs: bool,
 
-    /// Read Bebop, Hashflow and Metric prices from Fynd Nexus instead of
-    /// connecting to those venues, e.g. http://fynd-nexus:3000, the instance of this pod's
-    /// chain. Applies to their `rfq:` and `fallback:rfq:` entries in --protocols; Native and
-    /// Liquorice always connect directly.
+    /// Read Bebop, Hashflow and Metric prices, and the spot prices, pool depths and token
+    /// prices derived from the market, from Fynd Nexus instead of connecting to those venues
+    /// and computing them, e.g. http://fynd-nexus:3000, the instance of this pod's chain. The
+    /// instance must run the market (--tycho-url). Venue prices apply to the `rfq:` and
+    /// `fallback:rfq:` entries in --protocols; Native and Liquorice always connect directly.
     #[arg(long, env)]
     pub nexus_url: Option<String>,
 

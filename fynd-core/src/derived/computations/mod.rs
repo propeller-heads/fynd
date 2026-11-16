@@ -11,7 +11,10 @@ pub mod token_gas_price;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tycho_simulation::tycho_common::models::Address;
 
-use crate::types::{ComponentId, ComponentTopology};
+use crate::{
+    feed::market_data::MarketState,
+    types::{ComponentId, ComponentTopology},
+};
 
 /// Removes the entries for swap directions that the components in `added` no longer offer.
 /// Without this, a dropped direction keeps its last entry.
@@ -35,6 +38,19 @@ pub(crate) fn drop_unlisted_directions<V>(
             .get(id)
             .is_none_or(|directions| directions.contains(&(token_in, token_out)))
     });
+}
+
+/// The routable components of `market` that none of the `listed` ids names.
+pub(crate) fn components_without_entries<'a>(
+    market: &MarketState,
+    listed: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
+    let listed: FxHashSet<&str> = listed.collect();
+    market
+        .routable_component_ids()
+        .filter(|id| !listed.contains(id.as_str()))
+        .cloned()
+        .collect()
 }
 
 pub use component_depth::ComponentDepthComputation;

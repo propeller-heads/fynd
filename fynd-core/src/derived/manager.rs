@@ -17,7 +17,7 @@ use metrics::{counter, gauge, histogram};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, instrument, trace, warn, Span};
-use tycho_simulation::tycho_common::models::{Address, Chain};
+use tycho_simulation::tycho_common::models::{chain_config::ChainConfigError, Address, Chain};
 
 use crate::types::{
     constants::{gas_token_config, GasTokenConfig, UnsupportedChainError},
@@ -40,6 +40,11 @@ pub struct ChangedComponents {
 }
 
 impl ChangedComponents {
+    /// Every component of `topology` as added, as at startup.
+    pub(crate) fn every_component(topology: FxHashMap<ComponentId, ComponentTopology>) -> Self {
+        Self { added: topology, ..Self::default() }
+    }
+
     /// Returns a HashSet of all changed component IDs.
     pub fn all_changed_ids(&self) -> FxHashSet<ComponentId> {
         let mut all = FxHashSet::default();
@@ -108,9 +113,12 @@ use super::{
     registry::ErasedComputation,
     store::DerivedData,
 };
-use crate::feed::{
-    events::{EventError, MarketEvent, MarketEventHandler},
-    market_data::MarketData,
+use crate::{
+    feed::{
+        events::{EventError, MarketEvent, MarketEventHandler},
+        market_data::MarketData,
+    },
+    nexus::client::NexusClient,
 };
 
 /// Thread-safe handle to shared derived data store.
@@ -138,6 +146,16 @@ pub struct ComputationManagerConfig {
     /// Overrides how long after a token-pricing pass starts the next one may start; `None`
     /// keeps the computation's default.
     pricing_min_pass_interval: Option<Duration>,
+    /// The `fynd-nexus` service the default computations load their data from while it is
+    /// healthy; `None` computes it here.
+    nexus: Option<NexusSetting>,
+}
+
+/// The `fynd-nexus` client of a [`ComputationManagerConfig`] and the block time of its chain.
+#[derive(Debug, Clone)]
+struct NexusSetting {
+    client: NexusClient,
+    block_time: Duration,
 }
 
 impl ComputationManagerConfig {
@@ -180,6 +198,25 @@ impl ComputationManagerConfig {
     pub fn with_pricing_min_pass_interval(mut self, interval: Duration) -> Self {
         self.pricing_min_pass_interval = Some(interval);
         self
+    }
+
+    /// Makes the default computations (spot prices, token prices and component depths) load their
+    /// data from the `fynd-nexus` service behind `client` while it is healthy, and compute it
+    /// here while it is not. The service must run the market.
+    ///
+    /// A snapshot may be 30 seconds old, counted in market blocks of `chain`'s block time.
+    ///
+    /// # Errors
+    /// Returns [`ChainConfigError`] when `chain` is a custom chain with no registered config, so
+    /// its block time is unknown.
+    pub fn with_nexus_client(
+        mut self,
+        client: NexusClient,
+        chain: &Chain,
+    ) -> Result<Self, ChainConfigError> {
+        let block_time = Duration::from_secs(chain.try_block_time_secs()?);
+        self.nexus = Some(NexusSetting { client, block_time });
+        Ok(self)
     }
 
     /// Prices gas against `gas_token` as an 18-decimal wrapper of the native asset, replacing
@@ -249,6 +286,7 @@ impl Default for ComputationManagerConfig {
             pricing_max_tokens_per_pass: None,
             pricing_max_sell_solves_per_pass: None,
             pricing_min_pass_interval: None,
+            nexus: None,
         }
     }
 }
@@ -275,7 +313,9 @@ struct ComputationSchedule {
 
 impl ComputationManager {
     /// Creates a manager with the default computation set: spot prices, token prices, and
-    /// component depths, run for every block by [`run`](Self::run).
+    /// component depths, run for every block by [`run`](Self::run). With a nexus client in
+    /// `config`, they load their data from the service while it is healthy and compute it here
+    /// otherwise.
     ///
     /// Returns the manager and a receiver for derived data events.
     /// Workers can subscribe to the event sender via `event_sender()` to track
@@ -285,9 +325,17 @@ impl ComputationManager {
         market_data: MarketData,
     ) -> Result<(Self, broadcast::Receiver<DerivedDataEvent>), ComputationError> {
         let (mut manager, event_rx) = Self::empty(market_data);
-        manager.register(SpotPriceComputation::new())?;
-        manager.register(config.build_token_price_computation())?;
-        manager.register(ComponentDepthComputation::new(config.depth_marginal_price_drop())?)?;
+        let mut spot_prices = SpotPriceComputation::new();
+        let mut token_prices = config.build_token_price_computation();
+        let mut depths = ComponentDepthComputation::new(config.depth_marginal_price_drop())?;
+        if let Some(NexusSetting { client, block_time }) = &config.nexus {
+            spot_prices = spot_prices.with_nexus_client(client.clone(), *block_time);
+            token_prices = token_prices.with_nexus_client(client.clone(), *block_time);
+            depths = depths.with_nexus_client(client.clone(), *block_time);
+        }
+        manager.register(spot_prices)?;
+        manager.register(token_prices)?;
+        manager.register(depths)?;
         Ok((manager, event_rx))
     }
 
@@ -1731,5 +1779,66 @@ mod tests {
             }
             other => panic!("derived_computation_failures_total is not a counter: {other:?}"),
         }
+    }
+
+    #[rstest::rstest]
+    #[case::served(Some(1), 0, true)]
+    #[case::no_snapshot_computes_locally(None, 0, true)]
+    #[tokio::test]
+    async fn test_nexus_defaults_complete_with_or_without_a_snapshot(
+        #[case] served_block: Option<u64>,
+        #[case] expected_failures: usize,
+        #[case] expected_ready: bool,
+    ) {
+        use serde_json::json;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let (eth, usdc) = (token(1, "ETH").address, token(2, "USDC").address);
+        let direction = json!({"component_id": "eth_usdc", "token_in": eth, "token_out": usdc});
+        let with = |extra: serde_json::Value| {
+            let mut entry = direction.clone();
+            entry
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            entry
+        };
+        let token_price = json!({"token": usdc, "numerator": "3", "denominator": "4"});
+        let server = MockServer::start().await;
+        for (id, entry) in [
+            ("spot_prices", with(json!({"price": 2000.0}))),
+            ("pool_depths", with(json!({"depth": "7"}))),
+            ("token_prices", token_price),
+        ] {
+            let response = match served_block {
+                Some(block) => ResponseTemplate::new(200)
+                    .set_body_json(json!({"block": block, "entries": [entry]})),
+                None => ResponseTemplate::new(204),
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/derived/{id}")))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+        }
+        let config = ComputationManagerConfig::new()
+            .with_nexus_client(NexusClient::new(&server.uri()).unwrap(), &Chain::Ethereum)
+            .unwrap();
+        let (manager, mut event_rx) = ComputationManager::new(config, market_with_block()).unwrap();
+        let store = manager.store();
+
+        manager
+            .compute_all(&ChangedComponents::default())
+            .await;
+
+        let failures = drain_events(&mut event_rx)
+            .iter()
+            .filter(|event| matches!(event, DerivedDataEvent::ComputationFailed { .. }))
+            .count();
+        assert_eq!(failures, expected_failures);
+        assert_eq!(store.read().await.derived_data_ready(), expected_ready);
     }
 }
