@@ -1,7 +1,7 @@
 ---
 description: >-
-  Concentrated liquidity pools that set their fee per trade: 90% of what they
-  offer beyond the best public route.
+  Concentrated liquidity pools that charge every trade just under the highest
+  fee that still wins it.
 icon: water-ladder
 ---
 
