@@ -572,6 +572,13 @@ impl WorkerPoolRouter {
         if let Some(label) = request.options().state_label().cloned() {
             params = params.with_state_label(label);
         }
+        if let Some(priority_fee) = request
+            .options()
+            .priority_fee()
+            .cloned()
+        {
+            params = params.with_priority_fee(priority_fee);
+        }
 
         counter!(
             "worker_router_exclusive_access_total",
