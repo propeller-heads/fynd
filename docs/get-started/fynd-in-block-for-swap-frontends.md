@@ -43,7 +43,7 @@ Pick one of two paths.
 
 Use this path when your aggregator supports Fynd InBlock. The aggregator API then prepares the transaction for you.
 
-1. Check that your aggregator supports Fynd InBlock. The [Fynd InBlock page](fynd-in-block-solver.md) lists the supported routers.
+1. Check with your aggregator or the Fynd team that your aggregator supports Fynd InBlock.
 2. Request Fynd InBlock quotes from the aggregator API. They differ from normal quotes in three ways:
    * The transaction goes to the Fynd InBlock router, not to the aggregator router.
    * The quote names the Fynd InBlock router as the caller (the taker) and the user as the receiver.
