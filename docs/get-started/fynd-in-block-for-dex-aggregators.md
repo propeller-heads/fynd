@@ -21,7 +21,7 @@ The user always gets at least the output of your route, so your API clients can 
 
 <figure><picture><source srcset="../.gitbook/assets/inblock-aggregators-flow-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-aggregators-flow-light.png" alt="Fynd InBlock executes a better route, or your route as sent"></picture><figcaption><p>How a swap executes through Fynd InBlock</p></figcaption></figure>
 
-Your API client sends the swap to the Fynd InBlock router with your calldata. If the builder stored a better route, the Fynd router executes it. If not, or if the better route fails, your router executes the swap as sent.
+Your API client sends the swap to the Fynd InBlock router (`FyndJITRouter` contract) with your calldata. If the builder stored a better route, the Fynd router (`TychoRouterV3` contract) executes it. If not, or if the better route fails, your router executes the swap as sent.
 
 ## Where the money comes from
 
@@ -37,11 +37,11 @@ Fynd InBlock pays all shares from the surplus, the extra output of the better ro
 | Builder    | Nothing                   | A share of the surplus                |
 | Fynd       | Nothing                   | The rest of the surplus               |
 
-The size of your share is part of your agreement with Fynd.
+The size of your share is a part of your agreement with Fynd.
 
 ## Integration steps
 
-1. Write a decoder contract for your router that implements the `IDecoder` interface. You or the Fynd team can write it.
+1. Write a decoder contract for your router that implements the `IJITDecoder` interface. You or the Fynd team can write it.
 2. If the decoder cannot read all the swap data from your calldata, encode the missing data as an explicit order.
 3. Change the quotes that your API returns for Fynd InBlock:
    * The transaction goes to the Fynd InBlock router, not to your router.
