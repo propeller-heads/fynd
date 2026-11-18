@@ -19,7 +19,7 @@ When you route your users' swaps through Fynd InBlock, you get:
 
 <figure><picture><source srcset="../.gitbook/assets/inblock-frontends-flow-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-frontends-flow-light.png" alt="Fynd InBlock executes a better route, or the quoted route as sent"></picture><figcaption><p>How a swap executes through Fynd InBlock</p></figcaption></figure>
 
-Your app sends the swap to the Fynd InBlock router with the quoted calldata. If the builder stored a better route, the Fynd router executes it. If not, or if the better route fails, the aggregator router executes the swap as sent.
+Your app sends the swap to the Fynd InBlock router (`FyndJITRouter` contract) with the quoted calldata. If the builder stored a better route, the Fynd router (`TychoRouterV3` contract) executes it. If not, or if the better route fails, the aggregator router executes the swap as sent.
 
 ## Where the money comes from
 
@@ -61,7 +61,7 @@ Use this path when your swaps go through your own contract. You prepare the call
 
 ### Your fee on a replaced swap
 
-If your fee is in the quote calldata, Fynd InBlock keeps it only when it knows the fee. It learns the fee from the decoder, which reads it from the calldata, or from an explicit order. In path A, the aggregator API sends the explicit order. In path B, you send it.
+Fynd InBlock preserves your fee only when it knows it. It learns the fee from the original calldata, or from an explicit order. In path A, the aggregator API sends the explicit order. In path B, you send it.
 
 On a replaced swap, the Fynd router pays this fee in the output token, as a balance in the Fynd router. You can withdraw this balance at any time.
 
@@ -73,10 +73,8 @@ In path B, your contract can also take the fee from the output after the swap. F
 
 ## Protections for your users
 
-The Fynd InBlock router contract applies the same rules to every swap. Nobody can change them for a single swap.
-
 * **Minimum output.** The user always gets at least the minimum output of the quote. The contract checks this on each swap.
-* **Output of the quoted route.** On a replaced swap, the user gets at least the output of the quoted route. The builder calculates this value, and Fynd suggests no route that gives the user less.
+* **Output of the quoted route.** On a replaced swap, the user gets at least the output of the quoted route. The builder calculates this value, and Fynd doesn't suggest routes that give the user less.
 * **Fallback.** If the better route fails, the contract executes the quoted route as sent.
 * **No balances.** The Fynd InBlock router keeps no tokens after a swap. It gives the aggregator router an approval for the exact input amount, and removes the approval after the call.
 * **Only known routers.** The Fynd InBlock router calls only routers that have a registered decoder.
@@ -93,7 +91,7 @@ These swaps work through the aggregator router directly, but fail through Fynd I
 
 ## Questions
 
-**What do my users see?** In path A, they approve the Fynd InBlock router once per token. In path B, their approvals do not change. In both paths, they get at least the output of the quoted route.
+**What do my users see?** In path A, they approve the Fynd InBlock router once per token. In path B, their approvals do not change - they still approve your router. In both paths, they get at least the output of the quoted route.
 
 **What happens when Fynd InBlock finds no better route?** The quoted route executes as sent. You get your fee as usual.
 
