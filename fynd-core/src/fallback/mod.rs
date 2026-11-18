@@ -487,7 +487,7 @@ fn sorted_pair(token_a: &Address, token_b: &Address) -> (Address, Address) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use rstest::rstest;
     use tycho_simulation::{
@@ -989,7 +989,7 @@ mod tests {
                 label.clone(),
                 FxHashMap::from_iter([(
                     BETTER_POOL.to_string(),
-                    Box::new(util::MockProtocolSim::new(0.5)) as Box<dyn ProtocolSim>,
+                    Arc::new(util::MockProtocolSim::new(0.5)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )

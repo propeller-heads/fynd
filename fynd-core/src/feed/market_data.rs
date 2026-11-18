@@ -44,7 +44,7 @@ use crate::{
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
-pub type OverlayStates = Arc<FxHashMap<ComponentId, Box<dyn ProtocolSim>>>;
+pub type OverlayStates = Arc<FxHashMap<ComponentId, Arc<dyn ProtocolSim>>>;
 
 /// A named simulation-state overlay with a block-number expiry.
 pub struct OverlayEntry {
@@ -172,84 +172,6 @@ impl MarketData {
         self.data.write().await
     }
 
-    /// Extracts a base-data subset for `component_ids` without holding the read guard across the
-    /// whole clone.
-    ///
-    /// `extract_subset` deep-clones one simulation state per component, so one guard held over a
-    /// near-whole-market set stalls the feed's writer — and every reader queued behind it — for
-    /// the whole clone. This clones in batches of 512 components, releasing the guard between
-    /// batches. A batch whose label differs from the first batch's means the feed advanced
-    /// mid-clone; the clone restarts so the returned snapshot stays single-block consistent.
-    /// After three attempts it falls back to one guard for the full set: a feed advancing faster
-    /// than the batched clone completes would otherwise starve it forever.
-    ///
-    /// No overlay is applied — this reads base data only. The subset reports this handle's gas
-    /// price.
-    pub async fn extract_subset_batched(
-        &self,
-        component_ids: &FxHashSet<&ComponentId>,
-    ) -> MarketState {
-        let mut subset = self
-            .extract_subset_in_batches(component_ids, 512, || {})
-            .await;
-        if let Some(gas_price) = self.replace_priority_fee(subset.gas_price()) {
-            subset.update_gas_price(gas_price);
-        }
-        subset
-    }
-
-    /// `extract_subset_batched` with the batch size injectable, plus a hook that runs after each
-    /// batch — the window where no guard is held and a feed write can land mid-clone. Tests use
-    /// the two to drive the merge, restart, and fallback paths deterministically.
-    async fn extract_subset_in_batches(
-        &self,
-        component_ids: &FxHashSet<&ComponentId>,
-        batch_size: usize,
-        between_batches: impl Fn(),
-    ) -> MarketState {
-        if component_ids.is_empty() {
-            // The chunk loop would yield a blank default; extract_subset carries the label,
-            // block, and gas price even for an empty set.
-            return self
-                .data
-                .read()
-                .await
-                .extract_subset(component_ids);
-        }
-        let ids: Vec<&ComponentId> = component_ids.iter().copied().collect();
-        'attempt: for _ in 0..3 {
-            let mut merged: Option<MarketState> = None;
-            for chunk in ids.chunks(batch_size) {
-                let chunk_ids: FxHashSet<&ComponentId> = chunk.iter().copied().collect();
-                let part = self
-                    .data
-                    .read()
-                    .await
-                    .extract_subset(&chunk_ids);
-                match &mut merged {
-                    None => merged = Some(part),
-                    Some(snapshot) => {
-                        if part.label != snapshot.label {
-                            continue 'attempt;
-                        }
-                        snapshot.merge_subset(part);
-                    }
-                }
-                between_batches();
-            }
-            return merged.unwrap_or_default();
-        }
-        warn!(
-            components = ids.len(),
-            "batched market snapshot restarted three times; falling back to one guard over the \
-             full set"
-        );
-        self.data
-            .read()
-            .await
-            .extract_subset(component_ids)
-    }
-
     /// Attempts a non-blocking read of the base data store.
     ///
     /// Returns `None` if the lock is currently held for writing.
@@ -282,7 +204,7 @@ impl MarketData {
     pub async fn register_labeled_state(
         &self,
         label: StateLabel,
-        states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+        states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
         valid_until: u64,
     ) {
         self.overlays
@@ -383,7 +305,7 @@ impl<'a> MarketDataView<'a> {
                 {
                     subset
                         .simulation_states
-                        .insert(id.clone(), state.clone_box());
+                        .insert(id.clone(), Arc::clone(state));
                 }
             }
             subset.label = label.clone();
@@ -487,7 +409,7 @@ pub struct MarketState {
     /// All components indexed by their ID, each with its swap directions.
     components: FxHashMap<ComponentId, StoredComponent>,
     /// All states indexed by their component ID.
-    simulation_states: FxHashMap<ComponentId, Box<dyn ProtocolSim>>,
+    simulation_states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
     /// All tokens indexed by their address. Shared for the same reason as `components`.
     tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
@@ -879,12 +801,15 @@ impl MarketState {
     }
 
     /// Updates a component's state.
-    pub fn update_states(
+    ///
+    /// Accepts boxed states from the indexer as well as already shared ones.
+    pub fn update_states<S: Into<Arc<dyn ProtocolSim>>>(
         &mut self,
-        states: impl IntoIterator<Item = (ComponentId, Box<dyn ProtocolSim>)>,
+        states: impl IntoIterator<Item = (ComponentId, S)>,
     ) {
         for (id, state) in states {
-            self.simulation_states.insert(id, state);
+            self.simulation_states
+                .insert(id, state.into());
         }
     }
 
@@ -898,7 +823,7 @@ impl MarketState {
     /// This is used to create a local snapshot of market data that can be used for
     /// simulation without holding the main lock. The subset includes:
     /// - Components matching the provided IDs
-    /// - Simulation states for those components (cloned via `clone_box`)
+    /// - Simulation states for those components (shared, not copied)
     /// - Tokens referenced by those components
     /// - Gas price and block info
     /// - The unsynced protocols and their pools
@@ -920,7 +845,7 @@ impl MarketState {
             // A component without a simulation state is legitimate: the recording skips `vm:*`
             // states, and a component can be announced a block before its first state arrives.
             if let Some(state) = self.simulation_states.get(id) {
-                simulation_states.insert(id.clone(), state.clone_box());
+                simulation_states.insert(id.clone(), Arc::clone(state));
             }
         }
 
@@ -947,17 +872,6 @@ impl MarketState {
             components_by_protocol,
             constraint_generation: self.constraint_generation,
         }
-    }
-
-    /// Absorbs another subset extracted from the same base state (the caller checks the labels
-    /// match), keeping this one's metadata. Component sets from `extract_subset` batches are
-    /// disjoint, so components and simulation states are never overwritten; a token shared by
-    /// two batches is overwritten with an identical clone from the same base state.
-    fn merge_subset(&mut self, other: MarketState) {
-        self.components.extend(other.components);
-        self.simulation_states
-            .extend(other.simulation_states);
-        self.tokens.extend(other.tokens);
     }
 }
 
@@ -1347,131 +1261,36 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_subset() {
+    fn test_extract_subset_shares_states() {
         let market = market_with_two_components();
         let ab = "component_ab".to_string();
-        let bc = "component_bc".to_string();
 
-        let mut merged = market.extract_subset(&[&ab].into_iter().collect());
-        merged.merge_subset(market.extract_subset(&[&bc].into_iter().collect()));
+        let subset = market.extract_subset(&[&ab].into_iter().collect());
 
-        let combined = market.extract_subset(&[&ab, &bc].into_iter().collect());
-        assert_eq!(merged.components.len(), combined.components.len());
-        assert_eq!(merged.simulation_states.len(), combined.simulation_states.len());
-        assert_eq!(merged.tokens.len(), combined.tokens.len());
-        assert_eq!(merged.label, combined.label);
+        assert!(Arc::ptr_eq(&market.simulation_states[&ab], &subset.simulation_states[&ab]));
     }
 
-    #[tokio::test]
-    async fn test_extract_subset_batched() {
-        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
+    #[test]
+    fn test_extract_subset_keeps_state_replaced_later() {
+        let mut market = market_with_two_components();
         let ab = "component_ab".to_string();
-        let bc = "component_bc".to_string();
-        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
+        let (token_a, token_b) = (token(0x0A, "A"), token(0x0B, "B"));
+        let subset = market.extract_subset(&[&ab].into_iter().collect());
 
-        let batched = market_data
-            .extract_subset_batched(&ids)
-            .await;
+        market.update_states([(
+            ab.clone(),
+            Box::new(MockProtocolSim::new(9.0)) as Box<dyn ProtocolSim>,
+        )]);
 
-        let direct = market_data
-            .read()
-            .await
-            .extract_subset(&ids);
-        assert_eq!(batched.components.len(), direct.components.len());
-        assert_eq!(batched.simulation_states.len(), direct.simulation_states.len());
-        assert_eq!(batched.tokens.len(), direct.tokens.len());
-        assert_eq!(batched.label, direct.label);
-    }
-
-    #[tokio::test]
-    async fn test_extract_subset_batched_multi_chunk() {
-        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
-        let ab = "component_ab".to_string();
-        let bc = "component_bc".to_string();
-        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
-
-        // Batch size 1 puts each component in its own chunk, so the merge path runs.
-        let batched = market_data
-            .extract_subset_in_batches(&ids, 1, || {})
-            .await;
-
-        let direct = market_data
-            .read()
-            .await
-            .extract_subset(&ids);
-        assert!(batched.components.contains_key(&ab));
-        assert!(batched.components.contains_key(&bc));
-        assert!(batched
-            .simulation_states
-            .contains_key(&ab));
-        assert!(batched
-            .simulation_states
-            .contains_key(&bc));
-        assert_eq!(batched.tokens.len(), direct.tokens.len());
-        assert_eq!(batched.label, direct.label);
-    }
-
-    #[tokio::test]
-    async fn test_extract_subset_batched_label_change_mid_clone() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
-        let ab = "component_ab".to_string();
-        let bc = "component_bc".to_string();
-        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
-        // The feed advances once, after the first batch of the first attempt: the second
-        // batch's label mismatch must restart the clone, and the second attempt must read one
-        // consistent post-advance state.
-        let batches_done = AtomicUsize::new(0);
-        let writer = market_data.clone();
-
-        let batched = market_data
-            .extract_subset_in_batches(&ids, 1, || {
-                if batches_done.fetch_add(1, Ordering::SeqCst) == 0 {
-                    writer
-                        .try_write()
-                        .expect("no guard is held between batches")
-                        .label = "advanced".to_string();
-                }
-            })
-            .await;
-
-        assert_eq!(batched.label, "advanced");
-        assert!(batched.components.contains_key(&ab));
-        assert!(batched.components.contains_key(&bc));
-    }
-
-    #[tokio::test]
-    async fn test_extract_subset_batched_fallback_after_three_attempts() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let market_data = MarketData::new(Arc::new(RwLock::new(market_with_two_components())));
-        let ab = "component_ab".to_string();
-        let bc = "component_bc".to_string();
-        let ids: FxHashSet<&ComponentId> = [&ab, &bc].into_iter().collect();
-        // The feed advances after every batch, so all three batched attempts restart and the
-        // full-set fallback must still deliver every component under one guard.
-        let bumps = AtomicUsize::new(0);
-        let writer = market_data.clone();
-
-        let batched = market_data
-            .extract_subset_in_batches(&ids, 1, || {
-                let bump = bumps.fetch_add(1, Ordering::SeqCst);
-                writer
-                    .try_write()
-                    .expect("no guard is held between batches")
-                    .label = format!("block_{bump}");
-            })
-            .await;
-
-        assert!(batched.components.contains_key(&ab));
-        assert!(batched.components.contains_key(&bc));
-        assert!(batched
-            .simulation_states
-            .contains_key(&ab));
-        assert!(batched
-            .simulation_states
-            .contains_key(&bc));
+        let price = |state: &MarketState| {
+            state
+                .get_simulation_state(&ab)
+                .expect("state is present")
+                .spot_price(&token_a, &token_b)
+                .expect("mock prices every pair")
+        };
+        assert_eq!(price(&subset), 2.0);
+        assert_eq!(price(&market), 9.0);
     }
 
     // ==================== MarketData overlay tests ====================
@@ -1481,10 +1300,10 @@ mod tests {
         let market_ref = MarketData::new_shared();
 
         let label = "test_label".to_string();
-        let mut states: FxHashMap<ComponentId, Box<dyn ProtocolSim>> = FxHashMap::default();
+        let mut states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>> = FxHashMap::default();
         states.insert(
             "component_ab".to_string(),
-            Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
+            Arc::new(MockProtocolSim::new(99.0)) as Arc<dyn ProtocolSim>,
         );
 
         market_ref
@@ -1509,7 +1328,7 @@ mod tests {
                 "my_label".to_string(),
                 FxHashMap::from_iter([(
                     "component1".to_string(),
-                    Box::new(MockProtocolSim::new(5.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(5.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
@@ -1532,7 +1351,7 @@ mod tests {
                 label.clone(),
                 FxHashMap::from_iter([(
                     "component".to_string(),
-                    Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(1.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
@@ -1556,7 +1375,7 @@ mod tests {
                     format!("label_{i}"),
                     FxHashMap::from_iter([(
                         format!("component_{i}"),
-                        Box::new(MockProtocolSim::new(f64::from(i))) as Box<dyn ProtocolSim>,
+                        Arc::new(MockProtocolSim::new(f64::from(i))) as Arc<dyn ProtocolSim>,
                     )]),
                     u64::MAX,
                 )
@@ -1582,7 +1401,7 @@ mod tests {
             "shared".to_string(),
             FxHashMap::from_iter([(
                 "component_x".to_string(),
-                Box::new(MockProtocolSim::new(7.0)) as Box<dyn ProtocolSim>,
+                Arc::new(MockProtocolSim::new(7.0)) as Arc<dyn ProtocolSim>,
             )]),
             u64::MAX,
         )
@@ -1622,7 +1441,7 @@ mod tests {
             data.upsert_tokens([tok_a.clone(), tok_b.clone()]);
             data.update_states([(
                 "component_ab".to_string(),
-                Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                Arc::new(MockProtocolSim::new(2.0)) as Arc<dyn ProtocolSim>,
             )]);
         }
 
@@ -1632,7 +1451,7 @@ mod tests {
                 label.clone(),
                 FxHashMap::from_iter([(
                     "component_ab".to_string(),
-                    Box::new(MockProtocolSim::new(99.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(99.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 u64::MAX,
             )
@@ -1666,7 +1485,7 @@ mod tests {
                 "stale".to_string(),
                 FxHashMap::from_iter([(
                     "component_stale".to_string(),
-                    Box::new(MockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(1.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 10,
             )
@@ -1676,7 +1495,7 @@ mod tests {
                 "fresh".to_string(),
                 FxHashMap::from_iter([(
                     "component_fresh".to_string(),
-                    Box::new(MockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(MockProtocolSim::new(2.0)) as Arc<dyn ProtocolSim>,
                 )]),
                 20,
             )
@@ -1796,17 +1615,11 @@ mod tests {
             ("extract_subset_with_overlay", view.extract_subset_with_overlay(&ids)),
         ];
         drop(view);
-        let batched = priced
-            .extract_subset_batched(&ids)
-            .await;
 
         assert_eq!(view_price.pricing, eip1559(30, 100));
         assert_eq!(view_price.block_number, 42);
         assert_eq!(view_price.block_timestamp, 1_700_000_000);
-        for (name, subset) in subsets
-            .into_iter()
-            .chain([("extract_subset_batched", batched)])
-        {
+        for (name, subset) in subsets {
             assert_eq!(subset.gas_price().map(|p| &p.pricing), Some(&eip1559(30, 100)), "{name}");
         }
         assert_eq!(
