@@ -9,6 +9,8 @@
 * [Quickstart](get-started/quickstart/README.md)
 * [Hosted Fynd API](get-started/hosted-api.md)
 * [Fynd In-Block Solver](get-started/fynd-in-block-solver.md)
+  * [For Swap Frontends](get-started/fynd-in-block-for-swap-frontends.md)
+  * [For DEX Aggregators](get-started/fynd-in-block-for-dex-aggregators.md)
 * [Fynd AMM](get-started/fynd-amm.md)
 
 ## Guides
