@@ -20,6 +20,20 @@ jobs:
       app_id: ${{ secrets.APP_ID }}
       app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
 
+  # Pushes the dashboards under monitoring/grafana/hosted/ that this push added or changed to the
+  # "fynd" folder in Grafana. Runs independently of the release jobs; sends nothing when no
+  # dashboard changed.
+  sync-grafana-dashboards:
+    # Org template tracked at main, like the release job above, so template fixes apply here.
+    uses: propeller-heads/ci-cd-templates/.github/workflows/sync-grafana-dashboards.yaml@main # zizmor: ignore[unpinned-uses]
+    permissions:
+      contents: read
+    with:
+      dashboards_path: monitoring/grafana/hosted
+      folder_uid: dfrj6ovqaslxcd # "fynd"
+    secrets:
+      grafana_token: ${{ secrets.GRAFANA_SA_TOKEN }}
+
   # Rewrites the release PR's newest CHANGELOG.md section with an LLM (OpenRouter) after
   # release-plz has updated the PR. Falls back to release-plz's notes when the API key is
   # missing or the LLM call fails. release-plz rebuilds the PR on each push to main.
