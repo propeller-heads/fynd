@@ -110,7 +110,7 @@ pub(super) fn replace_with_swap(
 /// Indexes the components of the base market state that pass `is_member`.
 pub(super) async fn build_index(
     market: &MarketData,
-    is_member: impl Fn(&ProtocolComponent) -> bool,
+    is_member: impl Fn(&MarketDataView<'_>, &ProtocolComponent) -> bool,
 ) -> ReplacementComponentIndex {
     let mut index = ReplacementComponentIndex::default();
     let view = market.read().await;
@@ -122,7 +122,7 @@ pub(super) async fn build_index(
         for id in state.components_by_protocol(system) {
             if let Some(component) = state
                 .get_component(id)
-                .filter(|component| is_member(component))
+                .filter(|component| is_member(&view, component))
             {
                 index.insert(id.clone(), component.tokens.clone());
             }
@@ -131,29 +131,33 @@ pub(super) async fn build_index(
     index
 }
 
-/// Removes the components `event` removes from `index`, and indexes the components it adds that
-/// pass `is_member`.
+/// Removes the components `event` removes from `index`, and indexes again the components it adds
+/// or updates: each one that passes `is_member` is in the index.
 pub(super) async fn update_index(
     index: &mut ReplacementComponentIndex,
     market: &MarketData,
     event: &MarketEvent,
-    is_member: impl Fn(&ProtocolComponent) -> bool,
+    is_member: impl Fn(&MarketDataView<'_>, &ProtocolComponent) -> bool,
 ) {
-    let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
+    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
+        event;
     for id in removed_components {
         index.remove(id);
     }
-    if added_components.is_empty() {
+    if added_components.is_empty() && updated_components.is_empty() {
         return;
     }
     let view = market.read().await;
-    for (id, topology) in added_components {
+    for id in added_components
+        .keys()
+        .chain(updated_components)
+    {
         index.remove(id);
-        if view
+        if let Some(component) = view
             .get_component(id)
-            .is_some_and(&is_member)
+            .filter(|component| is_member(&view, component))
         {
-            index.insert(id.clone(), topology.tokens.clone());
+            index.insert(id.clone(), component.tokens.clone());
         }
     }
 }

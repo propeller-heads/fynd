@@ -1216,7 +1216,34 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let (stores, services) = self.assemble_market()?;
+        let (mut stores, services) = self.assemble_market()?;
+
+        let encoder = match self.encoder {
+            Some(enc) => enc,
+            None => {
+                let registry = SwapEncoderRegistry::new(self.chain)
+                    .add_default_encoders(None)
+                    .map_err(|e| SolverBuildError::Encoder(e.to_string()))?;
+                Encoder::new(self.chain, registry)
+                    .map_err(|e| SolverBuildError::Encoder(e.to_string()))?
+            }
+        };
+        let encoder = match self.calldata_watermark {
+            Some(watermark) => encoder.with_calldata_watermark(watermark),
+            None => encoder,
+        };
+        let encoder = match self.jit_router_address {
+            Some(jit_router) => encoder
+                .with_jit_router(jit_router)
+                .map_err(|e| SolverBuildError::Encoder(e.to_string()))?,
+            None => encoder,
+        };
+
+        // Workers read the market through this handle, so an exclusive worker knows which Curve
+        // pools Fynd can sign grants for.
+        stores.market_data = stores
+            .market_data
+            .with_curve_grantor(encoder.curve_grantor());
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
@@ -1309,27 +1336,6 @@ impl FyndBuilder {
             );
             worker_pools.push(worker_pool);
         }
-
-        let encoder = match self.encoder {
-            Some(enc) => enc,
-            None => {
-                let registry = SwapEncoderRegistry::new(self.chain)
-                    .add_default_encoders(None)
-                    .map_err(|e| SolverBuildError::Encoder(e.to_string()))?;
-                Encoder::new(self.chain, registry)
-                    .map_err(|e| SolverBuildError::Encoder(e.to_string()))?
-            }
-        };
-        let encoder = match self.calldata_watermark {
-            Some(watermark) => encoder.with_calldata_watermark(watermark),
-            None => encoder,
-        };
-        let encoder = match self.jit_router_address {
-            Some(jit_router) => encoder
-                .with_jit_router(jit_router)
-                .map_err(|e| SolverBuildError::Encoder(e.to_string()))?,
-            None => encoder,
-        };
 
         let chain = self.chain;
         let router_address = encoder.router_address().cloned();
