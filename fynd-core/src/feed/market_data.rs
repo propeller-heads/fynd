@@ -288,6 +288,17 @@ impl<'a> MarketDataView<'a> {
         self.guard.get_simulation_state(id)
     }
 
+    /// The block number of the update that last set `id`'s base state. `None` when the active
+    /// overlay holds `id`, or when that update named no block.
+    pub fn state_block(&self, id: &str) -> Option<u64> {
+        if let Some((_, ref states)) = self.overlay {
+            if states.contains_key(id) {
+                return None;
+            }
+        }
+        self.guard.state_block(id)
+    }
+
     /// Extracts a base-data subset for the given component IDs, then layers the active overlay
     /// on top by replacing any simulation states found in both the subset and the overlay.
     ///
@@ -306,6 +317,7 @@ impl<'a> MarketDataView<'a> {
                     subset
                         .simulation_states
                         .insert(id.clone(), Arc::clone(state));
+                    subset.state_blocks.remove(id);
                 }
             }
             subset.label = label.clone();
@@ -410,6 +422,9 @@ pub struct MarketState {
     components: FxHashMap<ComponentId, StoredComponent>,
     /// All states indexed by their component ID.
     simulation_states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
+    /// The block number of the update that last set each state, for the states set through
+    /// [`MarketState::update_states_at_block`].
+    state_blocks: FxHashMap<ComponentId, u64>,
     /// All tokens indexed by their address. Shared for the same reason as `components`.
     tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
@@ -481,6 +496,7 @@ impl MarketState {
             label: String::new(),
             components: FxHashMap::default(),
             simulation_states: FxHashMap::default(),
+            state_blocks: FxHashMap::default(),
             tokens: FxHashMap::default(),
             gas_price: None,
             protocol_sync_status: FxHashMap::default(),
@@ -797,6 +813,7 @@ impl MarketState {
                 }
             }
             self.simulation_states.remove(id);
+            self.state_blocks.remove(id);
         }
     }
 
@@ -808,9 +825,30 @@ impl MarketState {
         states: impl IntoIterator<Item = (ComponentId, S)>,
     ) {
         for (id, state) in states {
+            self.state_blocks.remove(&id);
             self.simulation_states
                 .insert(id, state.into());
         }
+    }
+
+    /// Updates components' states and records `block` as the block each state was set at.
+    pub fn update_states_at_block<S: Into<Arc<dyn ProtocolSim>>>(
+        &mut self,
+        block: u64,
+        states: impl IntoIterator<Item = (ComponentId, S)>,
+    ) {
+        for (id, state) in states {
+            self.state_blocks
+                .insert(id.clone(), block);
+            self.simulation_states
+                .insert(id, state.into());
+        }
+    }
+
+    /// The block number of the update that last set `id`'s state, or `None` when that update
+    /// named no block.
+    pub fn state_block(&self, id: &str) -> Option<u64> {
+        self.state_blocks.get(id).copied()
     }
 
     /// Updates the gas price.
@@ -832,6 +870,7 @@ impl MarketState {
             FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
         let mut simulation_states =
             FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
+        let mut state_blocks = FxHashMap::default();
         // Tokens are shared between components, so this collects addresses first and resolves
         // them once each rather than per component that mentions them.
         let mut token_addresses: FxHashSet<&Address> =
@@ -846,6 +885,9 @@ impl MarketState {
             // states, and a component can be announced a block before its first state arrives.
             if let Some(state) = self.simulation_states.get(id) {
                 simulation_states.insert(id.clone(), Arc::clone(state));
+            }
+            if let Some(&block) = self.state_blocks.get(id) {
+                state_blocks.insert(id.clone(), block);
             }
         }
 
@@ -863,6 +905,7 @@ impl MarketState {
             label: self.label.clone(),
             components,
             simulation_states,
+            state_blocks,
             tokens,
             gas_price: self.gas_price.clone(),
             protocol_sync_status: FxHashMap::default(), // Not needed for simulation
@@ -1424,6 +1467,72 @@ mod tests {
         assert!(guard_b
             .get_simulation_state("component_x")
             .is_some());
+    }
+
+    fn mock_state(price: f64) -> Arc<dyn ProtocolSim> {
+        Arc::new(MockProtocolSim::new(price))
+    }
+
+    #[test]
+    fn test_state_block() {
+        let mut market = MarketState::new();
+        market.update_states_at_block(100, [("ab".to_string(), mock_state(1.0))]);
+        market.update_states_at_block(
+            101,
+            [("bc".to_string(), mock_state(2.0)), ("cd".to_string(), mock_state(3.0))],
+        );
+        market.update_states([("ab".to_string(), mock_state(4.0))]);
+        market.remove_components([&"cd".to_string()]);
+
+        let blocks = ["ab", "bc", "cd", "unknown"].map(|id| market.state_block(id));
+
+        assert_eq!(blocks, [None, Some(101), None, None]);
+    }
+
+    #[test]
+    fn test_extract_subset_state_block() {
+        let mut market = market_with_two_components();
+        market.update_states_at_block(100, [("component_ab".to_string(), mock_state(1.0))]);
+        let ab = "component_ab".to_string();
+
+        let subset = market.extract_subset(&[&ab].into_iter().collect());
+
+        assert_eq!(subset.state_block("component_ab"), Some(100));
+    }
+
+    #[tokio::test]
+    async fn test_state_block_with_overlay() {
+        let market_ref = MarketData::new_shared();
+        market_ref
+            .write()
+            .await
+            .update_states_at_block(
+                100,
+                [
+                    ("component_ab".to_string(), mock_state(1.0)),
+                    ("component_bc".to_string(), mock_state(2.0)),
+                ],
+            );
+        let label = "overlay".to_string();
+        market_ref
+            .register_labeled_state(
+                label.clone(),
+                FxHashMap::from_iter([("component_ab".to_string(), mock_state(9.0))]),
+                u64::MAX,
+            )
+            .await;
+        let view = market_ref
+            .read_labeled(&label)
+            .await
+            .expect("label was just registered");
+        let ids = ["component_ab".to_string(), "component_bc".to_string()];
+
+        let subset = view.extract_subset_with_overlay(&ids.iter().collect());
+
+        assert_eq!(view.state_block("component_ab"), None, "the overlay holds component_ab");
+        assert_eq!(view.state_block("component_bc"), Some(100));
+        assert_eq!(subset.state_block("component_ab"), None, "the overlay holds component_ab");
+        assert_eq!(subset.state_block("component_bc"), Some(100));
     }
 
     #[tokio::test]
