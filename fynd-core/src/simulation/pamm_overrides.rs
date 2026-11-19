@@ -9,7 +9,10 @@
 //! Nothing here acts on a quote: a missing, unconvertible or conflicting override only changes
 //! what a simulation is given, never whether or how a quote is served.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use alloy::{
     primitives::{map::B256HashMap, Address, B256, U256},
@@ -42,6 +45,31 @@ pub(crate) const SIMULATION_DEVIATION_BPS: &str = "propamm_quote_simulation_devi
 /// The outcomes [`QuoteSimulator`](super::simulator::QuoteSimulator) counts a simulation under.
 pub(crate) const SIMULATION_OUTCOMES: [&str; 4] =
     ["success", "reverted", "failed", "block_unavailable"];
+
+/// The values of the `base_block` label, from [`base_block_label`].
+pub(crate) const BASE_BLOCKS: [&str; 4] =
+    ["quote_block", "before_quote_block", "after_quote_block", "unnamed"];
+
+/// How the block a route with pAMM overrides simulates on stands to the block its quote was
+/// priced on, for the `base_block` label.
+///
+/// The route runs on the parent of `quoted_block_number`. That is `quote_block` when it is the
+/// quote's own block, and `before_quote_block` or `after_quote_block` when it is older or newer:
+/// the route's other swaps then run on other state than the solver priced them on. `unnamed`
+/// means no override names a block, so the route runs on the usual block.
+pub(crate) fn base_block_label(quoted_block_number: Option<u64>, quote_block: u64) -> &'static str {
+    let Some(quoted) = quoted_block_number else {
+        return "unnamed";
+    };
+    match quoted
+        .saturating_sub(1)
+        .cmp(&quote_block)
+    {
+        Ordering::Equal => "quote_block",
+        Ordering::Less => "before_quote_block",
+        Ordering::Greater => "after_quote_block",
+    }
+}
 
 /// The account state Titan priced one pAMM swap's venue on, in alloy's override types.
 ///
@@ -157,8 +185,8 @@ pub(crate) struct RouteOverrides {
     pub(crate) block_number: Option<u64>,
     /// The timestamp of [`Self::block_number`], when a swap naming that block named one.
     pub(crate) block_timestamp: Option<u64>,
-    /// Every swap's accounts. Where two swaps set one value, the value of the later swap in the
-    /// route.
+    /// Every swap's accounts. Where two swaps set one value, the value of the swap naming the
+    /// newer block, and of the later swap in the route when both name the same block.
     pub(crate) accounts: StateOverride,
 }
 
@@ -191,11 +219,11 @@ pub(crate) struct OverridesReport {
     pub(crate) missing_block_number: u64,
     /// Merged overrides that name no block timestamp.
     pub(crate) missing_block_timestamp: u64,
-    /// Storage slots a later swap set to a different value than an earlier one.
+    /// Storage slots two swaps set to different values.
     pub(crate) storage_conflicts: u64,
-    /// Balances a later swap set to a different value than an earlier one.
+    /// Balances two swaps set to different values.
     pub(crate) balance_conflicts: u64,
-    /// Nonces a later swap set to a different value than an earlier one.
+    /// Nonces two swaps set to different values.
     pub(crate) nonce_conflicts: u64,
     /// Whether the merged overrides name more than one block.
     pub(crate) block_mismatch: bool,
@@ -248,25 +276,28 @@ impl OverridesReport {
 /// Collects the overrides of `route`'s pAMM swaps and merges them into one set.
 ///
 /// The accounts are a union, per account and per storage slot. Where two swaps set one balance,
-/// nonce or slot, the later swap in the route wins. The block is the newest one any swap names.
-/// Returns `None` when no pAMM swap carries overrides that convert.
+/// nonce or slot, the swap naming the newer block wins, since the route simulates as that block; a
+/// swap naming no block loses to any that names one, and between two swaps naming the same block
+/// the later one in the route wins. The block is the newest one any swap names. Returns `None`
+/// when no pAMM swap carries overrides that convert.
 pub(crate) fn collect(route: &Route) -> (Option<RouteOverrides>, OverridesReport) {
     let mut report = OverridesReport::default();
+    let mut attached = Vec::new();
+    for swap in route.swaps() {
+        match SwapOverrides::of(swap) {
+            SwapOverrides::NotPamm => {}
+            SwapOverrides::Missing => report.missing += 1,
+            SwapOverrides::ConversionFailed(reason) => report.conversion_failures.push(reason),
+            SwapOverrides::Attached(overrides) => attached.push(overrides),
+        }
+    }
+    // Merged oldest block first, so a newer block's value overwrites an older one's. The sort is
+    // stable, so route order stands within one block, and `None` sorts before every block.
+    attached.sort_by_key(SimulationOverrides::block_number);
+
     let mut merged: Option<RouteOverrides> = None;
     let mut blocks = BTreeSet::new();
-    for swap in route.swaps() {
-        let overrides = match SwapOverrides::of(swap) {
-            SwapOverrides::NotPamm => continue,
-            SwapOverrides::Missing => {
-                report.missing += 1;
-                continue;
-            }
-            SwapOverrides::ConversionFailed(reason) => {
-                report.conversion_failures.push(reason);
-                continue;
-            }
-            SwapOverrides::Attached(overrides) => overrides,
-        };
+    for overrides in attached {
         report.attached += 1;
         let route_overrides = merged.get_or_insert_with(RouteOverrides::default);
         match overrides.block_number {
@@ -286,7 +317,7 @@ pub(crate) fn collect(route: &Route) -> (Option<RouteOverrides>, OverridesReport
 }
 
 /// Adds `accounts` to `merged`, `accounts` winning wherever both set a value, and counts the
-/// values the two set differently.
+/// values the two set differently. The caller passes the accounts in the order they should win.
 fn merge_accounts(
     merged: &mut StateOverride,
     accounts: BTreeMap<Address, AccountOverride>,
@@ -380,15 +411,19 @@ pub(crate) fn register_metrics() {
     counter!(BLOCK_MISMATCH_TOTAL).increment(0);
     let purpose = SimulationPurpose::QUOTE.label();
     counter!(FUNDING_COLLISIONS_TOTAL, "purpose" => purpose).increment(0);
-    for overrides in ["applied", "none"] {
-        for outcome in SIMULATION_OUTCOMES {
-            counter!(
-                SIMULATIONS_TOTAL,
-                "overrides" => overrides,
-                "outcome" => outcome,
-                "purpose" => purpose
-            )
-            .increment(0);
+    // A simulation without overrides has no quoted block, so it only ever runs `unnamed`.
+    for (overrides, base_blocks) in [("applied", &BASE_BLOCKS[..]), ("none", &["unnamed"][..])] {
+        for base_block in base_blocks {
+            for outcome in SIMULATION_OUTCOMES {
+                counter!(
+                    SIMULATIONS_TOTAL,
+                    "overrides" => overrides,
+                    "base_block" => *base_block,
+                    "outcome" => outcome,
+                    "purpose" => purpose
+                )
+                .increment(0);
+            }
         }
     }
 }

@@ -1372,7 +1372,8 @@ impl FyndBuilder {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses)
-            .with_encoding_retry_budget(self.encoding_retry_budget);
+            .with_encoding_retry_budget(self.encoding_retry_budget)
+            .with_pamm_simulation_overrides(self.pamm_simulation_overrides);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
             .with_derived_data(Arc::clone(&stores.derived_data));
         if let Some(simulator) = quote_simulator {

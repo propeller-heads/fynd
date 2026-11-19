@@ -470,8 +470,7 @@ fn record_encoding_failures(quotes: &[OrderQuote], cut_off_orders: &[usize]) {
 /// Also credits each winning worker pool and algorithm. Attribution belongs here rather than at
 /// ranking: the price guard can pick a lower-ranked fallback, the exclusive overlay replaces the
 /// head of the list, and a failed encoding moves to the next candidate without an RFQ leg. These
-/// are the quotes the caller receives. For the same reason, this is where the simulation overrides
-/// of their pAMM swaps are counted.
+/// are the quotes the caller receives.
 ///
 /// `token_prices` are the derived token gas prices that restate each win's volume in the gas
 /// token; without them the wins count as unpriced.
@@ -483,10 +482,6 @@ pub fn finalize_quote(
     for quote in &order_quotes {
         record_win(quote, token_prices);
         instrumentation::record_winning_protocols(quote);
-        if let Some(route) = quote.route() {
-            let (_, report) = pamm_overrides::collect(route);
-            report.record(quote.order_id());
-        }
     }
 
     let total_gas_estimate = order_quotes
@@ -494,6 +489,19 @@ pub fn finalize_quote(
         .map(|o| o.gas_estimate())
         .fold(BigUint::ZERO, |acc, g| acc + g);
     Quote::new(order_quotes, total_gas_estimate, solve_time_ms)
+}
+
+/// Counts the simulation overrides of the pAMM swaps of `quotes`, the quotes the caller receives.
+///
+/// Counted only while the feed reads the overrides: with them off, every pAMM swap would count as
+/// missing them.
+fn record_pamm_overrides(quotes: &[OrderQuote]) {
+    for quote in quotes {
+        if let Some(route) = quote.route() {
+            let (_, report) = pamm_overrides::collect(route);
+            report.record(quote.order_id());
+        }
+    }
 }
 
 impl WorkerPoolRouter {
@@ -757,11 +765,15 @@ impl WorkerPoolRouter {
             }
             None => ranked.into_best(),
         };
-        Ok(finalize_quote(
+        let quote = finalize_quote(
             order_quotes,
             started.elapsed().as_millis() as u64,
             token_prices.as_deref(),
-        ))
+        );
+        if self.config.pamm_simulation_overrides() {
+            record_pamm_overrides(quote.orders());
+        }
+        Ok(quote)
     }
 
     /// The encoder this router uses for [`Self::quote`].
@@ -2225,12 +2237,20 @@ mod tests {
         worker_b.abort();
     }
 
-    /// `finalize_quote` counts the simulation overrides of the pAMM swaps it serves, and serves
-    /// each quote unchanged whether its pAMM swaps carry overrides or not.
-    #[test]
-    fn test_finalize_quote_counts_pamm_overrides() {
+    /// The router counts the simulation overrides of the pAMM swaps it serves only while the feed
+    /// reads them: with them off, no pAMM swap counts as missing its overrides.
+    #[rstest]
+    #[case::read(true, Some(1), Some(1))]
+    #[case::not_read(false, None, None)]
+    #[tokio::test]
+    async fn test_quote_counts_pamm_overrides(
+        #[case] read: bool,
+        #[case] attached: Option<u64>,
+        #[case] missing: Option<u64>,
+    ) {
         let recorder = metrics_util::debugging::DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
         let route = pamm_fixtures::route(vec![
             pamm_fixtures::pamm_swap(
                 "with",
@@ -2241,22 +2261,22 @@ mod tests {
             ),
             pamm_fixtures::pamm_swap("without", None),
         ]);
-        let mut quote =
+        let quote =
             crate::simulation::deviation::fixtures::quote_with_fees(1_000_000).with_route(route);
-        quote.set_transaction(crate::Transaction::new(
-            Bytes::from(make_address(0x02).as_ref()),
-            BigUint::ZERO,
-            vec![0x12],
-        ));
-        let (status, amount_out) = (quote.status(), quote.amount_out().clone());
+        let (pool, worker) =
+            create_mock_worker_pool("pool_a", Ok(SingleOrderQuote::new(quote, 5)), 0);
+        let config = WorkerPoolRouterConfig::default().with_pamm_simulation_overrides(read);
+        let router = WorkerPoolRouter::new(vec![pool], config, default_encoder());
 
-        let finalized =
-            metrics::with_local_recorder(&recorder, || finalize_quote(vec![quote], 7, None));
+        let served = router
+            .quote(
+                QuoteRequest::new(vec![make_order()], QuoteOptions::default()),
+                ExclusiveAccess::Denied,
+            )
+            .await
+            .expect("quote");
 
-        let served = &finalized.orders()[0];
-        assert_eq!(served.status(), status);
-        assert_eq!(*served.amount_out(), amount_out);
-        assert!(served.transaction().is_some());
+        assert!(served.orders()[0].route().is_some());
         let recorded = recorded_metrics(&snapshotter);
         let legs = |outcome: &str| {
             recorded
@@ -2268,8 +2288,9 @@ mod tests {
                 .map(|(.., value)| value)
         };
         use metrics_util::debugging::DebugValue::Counter;
-        assert_eq!(legs("attached"), Some(&Counter(1)));
-        assert_eq!(legs("missing"), Some(&Counter(1)));
+        assert_eq!(legs("attached"), attached.map(Counter).as_ref());
+        assert_eq!(legs("missing"), missing.map(Counter).as_ref());
+        worker.abort();
     }
 
     #[tokio::test]

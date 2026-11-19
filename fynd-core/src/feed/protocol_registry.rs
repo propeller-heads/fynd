@@ -573,8 +573,9 @@ fn register_exchange(
 ///
 /// With `simulation_overrides`, the stream also reads Titan's quote stream, a second websocket,
 /// and attaches to each state the account state Titan priced it on. Quoting never reads it.
-/// Opening the stream registers the overrides metrics at zero, on or off: with them off, every
-/// pAMM swap counts as missing its overrides.
+/// Opening the stream registers the overrides metrics at zero, on or off. With them off, the
+/// router does not count served pAMM swaps (`WorkerPoolRouterConfig::pamm_simulation_overrides`),
+/// so none counts as missing its overrides.
 ///
 /// # Errors
 ///

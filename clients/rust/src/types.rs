@@ -820,8 +820,10 @@ impl Swap {
 /// simulation of the swap on chain state alone usually reverts. To reproduce the quote with
 /// `eth_simulateV1` or `eth_call`, simulate on block `block_number - 1`, pass `block_number` and
 /// `block_timestamp` as the `number` and `time` block overrides, and add [`Self::accounts`] to
-/// your state overrides. For a route through several pAMM swaps, merge every swap's accounts, and
-/// when the swaps name different blocks, use the newest block number and its timestamp.
+/// your state overrides. For a route through several pAMM swaps, merge every swap's accounts per
+/// address and per storage slot. Where two swaps set one value, keep the value of the swap with the
+/// newer block number, or of the later swap in the route when both name the same block. Simulate
+/// as the newest block number, with its timestamp.
 ///
 /// A successful simulation means the quote can fill if the venue's state is current at that price
 /// when the transaction lands, not that it will.

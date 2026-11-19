@@ -667,6 +667,30 @@ fn test_setup_runs_on_the_quote_block_when_asked() {
     assert_eq!(setup.call.block, BlockNumberOrTag::Number(quote.block().number()));
 }
 
+/// The setup says how the block a pAMM route runs on stands to the quote's own block.
+#[rstest::rstest]
+#[case::one_block_ahead(Some(1), "quote_block")]
+#[case::behind(Some(0), "before_quote_block")]
+#[case::two_blocks_ahead(Some(2), "after_quote_block")]
+#[case::no_block(None, "unnamed")]
+fn test_setup_base_block(#[case] blocks_ahead: Option<u64>, #[case] expected: &str) {
+    let quote_block = pamm_quote(None).block().number();
+    let quote = pamm_quote(Some(pamm_fixtures::overrides(
+        blocks_ahead.map(|ahead| quote_block + ahead),
+        [(0xa1, pamm_fixtures::storage(&[(0, 7)]))],
+    )));
+
+    let setup = SimulationSetup::for_quote(
+        &quote,
+        None,
+        SimulationBlock::Latest,
+        PrevRandaoOverride::Random,
+    )
+    .expect("a valid quote");
+
+    assert_eq!(setup.base_block, expected);
+}
+
 #[tokio::test]
 async fn test_simulation_runs_on_the_block_it_is_given() {
     let server = wiremock::MockServer::start().await;
@@ -1399,11 +1423,8 @@ fn account_in(request: &serde_json::Value, byte: u8) -> Option<&serde_json::Valu
 
 #[test]
 fn test_block_overrides_set_the_quoted_block() {
-    let environment = block_environment(
-        PrevRandaoOverride::Random,
-        Some(QUOTED_BLOCK),
-        Some(1_792_115_924),
-    );
+    let environment =
+        block_environment(PrevRandaoOverride::Random, Some(QUOTED_BLOCK), Some(1_792_115_924));
 
     assert_eq!(environment.number, Some(U256::from(QUOTED_BLOCK)));
     assert_eq!(environment.time, Some(1_792_115_924));
@@ -1520,7 +1541,7 @@ fn test_record_pamm_outcome(#[case] applied: bool, #[case] label: &str) {
                 logs: Vec::new(),
             },
             "success",
-            PammSimulation { applied, funding_collisions: 2 },
+            PammSimulation { applied, funding_collisions: 2, base_block: "before_quote_block" },
             SimulationPurpose::QUOTE,
         );
     });
@@ -1547,9 +1568,11 @@ fn test_record_pamm_outcome(#[case] applied: bool, #[case] label: &str) {
         "{:?}",
         simulations.1
     );
-    assert!(find(pamm_overrides::SIMULATION_DEVIATION_BPS)
-        .1
-        .contains(&label.to_string()));
+    let base_block = "base_block=before_quote_block".to_string();
+    assert!(simulations.1.contains(&base_block), "{:?}", simulations.1);
+    let deviation = find(pamm_overrides::SIMULATION_DEVIATION_BPS);
+    assert!(deviation.1.contains(&label.to_string()));
+    assert!(deviation.1.contains(&base_block), "{:?}", deviation.1);
     assert_eq!(
         find(pamm_overrides::FUNDING_COLLISIONS_TOTAL).2,
         metrics_util::debugging::DebugValue::Counter(2)

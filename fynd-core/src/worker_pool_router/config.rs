@@ -22,6 +22,9 @@ pub struct WorkerPoolRouterConfig {
     /// How long encoding retries may take, counted from when the best candidates were encoded.
     /// `Duration::ZERO` turns retrying off.
     encoding_retry_budget: Duration,
+    /// Whether the feed reads the simulation overrides of pAMM swaps. Without them, a served
+    /// quote's pAMM swaps are not counted as missing their overrides.
+    pamm_simulation_overrides: bool,
 }
 
 impl Default for WorkerPoolRouterConfig {
@@ -30,6 +33,7 @@ impl Default for WorkerPoolRouterConfig {
             default_timeout: Duration::from_millis(1000),
             min_responses: 1, // Return as soon as one solver responds
             encoding_retry_budget: defaults::ENCODING_RETRY_BUDGET,
+            pamm_simulation_overrides: true,
         }
     }
 }
@@ -50,6 +54,11 @@ impl WorkerPoolRouterConfig {
         self.encoding_retry_budget
     }
 
+    /// Returns whether the feed reads the simulation overrides of pAMM swaps.
+    pub fn pamm_simulation_overrides(&self) -> bool {
+        self.pamm_simulation_overrides
+    }
+
     /// Creates a new config with the specified timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
@@ -65,6 +74,12 @@ impl WorkerPoolRouterConfig {
     /// Sets how long encoding retries may take.
     pub fn with_encoding_retry_budget(mut self, budget: Duration) -> Self {
         self.encoding_retry_budget = budget;
+        self
+    }
+
+    /// Sets whether the feed reads the simulation overrides of pAMM swaps (default: `true`).
+    pub fn with_pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.pamm_simulation_overrides = enabled;
         self
     }
 }

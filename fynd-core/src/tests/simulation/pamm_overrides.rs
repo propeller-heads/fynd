@@ -168,8 +168,8 @@ fn test_collect_unions_accounts_and_slots() {
     );
 }
 
-/// Where two swaps set one value differently, the later swap in the route wins and the
-/// disagreement is counted. Setting the same value twice is no conflict.
+/// Where two swaps of one block set one value differently, the later swap in the route wins and
+/// the disagreement is counted. Setting the same value twice is no conflict.
 #[test]
 fn test_collect_later_swap_wins_a_conflict() {
     let earlier = TychoAccountOverride {
@@ -216,6 +216,25 @@ fn test_collect_takes_the_newest_block() {
 
     assert_eq!(merged.block_number, Some(11));
     assert_eq!(merged.block_timestamp, Some(timestamp_of(11)));
+    assert!(report.block_mismatch);
+}
+
+/// Where swaps name different blocks, the newest block's value wins wherever they disagree,
+/// whatever their order in the route, and a swap naming no block loses to any that names one.
+#[test]
+fn test_collect_newest_block_wins_a_conflict() {
+    let (merged, report) = collect(&route(vec![
+        pamm_swap("newer", Some(overrides(Some(11), [(0xa1, storage(&[(0, 11)]))]))),
+        pamm_swap("older", Some(overrides(Some(10), [(0xa1, storage(&[(0, 10), (1, 10)]))]))),
+        pamm_swap("no-block", Some(overrides(None, [(0xa1, storage(&[(0, 1), (2, 1)]))]))),
+    ]));
+    let merged = merged.expect("overrides");
+
+    assert_eq!(merged.block_number, Some(11));
+    assert_eq!(slot_of(&merged.accounts, 0xa1, 0), Some(alloy_word(11)));
+    assert_eq!(slot_of(&merged.accounts, 0xa1, 1), Some(alloy_word(10)));
+    assert_eq!(slot_of(&merged.accounts, 0xa1, 2), Some(alloy_word(1)));
+    assert_eq!(report.storage_conflicts, 2);
     assert!(report.block_mismatch);
 }
 
@@ -341,6 +360,21 @@ fn test_record_ignores_a_quote_without_pamm_swaps() {
     metrics::with_local_recorder(&recorder, || OverridesReport::default().record("order"));
 
     assert!(recorded_metrics(&snapshotter).is_empty());
+}
+
+#[rstest::rstest]
+#[case::parent_is_the_quote_block(Some(101), 100, "quote_block")]
+#[case::parent_is_older(Some(100), 100, "before_quote_block")]
+#[case::parent_is_newer(Some(103), 100, "after_quote_block")]
+#[case::block_zero(Some(0), 0, "quote_block")]
+#[case::no_block(None, 100, "unnamed")]
+fn test_base_block_label(
+    #[case] quoted_block_number: Option<u64>,
+    #[case] quote_block: u64,
+    #[case] expected: &str,
+) {
+    assert_eq!(base_block_label(quoted_block_number, quote_block), expected);
+    assert!(BASE_BLOCKS.contains(&expected));
 }
 
 #[test]

@@ -249,6 +249,9 @@ struct SimulationSetup<'a> {
     venues: Option<RouteOverrides>,
     /// Whether the route crosses a pAMM swap, with or without overrides.
     has_pamm_swap: bool,
+    /// How the block the call runs on stands to the quote's block, from
+    /// [`pamm_overrides::base_block_label`].
+    base_block: &'static str,
 }
 
 impl<'a> SimulationSetup<'a> {
@@ -322,6 +325,10 @@ impl<'a> SimulationSetup<'a> {
             client_fee_receiver,
             venues,
             has_pamm_swap: report.has_pamm_swap(),
+            base_block: pamm_overrides::base_block_label(
+                quoted_block_number,
+                quote.block().number(),
+            ),
         })
     }
 }
@@ -334,6 +341,9 @@ struct PammSimulation {
     /// Values a pAMM override and the sender's funding both set differently, which kept the
     /// funding.
     funding_collisions: u64,
+    /// How the block the call ran on stands to the quote's block, from
+    /// [`pamm_overrides::base_block_label`].
+    base_block: &'static str,
 }
 
 pub(crate) enum SimulationAttempt {
@@ -431,7 +441,11 @@ impl QuoteSimulator {
             };
         let mut pamm = setup
             .has_pamm_swap
-            .then_some(PammSimulation { applied: setup.venues.is_some(), funding_collisions: 0 });
+            .then_some(PammSimulation {
+                applied: setup.venues.is_some(),
+                funding_collisions: 0,
+                base_block: setup.base_block,
+            });
         let mut overrides = match self
             .overrides(setup.call.sender, setup.token_in, setup.call.router)
             .await
@@ -723,7 +737,8 @@ fn record_outcome(
 }
 
 /// Counts one simulated quote that crosses a pAMM swap by whether it ran on the venues'
-/// overrides, and on success records how far its output landed from the quote.
+/// overrides and on which block, and on success records how far its output landed from the
+/// quote.
 ///
 /// The deviation says more than the outcome: a pAMM swap that fails in a route through the
 /// fallback router is filled from its fallback pool, so the simulation still succeeds, at a lower
@@ -740,6 +755,7 @@ fn record_pamm_outcome(
     counter!(
         pamm_overrides::SIMULATIONS_TOTAL,
         "overrides" => overrides,
+        "base_block" => pamm.base_block,
         "outcome" => outcome,
         "purpose" => purpose
     )
@@ -751,6 +767,7 @@ fn record_pamm_outcome(
             histogram!(
                 pamm_overrides::SIMULATION_DEVIATION_BPS,
                 "overrides" => overrides,
+                "base_block" => pamm.base_block,
                 "purpose" => purpose
             )
             .record(deviation);
@@ -816,7 +833,6 @@ fn block_environment(
         fee_recipient: Some(SIMULATION_COINBASE),
         prev_randao,
         gas_limit: Some(SIMULATION_BLOCK_GAS_LIMIT),
-        ..Default::default()
     }
 }
 
