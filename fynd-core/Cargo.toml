@@ -15,6 +15,7 @@ exclude = ["tests/"]
 tycho-simulation.workspace = true
 petgraph.workspace = true
 rustc-hash.workspace = true
+hashbrown.workspace = true
 smallvec.workspace = true
 tokio.workspace = true
 futures.workspace = true

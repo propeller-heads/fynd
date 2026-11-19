@@ -25,7 +25,7 @@ If you use Fynd API, the transaction it returns can already target JIT router - 
 
 Users approve `FyndJITRouter` instead of `TychoRouterV3`, both with standard ERC20 approvals and with Permit2 flow.
 
-<figure><picture><source srcset="../.gitbook/assets/inblock-docs-smart-contract-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-docs-smart-contract-light.png" alt=""></picture><figcaption></figcaption></figure>
+<figure><picture><source srcset="../.gitbook/assets/inblock-contracts-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-contracts-light.png" alt=""></picture><figcaption></figcaption></figure>
 {% endtab %}
 
 {% tab title="Builder / Sequencer" %}
@@ -37,7 +37,7 @@ _(Alpha Rollout) Titan, BuilderNet, Quasar and Eureka (together \~85% of Ethereu
 \
 Write Tanay on Telegram ([https://t.me/tanay\_j](https://t.me/tanay_j)) to integrate the Fynd In-Block Solving side-car in your builder/sequencer.
 
-<figure><img src="../.gitbook/assets/inblock-logos-builders.png" alt=""><figcaption></figcaption></figure>
+<figure><picture><source srcset="../.gitbook/assets/inblock-logos-builders-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-logos-builders-light.png" alt=""></picture><figcaption></figcaption></figure>
 {% endtab %}
 
 {% tab title="Trader" %}
@@ -47,7 +47,7 @@ Write Tanay on Telegram ([https://t.me/tanay\_j](https://t.me/tanay_j)) to integ
 \
 (_currently in Alpha, rolling out over the next weeks)._
 
-<figure><img src="../.gitbook/assets/inblock-logos-routers.png" alt=""><figcaption></figcaption></figure>
+<figure><picture><source srcset="../.gitbook/assets/inblock-logos-routers-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-logos-routers-light.png" alt=""></picture><figcaption></figcaption></figure>
 
 _If you trade with Fynd locally or via the Fynd API, see the instructions for aggregators._
 {% endtab %}
@@ -63,7 +63,7 @@ If Fynd finds a better route, the builder stores it on-chain, in a transaction p
 
 If no route is stored, FyndJITRouter runs the original route, exactly as if you had sent the swap to TychoRouterV3.
 
-<figure><img src="../.gitbook/assets/inblock-how-it-works-flow-v2-jit-router.jpg" alt=""><figcaption><p>If Fynd finds a better route, the builder stores it and FyndJITRouter runs it. Otherwise, your swap runs as sent.</p></figcaption></figure>
+<figure><picture><source srcset="../.gitbook/assets/inblock-block-building-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/inblock-block-building-light.png" alt=""></picture><figcaption><p>If Fynd finds a better route, the builder stores it and FyndJITRouter runs it. Otherwise, your swap runs as sent.</p></figcaption></figure>
 
 ## Better price guarantee
 

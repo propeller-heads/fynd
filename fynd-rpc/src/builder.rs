@@ -262,6 +262,16 @@ impl FyndRPCBuilder {
         self
     }
 
+    /// Whether the pAMM price level stream also reads Titan's quote stream (default: `true`).
+    ///
+    /// See [`FyndBuilder::pamm_simulation_overrides`].
+    pub fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .pamm_simulation_overrides(enabled);
+        self
+    }
+
     /// Sets the number of delta messages buffered for each Tycho subscription. Leaving this
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
@@ -288,9 +298,11 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Reads Bebop, Hashflow and Metric prices from the `fynd-nexus` service at `url`, such
-    /// as `http://fynd-nexus:3000`, instead of connecting to those venues (default: connect
-    /// directly). Native and Liquorice always connect directly.
+    /// Reads Bebop, Hashflow and Metric prices, and the spot prices, pool depths and token
+    /// prices of the market, from the `fynd-nexus` service at `url`, such as
+    /// `http://fynd-nexus:3000`, instead of connecting to those venues and computing them
+    /// (default: connect and compute). The service must run the market. Native and Liquorice
+    /// always connect directly.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
         self.fynd_builder = self.fynd_builder.nexus_url(url);
         self

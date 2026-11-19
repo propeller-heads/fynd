@@ -106,7 +106,8 @@ pub fn require_credentials(
 ///
 /// # Errors
 ///
-/// Returns an error naming `chain` and the listed venues when none of them supports it.
+/// Returns an error naming `chain` and the listed venues when some are listed and none of them
+/// supports it.
 pub fn streams_to_serve(
     chain: Chain,
     credentials: &[VenueCredentials],
@@ -126,7 +127,7 @@ pub fn streams_to_serve(
             warn!(%chain, %venue, "the venue does not support the chain; skipping");
         }
     }
-    if streams.is_empty() {
+    if streams.is_empty() && !credentials.is_empty() {
         let listed: Vec<String> = credentials
             .iter()
             .map(|venue_credentials| venue_credentials.venue().to_string())
@@ -269,5 +270,12 @@ mod tests {
             .to_string();
 
         assert_eq!(error, "none of the listed venues (hashflow) supports base");
+    }
+
+    #[test]
+    fn test_streams_are_empty_when_no_venue_is_listed() {
+        assert!(streams_to_serve(Chain::Base, &[])
+            .unwrap()
+            .is_empty());
     }
 }

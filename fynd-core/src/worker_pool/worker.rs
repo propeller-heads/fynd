@@ -544,17 +544,27 @@ where
     /// # Errors
     ///
     /// [`SolveError::NotReady`] when `label` names no registered overlay.
-    async fn read_market(
-        &self,
+    async fn read_market<'m>(
+        market: &'m MarketData,
         label: Option<&StateLabel>,
-    ) -> Result<MarketDataView<'_>, SolveError> {
+    ) -> Result<MarketDataView<'m>, SolveError> {
         match label {
-            Some(label) => self
-                .market_data
+            Some(label) => market
                 .read_labeled(label)
                 .await
                 .map_err(|e| SolveError::NotReady(e.to_string())),
-            None => Ok(self.market_data.read().await),
+            None => Ok(market.read().await),
+        }
+    }
+
+    /// Returns the market handle a solve with `params` reads: its gas price carries the request's
+    /// priority fee when the request sets one.
+    fn apply_priority_fee(&self, params: &SolveParams) -> MarketData {
+        match params.priority_fee() {
+            Some(priority_fee) => self
+                .market_data
+                .with_priority_fee(priority_fee.clone()),
+            None => self.market_data.clone(),
         }
     }
 
@@ -759,17 +769,16 @@ where
     async fn price_fallback_legs(
         &self,
         order: &Order,
-        params: &SolveParams,
+        ctx: SolveContext<'_>,
         route: &mut Route,
     ) -> Result<(), SolveError> {
         if !has_fallback_leg(route) {
             return Ok(());
         }
+        let SolveContext { params, market_data } = ctx;
         // The same view the algorithm solved against, so the fallback is selected and priced on
         // the requested overlay rather than the base state.
-        let market = self
-            .read_market(params.state_label())
-            .await?;
+        let market = Self::read_market(market_data, params.state_label()).await?;
         match price_through_fallbacks(
             route,
             &market,
@@ -808,7 +817,7 @@ where
     async fn post_process(
         &self,
         order: &Order,
-        params: &SolveParams,
+        ctx: SolveContext<'_>,
         constraints: &ResolvedRouteConstraints,
         deadline: Instant,
         result: RouteResult,
@@ -816,6 +825,7 @@ where
         if self.post_processors.is_empty() {
             return (result, Vec::new());
         }
+        let SolveContext { params, market_data } = ctx;
         let exclusive_access = self.post_process_exclusive_access(params);
         let scope = match exclusive_access {
             ExclusiveAccess::Granted => LiquidityScope::IncludeExclusive,
@@ -826,7 +836,7 @@ where
         };
         let request = PostProcessRequest::new(
             order,
-            &self.market_data,
+            market_data,
             &self.derived_data,
             constraints,
             deadline
@@ -849,7 +859,7 @@ where
                 .and_then(|()| self.check_processed_route(order, &processed_route, scope));
         if checked.is_ok() {
             checked = self
-                .price_fallback_legs(order, params, processed_route.route_mut())
+                .price_fallback_legs(order, ctx, processed_route.route_mut())
                 .await
                 .map_err(|err| err.to_string());
         }
@@ -922,15 +932,14 @@ where
         // Get the graph from the graph manager
         let graph = self.graph_manager.graph();
 
-        // Get block info and resolve the effective state label.
-        // TODO: maybe the algorithm should return the block info with the route? The block might
-        // update while solving and the route returned might be for the newer block.
+        // Read the block before solving, to fail fast when the market is not ready and as a
+        // fallback for algorithms that do not record the block they solved against.
+        let market_data = self.apply_priority_fee(&params);
+        let ctx = SolveContext { params: &params, market_data: &market_data };
         let (block_info, solved_against, constraints) = {
-            // Read briefly to capture block info; drop the lock before solving so it is not held
-            // across the algorithm's own read call.
-            let view = self
-                .read_market(params.state_label())
-                .await?;
+            // Read briefly; drop the lock before solving so it is not held across the
+            // algorithm's own read call.
+            let view = Self::read_market(&market_data, params.state_label()).await?;
             let last_block = view
                 .last_updated()
                 .ok_or(SolveError::NotReady("No block info".to_string()))?;
@@ -949,7 +958,7 @@ where
             (block_info, solved_against, constraints)
         };
 
-        let mut request = SolveRequest::new(graph, self.market_data.clone(), order)
+        let mut request = SolveRequest::new(graph, market_data.clone(), order)
             .with_derived(self.derived_data.clone())
             .with_shared_constraints(Arc::clone(&constraints));
         if let Some(label) = params.state_label().cloned() {
@@ -978,8 +987,22 @@ where
                     )));
                 }
 
+                // The market can move on while the algorithm solves, so quote the block its
+                // route was priced against. Read before post-processing, which builds new
+                // results.
+                let (block_info, solved_against) = match result.block() {
+                    Some(block) => {
+                        let solved_against = match params.state_label() {
+                            Some(_) => solved_against,
+                            None => block.number().to_string(),
+                        };
+                        (block.clone(), solved_against)
+                    }
+                    None => (block_info, solved_against),
+                };
+
                 let (result, post_processed_by) = self
-                    .post_process(order, &params, &constraints, deadline, result)
+                    .post_process(order, ctx, &constraints, deadline, result)
                     .await;
                 // Extract scalar values before consuming result with into_route()
                 let net_amount_out = result.net_amount_out().clone();
@@ -992,7 +1015,7 @@ where
 
                 // The worker priced a processed route in `post_process`.
                 if post_processed_by.is_empty() {
-                    self.price_fallback_legs(order, &params, &mut route)
+                    self.price_fallback_legs(order, ctx, &mut route)
                         .await?;
                 }
 
@@ -1377,6 +1400,14 @@ where
     }
 }
 
+/// The request parameters of one solve and the market handle it reads, which carries the request's
+/// priority fee.
+#[derive(Clone, Copy)]
+struct SolveContext<'a> {
+    params: &'a SolveParams,
+    market_data: &'a MarketData,
+}
+
 /// Maps an [`AlgorithmError`](crate::AlgorithmError) to the [`SolveError`] class
 /// reported upstream, logging at a severity matching the failure class.
 ///
@@ -1440,7 +1471,7 @@ mod tests {
             most_liquid::DepthAndPrice,
             test_utils::{
                 component, component_with_directions, component_with_protocol, order,
-                setup_market_weighted, token, MockProtocolSim,
+                set_last_updated_block, setup_market_weighted, token, MockProtocolSim,
             },
         },
         derived::{
@@ -2062,6 +2093,81 @@ mod tests {
             }
             other => panic!("expected the route to be rejected, got {other:?}"),
         }
+    }
+
+    /// Moves the market to block 2 while it solves, as a feed update landing mid-solve would, and
+    /// prices the split route against that block. Records the block on the result only when
+    /// `record_block` is set.
+    struct BlockAdvancingAlgorithm {
+        record_block: bool,
+    }
+
+    impl Algorithm for BlockAdvancingAlgorithm {
+        type GraphType = StableDiGraph<DepthAndPrice>;
+        type GraphManager = PetgraphStableDiGraphManager<DepthAndPrice>;
+
+        fn name(&self) -> &str {
+            "block_advancing_mock"
+        }
+
+        async fn find_best_route(
+            &self,
+            request: SolveRequest<'_, Self::GraphType>,
+        ) -> Result<RouteResult, AlgorithmError> {
+            let market = request.market().clone();
+            set_last_updated_block(&mut *market.write().await, 2, 24);
+            let solved_block = market
+                .read()
+                .await
+                .last_updated()
+                .cloned();
+            let result = SplitRouteAlgorithm { reported_spot_price: 2.0 }
+                .find_best_route(request)
+                .await?;
+            Ok(match (self.record_block, solved_block) {
+                (true, Some(block)) => result.with_block(block),
+                _ => result,
+            })
+        }
+
+        fn computation_requirements(&self) -> ComputationRequirements {
+            ComputationRequirements::none()
+        }
+
+        fn timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+    }
+
+    /// The market starts at block 1 and reaches block 2 during the solve. The quote reports the
+    /// block the algorithm recorded, else the block the worker read before solving.
+    #[rstest]
+    #[case::recorded(true, 2)]
+    #[case::not_recorded(false, 1)]
+    #[tokio::test]
+    async fn test_quote_solved_block(#[case] record_block: bool, #[case] expected_block: u64) {
+        let token_a = token(0x01, "A");
+        let token_b = token(0x02, "B");
+        let (market, _) = setup_market_weighted(vec![
+            ("p1", &token_a, &token_b, MockProtocolSim::new(2.0)),
+            ("p2", &token_a, &token_b, MockProtocolSim::new(2.0)),
+        ]);
+        let mut worker = SolverWorker::new(
+            market,
+            DerivedData::new_shared(),
+            BlockAdvancingAlgorithm { record_block },
+            0,
+            "test_pool".to_string(),
+        );
+        let ord = order(&token_a, &token_b, 100, OrderSide::Sell);
+
+        let quote = worker
+            .quote(&ord, SolveParams::default(), far_deadline())
+            .await
+            .expect("split route must quote");
+
+        assert_eq!(quote.order().block().number(), expected_block);
+        assert_eq!(quote.order().solved_against(), &expected_block.to_string());
     }
 
     #[tokio::test]

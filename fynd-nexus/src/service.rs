@@ -1,4 +1,4 @@
-//! Starts the prices feeds and the HTTP and metrics servers.
+//! Starts the prices feeds, the Tycho market and the HTTP and metrics servers.
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -8,12 +8,15 @@ use std::{
 
 use anyhow::Context as _;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::{
     api::{self, Streams},
     cli::Cli,
+    derived::{snapshot::DerivedSnapshots, writer::DerivedSnapshotWriter},
     latest_prices::{spawn_snapshot_age_reports, LatestPrices},
+    market::market_launch::{launch_market, LaunchedMarket},
     price_levels,
 };
 
@@ -57,11 +60,38 @@ fn bind_metrics(port: u16) -> anyhow::Result<actix_web::dev::Server> {
     Ok(server.run())
 }
 
-/// Starts the prices feeds and the HTTP and metrics servers, and returns when a server stops.
+/// Waits for the market's task to end, which is an error. Never returns without a market.
+async fn market_ended(launched: Option<&mut LaunchedMarket>) -> anyhow::Result<()> {
+    let Some(launched) = launched else {
+        return std::future::pending().await;
+    };
+    let joined: Result<anyhow::Result<()>, _> = (&mut launched.task).await;
+    joined
+        .context("the market task failed")?
+        .context("the market stopped")
+}
+
+/// Waits for the derived snapshot writer's task to end, which is an error. Never returns without a
+/// writer.
+async fn writer_ended(task: Option<&mut JoinHandle<()>>) -> anyhow::Result<()> {
+    let Some(task) = task else {
+        return std::future::pending().await;
+    };
+    task.await
+        .context("the derived snapshot writer task failed")?;
+    anyhow::bail!("the derived snapshot writer stopped: the market's event channel closed")
+}
+
+/// Starts the prices feeds, the Tycho market and the HTTP and metrics servers, and returns when
+/// one stops.
 ///
 /// The caller sets up logging.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let credentials = price_levels::require_credentials(&cli.venues, &cli.venue_args)?;
+    anyhow::ensure!(
+        !credentials.is_empty() || cli.market.is_enabled(),
+        "nothing to run: list venues in --venues or set --tycho-url to run the market"
+    );
 
     let metrics_server = bind_metrics(cli.metrics_port)?;
     let run_id = new_run_id();
@@ -75,15 +105,51 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         price_levels::spawn_prices_feed(Arc::clone(&latest_prices), venue_credentials);
         streams.push(latest_prices);
     }
+    let mut market = None;
+    let mut derived = None;
+    let mut writer_task = None;
+    if cli.market.is_enabled() {
+        info!("starting the market");
+        let launched = launch_market(cli.chain, &cli.market).await?;
+        let snapshots = Arc::new(DerivedSnapshots::new(cli.chain));
+        let writer =
+            DerivedSnapshotWriter::new(launched.feed.derived_data(), Arc::clone(&snapshots));
+        writer_task = Some(writer.spawn(launched.feed.subscribe_derived_events()));
+        derived = Some(snapshots);
+        market = Some(launched);
+    }
     spawn_snapshot_age_reports(streams.clone());
 
     let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cli.http_port));
-    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), address)
+    let (http_server, bound) = api::bind(Arc::new(Streams::new(streams)), derived, address)
         .with_context(|| format!("cannot bind the HTTP port {}", cli.http_port))?;
     info!(%bound, "HTTP API listening");
     tokio::select! {
         result = http_server => result.context("the HTTP server failed")?,
         result = metrics_server => result.context("the metrics server failed")?,
+        result = market_ended(market.as_mut()) => result?,
+        result = writer_ended(writer_task.as_mut()) => result?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_run_fails_with_neither_venues_nor_market() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum", "--venues"]).unwrap();
+
+        let error = run(cli).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("nothing to run"),
+            "{error}"
+        );
+    }
 }

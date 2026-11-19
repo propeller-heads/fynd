@@ -55,7 +55,8 @@ fn start_service(run_id: u64, address: SocketAddr, attempts: usize) -> Service {
     let attempts = Attempts::new(scripted);
     tokio::spawn(run_feed(latest_prices.clone(), attempts.starter(), Duration::from_millis(100)));
 
-    let (server, address) = api::bind(Arc::new(Streams::new([latest_prices])), address).unwrap();
+    let (server, address) =
+        api::bind(Arc::new(Streams::new([latest_prices])), None, address).unwrap();
     let handle = server.handle();
     tokio::spawn(server);
     Service { address, handle, feed_controls }

@@ -46,7 +46,7 @@ use tycho_simulation::{
 };
 
 use super::DataFeedError;
-use crate::fallback::FALLBACK_PREFIX;
+use crate::{fallback::FALLBACK_PREFIX, simulation::pamm_overrides};
 
 /// Opts a protocol into streaming its exclusive pools, e.g. `exclusive:ekubo_v3`.
 ///
@@ -437,6 +437,14 @@ fn register_exchange(
             builder.exchange::<UniswapV3State>("robinswap_v3", tvl_filter.clone(), None)
         }
         "gigadex_v3" => builder.exchange::<UniswapV3State>("gigadex_v3", tvl_filter.clone(), None),
+        // Elysium Uniswap V3 forks: their factories deploy Uniswap V3's pool contracts.
+        "kleos_v3" => builder.exchange::<UniswapV3State>("kleos_v3", tvl_filter.clone(), None),
+        "elyspump_v3" => {
+            builder.exchange::<UniswapV3State>("elyspump_v3", tvl_filter.clone(), None)
+        }
+        "stockiumswap_v3" => {
+            builder.exchange::<UniswapV3State>("stockiumswap_v3", tvl_filter.clone(), None)
+        }
         "ramses_v3" => builder.exchange::<RamsesV3State>("ramses_v3", tvl_filter.clone(), None),
         "pancakeswap_v3" => {
             builder.exchange::<UniswapV3State>("pancakeswap_v3", tvl_filter.clone(), None)
@@ -563,6 +571,12 @@ fn register_exchange(
 /// `vm:fermiswap`), in which case both price the same maker inventory. Streaming both
 /// double-counts that liquidity, so drop the Tycho one from `--protocols` instead.
 ///
+/// With `simulation_overrides`, the stream also reads Titan's quote stream, a second websocket,
+/// and attaches to each state the account state Titan priced it on. Quoting never reads it.
+/// Opening the stream registers the overrides metrics at zero, on or off. With them off, the
+/// router does not count served pAMM swaps (`WorkerPoolRouterConfig::pamm_simulation_overrides`),
+/// so none counts as missing its overrides.
+///
 /// # Errors
 ///
 /// Returns [`DataFeedError::Config`] if the chain is not [`PRICE_LEVEL_STREAM_CHAIN`], or if an
@@ -571,6 +585,7 @@ pub(crate) fn open_price_level_stream(
     chain: Chain,
     protocols: &[String],
     tokens: &HashMap<Bytes, Token>,
+    simulation_overrides: bool,
 ) -> Result<Option<impl Stream<Item = Update> + Send>, DataFeedError> {
     let venues: Vec<&str> = protocols
         .iter()
@@ -588,6 +603,9 @@ pub(crate) fn open_price_level_stream(
 
     let served = default_served_pamms();
     let mut builder = PriceLevelStreamBuilder::new().with_tokens(tokens.clone());
+    if !simulation_overrides {
+        builder = builder.without_simulation_overrides();
+    }
     for venue in venues {
         if venue == METRIC_PRICE_LEVEL_VENUE {
             if let Some(book_entry) = protocols.iter().find(|protocol| {
@@ -616,6 +634,7 @@ pub(crate) fn open_price_level_stream(
         info!("Adding {PRICE_LEVEL_STREAM_PREFIX}{venue} price level venue...");
         builder = builder.add_pamm(config.clone());
     }
+    pamm_overrides::register_metrics();
     Ok(Some(builder.build()))
 }
 
@@ -784,7 +803,7 @@ pub fn open_price_level_stream_for_live_capture(
     protocols: &[String],
     tokens: &HashMap<Bytes, Token>,
 ) -> Result<Option<impl Stream<Item = Update> + Send>, String> {
-    open_price_level_stream(chain, protocols, tokens).map_err(|e| e.to_string())
+    open_price_level_stream(chain, protocols, tokens, true).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1009,6 +1028,7 @@ mod tests {
                 .map(|entry| (*entry).to_string())
                 .collect::<Vec<_>>(),
             &HashMap::new(),
+            true,
         )
     }
 
@@ -1139,6 +1159,26 @@ mod tests {
         assert!(
             skipped.is_empty(),
             "expected every Robinhood protocol to register, but got unknown-protocol warnings \
+             for: {skipped:?}"
+        );
+    }
+
+    #[test]
+    fn test_register_exchanges_registers_every_elysium_protocol() {
+        let elysium_protocols = [
+            "uniswap_v2",
+            "uniswap_v3",
+            "uniswap_v4",
+            "kleos_v3",
+            "elyspump_v3",
+            "stockiumswap_v3",
+            "aero_basic",
+            "aero_cl",
+        ];
+        let skipped = skipped_unknown_protocols(&elysium_protocols);
+        assert!(
+            skipped.is_empty(),
+            "expected every Elysium protocol to register, but got unknown-protocol warnings \
              for: {skipped:?}"
         );
     }
@@ -1406,8 +1446,26 @@ mod tests {
             panic!("expected rfq:metric to be rejected where Fynd does not serve Metric");
         };
         assert!(
-            err.to_string()
-                .contains("only served on ethereum, base, robinhood, bsc, arbitrum, polygon"),
+            err.to_string().contains(
+                "only served on ethereum, base, robinhood, bsc, arbitrum, polygon, elysium"
+            ),
+            "got {err}"
+        );
+    }
+
+    /// Elysium passes the chain gate. Whether its entries also pass the executor check depends on
+    /// the tycho-execution release in the lockfile, so the test asserts only the chain gate.
+    #[rstest::rstest]
+    #[case::direct("rfq:metric")]
+    #[case::via_fallback_router("fallback:rfq:metric")]
+    fn test_open_book_metric_on_elysium(#[case] entry: &str) {
+        env::remove_var("METRIC_API_KEY");
+        let Err(err) = open_book_stream(Chain::Elysium, &[entry]) else {
+            panic!("expected {entry} on elysium to fail without METRIC_API_KEY");
+        };
+        assert!(
+            !err.to_string()
+                .contains("only served on"),
             "got {err}"
         );
     }

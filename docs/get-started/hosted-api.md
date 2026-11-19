@@ -155,6 +155,7 @@ curl -X POST https://fynd-api.propellerheads.xyz/v1/ethereum/quote \
 | `min_responses` | server default | Minimum number of solver pools that must respond before the server returns. `1` returns as soon as one pool has a route (fastest). Higher values wait for more pools to compete, improving price at the cost of latency. |
 | `encoding_options` | `null` | If set, the response includes a ready-to-submit `transaction` object. See [step 4](#4-encode-and-approve). |
 | `max_gas` | `null` | Cap on gas units the route may use. Routes exceeding it are rejected. |
+| `priority_fee` | `null` | Priority fee per gas, in wei as a string, that your transaction will pay. Fynd then prices gas at the block's base fee plus this fee, instead of the node's suggested priority fee. The quote's `gas_price` and `amount_out_net_gas` use it. Ignored when the node returns only a legacy gas price. A value above 2^64 - 1 fails with a `400` and the code `BAD_REQUEST`. |
 | `route_filter` | `null` | Liquidity to exclude from every route: `exclude_pools` (component ids), `exclude_protocols` (exact protocol system names, e.g. `uniswap_v2`, or family prefixes, e.g. `fallback:`) and `exclude_tokens` (tokens no route may pass through; the order's own two are always allowed). A name the server holds no pool for excludes nothing. `require_tokens` forces every route through every one of the listed tokens; the order's input and output tokens count as passed, a required token may be an intermediate even when a pool's connector tokens leave it out, and a token cannot also be in `exclude_tokens` (`REQUIRED_TOKEN_EXCLUDED`). Only the `most_liquid` and `water_fill` algorithms support it, and the router sends such an order only to pools that run one of them. When no solver pool serving the request does, the request fails with a `422` and the code `REQUIRED_TOKENS_NOT_SUPPORTED`. |
 
 The response contains the route, the expected `amount_out`, gas estimate, and the `solve_time_ms` the server spent finding the route:
@@ -483,12 +484,13 @@ Each chain is served from its own Fynd backend behind the shared gateway. Send t
 | Polygon | `polygon` | 137 | POL |
 | Unichain | `unichain` | 130 | ETH |
 | Robinhood Chain | `robinhood` | 4663 | ETH |
+| Elysium | `elysium` | 99901 | HYPE |
 
 A request to `/v1/{chain}/…` for a chain that isn't configured returns `404` with `{"error": "unknown_chain", ...}`.
 
 ### Native token swaps
 
-Use the zero address (`0x0000000000000000000000000000000000000000`) as `token_in` or `token_out` to swap the chain's native gas token (ETH on Ethereum/Base/Arbitrum/Unichain/Robinhood Chain, BNB on BSC, POL on Polygon). Native-token `token_in` skips the approval step — the router wraps native gas for you.
+Use the zero address (`0x0000000000000000000000000000000000000000`) as `token_in` or `token_out` to swap the chain's native gas token (ETH on Ethereum/Base/Arbitrum/Unichain/Robinhood Chain, BNB on BSC, POL on Polygon, HYPE on Elysium). Native-token `token_in` skips the approval step — the router wraps native gas for you.
 
 ## API key limits by tier
 

@@ -4,7 +4,7 @@ use clap::Parser;
 use fynd_core::nexus::price_levels::PriceLevelVenue;
 use tycho_simulation::evm::tycho_models::Chain;
 
-use crate::price_levels::VenueArgs;
+use crate::{market::market_args::MarketArgs, price_levels::VenueArgs};
 
 /// The arguments of `fynd-nexus`.
 #[derive(Debug, Parser)]
@@ -14,11 +14,13 @@ pub struct Cli {
     #[arg(long, env = "CHAIN")]
     pub chain: Chain,
 
-    /// Venues to connect to, comma separated.
+    /// Venues to connect to, comma separated. Pass the flag with no value to run the market
+    /// alone.
     #[arg(
         long,
         env = "VENUES",
         value_delimiter = ',',
+        num_args = 0..,
         default_values_t = PriceLevelVenue::ALL
     )]
     pub venues: Vec<PriceLevelVenue>,
@@ -34,6 +36,10 @@ pub struct Cli {
     /// The venues' credentials and endpoints.
     #[command(flatten)]
     pub venue_args: VenueArgs,
+
+    /// The Tycho market's settings. It runs when `--tycho-url` is set.
+    #[command(flatten)]
+    pub market: MarketArgs,
 }
 
 #[cfg(test)]
@@ -91,5 +97,30 @@ mod tests {
         assert_eq!(cli.venue_args.hashflow.key.as_deref(), Some("k"));
         assert_eq!(cli.venue_args.metric.api_key.as_deref(), Some("m"));
         assert_eq!(cli.venue_args.metric.api_url.as_deref(), Some("https://metric.example"));
+    }
+
+    #[test]
+    fn test_parse_market_without_venues() {
+        let cli = Cli::try_parse_from([
+            "fynd-nexus",
+            "--chain",
+            "ethereum",
+            "--venues",
+            "--tycho-url",
+            "tycho.example",
+            "--rpc-url",
+            "https://node.example",
+        ])
+        .unwrap();
+
+        assert!(cli.venues.is_empty());
+        assert!(cli.market.is_enabled());
+    }
+
+    #[test]
+    fn test_parse_market_off_by_default() {
+        let cli = Cli::try_parse_from(["fynd-nexus", "--chain", "ethereum"]).unwrap();
+
+        assert!(!cli.market.is_enabled());
     }
 }

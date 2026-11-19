@@ -2,7 +2,8 @@
 
 use std::{any::Any, str::FromStr, sync::Arc, time::Instant};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use hashbrown::HashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
 use tracing::warn;
 use tycho_simulation::tycho_common::models::Address;
@@ -81,9 +82,9 @@ pub struct DerivedData {
     /// Token prices with path dependency tracking for incremental computation.
     token_prices_deps: Option<ComputedValue<TokenPricesWithDeps>>,
     /// Persistent failure map: key → (block, error). Merged with each run's failures.
-    component_depths_failed: FxHashMap<ComponentDepthKey, (u64, FailedItemError)>,
+    component_depths_failed: HashMap<ComponentDepthKey, (u64, FailedItemError), FxBuildHasher>,
     /// Persistent failure map: key → (block, error). Merged with each run's failures.
-    spot_prices_failed: FxHashMap<SpotPriceKey, (u64, FailedItemError)>,
+    spot_prices_failed: HashMap<SpotPriceKey, (u64, FailedItemError), FxBuildHasher>,
 }
 
 /// Parses `"component_id/token_in/token_out"` into a typed `(ComponentId, Address, Address)` key.
@@ -167,10 +168,10 @@ impl DerivedData {
         self.slots.remove(id);
     }
 
-    /// Returns `true` if all derived data types has been computed at least once.
+    /// Returns `true` if token prices, component depths and spot prices have each been computed
+    /// at least once.
     pub fn derived_data_ready(&self) -> bool {
         self.token_prices_block().is_some() &&
-            self.token_prices_deps_block().is_some() &&
             self.component_depths_block().is_some() &&
             self.spot_prices_block().is_some()
     }
@@ -278,6 +279,11 @@ impl DerivedData {
         self.token_prices_deps = Some(ComputedValue { data: prices, block });
     }
 
+    /// Forgets the stored token price dependencies.
+    pub(crate) fn clear_token_prices_deps(&mut self) {
+        self.token_prices_deps = None;
+    }
+
     /// Edits the stored dependency map in place and stamps it with `block`.
     ///
     /// Returns `false` when nothing is stored yet, in which case `edit` never runs.
@@ -327,10 +333,11 @@ impl DerivedData {
         failed_items: Vec<FailedItem>,
         block: u64,
     ) {
-        let new_failures: FxHashMap<ComponentDepthKey, (u64, FailedItemError)> = failed_items
-            .into_iter()
-            .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
-            .collect();
+        let new_failures: HashMap<ComponentDepthKey, (u64, FailedItemError), FxBuildHasher> =
+            failed_items
+                .into_iter()
+                .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
+                .collect();
 
         self.component_depths_failed
             .retain(|k, _| !depths.contains_key(k));
@@ -388,10 +395,11 @@ impl DerivedData {
         failed_items: Vec<FailedItem>,
         block: u64,
     ) {
-        let new_failures: FxHashMap<SpotPriceKey, (u64, FailedItemError)> = failed_items
-            .into_iter()
-            .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
-            .collect();
+        let new_failures: HashMap<SpotPriceKey, (u64, FailedItemError), FxBuildHasher> =
+            failed_items
+                .into_iter()
+                .filter_map(|f| parse_pair_key(&f.key).map(|k| (k, (block, f.error))))
+                .collect();
 
         self.spot_prices_failed
             .retain(|k, _| !prices.contains_key(k));
@@ -600,9 +608,6 @@ mod tests {
         assert!(!store.derived_data_ready());
 
         store.set_token_prices(Default::default(), vec![], 10);
-        assert!(!store.derived_data_ready());
-
-        store.set_token_prices_deps(Default::default(), 10);
         assert!(!store.derived_data_ready());
 
         store.set_component_depths(Default::default(), vec![], 9);

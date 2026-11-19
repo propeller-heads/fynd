@@ -69,6 +69,7 @@ pub use computation::{
     ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
 };
 pub use error::ComputationError;
+pub use events::DerivedDataEvent;
 pub use manager::{
     ChangedComponents, ComputationManager, ComputationManagerConfig, SharedDerivedDataRef,
 };

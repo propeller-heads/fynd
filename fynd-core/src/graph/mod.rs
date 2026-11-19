@@ -235,7 +235,15 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
     /// the weights then hold its output from an earlier block.
     const INPUTS: &'static [ComputationId];
 
-    /// Computes edge weight data using ProtocolSim and pre-computed DerivedData.
+    /// The data from [`INPUTS`](Self::INPUTS) that a weight is computed from, gathered once per
+    /// rebuild so [`from_sim_and_derived`](Self::from_sim_and_derived) does not repeat it for
+    /// every edge.
+    type WeightInput<'a>;
+
+    /// Gathers the weight input from the derived data, before the loop over edges.
+    fn weight_input(derived: &DerivedData) -> Self::WeightInput<'_>;
+
+    /// Computes edge weight data using ProtocolSim and the weight input.
     ///
     /// # Arguments
     ///
@@ -243,7 +251,7 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
     /// * `component_id` - The component ID for derived data lookup
     /// * `token_in` - The input token
     /// * `token_out` - The output token
-    /// * `derived` - Pre-computed derived data (component depths, spot prices, etc.)
+    /// * `input` - The weight input gathered by [`weight_input`](Self::weight_input)
     ///
     /// # Returns
     ///
@@ -253,7 +261,7 @@ pub trait EdgeWeightFromSimAndDerived: Sized {
         component_id: &ComponentId,
         token_in: &Token,
         token_out: &Token,
-        derived: &DerivedData,
+        input: &Self::WeightInput<'_>,
     ) -> Option<Self>;
 }
 
@@ -262,12 +270,16 @@ impl EdgeWeightFromSimAndDerived for () {
     /// Unit weights read no derived data, so a worker never rebuilds them.
     const INPUTS: &'static [ComputationId] = &[];
 
+    type WeightInput<'a> = ();
+
+    fn weight_input(_derived: &DerivedData) -> Self::WeightInput<'_> {}
+
     fn from_sim_and_derived(
         _sim: &dyn ProtocolSim,
         _component_id: &ComponentId,
         _token_in: &Token,
         _token_out: &Token,
-        _derived: &DerivedData,
+        _input: &Self::WeightInput<'_>,
     ) -> Option<Self> {
         Some(())
     }

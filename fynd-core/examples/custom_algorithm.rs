@@ -150,7 +150,13 @@ impl Algorithm for DirectComponentAlgorithm {
 
             let net_amount_out = BigInt::from(result.amount);
 
-            return Ok(RouteResult::new(route, net_amount_out, gas_price));
+            let mut route_result = RouteResult::new(route, net_amount_out, gas_price);
+            // Record the block this route was priced against. The market can move on before
+            // the worker builds the quote, and the quote should report this block.
+            if let Some(block) = market.last_updated() {
+                route_result = route_result.with_block(block.clone());
+            }
+            return Ok(route_result);
         }
 
         Err(AlgorithmError::Other(format!(

@@ -908,6 +908,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWith
         derived: &crate::derived::DerivedData,
     ) -> usize {
         let tokens = market.token_registry_ref();
+        let input = D::weight_input(derived);
         let mut updated = 0usize;
 
         for edge in self
@@ -938,7 +939,7 @@ impl<D: Clone + super::EdgeWeightFromSimAndDerived> super::EdgeWeightUpdaterWith
                             &pool.component_id,
                             token_in,
                             token_out,
-                            derived,
+                            &input,
                         )
                     });
                 if pool.data.is_some() {
