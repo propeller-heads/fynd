@@ -47,7 +47,7 @@ impl MarketEventHandler for RfqSwapReplacer {
         let Some(market) = &self.market else {
             return Ok(());
         };
-        update_index(&mut self.index, market, event, |component| {
+        update_index(&mut self.index, market, event, |_, component| {
             is_rfq_protocol(&component.protocol_system)
         })
         .await;
@@ -59,7 +59,7 @@ impl MarketEventHandler for RfqSwapReplacer {
 impl RoutePostProcessor for RfqSwapReplacer {
     async fn initialize(&mut self, market: &MarketData) {
         self.index =
-            build_index(market, |component| is_rfq_protocol(&component.protocol_system)).await;
+            build_index(market, |_, component| is_rfq_protocol(&component.protocol_system)).await;
         self.market = Some(market.clone());
     }
 

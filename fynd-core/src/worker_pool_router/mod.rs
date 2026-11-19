@@ -53,11 +53,11 @@ use crate::{
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_route_shape, leg_route_output, matched_commitment, pin_commitment,
-        record_gas_token_amount, routes_through_exclusive, to_gas_token_wei, ExclusiveRouteShape,
-        RouteOutput, USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
+        exclusive_route_shape, is_exclusive_leg, leg_route_output, matched_commitment,
+        pin_commitment, record_gas_token_amount, routes_through_exclusive, to_gas_token_wei,
+        ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
     },
-    feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
+    feed::protocol_registry::is_rfq_protocol,
     price_guard::guard::PriceGuard,
     simulation::{
         pamm_overrides,
@@ -1400,7 +1400,7 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     let swaps = route.swaps();
     let leg = swaps
         .iter()
-        .find(|swap| is_exclusive(swap.protocol_component()))?;
+        .find(|swap| is_exclusive_leg(swap))?;
     let (numerator, denominator) = leg_route_output(swaps, leg, &route.output_token()?)?;
 
     let realized_amount_out = exclusive_candidate.amount_out();
@@ -1620,7 +1620,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         derived::DerivedData,
-        feed::exclusivity::mark_exclusive,
+        feed::exclusivity::{is_exclusive, mark_exclusive},
         simulation::pamm_overrides::fixtures as pamm_fixtures,
         solver::defaults,
         tests::metrics::recorded_metrics,

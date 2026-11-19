@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use num_bigint::BigInt;
 use tracing::debug;
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
     algorithm::paths::read_market,
@@ -13,7 +14,7 @@ use crate::{
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
         exclusivity::is_exclusive,
-        market_data::MarketData,
+        market_data::{MarketData, MarketDataView},
     },
     post_process::{
         replace::{
@@ -54,7 +55,7 @@ impl MarketEventHandler for ExclusiveSwapReplacer {
         let Some(market) = &self.market else {
             return Ok(());
         };
-        update_index(&mut self.index, market, event, is_exclusive).await;
+        update_index(&mut self.index, market, event, is_exclusive_member).await;
         Ok(())
     }
 }
@@ -62,8 +63,10 @@ impl MarketEventHandler for ExclusiveSwapReplacer {
 #[async_trait]
 impl RoutePostProcessor for ExclusiveSwapReplacer {
     async fn initialize(&mut self, market: &MarketData) {
-        self.index = build_index(market, is_exclusive).await;
-        self.market = Some(market.clone());
+        // Its view gives each dual pool's exclusive view, the state of a replacement swap.
+        let market = market.with_exclusive_views();
+        self.index = build_index(&market, is_exclusive_member).await;
+        self.market = Some(market);
     }
 
     async fn process(
@@ -78,7 +81,8 @@ impl RoutePostProcessor for ExclusiveSwapReplacer {
         {
             return None;
         }
-        let liquidity = match read_market(request.market(), request.label().cloned()).await {
+        let market = request.market().with_exclusive_views();
+        let liquidity = match read_market(&market, request.label().cloned()).await {
             Ok(view) => ReplacementLiquidity::from_market_for_route(
                 &self.index,
                 &view,
@@ -93,6 +97,12 @@ impl RoutePostProcessor for ExclusiveSwapReplacer {
         ReplacementSolver::new(liquidity, request, route, ExclusiveReplacementFinder)
             .and_then(ReplacementSolver::apply_best_replacements)
     }
+}
+
+/// Whether a replacement swap can go through `component`: it is exclusive, or `view` prices it with
+/// a grant.
+fn is_exclusive_member(view: &MarketDataView<'_>, component: &ProtocolComponent) -> bool {
+    is_exclusive(component) || view.is_priced_exclusive(&component.id)
 }
 
 /// Replaces a target with one swap through an exclusive component, or splits a target, one swap or

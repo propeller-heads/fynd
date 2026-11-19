@@ -12,7 +12,7 @@ use tycho_simulation::tycho_common::models::Address;
 use crate::{
     bps,
     derived::TokenGasPrices,
-    feed::exclusivity::is_exclusive,
+    feed::exclusivity::{find_exclusive_curve_view, is_exclusive},
     types::{Commitment, OrderQuote, SurplusInfo, Swap},
 };
 
@@ -35,9 +35,10 @@ pub(crate) enum ExclusiveRouteShape {
     DoesNotReachOutput,
 }
 
-/// Whether `swap` goes through an exclusive component.
+/// Whether `swap` goes through an exclusive component, or through a dual pool priced with a grant.
 pub(crate) fn is_exclusive_leg(swap: &Swap) -> bool {
-    is_exclusive(swap.protocol_component())
+    is_exclusive(swap.protocol_component()) ||
+        find_exclusive_curve_view(swap.protocol_state()).is_some()
 }
 
 /// Whether any swap of `swaps` goes through an exclusive component.
@@ -271,7 +272,7 @@ pub(crate) fn pin_commitment(
                 .iter()
                 .map(|swap| {
                     let output_token = output_token.as_ref()?;
-                    if !is_exclusive(swap.protocol_component()) {
+                    if !is_exclusive_leg(swap) {
                         return None;
                     }
                     leg_route_output(swaps, swap, output_token)
@@ -286,7 +287,7 @@ pub(crate) fn pin_commitment(
         // user.
         let mut surplus = exclusive_route_amount_out - &committed_amount_out;
         for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
-            if is_exclusive(swap.protocol_component()) {
+            if is_exclusive_leg(swap) {
                 let Some(Some((numerator, denominator))) = leg_route_outputs.get(i) else {
                     continue;
                 };

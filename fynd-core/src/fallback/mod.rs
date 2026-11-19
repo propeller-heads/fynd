@@ -27,7 +27,10 @@ use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Addres
 
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
-    feed::{component_filter::protocol_matches, events::MarketEvent, market_data::MarketDataView},
+    feed::{
+        component_filter::protocol_matches, events::MarketEvent, exclusivity::is_exclusive,
+        market_data::MarketDataView,
+    },
     replay::replay_route,
     types::{ComponentId, FallbackLeg, Route, RouteConstraints, RouteRejection, Swap},
 };
@@ -243,7 +246,8 @@ fn select_fallback(
 }
 
 /// Whether this candidate pool is ruled out, by the request's own filter, by the worker pool's
-/// `exclude_protocols`, or because its protocol is out of sync.
+/// `exclude_protocols`, because its protocol is out of sync, or because it is exclusive or priced
+/// with a grant. The fallback swap carries no grant.
 ///
 /// The fallback executes as part of the route, so a pool told never to route through a protocol
 /// must not settle its pAMM legs there either.
@@ -267,6 +271,9 @@ fn is_excluded(
         return true;
     }
     let Some(component) = market.get_component(candidate) else { return false };
+    if is_exclusive(component) || market.is_priced_exclusive(candidate) {
+        return true;
+    }
     filter
         .excluded_protocols()
         .iter()
@@ -909,6 +916,31 @@ mod tests {
 
         let fallback =
             select_fallback(&pamm_swap(), &view, &index, &filter, &[]).expect("one left");
+
+        assert_eq!(fallback.component_id(), WORSE_POOL);
+    }
+
+    /// A pAMM hop never falls back to an exclusive pool.
+    #[test]
+    fn test_select_fallback_exclusive_candidate() {
+        let market = market_with_fallback_pools();
+        {
+            let mut state = market.try_write().expect("uncontended");
+            let mut better = state
+                .get_component(BETTER_POOL)
+                .expect("pool")
+                .clone();
+            crate::feed::exclusivity::mark_exclusive(&mut better);
+            state.upsert_components([better]);
+        }
+        let view = market
+            .try_read_blocking()
+            .expect("uncontended");
+        let index = FallbackPoolIndex::build(&view);
+
+        let fallback =
+            select_fallback(&pamm_swap(), &view, &index, &RouteConstraints::default(), &[])
+                .expect("one left");
 
         assert_eq!(fallback.component_id(), WORSE_POOL);
     }
