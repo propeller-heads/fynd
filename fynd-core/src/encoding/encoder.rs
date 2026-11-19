@@ -30,6 +30,7 @@ use crate::{
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     fallback::user_data::fallback_user_data,
+    feed::exclusivity::read_fynd_policy,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
 
@@ -767,7 +768,15 @@ impl Encoder {
                     .committed_amount_out()
                     .is_some()
                 {
-                    let user_data = signer.build_user_data(route_swap, slippage)?;
+                    let user_data = match read_fynd_policy(route_swap.protocol_component()) {
+                        Some(fynd_policy) => signer.build_curve_user_data(
+                            route_swap,
+                            fynd_policy,
+                            quote.sender(),
+                            slippage,
+                        )?,
+                        None => signer.build_user_data(route_swap, slippage)?,
+                    };
                     Ok(solution_swap.with_user_data(user_data))
                 } else {
                     Ok(solution_swap)
@@ -1440,6 +1449,50 @@ mod tests {
                 .is_some(),
             signed
         );
+    }
+
+    /// An exclusive Curve hop gets a grant signed for the order's sender.
+    #[test]
+    fn test_stamp_exclusive_swaps_curve_grant() {
+        let token_in = make_address(0x11);
+        let token_out = make_address(0x22);
+        let mut curve = component("curve-pool", &[]);
+        let coins = format!(r#"["{token_in}","{token_out}"]"#);
+        curve
+            .static_attributes
+            .insert("coins".to_string(), Bytes::from(coins.as_bytes()));
+        crate::feed::exclusivity::set_fynd_policy(
+            &mut curve,
+            Some(&crate::feed::exclusivity::TEST_FYND_POLICY),
+        );
+        let mut swap = crate::types::Swap::new(
+            "curve-pool".to_string(),
+            "vm:curve".to_string(),
+            token_in,
+            token_out,
+            BigUint::from(1_000_000u64),
+            BigUint::from(1_000_000u64),
+            BigUint::from(50_000u64),
+            curve,
+            Box::new(MockProtocolSim::default()),
+        );
+        swap.set_committed_amount_out(BigUint::from(990_000u64));
+        let quote = make_order_quote(990_000).with_route(single_swap_route(swap));
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let solution = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer,
+            0.01,
+        )
+        .unwrap();
+
+        let user_data = solution.swaps()[0]
+            .user_data()
+            .clone()
+            .expect("signed");
+        assert_eq!(user_data.len(), 173, "the grant size the Curve executor reads");
     }
 
     #[tokio::test]

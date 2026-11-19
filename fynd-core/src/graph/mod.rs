@@ -382,6 +382,7 @@ mod tests {
             )]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         };
         let edges = |manager: &dyn DirectionGraph| {
             [(&a, &b), (&b, &a), (&b, &c)].map(|(from, to)| manager.weight("venue", from, to))

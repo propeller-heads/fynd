@@ -236,3 +236,12 @@ debug = true
 # for derived data. The workspace's own code keeps the debug settings.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Temporary: the Tycho branch that exposes a Curve pool's Fynd policy
+# (propeller-heads/tycho#1848). Remove once Tycho releases it, and bump tycho-simulation instead.
+[patch.crates-io]
+tycho-client = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
+tycho-common = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
+tycho-ethereum = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }

@@ -343,6 +343,7 @@ pub(crate) fn added(id: &str, pair: &[&Token]) -> MarketEvent {
         .collect(),
         removed_components: Vec::new(),
         updated_components: Vec::new(),
+        reclassified_components: Vec::new(),
     }
 }
 

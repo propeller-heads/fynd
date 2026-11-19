@@ -68,10 +68,13 @@ fn coalesce_market_events(events: &[MarketEvent]) -> Option<ChangedComponents> {
 
     for event in events {
         match event {
+            // A reclassified component is also in `updated_components`; derived data does not
+            // depend on exclusivity.
             MarketEvent::MarketUpdated {
                 added_components,
                 removed_components,
                 updated_components,
+                reclassified_components: _,
             } => {
                 for (id, topology) in added_components {
                     removed.remove(id);
@@ -727,6 +730,7 @@ impl MarketEventHandler for ComputationManager {
                 added_components,
                 removed_components,
                 updated_components,
+                reclassified_components: _,
             } if !added_components.is_empty() ||
                 !removed_components.is_empty() ||
                 !updated_components.is_empty() =>
@@ -813,11 +817,13 @@ mod tests {
             )]),
             removed_components: vec![],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
         let e2 = MarketEvent::MarketUpdated {
             added_components: FxHashMap::default(),
             removed_components: vec![],
             updated_components: vec!["eth_usdc".to_string(), "dai_usdc".to_string()],
+            reclassified_components: Vec::new(),
         };
         let c = coalesce_market_events(&[e1, e2]).expect("net changes present");
         // eth_usdc was added, so it stays in `added` (not double-counted in `updated`)
@@ -842,11 +848,13 @@ mod tests {
             )]),
             removed_components: vec![],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
         let remove = MarketEvent::MarketUpdated {
             added_components: FxHashMap::default(),
             removed_components: vec!["eth_usdc".to_string()],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
         let c = coalesce_market_events(&[add, remove]).expect("net removal present");
         assert!(!c.added.contains_key("eth_usdc"));
@@ -883,6 +891,7 @@ mod tests {
                 )]),
                 removed_components: vec![],
                 updated_components: vec![],
+                reclassified_components: Vec::new(),
             })
             .unwrap();
         }
@@ -1039,6 +1048,7 @@ mod tests {
             )]),
             removed_components: vec![],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
 
         manager
@@ -1063,6 +1073,7 @@ mod tests {
             added_components: FxHashMap::default(),
             removed_components: vec![],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
 
         manager

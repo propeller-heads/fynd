@@ -1074,11 +1074,13 @@ mod tests {
             )]),
             removed_components: vec![],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
         let removed = |id: &str| MarketEvent::MarketUpdated {
             added_components: FxHashMap::default(),
             removed_components: vec![id.to_string()],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
 
         // A second pool on the same pair rides on the edge that is already there.
@@ -1145,6 +1147,7 @@ mod tests {
                 )]),
                 removed_components: vec![],
                 updated_components: vec![],
+                reclassified_components: Vec::new(),
             })
             .await
             .unwrap();
@@ -2008,6 +2011,7 @@ mod tests {
                     )]),
                     removed_components: vec![],
                     updated_components: vec![],
+                    reclassified_components: Vec::new(),
                 })
                 .await
                 .unwrap();

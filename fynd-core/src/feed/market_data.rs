@@ -16,6 +16,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy::primitives::U256;
 use num_bigint::BigUint;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::RwLock;
@@ -30,7 +31,10 @@ use tycho_simulation::{
 };
 
 use crate::{
-    feed::component_filter::protocol_matches,
+    feed::{
+        component_filter::protocol_matches,
+        exclusivity::{find_fynd_policy, read_fynd_policy, set_fynd_policy},
+    },
     types::{
         swap_directions, BlockInfo, ComponentId, ComponentTopology, ResolvedRouteConstraints,
         RouteConstraints, SwapDirection,
@@ -811,6 +815,48 @@ impl MarketState {
             self.simulation_states
                 .insert(id, state.into());
         }
+    }
+
+    /// Marks each listed Curve pool exclusive while its policy is a Fynd policy, and prices an
+    /// exclusive pool at the policy's minimum fee. Returns the ids whose exclusivity changed.
+    pub(crate) fn sync_exclusivity<'a>(
+        &mut self,
+        ids: impl IntoIterator<Item = &'a ComponentId>,
+    ) -> Vec<ComponentId> {
+        let mut changed = Vec::new();
+        for id in ids {
+            let Some((curve, fynd_policy)) = self
+                .simulation_states
+                .get(id)
+                .and_then(|state| find_fynd_policy(state.as_ref()))
+            else {
+                continue;
+            };
+            if let Some(fynd_policy) = fynd_policy {
+                match curve.with_fixed_fee(U256::from(fynd_policy.min_fee)) {
+                    Ok(fixed) => {
+                        self.simulation_states
+                            .insert(id.clone(), Arc::new(fixed));
+                    }
+                    Err(error) => {
+                        warn!(component_id = %id, %error, "cannot price Curve pool at its grant fee");
+                        continue;
+                    }
+                }
+            }
+            let Some(stored) = self.components.get_mut(id) else {
+                continue;
+            };
+            let stamped = read_fynd_policy(&stored.component);
+            if stamped == fynd_policy {
+                continue;
+            }
+            set_fynd_policy(Arc::make_mut(&mut stored.component), fynd_policy);
+            if stamped.is_some() != fynd_policy.is_some() {
+                changed.push(id.clone());
+            }
+        }
+        changed
     }
 
     /// Updates the gas price.

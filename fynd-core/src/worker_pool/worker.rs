@@ -2671,6 +2671,7 @@ mod tests {
             )]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         }
     }
 
@@ -2680,6 +2681,7 @@ mod tests {
             added_components: FxHashMap::default(),
             removed_components: vec![component_id.to_string()],
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         }
     }
 
@@ -2889,6 +2891,7 @@ mod tests {
             ]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         };
 
         worker.process_event(event).await;
@@ -4284,6 +4287,7 @@ mod tests {
             added_components: FxHashMap::from_iter([("rfq-leg".to_string(), rfq.tokens.into())]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         };
 
         worker.process_event(event).await;
@@ -4327,6 +4331,7 @@ mod tests {
             )]),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         };
 
         worker.process_event(event).await;

@@ -345,6 +345,7 @@ mod tests {
             added_components: FxHashMap::default(),
             removed_components: vec!["rfq_ab".to_string()],
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         };
 
         replacer

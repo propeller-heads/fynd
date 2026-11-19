@@ -277,6 +277,7 @@ mod tests {
             added_components: FxHashMap::default(),
             removed_components: Vec::new(),
             updated_components: Vec::new(),
+            reclassified_components: Vec::new(),
         }
     }
 

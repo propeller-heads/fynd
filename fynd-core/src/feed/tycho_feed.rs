@@ -517,6 +517,7 @@ impl TychoFeed {
         let mut unsynced_protocol_count = 0;
         let mut latest_block_fields = None;
         let mut added_topology: FxHashMap<ComponentId, ComponentTopology> = FxHashMap::default();
+        let mut reclassified_ids: Vec<ComponentId> = Vec::new();
         self.market_data
             .apply_block_update(new_block_number, |market_data| {
                 let upserted = market_data.upsert_components(
@@ -529,6 +530,12 @@ impl TychoFeed {
                 market_data.upsert_tokens(maybe_new_tokens);
                 market_data.update_states(updated_or_new_states);
                 market_data.update_sync_status(sync_states, self.config.max_sync_lag);
+                // A new component reaches the workers already classified.
+                reclassified_ids = market_data
+                    .sync_exclusivity(updated_components_ids.iter())
+                    .into_iter()
+                    .filter(|id| !upserted.new.contains(id))
+                    .collect();
 
                 added_topology = upserted
                     .new
@@ -574,6 +581,7 @@ impl TychoFeed {
                 updated_components: updated_components_ids
                     .into_iter()
                     .collect(),
+                reclassified_components: reclassified_ids,
             };
 
             self.event_tx
@@ -666,6 +674,7 @@ impl TychoFeed {
                 added_components: added_topology,
                 removed_components: removed,
                 updated_components,
+                reclassified_components: Vec::new(),
             })
             .map_err(|e| DataFeedError::EventChannelError(e.to_string()))?;
 
@@ -758,7 +767,11 @@ mod tests {
     use super::*;
     use crate::{
         algorithm::test_utils::encode_swap_directions,
-        feed::{market_data::MarketData, TychoFeedConfig},
+        feed::{
+            exclusivity::{is_exclusive, TEST_FYND_POLICY},
+            market_data::MarketData,
+            TychoFeedConfig,
+        },
     };
 
     #[tokio::test]
@@ -956,6 +969,7 @@ mod tests {
                 added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new(),
             })
             .expect("Failed to send event");
 
@@ -968,6 +982,7 @@ mod tests {
                 added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new()
             }
         );
     }
@@ -1033,8 +1048,109 @@ mod tests {
                 )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new()
             }
         );
+    }
+
+    /// A three-coin Curve pool state with the given exclusivity.
+    fn curve_state(exclusive: bool) -> Box<dyn ProtocolSim> {
+        use tycho_simulation::evm::protocol::curve::{
+            adapter::{build_pool, CurveVariant, RawPoolState},
+            CurveState,
+        };
+        let parse = |value: &str| value.parse().expect("u256");
+        let raw = RawPoolState {
+            variant: CurveVariant::TriCryptoNG,
+            balances: vec![
+                parse("2466241139205"),
+                parse("4200057336"),
+                parse("1595469030050811720465"),
+            ],
+            token_decimals: vec![6, 8, 18],
+            amp: parse("1707629"),
+            mid_fee: Some(parse("3000000")),
+            out_fee: Some(parse("30000000")),
+            fee_gamma: Some(parse("500000000000000")),
+            d: Some(parse("7457948167729606869978625")),
+            gamma: Some(parse("11809167828997")),
+            price_scale: Some(vec![
+                parse("59372627314351316239076"),
+                parse("1565715369034455123313"),
+            ]),
+            ..Default::default()
+        };
+        let state = CurveState::new(
+            Bytes::from([7u8; 20]),
+            vec![Bytes::from([1u8; 20]), Bytes::from([2u8; 20]), Bytes::from([3u8; 20])],
+            vec![6, 8, 18],
+            CurveVariant::TriCryptoNG,
+            build_pool(&raw).expect("build curve pool"),
+            None,
+        )
+        .with_policy(exclusive.then(|| Bytes::from(TEST_FYND_POLICY.address)));
+        Box::new(state)
+    }
+
+    /// The feed copies a Curve pool's exclusivity into its component and reports each change.
+    #[tokio::test]
+    async fn test_handle_message_reclassifies_curve_pool() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let mut event_rx = feed.subscribe();
+        let id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let tokens = vec![
+            create_test_token("0x1111111111111111111111111111111111111111", "TKN1"),
+            create_test_token("0x2222222222222222222222222222222222222222", "TKN2"),
+        ];
+        let state_update = |exclusive: bool| {
+            Update::new(
+                1,
+                HashMap::from([(id.to_string(), curve_state(exclusive))]),
+                HashMap::new(),
+            )
+        };
+        let reclassified = |event: MarketEvent| {
+            let MarketEvent::MarketUpdated { reclassified_components, .. } = event;
+            reclassified_components
+        };
+        let stamped_exclusive = || async {
+            is_exclusive(
+                market_data
+                    .read()
+                    .await
+                    .get_component(id)
+                    .expect("component"),
+            )
+        };
+
+        let creation = Update::new(
+            1,
+            HashMap::from([(id.to_string(), curve_state(true))]),
+            HashMap::from([(id.to_string(), create_test_component(id, tokens))]),
+        );
+        feed.handle_tycho_message(creation)
+            .await
+            .expect("creation");
+        assert!(stamped_exclusive().await, "a new pool is classified before it is added");
+        assert_eq!(reclassified(event_rx.try_recv().expect("event")), Vec::<String>::new());
+
+        feed.handle_tycho_message(state_update(true))
+            .await
+            .expect("same exclusivity");
+        assert_eq!(reclassified(event_rx.try_recv().expect("event")), Vec::<String>::new());
+
+        feed.handle_tycho_message(state_update(false))
+            .await
+            .expect("becomes public");
+        assert!(!stamped_exclusive().await);
+        assert_eq!(reclassified(event_rx.try_recv().expect("event")), vec![id.to_string()]);
+
+        feed.handle_tycho_message(state_update(true))
+            .await
+            .expect("becomes exclusive");
+        assert!(stamped_exclusive().await);
+        assert_eq!(reclassified(event_rx.try_recv().expect("event")), vec![id.to_string()]);
     }
 
     #[tokio::test]
@@ -1141,6 +1257,7 @@ mod tests {
                 )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new()
             }
         );
         assert_eq!(
@@ -1149,6 +1266,7 @@ mod tests {
                 added_components: FxHashMap::default(),
                 removed_components: vec![component_id.to_string()],
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new()
             }
         );
     }
@@ -1225,16 +1343,19 @@ mod tests {
                     )]),
                     removed_components: Vec::new(),
                     updated_components: Vec::new(),
+                    reclassified_components: Vec::new()
                 },
                 MarketEvent::MarketUpdated {
                     added_components: FxHashMap::default(),
                     removed_components: Vec::new(),
                     updated_components: vec![market_id.to_string()],
+                    reclassified_components: Vec::new()
                 },
                 MarketEvent::MarketUpdated {
                     added_components: FxHashMap::default(),
                     removed_components: vec![market_id.to_string()],
                     updated_components: Vec::new(),
+                    reclassified_components: Vec::new()
                 },
             ]
         );
@@ -1342,6 +1463,7 @@ mod tests {
                 )]),
                 removed_components: Vec::new(),
                 updated_components: vec![],
+                reclassified_components: Vec::new()
             }
         );
         assert_eq!(
@@ -1350,6 +1472,7 @@ mod tests {
                 added_components: FxHashMap::default(),
                 removed_components: Vec::new(),
                 updated_components: vec![component_id.to_string()],
+                reclassified_components: Vec::new()
             }
         );
     }
@@ -1603,6 +1726,7 @@ mod tests {
                 )]),
                 removed_components: Vec::new(),
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new()
             }
         );
 
@@ -1616,6 +1740,7 @@ mod tests {
                 )]),
                 removed_components: vec![old_component_id.to_string()],
                 updated_components: Vec::new(),
+                reclassified_components: Vec::new()
             }
         );
 

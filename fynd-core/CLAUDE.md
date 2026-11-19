@@ -334,9 +334,17 @@ Pools are partitioned by `LiquidityScope` (`worker_pool_router/`, re-exported at
 - `IncludeExclusive` — no filtering: routes through whatever the stream delivers, exclusive
   components included if the deployment opted them into the stream.
 
-A component is classified exclusive by `is_exclusive` (`feed/exclusivity.rs`) — a fixed check for the
+A component is classified exclusive by `is_exclusive` (`feed/exclusivity.rs`) — a check for the
 `is_exclusive` static attribute on the component's Tycho data, applied generically to every ingested
 component. There is no per-deployment policy to configure.
+
+A Curve pool is exclusive while its policy (`CurveState::policy`) is one of the hardcoded
+`FYND_POLICIES` in `feed/exclusivity.rs`, and its policy can change. After every Tycho update
+`MarketState::sync_exclusivity` stamps the `is_exclusive` and `fynd_policy` static attributes, and
+replaces an exclusive pool's state with one priced at the policy's `min_fee`
+(`CurveState::with_fixed_fee`). A pAMM hop never falls back to an exclusive pool. The feed lists
+each tracked component whose exclusivity changed in `MarketEvent::reclassified_components`.
+`filter_event` adds or removes each one by the worker's drop rule.
 
 Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers filter
 exclusive components out of their local graph topology and incoming `MarketEvent`s (via
@@ -379,10 +387,14 @@ Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 fails the build (`SolverBuildError::NoPublicPool`) — there would be no pool left to establish the
 committed reference output.
 
-Encoding a committed leg is protocol-specific: `encoding/exclusive_swap.rs` is Ekubo-only. It signs
-an EIP-712 authorization with `EXCLUSIVE_SWAP_CONTROLLER_KEY` and packs it, plus a derived Q32 fee,
-into the `SignedExclusiveSwap` extension's `user_data`. Encoding an exclusive leg without that env
-var fails.
+Encoding a committed leg is protocol-specific, and both kinds sign with
+`EXCLUSIVE_SWAP_CONTROLLER_KEY`. Encoding an exclusive leg without that env var fails.
+
+- Ekubo (`encoding/exclusive_swap.rs`): an EIP-712 authorization plus a derived Q32 fee, in the
+  `SignedExclusiveSwap` extension's `user_data`.
+- Curve (`encoding/curve_grant.rs`): a `FyndPolicy` grant for the order's sender. Its fee brings
+  the output at `min_fee` down to the committed amount. `user_data` is
+  `min_amount_in(32) | max_amount_in(32) | fee(32) | nonce(8) | deadline(4) | signature(65)`.
 
 The authorization names the Tycho router (the address `Encoder` resolves for the chain) as its
 authorized locker, and the extension accepts no other caller. Authorizing every locker

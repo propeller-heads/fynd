@@ -798,6 +798,7 @@ mod tests {
             )]),
             removed_components: vec!["component2".to_string()],
             updated_components: vec![],
+            reclassified_components: Vec::new(),
         };
 
         let result = manager.handle_event(&event).await;

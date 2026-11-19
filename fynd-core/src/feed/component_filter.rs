@@ -10,7 +10,11 @@ use rustc_hash::FxHashMap;
 use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
-    feed::{events::MarketEvent, market_data::MarketState},
+    feed::{
+        events::MarketEvent,
+        exclusivity::{is_exclusive, set_exclusive},
+        market_data::MarketState,
+    },
     types::{ComponentId, ComponentTopology},
 };
 
@@ -58,19 +62,52 @@ pub(crate) fn remove_components(
 
 /// Removes those component ids from a market event's added/updated/removed lists, so a component
 /// the worker must not route through is never ingested mid-stream.
+///
+/// A reclassified component is added when `drop` keeps it, and removed when `drop` kept it only
+/// before the change. The returned event keeps the reclassified ids, so it can be filtered again.
 pub(crate) fn filter_event(
     market: &MarketState,
     event: MarketEvent,
     drop: &dyn Fn(&ProtocolComponent) -> bool,
 ) -> MarketEvent {
-    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-        event;
+    let MarketEvent::MarketUpdated {
+        mut added_components,
+        mut removed_components,
+        mut updated_components,
+        reclassified_components,
+    } = event;
 
-    let added_components = remove_components(market, added_components, drop);
-    let removed_components = filter_component_ids(market, &removed_components, drop);
+    added_components.retain(|id, _| !reclassified_components.contains(id));
+    removed_components.retain(|id| !reclassified_components.contains(id));
+    updated_components.retain(|id| !reclassified_components.contains(id));
+
+    let mut added_components = remove_components(market, added_components, drop);
+    let mut removed_components = filter_component_ids(market, &removed_components, drop);
     let updated_components = filter_component_ids(market, &updated_components, drop);
 
-    MarketEvent::MarketUpdated { added_components, removed_components, updated_components }
+    for id in &reclassified_components {
+        let Some(component) = market.get_component(id) else {
+            continue;
+        };
+        let mut before = component.clone();
+        set_exclusive(&mut before, !is_exclusive(component));
+        match (drop(&before), drop(component)) {
+            (_, false) => {
+                if let Some(topology) = market.topology_of(id) {
+                    added_components.insert(id.clone(), topology);
+                }
+            }
+            (false, true) => removed_components.push(id.clone()),
+            (true, true) => {}
+        }
+    }
+
+    MarketEvent::MarketUpdated {
+        added_components,
+        removed_components,
+        updated_components,
+        reclassified_components,
+    }
 }
 
 /// Keeps only the component ids `drop` returns `false` for.
@@ -171,18 +208,93 @@ mod tests {
             ),
             removed_components: ids(),
             updated_components: ids(),
+            reclassified_components: Vec::new(),
         };
         let exclude_protocols = vec!["fallback:".to_string()];
         let drop =
             |c: &ProtocolComponent| is_exclusive(c) || is_excluded_protocol(&exclude_protocols, c);
 
-        let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-            filter_event(&market, event, &drop);
+        let MarketEvent::MarketUpdated {
+            added_components,
+            removed_components,
+            updated_components,
+            reclassified_components: _,
+        } = filter_event(&market, event, &drop);
 
         assert!(added_components.contains_key("pub-1"));
         assert!(!added_components.contains_key("excl-1"));
         assert!(!added_components.contains_key("pamm-1"));
         assert_eq!(removed_components, vec!["pub-1".to_string()]);
         assert_eq!(updated_components, vec!["pub-1".to_string()]);
+    }
+
+    /// An event that reclassifies `id`, as the feed sends it.
+    fn reclassified_event(id: &str) -> MarketEvent {
+        MarketEvent::MarketUpdated {
+            added_components: FxHashMap::default(),
+            removed_components: Vec::new(),
+            updated_components: vec![id.to_string()],
+            reclassified_components: vec![id.to_string()],
+        }
+    }
+
+    /// (added, removed, updated) ids of a filtered event.
+    fn changes(event: MarketEvent) -> (Vec<ComponentId>, Vec<ComponentId>, Vec<ComponentId>) {
+        let MarketEvent::MarketUpdated {
+            added_components,
+            removed_components,
+            updated_components,
+            reclassified_components: _,
+        } = event;
+        (added_components.into_keys().collect(), removed_components, updated_components)
+    }
+
+    #[rstest::rstest]
+    #[case::public_worker_drops_newly_exclusive(true, true, (vec![], vec!["c-1"], vec![]))]
+    #[case::public_worker_adds_newly_public(false, true, (vec!["c-1"], vec![], vec![]))]
+    #[case::exclusive_worker_re_adds_newly_exclusive(true, false, (vec!["c-1"], vec![], vec![]))]
+    #[case::exclusive_worker_re_adds_newly_public(false, false, (vec!["c-1"], vec![], vec![]))]
+    fn test_filter_event_reclassified(
+        #[case] now_exclusive: bool,
+        #[case] public_only: bool,
+        #[case] expected: (Vec<&str>, Vec<&str>, Vec<&str>),
+    ) {
+        let component =
+            if now_exclusive { exclusive_component("c-1") } else { public_component("c-1") };
+        let market = market_with(vec![component]);
+        let drop = |c: &ProtocolComponent| public_only && is_exclusive(c);
+        let to_ids = |ids: Vec<&str>| {
+            ids.into_iter()
+                .map(str::to_string)
+                .collect::<Vec<ComponentId>>()
+        };
+
+        let filtered = filter_event(&market, reclassified_event("c-1"), &drop);
+
+        assert_eq!(changes(filtered), (to_ids(expected.0), to_ids(expected.1), to_ids(expected.2)));
+    }
+
+    #[test]
+    fn test_filter_event_reclassified_excluded_protocol() {
+        let market = market_with(vec![pamm_component("pamm-1")]);
+        let drop = |_: &ProtocolComponent| true;
+
+        let filtered = filter_event(&market, reclassified_event("pamm-1"), &drop);
+
+        assert_eq!(changes(filtered), (vec![], vec![], vec![]));
+    }
+
+    /// A second filter resolves a reclassified component by its own rule.
+    #[test]
+    fn test_filter_event_reclassified_filtered_twice() {
+        let market = market_with(vec![exclusive_component("c-1")]);
+        let keep_all = |_: &ProtocolComponent| false;
+        let public_only = |c: &ProtocolComponent| is_exclusive(c);
+
+        let for_post_processors = filter_event(&market, reclassified_event("c-1"), &keep_all);
+        let for_graph = filter_event(&market, for_post_processors.clone(), &public_only);
+
+        assert_eq!(changes(for_post_processors), (vec!["c-1".to_string()], vec![], vec![]));
+        assert_eq!(changes(for_graph), (vec![], vec!["c-1".to_string()], vec![]));
     }
 }

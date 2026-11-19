@@ -2002,6 +2002,7 @@ impl Solver {
                 added_components: added,
                 removed_components: vec![],
                 updated_components: vec![],
+                reclassified_components: vec![],
             })
             .is_err()
         {

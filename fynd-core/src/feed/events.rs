@@ -25,6 +25,8 @@ pub enum MarketEvent {
         removed_components: Vec<ComponentId>,
         /// Tracked components whose state changed, with the same swap directions as before.
         updated_components: Vec<ComponentId>,
+        /// Tracked components that became exclusive or public.
+        reclassified_components: Vec<ComponentId>,
     },
 }
 

@@ -218,8 +218,12 @@ fn drain_events(events: &mut broadcast::Receiver<MarketEvent>) -> Vec<MarketEven
 }
 
 fn changed_components(event: MarketEvent) -> ChangedComponents {
-    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
-        event;
+    let MarketEvent::MarketUpdated {
+        added_components,
+        removed_components,
+        updated_components,
+        reclassified_components: _,
+    } = event;
     ChangedComponents {
         added: added_components,
         removed: removed_components,
