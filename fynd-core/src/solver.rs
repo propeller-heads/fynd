@@ -581,6 +581,7 @@ pub struct FyndBuilder {
     reconnect_delay: Duration,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
+    pamm_simulation_overrides: bool,
     tycho_subscription_buffer_size: Option<usize>,
     max_sync_lag: Duration,
     aggregate_rfqs: bool,
@@ -632,6 +633,7 @@ impl FyndBuilder {
             reconnect_delay: defaults::RECONNECT_DELAY,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            pamm_simulation_overrides: true,
             tycho_subscription_buffer_size: None,
             max_sync_lag: defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
@@ -723,6 +725,17 @@ impl FyndBuilder {
     /// unaffected.
     pub fn partial_blocks(mut self, enabled: bool) -> Self {
         self.partial_blocks = enabled;
+        self
+    }
+
+    /// Whether the pAMM price level stream also reads Titan's quote stream (default: `true`).
+    ///
+    /// The quote stream is a second websocket that carries the account state Titan priced each
+    /// pAMM state on. Each pAMM swap then carries those simulation overrides, and simulation runs
+    /// its route on them. Quoting never reads them, so turning them off only drops the websocket,
+    /// its buffer and the overrides. Has no effect without a `pricelevelstream:` protocol.
+    pub fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.pamm_simulation_overrides = enabled;
         self
     }
 
@@ -1089,6 +1102,7 @@ impl FyndBuilder {
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(std::mem::take(&mut self.blocklisted_components))
         .partial_blocks(self.partial_blocks)
+        .pamm_simulation_overrides(self.pamm_simulation_overrides)
         .max_sync_lag(self.max_sync_lag)
         .aggregate_rfqs(self.aggregate_rfqs)
         .external_liquidity(std::mem::take(&mut self.external_liquidity));
@@ -1358,7 +1372,8 @@ impl FyndBuilder {
         let router_config = WorkerPoolRouterConfig::default()
             .with_timeout(self.router_timeout)
             .with_min_responses(self.router_min_responses)
-            .with_encoding_retry_budget(self.encoding_retry_budget);
+            .with_encoding_retry_budget(self.encoding_retry_budget)
+            .with_pamm_simulation_overrides(self.pamm_simulation_overrides);
         let mut router = WorkerPoolRouter::new(solver_pool_handles, router_config, encoder)
             .with_derived_data(Arc::clone(&stores.derived_data));
         if let Some(simulator) = quote_simulator {
