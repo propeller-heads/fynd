@@ -520,13 +520,13 @@ The gateway returns your plan in the `X-User-Plan` response header on every auth
 | ---: | --- | --- |
 | 400 | Malformed request body, bad token address, or a request that breaks a validation rule | JSON: `{"error": "...", "code": "..."}` — see [Validation codes](#validation-codes) |
 | 401 | Missing or invalid API key, or plan not recognized | Plain text: `Unauthorized` or `Missing authorization token` |
-| 403 | Your plan doesn't allow this service, or the request names a wallet on the OFAC sanctions list | Plan: plain text `Forbidden`. Sanctioned wallet: JSON `{"error": "...", "code": "SANCTIONED_ADDRESS"}`, see below |
+| 403 | Your plan doesn't allow this service | Plain text: `Forbidden` |
 | 404 | Unknown chain path segment | JSON: `{"error": "unknown_chain", ...}` |
 | 429 | Rate limit exceeded | Plain text: `Too Many Requests`, plus `Retry-After: <seconds>` header |
 | 5xx | Backend or gateway failure | varies — check health and retry with backoff |
 
 {% hint style="warning" %}
-**Error body formats differ by layer.** Gateway errors (401, a 403 for your plan, 429) return plain text; backend errors (400, a 403 for a sanctioned wallet, 404, 5xx) return JSON. If your client assumes JSON on every non-2xx, it will throw a parse error on the auth and rate-limit paths you most need to handle. Parse defensively.
+**Error body formats differ by layer.** Gateway errors (401, 403, 429) return plain text; backend errors (400, 404, 5xx) return JSON. If your client assumes JSON on every non-2xx, it will throw a parse error on the auth and rate-limit paths you most need to handle. Parse defensively.
 {% endhint %}
 
 ### Validation codes
@@ -544,8 +544,6 @@ A `400` carries a `code` naming what to fix. `BAD_REQUEST` means the body did no
 | `REQUIRED_TOKEN_EXCLUDED` | A token is in both `route_filter.require_tokens` and `route_filter.exclude_tokens` |
 
 A `422` with `REQUIRED_TOKENS_NOT_SUPPORTED` means `route_filter.require_tokens` was set and no solver pool serving the request supports it; drop the filter or use a deployment that runs `most_liquid` or `water_fill`.
-
-A `403` with `SANCTIONED_ADDRESS` means the order's `sender`, a `receiver` other than the sender, or the client fee receiver (`encoding_options.client_fee_params.receiver`) is on the [OFAC sanctions list](https://sanctionslist.ofac.treas.gov/Home/SdnList). The hosted API does not quote for that address on any chain, and retrying does not help. The `error` says which of the three it was. Any of these addresses that is not 20 bytes gets `400` with `BAD_REQUEST`.
 
 A `200` with `orders[0].status: "no_route_found"` is **not** an HTTP error — it means the solver ran but couldn't find a profitable route for the pair at the requested size. Check `/v1/{chain}/health` (`last_update_ms: 0` means the Tycho stream isn't delivering live state yet), try a different token pair or size, or confirm the tokens have [Tycho-indexed liquidity](https://docs.propellerheads.xyz/tycho) on that chain.
 
