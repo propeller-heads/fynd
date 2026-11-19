@@ -1,4 +1,24 @@
 
+## [0.126.0](https://github.com/propeller-heads/fynd/compare/0.125.2...0.126.0) (2026-11-19)
+
+### Features
+
+* return pAMM simulation overrides on each swap ([bec48e8](https://github.com/propeller-heads/fynd/commit/bec48e841372374cd507e9fe71b336200d4b4442))
+* simulate pAMM routes on Titan's simulation overrides ([052d236](https://github.com/propeller-heads/fynd/commit/052d236d51298261ffe3163e22d32147ebbc644a))
+* price gas at a priority fee the request sets ([e432f6a](https://github.com/propeller-heads/fynd/commit/e432f6ab8496c50784a8a0053a63748fb65c449f))
+* **feed:** share pool simulation states instead of copying ([be8e37c](https://github.com/propeller-heads/fynd/commit/be8e37c78ee024349fcdb00f4c8f4b5568721b3b))
+
+### Bug Fixes
+
+* **core:** address review of pAMM simulation overrides ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+* **client-ts:** drop simulation overrides of the wrong size ([a772e2f](https://github.com/propeller-heads/fynd/commit/a772e2fa6dc62ba0c793c3b4b930a5caa2aa31da))
+* bump actix-http to 3.21.3 for RUSTSEC advisories ([c53eb8c](https://github.com/propeller-heads/fynd/commit/c53eb8c1955b20bf2cf741855bbec46997747975))
+
+### Performance Improvements
+
+* **feed:** remove the batched market snapshot ([cacdca8](https://github.com/propeller-heads/fynd/commit/cacdca85449818d3535415c2aa4e572678145309))
+
+
 
 
 ## [0.125.0](https://github.com/propeller-heads/fynd/compare/0.124.1...0.125.0) (2026-11-16)
