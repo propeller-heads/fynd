@@ -820,10 +820,8 @@ impl Swap {
 /// simulation of the swap on chain state alone usually reverts. To reproduce the quote with
 /// `eth_simulateV1` or `eth_call`, simulate on block `block_number - 1`, pass `block_number` and
 /// `block_timestamp` as the `number` and `time` block overrides, and add [`Self::accounts`] to
-/// your state overrides. For a route through several pAMM swaps, merge every swap's accounts per
-/// address and per storage slot. Where two swaps set one value, keep the value of the swap with the
-/// newer block number, or of the later swap in the route when both name the same block. Simulate
-/// as the newest block number, with its timestamp.
+/// your state overrides. For a route through several pAMM swaps, [`Route::simulation_overrides`]
+/// merges every swap's overrides into one set.
 ///
 /// A successful simulation means the quote can fill if the venue's state is current at that price
 /// when the transaction lands, not that it will.
@@ -878,6 +876,69 @@ impl Route {
     /// Create a new [`Route`] from a list of swaps.
     pub fn new(swaps: Vec<Swap>) -> Self {
         Self { swaps }
+    }
+
+    /// The simulation overrides of every pAMM swap of this route, merged into one set to simulate
+    /// the route with. `None` when no swap carries overrides.
+    ///
+    /// These are the rules Fynd's own simulation merges by. The accounts are a union, per account
+    /// and per storage slot. Where two swaps set one balance, nonce or slot, the swap with the
+    /// newer block number wins: a swap naming no block loses to any that names one, and between
+    /// two swaps naming the same block the later one in the route wins. The block is the newest
+    /// one any swap names, with its timestamp.
+    ///
+    /// The result holds the venues' state only. Add the overrides that fund your sender on top,
+    /// keeping your funding wherever both set a value, as Fynd does.
+    pub fn simulation_overrides(&self) -> Option<SimulationOverrides> {
+        let mut contributing: Vec<&SimulationOverrides> = self
+            .swaps
+            .iter()
+            .filter_map(Swap::simulation_overrides)
+            .collect();
+        // Merged oldest block first, so a newer block's value overwrites an older one's. The sort
+        // is stable, so route order stands within one block, and `None` sorts before every
+        // block.
+        contributing.sort_by_key(|overrides| overrides.block_number);
+
+        let mut merged: Option<SimulationOverrides> = None;
+        for overrides in contributing {
+            let held = merged.get_or_insert_with(|| {
+                SimulationOverrides::new(None, None, StateOverride::default())
+            });
+            if let Some(number) = overrides.block_number {
+                if held.block_number == Some(number) {
+                    held.block_timestamp = held
+                        .block_timestamp
+                        .or(overrides.block_timestamp);
+                } else {
+                    held.block_number = Some(number);
+                    held.block_timestamp = overrides.block_timestamp;
+                }
+            }
+            for (address, account) in &overrides.accounts {
+                let held_account = held
+                    .accounts
+                    .entry(*address)
+                    .or_default();
+                if account.balance.is_some() {
+                    held_account.balance = account.balance;
+                }
+                if account.nonce.is_some() {
+                    held_account.nonce = account.nonce;
+                }
+                if let Some(slots) = &account.state_diff {
+                    held_account
+                        .state_diff
+                        .get_or_insert_with(Default::default)
+                        .extend(
+                            slots
+                                .iter()
+                                .map(|(slot, word)| (*slot, *word)),
+                        );
+                }
+            }
+        }
+        merged
     }
 }
 
@@ -1916,5 +1977,174 @@ mod tests {
             ),
             Err(crate::error::FyndError::Protocol(_))
         ));
+    }
+
+    mod route_simulation_overrides {
+        use alloy::{
+            primitives::{map::B256HashMap, Address, B256},
+            rpc::types::state::AccountOverride,
+        };
+
+        use super::*;
+
+        fn word(byte: u8) -> B256 {
+            B256::with_last_byte(byte)
+        }
+
+        /// An account overriding one storage slot per `(slot, value)` pair, and nothing else.
+        fn storage(slots: &[(u8, u8)]) -> AccountOverride {
+            let state_diff: B256HashMap<B256> = slots
+                .iter()
+                .map(|(slot, value)| (word(*slot), word(*value)))
+                .collect();
+            AccountOverride { state_diff: Some(state_diff), ..Default::default() }
+        }
+
+        /// The timestamp the tests give `block`: twelve seconds per block from a fixed origin.
+        fn timestamp_of(block: u64) -> u64 {
+            1_500_000_000 + 12 * block
+        }
+
+        /// Overrides for `block` (with its timestamp) over `accounts`, each keyed by the byte its
+        /// address repeats.
+        fn overrides(
+            block: Option<u64>,
+            accounts: impl IntoIterator<Item = (u8, AccountOverride)>,
+        ) -> SimulationOverrides {
+            SimulationOverrides::new(
+                block,
+                block.map(timestamp_of),
+                accounts
+                    .into_iter()
+                    .map(|(byte, account)| (Address::repeat_byte(byte), account))
+                    .collect(),
+            )
+        }
+
+        fn swap(overrides: Option<SimulationOverrides>) -> Swap {
+            let swap = Swap::new(
+                "pool".to_string(),
+                "fallback:fermiswap".to_string(),
+                addr(&[0x01; 20]),
+                addr(&[0x02; 20]),
+                BigUint::from(1_000u32),
+                BigUint::from(990u32),
+                BigUint::from(50_000u32),
+                0.0,
+            );
+            match overrides {
+                Some(overrides) => swap.with_simulation_overrides(overrides),
+                None => swap,
+            }
+        }
+
+        fn merged(overrides: Vec<Option<SimulationOverrides>>) -> Option<SimulationOverrides> {
+            Route::new(
+                overrides
+                    .into_iter()
+                    .map(swap)
+                    .collect(),
+            )
+            .simulation_overrides()
+        }
+
+        fn slot_of(merged: &SimulationOverrides, account: u8, slot: u8) -> Option<B256> {
+            merged.accounts()[&Address::repeat_byte(account)]
+                .state_diff
+                .as_ref()
+                .and_then(|slots| slots.get(&word(slot)).copied())
+        }
+
+        #[test]
+        fn test_route_simulation_overrides_without_overrides() {
+            assert_eq!(merged(vec![]), None);
+            assert_eq!(merged(vec![None, None]), None);
+        }
+
+        /// One swap's overrides pass through unchanged, whatever other swaps carry none.
+        #[test]
+        fn test_route_simulation_overrides_single_swap() {
+            let only = overrides(Some(10), [(0xa1, storage(&[(0, 1)]))]);
+
+            assert_eq!(merged(vec![None, Some(only.clone()), None]), Some(only));
+        }
+
+        #[test]
+        fn test_route_simulation_overrides_unions_accounts_and_slots() {
+            let merged = merged(vec![
+                Some(overrides(Some(10), [(0xa1, storage(&[(0, 1)])), (0xb2, storage(&[(0, 2)]))])),
+                Some(overrides(Some(10), [(0xa1, storage(&[(1, 3)]))])),
+            ])
+            .expect("overrides");
+
+            assert_eq!(merged.accounts().len(), 2);
+            assert_eq!(slot_of(&merged, 0xa1, 0), Some(word(1)));
+            assert_eq!(slot_of(&merged, 0xa1, 1), Some(word(3)));
+            assert_eq!(slot_of(&merged, 0xb2, 0), Some(word(2)));
+        }
+
+        /// Where two swaps of one block set one value differently, the later swap in the route
+        /// wins. A value only the earlier swap sets stays.
+        #[test]
+        fn test_route_simulation_overrides_later_swap_wins_within_a_block() {
+            let earlier = AccountOverride {
+                balance: Some(U256::from(1)),
+                nonce: Some(1),
+                ..storage(&[(0, 1), (1, 7)])
+            };
+            let later = AccountOverride { balance: Some(U256::from(2)), ..storage(&[(0, 2)]) };
+            let merged = merged(vec![
+                Some(overrides(Some(10), [(0xa1, earlier)])),
+                Some(overrides(Some(10), [(0xa1, later)])),
+            ])
+            .expect("overrides");
+            let account = &merged.accounts()[&Address::repeat_byte(0xa1)];
+
+            assert_eq!(account.balance, Some(U256::from(2)));
+            assert_eq!(account.nonce, Some(1));
+            assert_eq!(slot_of(&merged, 0xa1, 0), Some(word(2)));
+            assert_eq!(slot_of(&merged, 0xa1, 1), Some(word(7)));
+        }
+
+        /// Where swaps name different blocks, the newest block's value wins whatever their order
+        /// in the route, and a swap naming no block loses to any that names one.
+        #[test]
+        fn test_route_simulation_overrides_newest_block_wins() {
+            let merged = merged(vec![
+                Some(overrides(Some(11), [(0xa1, storage(&[(0, 11)]))])),
+                Some(overrides(Some(10), [(0xa1, storage(&[(0, 10), (1, 10)]))])),
+                Some(overrides(None, [(0xa1, storage(&[(0, 1), (2, 1)]))])),
+            ])
+            .expect("overrides");
+
+            assert_eq!(merged.block_number(), Some(11));
+            assert_eq!(slot_of(&merged, 0xa1, 0), Some(word(11)));
+            assert_eq!(slot_of(&merged, 0xa1, 1), Some(word(10)));
+            assert_eq!(slot_of(&merged, 0xa1, 2), Some(word(1)));
+        }
+
+        /// The block is the newest one named, with its own timestamp: a newer block without one
+        /// leaves none, and a later swap of the same block fills in a missing one.
+        #[test]
+        fn test_route_simulation_overrides_block_and_timestamp() {
+            let untimed =
+                |block| SimulationOverrides::new(Some(block), None, StateOverride::default());
+
+            let newer_untimed =
+                merged(vec![Some(overrides(Some(10), [])), Some(untimed(11))]).expect("overrides");
+            let filled_in = merged(vec![
+                Some(untimed(11)),
+                Some(overrides(Some(11), [])),
+                Some(overrides(None, [])),
+            ])
+            .expect("overrides");
+            let unnamed = merged(vec![Some(overrides(None, []))]).expect("overrides");
+
+            assert_eq!(newer_untimed.block_number(), Some(11));
+            assert_eq!(newer_untimed.block_timestamp(), None);
+            assert_eq!(filled_in.block_number(), Some(11));
+            assert_eq!(filled_in.block_timestamp(), Some(timestamp_of(11)));
+            assert_eq!((unnamed.block_number(), unnamed.block_timestamp()), (None, None));
+        }
     }
 }
