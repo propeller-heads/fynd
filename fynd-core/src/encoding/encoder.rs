@@ -6,6 +6,7 @@ use alloy::{
 };
 use futures::{StreamExt, TryStreamExt};
 use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use serde_json::Value;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -736,9 +737,10 @@ impl Encoder {
 
     /// Stamps controller-signed `user_data` onto each exclusive leg of `solution`.
     ///
-    /// A leg is exclusive when its route swap carries a committed amount. The solution's swaps are
-    /// built 1:1 from the route's swaps, so they are matched by index. Returns `solution` unchanged
-    /// when no leg is exclusive.
+    /// A leg is exclusive when its route swap carries a committed amount. Each leg's input floor
+    /// allows for the request's slippage plus the fees of the exclusive legs before it. The
+    /// solution's swaps are built 1:1 from the route's swaps, so they are matched by index.
+    /// Returns `solution` unchanged when no leg is exclusive.
     fn stamp_exclusive_swaps(
         solution: Solution,
         quote: &OrderQuote,
@@ -759,32 +761,32 @@ impl Encoder {
         }
 
         // `route_swaps` carry `committed_amount_out` and the component attributes;
-        // `solution.swaps()`
-        // are built 1:1 from them by `Solution::try_from` and are what the router executes.
-        // We read the committed amount from the route swap but stamp `user_data` onto the
-        // matching solution swap, matched by index via the zip below.
-        let swaps = solution
+        // `solution.swaps()` are built 1:1 from them by `Solution::try_from` and are what the
+        // router executes. We read the committed amount from the route swap but stamp `user_data`
+        // onto the matching solution swap, matched by index.
+        //
+        // The fee of an exclusive leg lowers the input of the swaps after it. Each leg's input
+        // floor allows for the fees of the exclusive legs before it, on top of the slippage.
+        let mut earlier_fees = 0.0;
+        let mut swaps = Vec::with_capacity(route_swaps.len());
+        for (solution_swap, route_swap) in solution
             .swaps()
             .iter()
             .cloned()
             .zip(route_swaps.iter())
-            // Only the exclusive leg (the route swap carrying a committed amount) gets signed
-            // `user_data`; every other solution swap passes through unchanged.
-            .map(|(solution_swap, route_swap)| {
-                if route_swap
-                    .committed_amount_out()
-                    .is_some()
-                {
-                    let user_data = match find_venue(route_swap.protocol_state()) {
-                        Some(venue) => venue.sign(signer, route_swap, quote.sender(), slippage)?,
-                        None => signer.build_user_data(route_swap, slippage)?,
-                    };
-                    Ok(solution_swap.with_user_data(user_data))
-                } else {
-                    Ok(solution_swap)
-                }
-            })
-            .collect::<Result<Vec<_>, SolveError>>()?;
+        {
+            let Some(committed) = route_swap.committed_amount_out() else {
+                swaps.push(solution_swap);
+                continue;
+            };
+            let leg_slippage = slippage + earlier_fees;
+            let user_data = match find_venue(route_swap.protocol_state()) {
+                Some(venue) => venue.sign(signer, route_swap, quote.sender(), leg_slippage)?,
+                None => signer.build_user_data(route_swap, leg_slippage)?,
+            };
+            swaps.push(solution_swap.with_user_data(user_data));
+            earlier_fees += fee_fraction(route_swap.amount_out(), committed);
+        }
 
         Ok(solution.with_swaps(swaps))
     }
@@ -1176,6 +1178,16 @@ impl From<EncodingError> for SolveError {
     }
 }
 
+/// The part of `amount_out` that an exclusive leg keeps as its fee, as a fraction.
+fn fee_fraction(amount_out: &BigUint, committed: &BigUint) -> f64 {
+    let (Some(amount_out), Some(committed)) = (amount_out.to_f64(), committed.to_f64()) else {
+        return 0.0;
+    };
+    if amount_out <= 0.0 || committed >= amount_out {
+        return 0.0;
+    }
+    1.0 - committed / amount_out
+}
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes, B256};
@@ -1454,18 +1466,18 @@ mod tests {
         );
     }
 
-    /// A Curve hop priced with a grant gets a grant signed for the order's sender.
-    #[test]
-    fn test_stamp_exclusive_swaps_curve_grant() {
-        let token_in = make_address(0x11);
-        let token_out = make_address(0x22);
-        let mut curve = component("curve-pool", &[]);
+    /// A swap through a dual Curve pool from `token_in` to `token_out`, 1_000_000 in and out,
+    /// priced with a grant and committed to `committed`.
+    fn curve_grant_swap(token_in: u8, token_out: u8, committed: u64) -> crate::types::Swap {
+        let token_in = make_address(token_in);
+        let token_out = make_address(token_out);
+        let mut curve = component(&format!("curve-{token_in}-{token_out}"), &[]);
         let coins = format!(r#"["{token_in}","{token_out}"]"#);
         curve
             .static_attributes
             .insert("coins".to_string(), Bytes::from(coins.as_bytes()));
         let mut swap = crate::types::Swap::new(
-            "curve-pool".to_string(),
+            curve.id.clone(),
             "vm:curve".to_string(),
             token_in,
             token_out,
@@ -1479,8 +1491,20 @@ mod tests {
                     .expect("supported policy"),
             ),
         );
-        swap.set_committed_amount_out(BigUint::from(990_000u64));
-        let quote = make_order_quote(990_000).with_route(single_swap_route(swap));
+        swap.set_committed_amount_out(BigUint::from(committed));
+        swap
+    }
+
+    /// The `min_amount_in` of a signed Curve grant.
+    fn grant_min_amount_in(user_data: &Bytes) -> BigUint {
+        BigUint::from_bytes_be(&user_data[20..52])
+    }
+
+    /// A Curve hop priced with a grant gets a grant signed for the order's sender.
+    #[test]
+    fn test_stamp_exclusive_swaps_curve_grant() {
+        let quote = make_order_quote(990_000)
+            .with_route(single_swap_route(curve_grant_swap(0x11, 0x22, 990_000)));
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
 
         let solution = Encoder::stamp_exclusive_swaps(
@@ -1496,6 +1520,44 @@ mod tests {
             .clone()
             .expect("signed");
         assert_eq!(user_data.len(), 193, "the grant size the Curve executor reads");
+        assert_eq!(grant_min_amount_in(&user_data), BigUint::from(990_000u64));
+    }
+
+    /// Two exclusive hops in a row: the first keeps 1% as its fee, so the second hop's input floor
+    /// allows for 1% slippage plus that 1%.
+    #[test]
+    fn test_stamp_exclusive_swaps_two_hops() {
+        let swaps =
+            vec![curve_grant_swap(0x11, 0x22, 990_000), curve_grant_swap(0x22, 0x33, 990_000)];
+        let tokens = FxHashMap::from_iter(
+            [0x11, 0x22, 0x33].map(|byte| (make_address(byte), make_token(make_address(byte)))),
+        );
+        let route = crate::types::Route::new(swaps, tokens).expect("non-empty route");
+        let quote = make_order_quote(980_100).with_route(route);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let solution = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer,
+            0.01,
+        )
+        .unwrap();
+
+        let floors: Vec<BigUint> = solution
+            .swaps()
+            .iter()
+            .map(|swap| {
+                grant_min_amount_in(
+                    swap.user_data()
+                        .as_ref()
+                        .expect("signed"),
+                )
+            })
+            .collect();
+        assert_eq!(floors[0], BigUint::from(990_000u64));
+        assert!(floors[1] <= BigUint::from(980_000u64), "second floor {}", floors[1]);
+        assert!(floors[1] >= BigUint::from(979_000u64), "second floor {}", floors[1]);
     }
 
     #[tokio::test]
