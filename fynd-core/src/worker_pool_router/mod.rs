@@ -1199,6 +1199,10 @@ impl WorkerPoolRouter {
 /// - `Swap::committed_amount_out` set on each exclusive leg, and
 /// - an order-level `SurplusInfo`.
 ///
+/// A candidate whose exclusive leg goes through a pool of the public reference's route is skipped.
+/// The pool already wins the trade at its public price, so a grant would only lower what its LPs
+/// earn.
+///
 /// If there is no commitment, this returns `public_ranked` unchanged. In default-fee mode the
 /// placeholder is the only fallback, so the order answers "no route" if there is no commitment or
 /// the price guard rejects the exclusive quote.
@@ -1224,12 +1228,13 @@ fn combine_with_surplus(
     user_share_bps: u32,
     token_prices: Option<&TokenGasPrices>,
 ) -> Vec<OrderQuote> {
-    let Some(exclusive_candidate) = best_exclusive_candidate(responses, pool_scopes, options)
+    let public_reference = find_public_reference(&public_ranked);
+
+    let Some(exclusive_candidate) =
+        best_exclusive_candidate(responses, pool_scopes, options, public_reference)
     else {
         return public_ranked;
     };
-
-    let public_reference = find_public_reference(&public_ranked);
 
     let commitment = match public_reference {
         Some(public_reference) => matched_commitment(
@@ -1349,11 +1354,13 @@ fn is_rankable(quote: &OrderQuote, options: &QuoteOptions) -> bool {
 }
 
 /// Returns the exclusive-access candidate with the highest output net of gas. The candidate must
-/// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`.
+/// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`, and must
+/// not compete with `public_reference` (see `competes_with_public`).
 fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
     pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
+    public_reference: Option<&OrderQuote>,
 ) -> Option<&'a OrderQuote> {
     responses
         .quotes
@@ -1367,12 +1374,37 @@ fn best_exclusive_candidate<'a>(
                 .unwrap_or(true)
         })
         .filter(|wq| has_valid_exclusive_route(&wq.quote))
+        .filter(|wq| !competes_with_public(&wq.quote, public_reference))
         .max_by(|a, b| {
             a.quote
                 .amount_out_net_gas()
                 .cmp(b.quote.amount_out_net_gas())
         })
         .map(|wq| &wq.quote)
+}
+
+/// Whether an exclusive leg of `quote` goes through a pool that the route of `public_reference`
+/// also goes through. A dual pool can be in both routes: at its public price in the public one and
+/// with a grant in the exclusive one. Counts `exclusive_route_competes_with_public_total`.
+fn competes_with_public(quote: &OrderQuote, public_reference: Option<&OrderQuote>) -> bool {
+    let Some(public_route) = public_reference.and_then(OrderQuote::route) else {
+        return false;
+    };
+    let Some(route) = quote.route() else {
+        return false;
+    };
+    for swap in route.swaps() {
+        if !is_exclusive_leg(swap) {
+            continue;
+        }
+        for public_swap in public_route.swaps() {
+            if public_swap.component_id() == swap.component_id() {
+                counter!("exclusive_route_competes_with_public_total").increment(1);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Returns the amount to commit if the public worker pools find no route. The amount is the
@@ -3598,6 +3630,41 @@ mod tests {
         assert_eq!(combined.len(), 1);
         assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
         assert_eq!(combined[0].surplus_amount(), None);
+    }
+
+    /// An exclusive leg through a pool of the public reference's route is not signed: the public
+    /// ranking is returned unchanged.
+    #[rstest]
+    #[case::same_pool(&[("uniswap_v2", 0x01, 0x02, 1000, 900)], 900)]
+    #[case::other_pool(
+        &[("uniswap_v2", 0x01, 0x03, 1000, 1000), ("uniswap_v2", 0x03, 0x02, 1000, 900)],
+        905
+    )]
+    fn test_combine_skips_candidate_competing_with_public(
+        #[case] public_legs: &[(&str, u8, u8, u64, u64)],
+        #[case] expected_head: u64,
+    ) {
+        let public = make_priced_route_quote(public_legs, 900);
+        let exclusive = make_priced_route_quote(&[("vm:exclusive", 0x01, 0x02, 1000, 950)], 950);
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("public_pool".to_string(), public.clone())),
+                worker_quote(("exclusive_access_pool".to_string(), exclusive)),
+            ],
+            failed_solvers: vec![],
+        };
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![public],
+            1_000,
+            None,
+        );
+
+        assert_eq!(*combined[0].amount_out(), BigUint::from(expected_head));
     }
 
     /// The `NoRouteFound` placeholder `rank_quotes` returns when no public candidate succeeded.

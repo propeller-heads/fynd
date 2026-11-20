@@ -363,6 +363,10 @@ handle, and so does `exclusive_swap_replacer` for its replacement swaps. A swap 
 (`is_exclusive_leg`) when its component is exclusive or its state is an exclusive view. A pAMM hop
 never falls back to an exclusive component or a pool its view prices with a grant.
 
+A dual pool can be in the public reference's route at its public price and in the exclusive
+candidate's route with a grant. The router skips such a candidate (`competes_with_public`): the
+pool wins the trade anyway, and a grant would only lower what its LPs earn.
+
 Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers filter
 exclusive components out of their local graph topology and incoming `MarketEvent`s (via
 `feed/component_filter.rs`, which every worker also uses for `exclude_protocols`);
