@@ -30,10 +30,8 @@ use tycho_simulation::{
 };
 
 use crate::{
-    feed::{
-        component_filter::protocol_matches,
-        exclusivity::{build_exclusive_view, CurveGrantor},
-    },
+    exclusive_venue::{build_exclusive_view, can_grant, Grantor},
+    feed::component_filter::protocol_matches,
     types::{
         swap_directions, BlockInfo, ComponentId, ComponentTopology, ResolvedRouteConstraints,
         RouteConstraints, SwapDirection,
@@ -86,8 +84,8 @@ pub struct MarketData {
     /// Set by [`MarketData::with_priority_fee`]. It lives on the handle, not on the shared state,
     /// so one request can solve at its own priority fee without any other request seeing it.
     priority_fee: Option<BigUint>,
-    /// The signer and router of Fynd's Curve grants, if Fynd signs them.
-    curve_grantor: Option<Arc<CurveGrantor>>,
+    /// The signer and router of Fynd's exclusive swaps, if Fynd signs them.
+    grantor: Option<Arc<Grantor>>,
     /// Whether this handle's views give a dual pool's exclusive view in place of its state.
     exclusive_views: bool,
 }
@@ -99,19 +97,19 @@ impl MarketData {
             data,
             overlays: Arc::new(RwLock::new(FxHashMap::default())),
             priority_fee: None,
-            curve_grantor: None,
+            grantor: None,
             exclusive_views: false,
         }
     }
 
-    /// A handle over the same data that knows which Curve pools Fynd can sign grants for.
+    /// A handle over the same data that knows which dual pools Fynd can sign for.
     #[must_use]
-    pub(crate) fn with_curve_grantor(&self, curve_grantor: Option<CurveGrantor>) -> Self {
-        Self { curve_grantor: curve_grantor.map(Arc::new), ..self.clone() }
+    pub(crate) fn with_grantor(&self, grantor: Option<Grantor>) -> Self {
+        Self { grantor: grantor.map(Arc::new), ..self.clone() }
     }
 
     /// A handle over the same data whose views give each dual pool's exclusive view in place of
-    /// its state. A handle without a Curve grantor has no dual pools.
+    /// its state. A handle without a grantor has no dual pools.
     #[must_use]
     pub(crate) fn with_exclusive_views(&self) -> Self {
         Self { exclusive_views: true, ..self.clone() }
@@ -140,11 +138,11 @@ impl MarketData {
         overlay: Option<Overlay>,
     ) -> MarketDataView<'a> {
         let gas_price = self.replace_priority_fee(guard.gas_price());
-        let curve_grantor = self
-            .curve_grantor
+        let grantor = self
+            .grantor
             .clone()
             .filter(|_| self.exclusive_views);
-        MarketDataView { guard, overlay, gas_price, curve_grantor }
+        MarketDataView { guard, overlay, gas_price, grantor }
     }
 
     /// Returns `gas_price` with this handle's priority fee, or `None` when the handle carries no
@@ -307,7 +305,7 @@ pub struct MarketDataView<'a> {
     /// carries a priority fee. Built once per view so `gas_price` can hand out a reference.
     gas_price: Option<BlockGasPrice>,
     /// Set when the view gives each dual pool's exclusive view in place of its state.
-    curve_grantor: Option<Arc<CurveGrantor>>,
+    grantor: Option<Arc<Grantor>>,
 }
 
 /// The overlay a view reads, with the exclusive views of its states.
@@ -349,21 +347,19 @@ impl<'a> MarketDataView<'a> {
     /// The exclusive view this view gives for a dual pool. With `use_overlay`, an overlay state
     /// replaces the base state, and so does its exclusive view.
     fn find_exclusive_view(&self, id: &str, use_overlay: bool) -> Option<&Arc<dyn ProtocolSim>> {
-        let curve_grantor = self.curve_grantor.as_ref()?;
+        let grantor = self.grantor.as_ref()?;
         let view = match &self.overlay {
             Some(overlay) if use_overlay && overlay.states.contains_key(id) => {
                 overlay.exclusive_states.get(id)
             }
             _ => self.guard.exclusive_states.get(id),
         }?;
-        curve_grantor
-            .can_grant(view.as_ref())
-            .then_some(view)
+        can_grant(view.as_ref(), grantor).then_some(view)
     }
 
     /// Replaces the state of each dual pool in `subset` with its exclusive view.
     fn substitute_exclusive_views(&self, subset: &mut MarketState, use_overlay: bool) {
-        if self.curve_grantor.is_none() {
+        if self.grantor.is_none() {
             return;
         }
         for (id, state) in &mut subset.simulation_states {
@@ -1773,7 +1769,7 @@ mod tests {
 
     fn is_exclusive_view(state: Option<&dyn ProtocolSim>) -> bool {
         state
-            .and_then(crate::feed::exclusivity::find_exclusive_curve_view)
+            .and_then(crate::exclusive_venue::find_venue)
             .is_some()
     }
 
@@ -1781,10 +1777,10 @@ mod tests {
     /// whose policy names Fynd's grantor.
     #[tokio::test]
     async fn test_exclusive_views_give_dual_pool_view() {
-        use crate::feed::exclusivity::test_curve::{curve_state, dual_curve_state, grant_policy};
+        use crate::exclusive_venue::test_curve::{curve_state, dual_curve_state, grant_policy};
 
         let market = MarketData::new_shared()
-            .with_curve_grantor(Some(crate::feed::exclusivity::test_curve::grantor()));
+            .with_grantor(Some(crate::exclusive_venue::test_curve::grantor()));
         market.write().await.update_states([
             ("dual".to_string(), Box::new(dual_curve_state()) as Box<dyn ProtocolSim>),
             ("other".to_string(), Box::new(curve_state(grant_policy([0xee; 20], false)))),
@@ -1809,12 +1805,12 @@ mod tests {
     /// An overlay state replaces the base state's exclusive view with its own.
     #[tokio::test]
     async fn test_exclusive_views_follow_overlay() {
-        use crate::feed::exclusivity::test_curve::{
+        use crate::exclusive_venue::test_curve::{
             curve_state, dual_curve_state, grant_policy, CONTROLLER,
         };
 
         let market = MarketData::new_shared()
-            .with_curve_grantor(Some(crate::feed::exclusivity::test_curve::grantor()))
+            .with_grantor(Some(crate::exclusive_venue::test_curve::grantor()))
             .with_exclusive_views();
         market.write().await.update_states([(
             "dual".to_string(),

@@ -29,8 +29,8 @@ use crate::{
         router_call::{RouterCall, RouterLayout},
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
+    exclusive_venue::{find_venue, Grantor},
     fallback::user_data::fallback_user_data,
-    feed::exclusivity::{find_exclusive_curve_view, CurveGrantor},
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
 
@@ -351,11 +351,11 @@ impl Encoder {
         self
     }
 
-    /// The key and router of the Curve grants this encoder signs, if it signs any.
-    pub(crate) fn curve_grantor(&self) -> Option<CurveGrantor> {
+    /// The key and router of the exclusive swaps this encoder signs, if it signs any.
+    pub(crate) fn grantor(&self) -> Option<Grantor> {
         self.exclusive_swap_signer
             .as_ref()
-            .map(|signer| signer.curve_grantor())
+            .map(|signer| signer.grantor())
     }
 
     /// Returns the Tycho Router contract address for this chain, or `None` if encoding is
@@ -775,13 +775,8 @@ impl Encoder {
                     .committed_amount_out()
                     .is_some()
                 {
-                    let user_data = match find_exclusive_curve_view(route_swap.protocol_state()) {
-                        Some(curve) => signer.build_curve_user_data(
-                            route_swap,
-                            curve.policy(),
-                            quote.sender(),
-                            slippage,
-                        )?,
+                    let user_data = match find_venue(route_swap.protocol_state()) {
+                        Some(venue) => venue.sign(signer, route_swap, quote.sender(), slippage)?,
                         None => signer.build_user_data(route_swap, slippage)?,
                     };
                     Ok(solution_swap.with_user_data(user_data))
@@ -1479,7 +1474,7 @@ mod tests {
             BigUint::from(50_000u64),
             curve,
             Box::new(
-                crate::feed::exclusivity::test_curve::dual_curve_state()
+                crate::exclusive_venue::test_curve::dual_curve_state()
                     .exclusive_view()
                     .expect("supported policy"),
             ),
