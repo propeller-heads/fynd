@@ -3,7 +3,8 @@
 
 ### Bug Fixes
 
-* **core:** count pAMM override legs in finalize_quote ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+- Count pAMM simulation override legs in `finalize_quote`, so servers that compose router stages themselves (`solve`, `encode_quotes`, `simulate_quotes`, `finalize_quote`) now report the pAMM override metrics (legs, missing-block, conflict and block-mismatch) instead of zeros. With `--disable-pamm-simulation-overrides`, every pAMM swap counts as missing. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+- **Breaking:** Remove `WorkerPoolRouterConfig::with_pamm_simulation_overrides` and `WorkerPoolRouterConfig::pamm_simulation_overrides`. Use `FyndBuilder::pamm_simulation_overrides` to turn the quote stream on or off. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
 
 
 ## [0.126.0](https://github.com/propeller-heads/fynd/compare/0.125.2...0.126.0) (2026-11-19)
