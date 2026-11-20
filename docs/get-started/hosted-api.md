@@ -216,7 +216,7 @@ The response contains the route, the expected `amount_out`, gas estimate, and th
 | `transaction` | `null` unless `encoding_options` is set. See step 4. |
 | `order_id` | Correlation ID for this quote. Not queryable after the fact. |
 
-A request may carry up to 10 orders. Each order is solved, priced, and encoded independently and gets its own transaction; one order failing leaves the others untouched. The hosted API rejects a request with more than 10 orders with `400` and code `TOO_MANY_ORDERS`.
+A request carries one order. The hosted API rejects a request with more than one order with `400` and code `TOO_MANY_ORDERS`.
 
 ### 4. Encode and approve
 
@@ -536,7 +536,7 @@ A `400` carries a `code` naming what to fix. `BAD_REQUEST` means the body did no
 | Code | Rule |
 | --- | --- |
 | `NO_ORDERS` | `orders` is empty |
-| `TOO_MANY_ORDERS` | `orders` holds more than 10 orders (see [Request a quote](#3-request-a-quote)) |
+| `TOO_MANY_ORDERS` | `orders` holds more than one order (see [Request a quote](#3-request-a-quote)) |
 | `SAME_TOKENS` | An order's `token_in` equals its `token_out` |
 | `ZERO_AMOUNT` | An order's `amount` is `0` |
 | `INVALID_SLIPPAGE` | `encoding_options.slippage` is not a number from `0` to below `1` |
