@@ -1,4 +1,11 @@
 
+## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
+
+### Bug Fixes
+
+* **core:** count pAMM override legs in finalize_quote ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+
+
 ## [0.126.0](https://github.com/propeller-heads/fynd/compare/0.125.2...0.126.0) (2026-11-19)
 
 ### Features
