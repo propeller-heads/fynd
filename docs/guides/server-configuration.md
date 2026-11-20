@@ -97,7 +97,7 @@ A pAMM quote prices the block Titan is building, on venue state that is not on c
 * A successful simulation means the quote can fill if the venue's state is current at that price when the transaction lands, not that it will.
 * A pAMM swap whose state carried no overrides has no `simulation_overrides` field. The quote is served, ranked and encoded exactly as one with overrides: nothing in quoting reads them, and Fynd never rejects or expires a quote because of them.
 * With `--enable-simulation`, Fynd simulates such a route the same way: on the parent of the newest block the route's pAMM swaps name, as that block, with every swap's accounts merged under the sender's funding. Where two swaps set one value, the swap with the newer block wins, and the later swap in the route when both name the same block.
-* `--disable-pamm-simulation-overrides` stops reading the second websocket; pAMM swaps then carry no overrides, and `propamm_simulation_overrides_legs_total` stays at zero rather than counting every pAMM swap as missing its overrides. `TITAN_PAMM_QUOTE_STREAM_URL` points it at another Titan region, as `TITAN_PAMM_PRICE_LEVEL_URL` does the price levels; set both when you move region.
+* `--disable-pamm-simulation-overrides` stops reading the second websocket; pAMM swaps then carry no overrides, and `propamm_simulation_overrides_legs_total` counts every pAMM swap as `missing`. `TITAN_PAMM_QUOTE_STREAM_URL` points it at another Titan region, as `TITAN_PAMM_PRICE_LEVEL_URL` does the price levels; set both when you move region.
 
 ### Self-hosted Tycho
 
