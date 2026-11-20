@@ -377,10 +377,13 @@ beats the committed amount and records the difference as `SurplusInfo`
 (`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
 `#[serde(skip)]` — internal, not on the wire.
 
-The one exclusive leg can sit at any hop of the route (`has_valid_exclusive_route`). When pools
-follow it, `pin_commitment` converts the surplus into the leg's token at the average price of those
-pools (`leg_route_output`): the route output the leg's output produces, divided by the leg's
-output. The conversion runs no simulation. On split and merging routes the leg gets the share of
+A route can have several exclusive legs, each at any hop (`has_valid_exclusive_route`). Each leg's
+output must reach the output token. `pin_commitment` splits the surplus between the legs in
+proportion to the route output each one produces, capped at that output: two legs in sequence each
+capture half. Each signer turns its leg's part into a fee rate, so an earlier leg's fee lowers a
+later leg's input and the user gets at least the committed amount. When pools follow a leg,
+`pin_commitment` converts its part into the leg's token at the average price of those pools
+(`leg_route_output`): the route output the leg's output produces, divided by the leg's output. The conversion runs no simulation. On split and merging routes the leg gets the share of
 its token's route output that its own output makes up. The user gets at least the committed amount
 when the pools after the leg give less per unit as their input grows, which holds for AMM pools.
 After a hook pool, a market-maker quote with a minimum order size, or a fixed-rate pool (rounding),
@@ -391,9 +394,8 @@ The `exclusive_swap_replacer` post-processor (`post_process/exclusive.rs`) repla
 
 The rules for an exclusive route (`ExclusiveRouteShape`, `exclusive_route_shape`), the route output of an exclusive leg (`leg_route_output`) and the commitment (`matched_commitment`, `pin_commitment`, `USER_IMPROVEMENT_SHARE_BPS`) live in `exclusive_route.rs`.
 
-Two counters report the exclusive candidates `has_valid_exclusive_route` rejects:
-`exclusive_route_multiple_legs_total` (more than one exclusive leg) and
-`exclusive_route_does_not_reach_output_total` (the leg's output never reaches the output token, or
+One counter reports the exclusive candidates `has_valid_exclusive_route` rejects:
+`exclusive_route_does_not_reach_output_total` (a leg's output never reaches the output token, or
 the swaps after it loop back to a token already on their path). A route with no exclusive leg is
 not counted.
 
