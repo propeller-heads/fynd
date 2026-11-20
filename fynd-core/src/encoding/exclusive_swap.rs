@@ -38,9 +38,7 @@ use tycho_simulation::{
     tycho_common::{models::protocol::ProtocolComponent, Bytes},
 };
 
-use crate::{
-    bps, encoding::curve_grant::GrantTerms, feed::exclusivity::CurveGrantor, SolveError, Swap,
-};
+use crate::{bps, encoding::curve_grant::GrantTerms, exclusive_venue::Grantor, SolveError, Swap};
 
 /// Validity window of the exclusive-swap signature, in seconds. Well under the Ekubo extension's
 /// 30-day cap.
@@ -193,9 +191,9 @@ impl ExclusiveSwapSigner {
         self
     }
 
-    /// The key and router of the Curve grants this signer signs.
-    pub(crate) fn curve_grantor(&self) -> CurveGrantor {
-        CurveGrantor::new(
+    /// The key and router of the exclusive swaps this signer signs.
+    pub(crate) fn grantor(&self) -> Grantor {
+        Grantor::new(
             Bytes::from(self.signer.address().to_vec()),
             Bytes::from(self.authorized_locker.to_vec()),
         )

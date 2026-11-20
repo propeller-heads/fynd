@@ -1238,11 +1238,11 @@ impl FyndBuilder {
             None => encoder,
         };
 
-        // Workers read the market through this handle, so an exclusive worker knows which Curve
-        // pools Fynd can sign grants for.
+        // Workers read the market through this handle, so an exclusive worker knows which dual
+        // pools Fynd can sign for.
         stores.market_data = stores
             .market_data
-            .with_curve_grantor(encoder.curve_grantor());
+            .with_grantor(encoder.grantor());
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
