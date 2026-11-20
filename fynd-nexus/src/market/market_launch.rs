@@ -29,7 +29,7 @@ pub struct LaunchedMarket {
 }
 
 /// Starts the market of `chain`: every on-chain protocol system Tycho serves, above the TVL
-/// floor, with no worker pools.
+/// and token quality floors, with no worker pools.
 ///
 /// # Errors
 ///
@@ -43,13 +43,19 @@ pub async fn launch_market(chain: Chain, args: &MarketArgs) -> anyhow::Result<La
         resolve_protocols(tycho_url, args.tycho_api_key.as_deref(), !args.disable_tls, chain, &[])
             .await
             .context("cannot resolve the protocol systems to track")?;
-    info!(count = protocols.len(), "starting the market");
     let min_tvl = args
         .min_tvl
         .unwrap_or_else(|| chain.default_tvl_threshold(TvlThresholdTier::Low));
+    info!(
+        count = protocols.len(),
+        min_tvl,
+        min_token_quality = args.min_token_quality,
+        "starting the market"
+    );
     let mut builder =
         FyndBuilder::new(chain, tycho_url.clone(), rpc_url.clone(), protocols, min_tvl)
             .tycho_use_tls(!args.disable_tls)
+            .min_token_quality(args.min_token_quality)
             .blocklisted_components(default_blocklist());
     if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
