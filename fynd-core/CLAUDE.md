@@ -381,7 +381,9 @@ A route can have several exclusive legs, each at any hop (`has_valid_exclusive_r
 output must reach the output token. `pin_commitment` splits the surplus between the legs in
 proportion to the route output each one produces, capped at that output: two legs in sequence each
 capture half. Each signer turns its leg's part into a fee rate, so an earlier leg's fee lowers a
-later leg's input and the user gets at least the committed amount. When pools follow a leg,
+later leg's input and the user gets at least the committed amount. The encoder widens each leg's input floor
+(the request's slippage) by the fees of the exclusive legs before it, so a later leg's grant or
+authorization still applies. When pools follow a leg,
 `pin_commitment` converts its part into the leg's token at the average price of those pools
 (`leg_route_output`): the route output the leg's output produces, divided by the leg's output. The conversion runs no simulation. On split and merging routes the leg gets the share of
 its token's route output that its own output makes up. The user gets at least the committed amount
