@@ -68,6 +68,7 @@ fynd serve \
 * `rfq:metric` reads `METRIC_API_KEY` (required — the Bearer token for Metric's quote endpoints) and `METRIC_API_URL` (optional, defaults to `https://api.metric.xyz`).
 * `rfq:native` reads `NATIVE_API_KEY`. It runs on Ethereum, Base, Arbitrum, BSC and Robinhood only. Neither `rfq:native` nor `rfq:liquorice` has a `fallback:rfq:` form.
 * `rfq:liquorice` reads `LIQUORICE_USER` (the solver name) and `LIQUORICE_KEY`. It runs on Ethereum only.
+* `pamm:baibai` (BaiBai) needs no API key: it reads its curves from the chain through `--rpc-url`. It runs on Base only. `fallback:pamm:baibai` executes through BaiBai's fallback router and, like every entry, needs its executor on the chain.
 
 ### pAMM Price Level Stream
 

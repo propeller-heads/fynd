@@ -1,9 +1,10 @@
-//! The book venues Fynd can run: the `rfq:` entries of `--protocols`.
+//! The book venues Fynd can run: the `rfq:` and `pamm:` entries of `--protocols`.
 //!
 //! Each venue has a module of its own with its environment variables, its checks, its book
 //! settings and its own connection. This file holds the two places that choose between venues:
 //! `BookVenueEntry::check_supported` and `open_book_feed`.
 
+mod baibai;
 mod bebop;
 mod hashflow;
 mod liquorice;
@@ -17,7 +18,10 @@ use futures::FutureExt as _;
 use tracing::warn;
 use tycho_simulation::{
     book::{quote_tokens::usd_stablecoins_for_chain, BookFeedConfig, BookSnapshot, ReceivedAt},
-    pamm::protocols::metric::{self as metric_protocol, feed::MetricFeed},
+    pamm::protocols::{
+        baibai::{self as baibai_protocol, BaibaiFeed},
+        metric::{self as metric_protocol, feed::MetricFeed},
+    },
     rfq::protocols::{
         bebop::{self as bebop_protocol, feed::BebopFeed},
         hashflow::{self as hashflow_protocol, feed::HashflowFeed},
@@ -31,7 +35,7 @@ use tycho_simulation::{
 
 use super::DataFeedError;
 use crate::{
-    feed::protocol_registry::parse_rfq_entries,
+    feed::protocol_registry::parse_book_entries,
     nexus::{
         client::NexusClient,
         price_levels::{PriceLevelsAssembler, PriceLevelsFeed},
@@ -41,6 +45,7 @@ use crate::{
 /// A market-maker venue whose books Fynd builds from the venue's own prices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BookVenue {
+    Baibai,
     Bebop,
     Hashflow,
     Metric,
@@ -49,9 +54,11 @@ pub(crate) enum BookVenue {
 }
 
 impl BookVenue {
-    /// The venue behind an `rfq:<venue>` protocol system, or `None` when Fynd runs no such venue.
+    /// The venue behind an `rfq:<venue>` or `pamm:<venue>` protocol system, or `None` when Fynd
+    /// runs no such venue.
     fn from_protocol_system(protocol_system: &str) -> Option<Self> {
         match protocol_system {
+            baibai_protocol::PROTOCOL_SYSTEM => Some(Self::Baibai),
             bebop_protocol::PROTOCOL_SYSTEM => Some(Self::Bebop),
             hashflow_protocol::PROTOCOL_SYSTEM => Some(Self::Hashflow),
             metric_protocol::PROTOCOL_SYSTEM => Some(Self::Metric),
@@ -62,7 +69,7 @@ impl BookVenue {
     }
 }
 
-/// One `rfq:` or `fallback:rfq:` entry of `--protocols`, parsed.
+/// One `rfq:`, `pamm:`, `fallback:rfq:` or `fallback:pamm:` entry of `--protocols`, parsed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BookVenueEntry<'a> {
     /// The entry as written. It labels the venue's components.
@@ -83,15 +90,15 @@ impl<'a> BookVenueEntry<'a> {
     /// prefix.
     pub(crate) fn parse_all(protocols: &'a [String]) -> Result<Vec<Self>, DataFeedError> {
         let mut entries = Vec::new();
-        for (name, rfq_entry) in parse_rfq_entries(protocols)? {
-            let Some(venue) = BookVenue::from_protocol_system(rfq_entry.protocol()) else {
-                warn!("Skipping unknown book protocol system: {}", rfq_entry.protocol());
+        for (name, book_entry) in parse_book_entries(protocols)? {
+            let Some(venue) = BookVenue::from_protocol_system(book_entry.protocol()) else {
+                warn!("Skipping unknown book protocol system: {}", book_entry.protocol());
                 continue;
             };
             entries.push(Self {
                 name,
                 venue,
-                uses_fallback_router: rfq_entry.uses_fallback_router(),
+                uses_fallback_router: book_entry.uses_fallback_router(),
             });
         }
         Ok(entries)
@@ -105,6 +112,7 @@ impl<'a> BookVenueEntry<'a> {
     /// [`DataFeedError::Config`] when the venue is not served on `chain` or has no executor there.
     pub(crate) fn check_supported(&self, chain: Chain) -> Result<(), DataFeedError> {
         match self.venue {
+            BookVenue::Baibai => baibai::check_supported(chain, self),
             BookVenue::Bebop => bebop::check_supported(chain, self),
             BookVenue::Hashflow => hashflow::check_supported(chain, self),
             BookVenue::Metric => metric::check_supported(chain, self),
@@ -124,6 +132,8 @@ pub(crate) struct BookVenueContext {
     /// Optional client for shared Bebop, Hashflow and Metric prices. Without this client, each
     /// feed connects directly to its venue.
     pub(crate) nexus_client: Option<NexusClient>,
+    /// The node the venues that read the chain themselves poll, such as BaiBai.
+    pub(crate) rpc_url: Option<String>,
 }
 
 /// The feed of one book venue that [`BookStream`] runs: the venue's own connection, or
@@ -131,6 +141,7 @@ pub(crate) struct BookVenueContext {
 ///
 /// [`BookStream`]: super::book_stream::BookStream
 pub(crate) enum BookVenueFeed {
+    Baibai(Box<BaibaiFeed>),
     Bebop(BebopFeed),
     Hashflow(HashflowFeed),
     Metric(MetricFeed),
@@ -148,6 +159,7 @@ impl SnapshotFeed for BookVenueFeed {
         publisher: Publisher<Self::Snapshot>,
     ) -> impl Future<Output = Result<(), FeedError>> + Send + 'static {
         match self {
+            Self::Baibai(feed) => (*feed).run(publisher).boxed(),
             Self::Bebop(feed) => feed.run(publisher).boxed(),
             Self::Hashflow(feed) => feed.run(publisher).boxed(),
             Self::Metric(feed) => feed.run(publisher).boxed(),
@@ -162,18 +174,19 @@ impl SnapshotFeed for BookVenueFeed {
 ///
 /// With a nexus client in `context`, Bebop, Hashflow and Metric build their books from the
 /// service's prices; Metric then needs no API key. Native and Liquorice always connect to the
-/// venue.
+/// venue, and BaiBai always reads the chain through `context.rpc_url`.
 ///
 /// # Errors
 ///
-/// [`DataFeedError::Config`] when a credential is missing or the chain has no USD stablecoins to
-/// price the venue's books against, and [`DataFeedError::StreamError`] when the venue's feed
-/// cannot be built.
+/// [`DataFeedError::Config`] when a credential or the node BaiBai reads is missing or the chain
+/// has no USD stablecoins to price the venue's books against, and [`DataFeedError::StreamError`]
+/// when the venue's feed cannot be built.
 pub(crate) fn open_book_feed(
     entry: &BookVenueEntry,
     context: &BookVenueContext,
 ) -> Result<BookVenueFeed, DataFeedError> {
     Ok(match entry.venue {
+        BookVenue::Baibai => BookVenueFeed::Baibai(Box::new(baibai::direct_feed(context, entry)?)),
         BookVenue::Bebop => {
             let env = bebop::BebopEnv::read()?;
             let assembler = bebop::assembler(context, entry, &env)?;
@@ -343,11 +356,13 @@ mod tests {
             },
             aggregate_rfqs: false,
             nexus_client,
+            rpc_url: None,
         }
     }
 
     fn feed_kind(feed: &BookVenueFeed) -> &'static str {
         match feed {
+            BookVenueFeed::Baibai(_) => "baibai",
             BookVenueFeed::Bebop(_) => "bebop",
             BookVenueFeed::Hashflow(_) => "hashflow",
             BookVenueFeed::Metric(_) => "metric",
