@@ -345,6 +345,28 @@ A component is classified exclusive by `is_exclusive` (`feed/exclusivity.rs`) â€
 `is_exclusive` static attribute on the component's Tycho data, applied generically to every ingested
 component. There is no per-deployment policy to configure.
 
+A pool of an `ExclusiveVenue` (`exclusive_venue/`) is dual, not exclusive: it stays in every
+worker's graph. Each venue holds its protocol's specifics: it builds a pool's exclusive view, tells
+whether Fynd's `Grantor` (the signer's address and the router) can sign for the pool, and signs the
+swap. A new venue (for example a Metric fAMM) is one more entry in `VENUES`. `MarketState` rebuilds
+each exclusive view with its state, and `register_labeled_state` builds the views of an overlay.
+
+The Curve venue calls `CurveState::exclusive_view` in tycho-simulation, which prices the pool at the
+policy's `min_fee` for a policy version the simulation models. Tycho reports the policy's facts as
+state attributes (`CurveState::policy`). The pool is dual while its policy names the `Grantor` and
+is not killed, so a new pool needs no configuration, and a key change, router change or kill makes
+the pool public again.
+
+A `MarketData` handle from `with_exclusive_views` gives each dual pool's exclusive view in place of
+its state, in `get_simulation_state` and in subsets. `IncludeExclusive` workers read through such a
+handle, and so does `exclusive_swap_replacer` for its replacement swaps. A swap is an exclusive leg
+(`is_exclusive_leg`) when its component is exclusive or its state is an exclusive view. A pAMM hop
+never falls back to an exclusive component or a pool its view prices with a grant.
+
+A dual pool can be in the public reference's route at its public price and in the exclusive
+candidate's route with a grant. The router skips such a candidate (`competes_with_public`): the
+pool wins the trade anyway, and a grant would only lower what its LPs earn.
+
 Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers filter
 exclusive components out of their local graph topology and incoming `MarketEvent`s (via
 `feed/component_filter.rs`, which every worker also uses for `exclude_protocols`);
@@ -386,10 +408,16 @@ Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 fails the build (`SolverBuildError::NoPublicPool`) â€” there would be no pool left to establish the
 committed reference output.
 
-Encoding a committed leg is protocol-specific: `encoding/exclusive_swap.rs` is Ekubo-only. It signs
-an EIP-712 authorization with `EXCLUSIVE_SWAP_CONTROLLER_KEY` and packs it, plus a derived Q32 fee,
-into the `SignedExclusiveSwap` extension's `user_data`. Encoding an exclusive leg without that env
-var fails.
+Encoding a committed leg is protocol-specific, and both kinds sign with
+`EXCLUSIVE_SWAP_CONTROLLER_KEY`. Encoding an exclusive leg without that env var fails.
+
+- Ekubo (`encoding/exclusive_swap.rs`): an EIP-712 authorization plus a derived Q32 fee, in the
+  `SignedExclusiveSwap` extension's `user_data`.
+- Curve (`encoding/curve_grant.rs`, called by the Curve venue's `sign`): a grant for the order's sender, signed for the pool's policy.
+  The executor accepts the grant when its taker is the router's caller or `tx.origin`, as for
+  subsidies. Its fee brings the output at `min_fee` down to the committed amount. `user_data` is
+  `taker(20) | min_amount_in(32) | max_amount_in(32) | fee(32) | nonce(8) | deadline(4) |
+  signature(65)`.
 
 The authorization names the Tycho router (the address `Encoder` resolves for the chain) as its
 authorized locker, and the extension accepts no other caller. Authorizing every locker

@@ -29,6 +29,7 @@ use crate::{
         router_call::{RouterCall, RouterLayout},
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
+    exclusive_venue::{find_venue, Grantor},
     fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
@@ -348,6 +349,13 @@ impl Encoder {
     pub fn with_exclusive_swap_signer(mut self, signer: ExclusiveSwapSigner) -> Self {
         self.exclusive_swap_signer = Some(Arc::new(signer));
         self
+    }
+
+    /// The key and router of the exclusive swaps this encoder signs, if it signs any.
+    pub(crate) fn grantor(&self) -> Option<Grantor> {
+        self.exclusive_swap_signer
+            .as_ref()
+            .map(|signer| signer.grantor())
     }
 
     /// Returns the Tycho Router contract address for this chain, or `None` if encoding is
@@ -767,7 +775,10 @@ impl Encoder {
                     .committed_amount_out()
                     .is_some()
                 {
-                    let user_data = signer.build_user_data(route_swap, slippage)?;
+                    let user_data = match find_venue(route_swap.protocol_state()) {
+                        Some(venue) => venue.sign(signer, route_swap, quote.sender(), slippage)?,
+                        None => signer.build_user_data(route_swap, slippage)?,
+                    };
                     Ok(solution_swap.with_user_data(user_data))
                 } else {
                     Ok(solution_swap)
@@ -1441,6 +1452,50 @@ mod tests {
                 .is_some(),
             signed
         );
+    }
+
+    /// A Curve hop priced with a grant gets a grant signed for the order's sender.
+    #[test]
+    fn test_stamp_exclusive_swaps_curve_grant() {
+        let token_in = make_address(0x11);
+        let token_out = make_address(0x22);
+        let mut curve = component("curve-pool", &[]);
+        let coins = format!(r#"["{token_in}","{token_out}"]"#);
+        curve
+            .static_attributes
+            .insert("coins".to_string(), Bytes::from(coins.as_bytes()));
+        let mut swap = crate::types::Swap::new(
+            "curve-pool".to_string(),
+            "vm:curve".to_string(),
+            token_in,
+            token_out,
+            BigUint::from(1_000_000u64),
+            BigUint::from(1_000_000u64),
+            BigUint::from(50_000u64),
+            curve,
+            Box::new(
+                crate::exclusive_venue::test_curve::dual_curve_state()
+                    .exclusive_view()
+                    .expect("supported policy"),
+            ),
+        );
+        swap.set_committed_amount_out(BigUint::from(990_000u64));
+        let quote = make_order_quote(990_000).with_route(single_swap_route(swap));
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let solution = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer,
+            0.01,
+        )
+        .unwrap();
+
+        let user_data = solution.swaps()[0]
+            .user_data()
+            .clone()
+            .expect("signed");
+        assert_eq!(user_data.len(), 193, "the grant size the Curve executor reads");
     }
 
     #[tokio::test]

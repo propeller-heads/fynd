@@ -33,9 +33,12 @@ use alloy::{
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use tracing::warn;
-use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
+use tycho_simulation::{
+    evm::protocol::curve::CurvePolicy,
+    tycho_common::{models::protocol::ProtocolComponent, Bytes},
+};
 
-use crate::{bps, SolveError, Swap};
+use crate::{bps, encoding::curve_grant::GrantTerms, exclusive_venue::Grantor, SolveError, Swap};
 
 /// Validity window of the exclusive-swap signature, in seconds. Well under the Ekubo extension's
 /// 30-day cap.
@@ -188,6 +191,14 @@ impl ExclusiveSwapSigner {
         self
     }
 
+    /// The key and router of the exclusive swaps this signer signs.
+    pub(crate) fn grantor(&self) -> Grantor {
+        Grantor::new(
+            Bytes::from(self.signer.address().to_vec()),
+            Bytes::from(self.authorized_locker.to_vec()),
+        )
+    }
+
     /// The locker every payload from this signer authorizes.
     #[cfg(test)]
     pub(crate) fn authorized_locker(&self) -> Address {
@@ -214,6 +225,35 @@ impl ExclusiveSwapSigner {
                 )
             })?;
         Ok((u64::from(self.nonce_prefix) << 32) | u64::from(counter))
+    }
+
+    /// The deadline of a payload signed now.
+    fn next_deadline(&self) -> Result<u32, SolveError> {
+        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
+        u32::try_from(deadline).map_err(|_| {
+            SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
+        })
+    }
+
+    /// Builds the signed grant for a swap through a dual Curve pool, with the pool's `policy`.
+    /// `taker` is the order's sender. The executor accepts it as the router's caller or as
+    /// `tx.origin`.
+    pub(crate) fn build_curve_user_data(
+        &self,
+        swap: &Swap,
+        policy: &CurvePolicy,
+        taker: &Bytes,
+        slippage: f64,
+    ) -> Result<Bytes, SolveError> {
+        GrantTerms::for_swap(
+            swap,
+            policy,
+            input_floor_factor_bps(slippage),
+            bps::DENOMINATOR.saturating_add(self.output_cap_tolerance_bps),
+            self.next_nonce()?,
+            self.next_deadline()?,
+        )?
+        .sign(swap, policy, taker, self.chain_id, &self.signer)
     }
 
     /// Builds the signed `user_data` for one exclusive swap leg.
@@ -243,10 +283,7 @@ impl ExclusiveSwapSigner {
 
         let fee = derive_fee_q32(swap.amount_out(), committed);
         let nonce = self.next_nonce()?;
-        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
-        let deadline = u32::try_from(deadline).map_err(|_| {
-            SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
-        })?;
+        let deadline = self.next_deadline()?;
 
         // The extension's `isAuthorized` accepts only this locker, so a third party that lifts the
         // signed bytes cannot execute them through its own contract. The locker is the router,
