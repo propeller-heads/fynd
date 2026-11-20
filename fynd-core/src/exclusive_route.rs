@@ -18,20 +18,17 @@ use crate::{
 
 /// How the exclusive legs of a route fit the rules for an exclusive route.
 ///
-/// A route has exactly one exclusive leg, at any hop, on any branch of a split route. The output
-/// of the leg must reach the route's output token, and the swaps after the leg must not loop back
-/// to a token already on their path. With one exclusive leg, the surplus has one leg to come
-/// from.
+/// A route has one or more exclusive legs, at any hop, on any branch of a split route. The output
+/// of each leg must reach the route's output token, and the swaps after each leg must not loop back
+/// to a token already on their path. `pin_commitment` splits the surplus between the legs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExclusiveRouteShape {
-    /// One exclusive leg that reaches the route's output token.
+    /// Every exclusive leg reaches the route's output token.
     Valid,
     /// The route has no exclusive leg.
     NoExclusiveLeg,
-    /// The route has more than one exclusive leg.
-    MultipleLegs,
-    /// No swap carries the leg's output to the output token, or the swaps after the leg loop back
-    /// to a token already on their path.
+    /// For some exclusive leg, no swap carries its output to the output token, or the swaps after
+    /// it loop back to a token already on their path.
     DoesNotReachOutput,
 }
 
@@ -55,22 +52,22 @@ pub(crate) fn first_exclusive_leg(swaps: &[Swap]) -> Option<&Swap> {
 
 /// Returns the shape of the exclusive legs of `swaps`, without incrementing metrics.
 pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> ExclusiveRouteShape {
-    let mut exclusive_legs = swaps
+    let mut has_exclusive_leg = false;
+    for leg in swaps
         .iter()
-        .filter(|swap| is_exclusive_leg(swap));
-    let Some(leg) = exclusive_legs.next() else {
-        return ExclusiveRouteShape::NoExclusiveLeg;
-    };
-    if exclusive_legs.next().is_some() {
-        return ExclusiveRouteShape::MultipleLegs;
+        .filter(|swap| is_exclusive_leg(swap))
+    {
+        has_exclusive_leg = true;
+        let reaches_output = leg_route_output(swaps, leg, output_token)
+            .is_some_and(|(numerator, _)| numerator > BigUint::ZERO);
+        if !reaches_output {
+            return ExclusiveRouteShape::DoesNotReachOutput;
+        }
     }
-
-    let reaches_output = leg_route_output(swaps, leg, output_token)
-        .is_some_and(|(numerator, _)| numerator > BigUint::ZERO);
-    if reaches_output {
+    if has_exclusive_leg {
         ExclusiveRouteShape::Valid
     } else {
-        ExclusiveRouteShape::DoesNotReachOutput
+        ExclusiveRouteShape::NoExclusiveLeg
     }
 }
 
@@ -250,7 +247,10 @@ pub(crate) fn matched_commitment(
 /// Sets `exclusive_candidate` to `committed_amount_out`. This sets the committed amount on each
 /// leg, sets `amount_out` and `amount_out_net_gas`, and attaches the `SurplusInfo`.
 ///
-/// The exclusive components capture all output above the commitment.
+/// The exclusive components capture all output above the commitment. Each exclusive leg captures
+/// a part of the surplus in proportion to the route output it produces, capped at that output.
+/// Two legs in sequence both produce the whole route output, so each captures half. Rounding and
+/// the cap leave any remainder with the user.
 pub(crate) fn pin_commitment(
     exclusive_candidate: &OrderQuote,
     committed_amount_out: BigUint,
@@ -288,11 +288,20 @@ pub(crate) fn pin_commitment(
         })
         .unwrap_or_default();
 
+    // Route output each exclusive leg produces, rounded down, and their sum: the weights of the
+    // split.
+    let mut leg_outputs: Vec<BigUint> = Vec::with_capacity(leg_route_outputs.len());
+    for fraction in &leg_route_outputs {
+        let output = match fraction {
+            Some((numerator, denominator)) => numerator / denominator,
+            None => BigUint::ZERO,
+        };
+        leg_outputs.push(output);
+    }
+    let total_leg_output: BigUint = leg_outputs.iter().sum();
+
     if let Some(route) = surplus_quote.route_mut() {
-        // Capture the route's surplus at the exclusive legs.
-        // Each leg absorbs up to the route output it produces; any remainder is left with the
-        // user.
-        let mut surplus = exclusive_route_amount_out - &committed_amount_out;
+        let surplus = exclusive_route_amount_out - &committed_amount_out;
         for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
             if is_exclusive_leg(swap) {
                 let Some(Some((numerator, denominator))) = leg_route_outputs.get(i) else {
@@ -301,9 +310,11 @@ pub(crate) fn pin_commitment(
                 if *numerator == BigUint::ZERO {
                     continue;
                 }
-                let captured = surplus
-                    .clone()
-                    .min(numerator / denominator);
+                let leg_output = &leg_outputs[i];
+                if *leg_output == BigUint::ZERO {
+                    continue;
+                }
+                let captured = (&surplus * leg_output / &total_leg_output).min(leg_output.clone());
                 // Convert into the leg's own token at the average price of the pools after the
                 // leg, rounding down so any error is taken from the protocol, not the user. The
                 // user gets at least the committed amount when those pools give less per unit
@@ -317,7 +328,6 @@ pub(crate) fn pin_commitment(
                     swap.amount_out(),
                 );
                 let committed_swap_amount_out = swap.amount_out() - &captured_swap_amount_out;
-                surplus -= captured;
                 swap.set_committed_amount_out(committed_swap_amount_out);
             }
         }
