@@ -1,4 +1,34 @@
 
+## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
+
+### Bug Fixes
+
+- Count pAMM simulation override legs in `finalize_quote`, so servers that compose router stages themselves (`solve`, `encode_quotes`, `simulate_quotes`, `finalize_quote`) now report the pAMM override metrics (legs, missing-block, conflict and block-mismatch) instead of zeros. With `--disable-pamm-simulation-overrides`, every pAMM swap counts as missing. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+- **Breaking:** Remove `WorkerPoolRouterConfig::with_pamm_simulation_overrides` and `WorkerPoolRouterConfig::pamm_simulation_overrides`. Use `FyndBuilder::pamm_simulation_overrides` to turn the quote stream on or off. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+
+
+## [0.126.0](https://github.com/propeller-heads/fynd/compare/0.125.2...0.126.0) (2026-11-19)
+
+### Features
+
+- Return pAMM simulation overrides on each swap as `Swap.simulation_overrides`, including the quoted block's number and timestamp and the account overrides in the State Override Set format used by `eth_call` and `eth_simulateV1`. Both clients map them and drop a malformed set without failing the quote. ([bec48e8](https://github.com/propeller-heads/fynd/commit/bec48e841372374cd507e9fe71b336200d4b4442))
+- Simulate pAMM routes on the account state Titan priced them on. The simulator merges a route's overrides, runs on the parent of the quoted block with that block's number and time, and keeps the sender's funding on a collision. Quoting, ranking and encoding ignore the overrides. New `propamm_simulation_overrides_*` and `propamm_quote_simulation*` metrics count the edge cases. Pass `--disable-pamm-simulation-overrides` to stop reading Titan's quote stream. ([052d236](https://github.com/propeller-heads/fynd/commit/052d236d51298261ffe3163e22d32147ebbc644a))
+- Set an optional `priority_fee` in the quote request options (Rust and TypeScript clients included). Fynd prices gas, ranks routes and reports the quote's gas price using the priority fee you will actually pay instead of the node's suggestion. Legacy gas prices are unchanged, and a priority fee that does not fit in 64 bits is rejected. ([e432f6a](https://github.com/propeller-heads/fynd/commit/e432f6ab8496c50784a8a0053a63748fb65c449f))
+
+### Bug Fixes
+
+- Use the values from the newest block when two pAMM swaps set the same override; route order now decides only within one block. The wire type, both clients and the guide document this. ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+- Stop counting pAMM swaps as missing overrides when `--disable-pamm-simulation-overrides` is set. ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+- Add a `base_block` label to `propamm_quote_simulations_total` and `propamm_quote_simulation_deviation_bps` that compares the simulated block with the quote's block, and export the deviation metric as a histogram with signed buckets. ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+- Drop simulation overrides of the wrong size in the TypeScript client, matching the Rust client: addresses that are not 20 bytes, storage slots or values that are not 32 bytes, balances above 256 bits, nonces above 64 bits, and non-hex-quantity balances or nonces. The client now warns with the swap's component id and the reason instead of dropping them silently. ([a772e2f](https://github.com/propeller-heads/fynd/commit/a772e2fa6dc62ba0c793c3b4b930a5caa2aa31da))
+- Bump `actix-http` to 3.21.3 to fix HTTP/1.1 parsing advisories RUSTSEC-2026-0552, RUSTSEC-2026-0553 and RUSTSEC-2026-0554. ([c53eb8c](https://github.com/propeller-heads/fynd/commit/c53eb8c1955b20bf2cf741855bbec46997747975))
+
+### Performance
+
+- Share pool simulation states between solves instead of copying them under the market read lock. This avoids copying hundreds of KB per pool on large markets. **Breaking:** `MarketState.simulation_states`, `OverlayStates`, `MarketData::register_labeled_state` and `BookUpdate.states` now use `Arc<dyn ProtocolSim>`, and `MarketState::update_states` is generic over `Into<Arc<dyn ProtocolSim>>`. ([be8e37c](https://github.com/propeller-heads/fynd/commit/be8e37c78ee024349fcdb00f4c8f4b5568721b3b))
+- Take the token-price market snapshot under a single read lock, which is faster and guarantees one block. Copying 1200 components with 200 KB states drops from 4.7 ms to 0.20 ms. **Breaking:** `MarketData::extract_subset_batched` is removed; use `read().await.extract_subset` instead. ([cacdca8](https://github.com/propeller-heads/fynd/commit/cacdca85449818d3535415c2aa4e572678145309))
+
+
 
 
 ## [0.125.0](https://github.com/propeller-heads/fynd/compare/0.124.1...0.125.0) (2026-11-16)
