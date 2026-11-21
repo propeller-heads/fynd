@@ -19,17 +19,14 @@ use crate::{
         computation::{
             ComputationId, ComputationOutput, DerivedComputation, FailedItem, FailedItemError,
         },
-        computations::{components_without_entries, drop_unlisted_directions},
+        computations::drop_unlisted_directions,
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::SpotPrices,
     },
     feed::market_data::MarketData,
-    nexus::{
-        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
-        derived::SpotPriceSnapshot,
-    },
+    nexus::client::{NexusClient, NexusDerivedClient, NexusSnapshot},
 };
 
 /// The oldest a snapshot from `fynd-nexus` may be, measured in market blocks times the chain's
@@ -81,13 +78,7 @@ impl DerivedComputation for SpotPriceComputation {
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         if let Some(nexus_client) = &self.nexus_client {
             let snapshot = nexus_client
-                .get_in_sync_snapshot(
-                    market,
-                    SpotPriceSnapshot::into_spot_prices,
-                    |market, prices| {
-                        components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
-                    },
-                )
+                .get_in_sync_snapshot(market)
                 .await;
             match snapshot {
                 NexusSnapshot::InSync(prices) => return Ok(ComputationOutput::success(prices)),
