@@ -38,6 +38,7 @@ BEBOP_KEY=... HASHFLOW_USER=... HASHFLOW_KEY=... METRIC_API_KEY=... \
 | `--disable-tls` | `DISABLE_TLS` | `false` | Disable TLS for the Tycho connection. |
 | `--min-tvl` | `MIN_TVL` | the chain's low TVL threshold | Minimum TVL, in the chain's native token, for a component to be tracked. |
 | `--min-token-quality` | `MIN_TOKEN_QUALITY` | `100` | Minimum Tycho token quality score; tokens below it are excluded. |
+| `--pricing-min-pass-interval-ms` | `PRICING_MIN_PASS_INTERVAL_MS` | the market's own | Time after a token-pricing pass starts before the next one may start; a block inside it serves the stored token prices. |
 | `--rpc-url` | `RPC_URL` | | Node RPC URL, which the market reads gas prices from. |
 
 Another binary can start the service with `fynd_nexus::run(Cli::parse())`, where `Cli` is
@@ -64,8 +65,8 @@ orchestrator restarts it.
 | Endpoint | |
 |---|---|
 | `GET /v1/price-levels/{venue}` | The current message of the stream as JSON, with an `ETag`. |
-| `GET /v1/derived/{kind}` | The latest derived data of the market as JSON, with an `ETag`. Needs `--tycho-url`. |
-| `GET /v1/health` | 200 while at least one stream holds prices, 503 otherwise. A service that runs no venue is healthy once every derived kind holds a snapshot. The body lists every stream and those serving, and with the market, the derived kinds and those holding a snapshot. |
+| `GET /v1/derived/{kind}` | The derived data of the market as a full update or a delta, with an `ETag`. Needs `--tycho-url`. |
+| `GET /v1/health` | 200 while at least one stream holds prices, 503 otherwise. A service that runs no venue is healthy once every derived kind has been published. The body lists every stream and those serving, and with the market, the derived kinds and those published. |
 | `GET /metrics` (metrics port) | Prometheus metrics. |
 
 `venue` is `bebop`, `hashflow` or `metric`. `GET /v1/price-levels/{venue}` answers:
@@ -84,38 +85,68 @@ response has no body. A request that fails, times out after 2 s, or gets any oth
 
 ## Derived data
 
-With `--tycho-url` set, the service keeps the latest snapshot of each of the market's three default
-derived computations and replaces it whenever the market finishes that computation at a new block.
-Derived data is indexed by block, so it has no `run_id`, `seq`, `as_of` or withdrawals, and no
-message envelope: the body is the snapshot itself. The types are in `fynd_core::nexus::derived`.
+With `--tycho-url` set, the service keeps the latest output of each of the market's three default
+derived computations and publishes it whenever the market finishes that computation at a block
+whose data or number differs from the last publish. A pod asks for what changed since the last
+update it applied, so most responses are a small delta. The types are in
+`fynd_core::nexus::derived`.
 
-```json
-{ "block": 23500000, "entries": [ { "token": "0xa0b8...", "numerator": "3000", "denominator": "1" } ] }
-```
+Each publish of a kind gets a `seq` that grows by one. `run_id` is the service's start time in
+milliseconds, as in the price-level streams, so a restart changes it. A position in a kind's
+history is the cursor `{run_id}-{seq}`.
 
-| `kind` | `entries` |
-|---|---|
-| `spot_prices` | `{ "component_id", "token_in", "token_out", "price" }`: 1 `token_in` buys `price` `token_out`. A price that is not finite is left out. |
-| `pool_depths` | `{ "component_id", "token_in", "token_out", "depth" }`: `depth` is a decimal string. |
-| `token_prices` | `{ "token", "numerator", "denominator" }`: the price in raw token units per raw native gas unit, as two decimal strings. |
+| `kind` | Entry | Key |
+|---|---|---|
+| `spot_prices` | `{ "component_id", "token_in", "token_out", "price" }`: 1 `token_in` buys `price` `token_out`. A price that is not finite is left out. | `{ "component_id", "token_in", "token_out" }` |
+| `pool_depths` | `{ "component_id", "token_in", "token_out", "depth" }`: `depth` is a decimal string. | `{ "component_id", "token_in", "token_out" }` |
+| `token_prices` | `{ "token", "numerator", "denominator" }`: the price in raw token units per raw native gas unit, as two decimal strings. | `{ "token" }` |
 
-`GET /v1/derived/{kind}` answers:
+`GET /v1/derived/{kind}` takes an optional query `?since={run_id}-{seq}`, the cursor of the last
+update the client applied, and answers:
 
 | Status | When |
 |---|---|
-| `200` | The snapshot. The `ETag` header is the block in quotes, such as `"23500000"`. |
-| `304` | The request's `If-None-Match` equals the current `ETag`. The body is empty. |
-| `204` | The kind has no snapshot yet. The body is empty. |
+| `200`, a delta | `since` is of this run and its `seq` is still in the delta history. |
+| `200`, a full update | There is no `since`, it is malformed, it is of another run, or its `seq` is outside the history. |
+| `304` | `since` or `If-None-Match` equals the latest cursor. The body is empty. |
+| `204` | The kind has had no publish yet. The body is empty. |
 | `404` | The kind is unknown, or the service does not run the market. |
 
-A snapshot is never withdrawn: when a computation fails or the Tycho feed stops sending blocks,
-the last snapshot stays served, so a consumer compares `block` with the chain's head to know its
-age.
+The `ETag` header of a `200` and a `304` is the cursor of the answer in quotes, such as
+`"1761550000000-42"`. A full update:
 
-The service compresses each snapshot with gzip once, when it writes it, and sends that copy
-with `Content-Encoding: gzip` to a request whose `Accept-Encoding` lists gzip with a quality above
-zero; other requests get plain JSON. The route always sends `Vary: Accept-Encoding`, and a `304`
-has no body.
+```json
+{ "type": "full", "run_id": 1761550000000, "seq": 42, "block": 23500000, "entries": [ ... ] }
+```
+
+A delta merges every publish after `from_seq` into one body. The last write of a key wins: a key
+that was upserted and then removed ends in `removed`, and the reverse in `upserted`.
+
+```json
+{ "type": "delta", "run_id": 1761550000000, "from_seq": 40, "seq": 42, "block": 23500001,
+  "upserted": [ ... ], "removed": [ { "token": "0xa0b8..." } ] }
+```
+
+A full update keeps `block` and `entries`, so a pod that knows nothing of deltas still reads it.
+
+The writer compares the market's current output with the last one it published, so it does not
+rely on per-block change lists, and a writer that lags skips no change. A spot price counts as
+changed when its bits differ, and one that becomes not finite is a removal. When nothing differs and
+the block is the same, nothing is published. When nothing differs and the block changed, an empty
+delta is published, so a pod's block lag stays right. A lower block is published too, and data that
+differs at the same block, as after a reorg, is published. The service keeps the changes of the last
+256 publishes of each kind. A cursor older than that gets a full update.
+
+The service encodes a full update only when a request needs one, on the blocking pool. It
+compresses it with gzip and sends that copy with `Content-Encoding: gzip` to a request whose
+`Accept-Encoding` lists gzip with a quality above zero; other requests get plain JSON. It reuses the
+encoded full update until it is 5 s old, so a pod that gets it catches up with a delta. Concurrent
+requests wait for one encoding instead of each encoding their own. Deltas are plain JSON. The route
+always sends `Vary: Accept-Encoding`.
+
+A published output is never withdrawn: when a computation fails or the Tycho feed stops sending
+blocks, the last output stays served, so a consumer compares `block` with the chain's head to know
+its age.
 
 ## Messages
 
@@ -163,12 +194,15 @@ serves.
 | `nexus_venue_restarts_total` | counter | Restarts of a feed that ended. |
 | `nexus_venue_ended_total` | counter | Streams that ended for good. |
 | `nexus_message_bytes` | histogram | Size of each encoded snapshot and withdrawal. |
-| `nexus_derived_snapshot_bytes` | histogram | Size of each encoded derived snapshot, labelled by `encoding`: `identity` or `gzip`. |
-| `nexus_derived_block` | gauge | Block of the latest written snapshot. |
-| `nexus_derived_skipped_entries_total` | counter | Spot prices left out of a snapshot for not being finite. |
+| `nexus_derived_snapshot_bytes` | histogram | Size of each full update when it is encoded, labelled by `encoding`: `identity` or `gzip`. |
+| `nexus_derived_delta_bytes` | histogram | Size of each delta served. |
+| `nexus_derived_delta_entries` | histogram | Upserted entries plus removed keys of each delta served. |
+| `nexus_derived_block` | gauge | Block of the latest publish. |
+| `nexus_derived_skipped_entries_total` | counter | Spot prices left out of a publish for not being finite. |
 
 Pods that read from the service export `nexus_client_snapshot_age_seconds` (the age of the
 prices when applied) and `nexus_client_failed_polls_total`, labelled by `venue`. Pods that read
-derived data export `nexus_client_failed_polls_total` labelled by `computation`, and
+derived data export `nexus_client_failed_polls_total` labelled by `computation`,
+`nexus_client_derived_updates_total` labelled by `computation` and `update` (`full` or `delta`), and
 `nexus_derived_block_lag`, `nexus_derived_snapshot_age_seconds` and
 `nexus_derived_missing_components`.

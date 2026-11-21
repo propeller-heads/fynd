@@ -1,22 +1,29 @@
 //! The HTTP API: `/v1/price-levels/{venue}` serves a stream's current message,
-//! `/v1/derived/{kind}` serves the latest snapshot of a derived computation and `/v1/health` says
-//! whether the service holds data.
+//! `/v1/derived/{kind}` serves a derived computation as a full update or a delta, and `/v1/health`
+//! says whether the service holds data.
 
 use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use actix_web::{
     dev::Server,
-    error::ErrorNotFound,
+    error::{ErrorInternalServerError, ErrorNotFound},
     http::header::{
         AcceptEncoding, ContentEncoding, ContentType, Encoding, Preference, Quality, ETAG,
         IF_NONE_MATCH, VARY,
     },
-    web, App, HttpMessage as _, HttpRequest, HttpResponse, HttpServer, Responder,
+    web, App, HttpMessage as _, HttpRequest, HttpResponse, HttpResponseBuilder, HttpServer,
+    Responder,
 };
-use fynd_core::nexus::{derived::DerivedKind, price_levels::PriceLevelVenue};
+use fynd_core::nexus::{
+    derived::{DerivedCursor, DerivedKind},
+    price_levels::PriceLevelVenue,
+};
 use serde_json::json;
 
-use crate::{derived::snapshot::DerivedSnapshots, latest_prices::LatestPrices};
+use crate::{
+    derived::{models::DerivedAnswer, snapshot::DerivedSnapshots},
+    latest_prices::LatestPrices,
+};
 
 /// The derived snapshots this service serves, or `None` when it does not run the market.
 type DerivedStore = Option<Arc<DerivedSnapshots>>;
@@ -144,11 +151,17 @@ async fn current(
         .body(message.encoded))
 }
 
-/// `GET /v1/derived/{kind}`: the latest snapshot of the computation, with its block as `ETag`.
+/// `GET /v1/derived/{kind}`: a full update, or a delta from the `since` cursor, of the
+/// computation.
 ///
-/// Answers 404 for an unknown kind or without the market, 204 until a snapshot is written and
-/// 304 with no body when `If-None-Match` equals the `ETag`. The body is gzip-compressed when the
-/// client accepts it.
+/// `since` is the `{run_id}-{seq}` cursor of the last update the client applied. The answer is:
+/// - 404 for an unknown kind or without the market, and 204 until the first publish;
+/// - 304 with no body when `since` or `If-None-Match` equals the latest cursor;
+/// - one merged delta when `since` is of this run and the history still covers it;
+/// - a full update otherwise, including when `since` is missing or malformed. It is gzip-compressed
+///   when the client accepts it.
+///
+/// The `ETag` is the cursor of the answer.
 async fn current_derived(
     request: HttpRequest,
     derived: web::Data<DerivedStore>,
@@ -160,28 +173,46 @@ async fn current_derived(
         .as_ref()
         .as_ref()
         .ok_or_else(not_served)?;
-    let Some(snapshot) = derived.current(kind) else {
-        return Ok(HttpResponse::NoContent().finish());
-    };
-    let etag = snapshot.etag();
-    let not_modified = request
+    let since = web::Query::<HashMap<String, String>>::from_query(request.query_string())
+        .ok()
+        .and_then(|query| query.get("since")?.parse().ok());
+    let if_none_match = request
         .headers()
         .get(IF_NONE_MATCH)
-        .is_some_and(|value| value.as_bytes() == etag.as_bytes());
-    let mut response = if not_modified { HttpResponse::NotModified() } else { HttpResponse::Ok() };
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim_matches('"').parse().ok());
+    let answer = derived
+        .answer(kind, since, if_none_match)
+        .await
+        .map_err(|error| ErrorInternalServerError(format!("encoding {kind} failed: {error}")))?;
+    Ok(match answer {
+        DerivedAnswer::NoData => HttpResponse::NoContent().finish(),
+        DerivedAnswer::NotModified(cursor) => {
+            with_cursor(HttpResponse::NotModified(), cursor).finish()
+        }
+        DerivedAnswer::Delta { cursor, json } => with_cursor(HttpResponse::Ok(), cursor)
+            .insert_header(ContentType::json())
+            .body(json),
+        DerivedAnswer::Full(full) => {
+            let mut response = with_cursor(HttpResponse::Ok(), full.cursor);
+            response.insert_header(ContentType::json());
+            if accepts_gzip(&request) {
+                response
+                    .insert_header(ContentEncoding::Gzip)
+                    .body(full.gzip)
+            } else {
+                response.body(full.json)
+            }
+        }
+    })
+}
+
+/// Sets the `ETag` to `cursor`, and `Vary` because a full update depends on `Accept-Encoding`.
+fn with_cursor(mut response: HttpResponseBuilder, cursor: DerivedCursor) -> HttpResponseBuilder {
     response
-        .insert_header((ETAG, etag))
+        .insert_header((ETAG, format!("\"{cursor}\"")))
         .insert_header((VARY, "Accept-Encoding"));
-    if not_modified {
-        return Ok(response.finish());
-    }
-    response.insert_header(ContentType::json());
-    if accepts_gzip(&request) {
-        return Ok(response
-            .insert_header(ContentEncoding::Gzip)
-            .body(snapshot.gzip));
-    }
-    Ok(response.body(snapshot.json))
+    response
 }
 
 /// Whether the request's `Accept-Encoding` lists gzip with a quality above zero.

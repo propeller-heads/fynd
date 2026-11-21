@@ -3,10 +3,13 @@ mod common;
 use std::{io::Read as _, net::SocketAddr, sync::Arc};
 
 use common::{new_latest_prices, RUN_ID};
-use fynd_core::nexus::{
-    derived::{DerivedKind, DerivedSnapshot},
-    price_levels::{prices_path, PriceLevelVenue},
-    MessageBody, NexusMessage,
+use fynd_core::{
+    derived::types::{ComponentDepths, SpotPrices, TokenGasPrices},
+    nexus::{
+        derived::DerivedKind,
+        price_levels::{prices_path, PriceLevelVenue},
+        MessageBody, NexusMessage,
+    },
 };
 use fynd_nexus::{
     api::{self, Streams},
@@ -195,47 +198,126 @@ async fn test_health_follows_whether_any_stream_has_prices(
     assert_eq!(body, json!({ "serving": serving, "streams": ["bebop", "metric"] }));
 }
 
-/// A store with a snapshot at block 5 of each of `kinds`.
+/// A store with one publish, at block 5, of each of `kinds`.
 fn derived_with(kinds: &[DerivedKind]) -> Arc<DerivedSnapshots> {
-    let derived = Arc::new(DerivedSnapshots::new(Chain::Ethereum));
+    let derived = Arc::new(DerivedSnapshots::new(Chain::Ethereum, RUN_ID));
     for kind in kinds {
-        derived.replace(*kind, &DerivedSnapshot { block: 5, entries: vec![json!({"n": 1})] });
+        publish(&derived, *kind, 5);
     }
     derived
+}
+
+/// Publishes an empty output of `kind` at `block`, which differs from the last by its block.
+fn publish(derived: &DerivedSnapshots, kind: DerivedKind, block: u64) {
+    match kind {
+        DerivedKind::SpotPrices => derived
+            .spot_prices()
+            .publish(&SpotPrices::default(), block),
+        DerivedKind::PoolDepths => derived
+            .pool_depths()
+            .publish(&ComponentDepths::default(), block),
+        DerivedKind::TokenPrices => derived
+            .token_prices()
+            .publish(&TokenGasPrices::default(), block),
+    };
+}
+
+fn cursor_etag(seq: u64) -> String {
+    format!("\"{RUN_ID}-{seq}\"")
 }
 
 #[rstest]
 #[case::unknown_kind("/v1/derived/nope", true, true, None, 404)]
 #[case::market_off("/v1/derived/pool_depths", false, true, None, 404)]
 #[case::no_snapshot_yet("/v1/derived/pool_depths", true, false, None, 204)]
-#[case::snapshot("/v1/derived/pool_depths", true, true, None, 200)]
-#[case::same_block("/v1/derived/pool_depths", true, true, Some("\"5\""), 304)]
-#[case::other_block("/v1/derived/pool_depths", true, true, Some("\"4\""), 200)]
+#[case::full("/v1/derived/pool_depths", true, true, None, 200)]
+#[case::same_etag("/v1/derived/pool_depths", true, true, Some(cursor_etag(1)), 304)]
+#[case::other_etag("/v1/derived/pool_depths", true, true, Some(cursor_etag(0)), 200)]
 #[tokio::test]
 async fn test_derived_status_follows_market_snapshot_and_etag(
     #[case] path: &str,
     #[case] market: bool,
     #[case] written: bool,
-    #[case] if_none_match: Option<&str>,
+    #[case] if_none_match: Option<String>,
     #[case] status: u16,
 ) {
     let kinds: &[DerivedKind] = if written { &[DerivedKind::PoolDepths] } else { &[] };
     let address = serve_with(&[], market.then(|| derived_with(kinds)));
 
-    let response = get(address, path, if_none_match).await;
+    let response = get(address, path, if_none_match.as_deref()).await;
 
     assert_eq!(response.status(), status);
     if status == 200 || status == 304 {
-        assert_eq!(etag_of(&response), "\"5\"");
+        assert_eq!(etag_of(&response), cursor_etag(1));
         assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
     }
     let body = response.bytes().await.unwrap();
     if status == 200 {
-        let snapshot: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(snapshot, json!({"block": 5, "entries": [{"n": 1}]}));
+        let update: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            update,
+            json!({"type": "full", "run_id": RUN_ID, "seq": 1, "block": 5, "entries": []})
+        );
     } else if status != 404 {
         assert!(body.is_empty());
     }
+}
+
+#[rstest]
+#[case::covered_cursor(format!("{RUN_ID}-1"), 200, "delta")]
+#[case::latest_cursor(format!("{RUN_ID}-2"), 304, "")]
+#[case::before_the_first_publish(format!("{RUN_ID}-0"), 200, "full")]
+#[case::other_run(format!("{}-1", RUN_ID + 1), 200, "full")]
+#[case::malformed("soon".to_string(), 200, "full")]
+#[tokio::test]
+async fn test_derived_since_selects_delta_full_or_not_modified(
+    #[case] since: String,
+    #[case] status: u16,
+    #[case] update_type: &str,
+) {
+    let derived = derived_with(&[DerivedKind::SpotPrices]);
+    publish(&derived, DerivedKind::SpotPrices, 6);
+    let address = serve_with(&[], Some(derived));
+
+    let response = get_with(
+        address,
+        &format!("/v1/derived/spot_prices?since={since}"),
+        header::ACCEPT_ENCODING,
+        Some("identity"),
+    )
+    .await;
+
+    assert_eq!(response.status(), status);
+    assert_eq!(etag_of(&response), cursor_etag(2));
+    let body = response.bytes().await.unwrap();
+    if status == 200 {
+        let update: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(update["type"], update_type);
+        assert_eq!((update["seq"].as_u64(), update["block"].as_u64()), (Some(2), Some(6)));
+    } else {
+        assert!(body.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_derived_delta_is_not_gzipped() {
+    let derived = derived_with(&[DerivedKind::SpotPrices]);
+    publish(&derived, DerivedKind::SpotPrices, 6);
+    let address = serve_with(&[], Some(derived));
+
+    let response = get_with(
+        address,
+        &format!("/v1/derived/spot_prices?since={RUN_ID}-1"),
+        header::ACCEPT_ENCODING,
+        Some("gzip"),
+    )
+    .await;
+
+    assert!(!response
+        .headers()
+        .contains_key(header::CONTENT_ENCODING));
+    let update: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(update["type"], "delta");
 }
 
 #[rstest]
@@ -245,7 +327,7 @@ async fn test_derived_status_follows_market_snapshot_and_etag(
 #[case::gzip_refused(Some("gzip;q=0"), false)]
 #[case::identity_only(Some("identity"), false)]
 #[tokio::test]
-async fn test_derived_body_is_gzip_only_when_accepted(
+async fn test_derived_full_update_is_gzip_only_when_accepted(
     #[case] accept_encoding: Option<&str>,
     #[case] gzipped: bool,
 ) {

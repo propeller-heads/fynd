@@ -55,4 +55,5 @@ pub(crate) fn components_without_entries<'a>(
 
 pub use component_depth::ComponentDepthComputation;
 pub use spot_price::SpotPriceComputation;
+pub(crate) use token_gas_price::tokens_without_price;
 pub use token_gas_price::TokenGasPriceComputation;
