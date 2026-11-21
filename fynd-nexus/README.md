@@ -38,6 +38,7 @@ BEBOP_KEY=... HASHFLOW_USER=... HASHFLOW_KEY=... METRIC_API_KEY=... \
 | `--disable-tls` | `DISABLE_TLS` | `false` | Disable TLS for the Tycho connection. |
 | `--min-tvl` | `MIN_TVL` | the chain's low TVL threshold | Minimum TVL, in the chain's native token, for a component to be tracked. |
 | `--min-token-quality` | `MIN_TOKEN_QUALITY` | `100` | Minimum Tycho token quality score; tokens below it are excluded. |
+| `--pricing-min-pass-interval-ms` | `PRICING_MIN_PASS_INTERVAL_MS` | the market's own | Time after a token-pricing pass starts before the next one may start; a block inside it serves the stored token prices. |
 | `--rpc-url` | `RPC_URL` | | Node RPC URL, which the market reads gas prices from. |
 
 Another binary can start the service with `fynd_nexus::run(Cli::parse())`, where `Cli` is
