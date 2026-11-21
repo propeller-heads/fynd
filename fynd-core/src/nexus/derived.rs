@@ -662,55 +662,100 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::round_trip("1761550000000-42", Some(DerivedCursor { run_id: 1761550000000, seq: 42 }))]
+    #[case::no_dash("42", None)]
+    #[case::empty_seq("1-", None)]
+    #[case::negative_seq("1--2", None)]
+    #[case::text("run-seq", None)]
+    fn test_cursor_parse(#[case] text: &str, #[case] expected: Option<DerivedCursor>) {
+        let parsed = text.parse::<DerivedCursor>().ok();
+
+        assert_eq!(parsed, expected);
+        if let Some(cursor) = parsed {
+            assert_eq!(cursor.to_string(), text);
+        }
+    }
+
+    #[rstest]
+    #[case::full(
+        json!({"type": "full", "run_id": 1, "seq": 4, "block": 9, "entries": [{"token": TOKEN}]}),
+        Some(DerivedUpdate::Full { run_id: 1, seq: 4, block: 9, entries: vec![json!({"token": TOKEN})] })
+    )]
+    #[case::delta(
+        json!({"type": "delta", "run_id": 1, "from_seq": 3, "seq": 4, "block": 9,
+               "upserted": [{"token": TOKEN}], "removed": [{"token": OTHER}]}),
+        Some(DerivedUpdate::Delta {
+            run_id: 1, from_seq: 3, seq: 4, block: 9,
+            upserted: vec![json!({"token": TOKEN})], removed: vec![json!({"token": OTHER})],
+        })
+    )]
+    #[case::delta_without_from_seq(
+        json!({"type": "delta", "run_id": 1, "seq": 4, "block": 9}),
+        None
+    )]
+    #[case::unknown_type(json!({"type": "patch", "run_id": 1, "seq": 4, "block": 9}), None)]
+    #[case::snapshot_of_the_previous_version(json!({"block": 9, "entries": []}), None)]
+    fn test_update_parse(
+        #[case] body: Value,
+        #[case] expected: Option<DerivedUpdate<Value, Value>>,
+    ) {
+        let parsed = serde_json::from_value::<DerivedUpdate<Value, Value>>(body).ok();
+
+        assert_eq!(parsed, expected);
+    }
+
+    const TOKEN: &str = "0x0101010101010101010101010101010101010101";
+    const OTHER: &str = "0x0202020202020202020202020202020202020202";
+
     #[test]
-    fn test_snapshots_round_trip_through_json() {
-        let spot = SpotPriceSnapshot::from_spot_prices(&spot_prices(), 9);
-        let depth = PoolDepthSnapshot::from_depths(&depths(), 9);
-        let token = TokenGasPriceSnapshot::from_token_prices(&token_prices(), 9);
+    fn test_full_update_serializes_as_a_snapshot_of_the_previous_version() {
+        let full = DerivedUpdate::<Value, Value>::Full {
+            run_id: 1,
+            seq: 4,
+            block: 9,
+            entries: vec![json!({"n": 1})],
+        };
 
-        let spot_back: SpotPriceSnapshot =
-            serde_json::from_str(&serde_json::to_string(&spot).unwrap()).unwrap();
-        let depth_back: PoolDepthSnapshot =
-            serde_json::from_str(&serde_json::to_string(&depth).unwrap()).unwrap();
-        let token_back: TokenGasPriceSnapshot =
-            serde_json::from_str(&serde_json::to_string(&token).unwrap()).unwrap();
+        let body = serde_json::to_value(&full).unwrap();
 
-        assert_eq!(spot_back, spot);
-        assert_eq!(depth_back, depth);
-        assert_eq!(token_back, token);
+        assert_eq!(
+            body,
+            json!({"type": "full", "run_id": 1, "seq": 4, "block": 9, "entries": [{"n": 1}]})
+        );
+    }
+
+    #[test]
+    fn test_outputs_round_trip_through_entries() {
+        let spot = SpotPrices::from_entries(spot_prices().entries());
+        let depth = ComponentDepths::from_entries(depths().entries());
+        let token = TokenGasPrices::from_entries(token_prices().entries());
+
+        assert_eq!(spot, spot_prices());
+        assert_eq!(depth, depths());
+        assert_eq!(token, token_prices());
     }
 
     #[rstest]
     #[case::pool_depth(
-        serde_json::to_value(PoolDepthSnapshot::from_depths(&depths(), 9)).unwrap(),
-        json!({"block": 9, "entries": [{
+        serde_json::to_value(depths().entries()).unwrap(),
+        json!([{
             "component_id": "pool",
             "token_in": "0x0101010101010101010101010101010101010101",
             "token_out": "0x0202020202020202020202020202020202020202",
             "depth": (BigUint::from(u128::MAX) * 7u8).to_string(),
-        }]})
+        }])
     )]
     #[case::token_gas_price(
-        serde_json::to_value(TokenGasPriceSnapshot::from_token_prices(&token_prices(), 9)).unwrap(),
-        json!({"block": 9, "entries": [{
+        serde_json::to_value(token_prices().entries()).unwrap(),
+        json!([{
             "token": "0x0101010101010101010101010101010101010101",
             "numerator": (BigUint::from(u128::MAX) * 3u8).to_string(),
             "denominator": "7",
-        }]})
+        }])
     )]
-    fn test_snapshot_json_large_integers(#[case] actual: Value, #[case] expected: Value) {
+    fn test_entry_json_large_integers(#[case] actual: Value, #[case] expected: Value) {
         assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_snapshots_convert_back_into_the_maps_they_came_from() {
-        let spot = SpotPriceSnapshot::from_spot_prices(&spot_prices(), 9);
-        let depth = PoolDepthSnapshot::from_depths(&depths(), 9);
-        let token = TokenGasPriceSnapshot::from_token_prices(&token_prices(), 9);
-
-        assert_eq!(spot.into_spot_prices(), spot_prices());
-        assert_eq!(depth.into_depths(), depths());
-        assert_eq!(token.into_token_prices(), token_prices());
     }
 
     #[test]
@@ -721,9 +766,8 @@ mod tests {
             token_out: address(2),
             price,
         };
-        let snapshot = SpotPriceSnapshot { block: 1, entries: vec![entry(1.0), entry(2.0)] };
 
-        let prices = snapshot.into_spot_prices();
+        let prices = SpotPrices::from_entries(vec![entry(1.0), entry(2.0)]);
 
         assert_eq!(prices.len(), 1);
         assert_eq!(prices[&("pool".to_string(), address(1), address(2))], 2.0);
@@ -733,17 +777,113 @@ mod tests {
     #[case::none_skipped(vec![1.5, 2.0], 2)]
     #[case::non_finite(vec![1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY], 1)]
     #[case::empty(vec![], 0)]
-    fn test_spot_prices_skip_non_finite(#[case] values: Vec<f64>, #[case] kept: usize) {
+    fn test_spot_price_entries_skip_non_finite(#[case] values: Vec<f64>, #[case] kept: usize) {
         let mut prices = SpotPrices::default();
         for (index, value) in values.into_iter().enumerate() {
             prices.insert((format!("pool{index}"), address(1), address(2)), value);
         }
 
-        let snapshot = SpotPriceSnapshot::from_spot_prices(&prices, 1);
+        let entries = prices.entries();
 
-        assert_eq!(snapshot.entries.len(), kept);
-        let read_back: SpotPriceSnapshot =
-            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
-        assert_eq!(read_back, snapshot);
+        assert_eq!(entries.len(), kept);
+        serde_json::to_string(&entries).unwrap();
+    }
+
+    fn spot(entries: &[(&str, f64)]) -> SpotPrices {
+        let mut prices = SpotPrices::default();
+        for (component, price) in entries {
+            prices.insert((component.to_string(), address(1), address(2)), *price);
+        }
+        prices
+    }
+
+    fn spot_key(component: &str) -> DirectionEntryKey {
+        DirectionEntryKey::of(component, &address(1), &address(2))
+    }
+
+    #[rstest]
+    #[case::nothing_changed(&[("a", 1.0)], &[("a", 1.0)], &[], &[], 0)]
+    #[case::new_price(&[("a", 1.0), ("b", 2.0)], &[("a", 1.0)], &["b"], &[], 0)]
+    #[case::changed_price(&[("a", 1.5)], &[("a", 1.0)], &["a"], &[], 0)]
+    #[case::gone(&[], &[("a", 1.0)], &[], &["a"], 0)]
+    #[case::became_non_finite(&[("a", f64::NAN)], &[("a", 1.0)], &[], &["a"], 1)]
+    #[case::stays_non_finite(&[("a", f64::INFINITY)], &[], &[], &[], 1)]
+    #[case::same_bits_for_negative_zero(&[("a", -0.0)], &[("a", 0.0)], &["a"], &[], 0)]
+    fn test_spot_price_changes(
+        #[case] current: &[(&str, f64)],
+        #[case] previous: &[(&str, f64)],
+        #[case] upserted: &[&str],
+        #[case] removed: &[&str],
+        #[case] non_finite: usize,
+    ) {
+        let changes = spot(current).changes_since(&spot(previous));
+
+        let mut upserted_ids: Vec<_> = changes
+            .upserted
+            .iter()
+            .map(|entry| entry.component_id.as_str())
+            .collect();
+        upserted_ids.sort_unstable();
+        let mut removed_ids: Vec<_> = changes
+            .removed
+            .iter()
+            .map(|key| key.component_id.as_str())
+            .collect();
+        removed_ids.sort_unstable();
+        assert_eq!(upserted_ids, upserted);
+        assert_eq!(removed_ids, removed);
+        assert_eq!(changes.non_finite_left_out, non_finite);
+    }
+
+    #[rstest]
+    #[case::price_change_of_a_known_key(&[("a", 2.0)], &[], false)]
+    #[case::new_key(&[("b", 2.0)], &[], true)]
+    #[case::removed_key(&[], &["a"], true)]
+    #[case::removing_an_absent_key(&[], &["z"], false)]
+    fn test_apply_reports_key_changes(
+        #[case] upserted: &[(&str, f64)],
+        #[case] removed: &[&str],
+        #[case] keys_changed: bool,
+    ) {
+        let mut prices = spot(&[("a", 1.0)]);
+        let changes = DerivedChanges::<SpotPrices> {
+            upserted: spot(upserted).entries(),
+            removed: removed
+                .iter()
+                .map(|id| spot_key(id))
+                .collect(),
+            non_finite_left_out: 0,
+        };
+
+        let changed = prices.apply(&changes);
+
+        assert_eq!(changed, keys_changed);
+    }
+
+    #[test]
+    fn test_applying_changes_since_gives_the_current_output() {
+        let previous = spot(&[("a", 1.0), ("b", 2.0), ("c", 3.0)]);
+        let current = spot(&[("b", 2.5), ("c", 3.0), ("d", 4.0)]);
+        let mut rebuilt = previous.clone();
+
+        rebuilt.apply(&current.changes_since(&previous));
+
+        assert_eq!(rebuilt, current);
+    }
+
+    #[test]
+    fn test_token_price_and_depth_changes() {
+        let mut changed_prices = token_prices();
+        changed_prices.insert(address(2), Price { numerator: 1u8.into(), denominator: 1u8.into() });
+        let mut changed_depths = depths();
+        changed_depths.clear();
+
+        let price_changes = changed_prices.changes_since(&token_prices());
+        let depth_changes = changed_depths.changes_since(&depths());
+
+        assert_eq!(price_changes.upserted.len(), 1);
+        assert!(price_changes.removed.is_empty());
+        assert!(depth_changes.upserted.is_empty());
+        assert_eq!(depth_changes.removed.len(), 1);
     }
 }
