@@ -307,3 +307,340 @@ fn gzip(plain: &[u8]) -> Bytes {
             .expect("finishing a gzip stream into a vector cannot fail"),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use fynd_core::{
+        derived::types::SpotPrices,
+        nexus::derived::{DirectionEntryKey, SpotPriceEntry},
+    };
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use rstest::rstest;
+    use tycho_simulation::tycho_core::Bytes as Address;
+
+    use super::*;
+
+    const RUN_ID: u64 = 1_761_550_000_000;
+
+    type SpotDelta = DerivedUpdate<SpotPriceEntry, DirectionEntryKey>;
+
+    fn spot(prices: &[(&str, f64)]) -> SpotPrices {
+        let mut output = SpotPrices::default();
+        for (component, price) in prices {
+            output.insert(
+                (component.to_string(), Address::from([1; 20]), Address::from([2; 20])),
+                *price,
+            );
+        }
+        output
+    }
+
+    fn history() -> DerivedHistory<SpotPrices> {
+        DerivedHistory::new(RUN_ID, Vec::new())
+    }
+
+    fn cursor(seq: u64) -> DerivedCursor {
+        DerivedCursor { run_id: RUN_ID, seq }
+    }
+
+    /// A history that published each of `states` at the blocks 10, 11, ...
+    fn published<State: AsRef<[(&'static str, f64)]>>(
+        states: &[State],
+    ) -> DerivedHistory<SpotPrices> {
+        let history = history();
+        for (block, state) in (10..).zip(states) {
+            history.publish(&spot(state.as_ref()), block);
+        }
+        history
+    }
+
+    fn delta_of(answer: DerivedAnswer) -> SpotDelta {
+        let DerivedAnswer::Delta { json, .. } = answer else {
+            panic!("expected a delta, got {answer:?}");
+        };
+        serde_json::from_slice(&json).unwrap()
+    }
+
+    fn answer_kind(answer: &DerivedAnswer) -> &'static str {
+        match answer {
+            DerivedAnswer::NoData => "no_data",
+            DerivedAnswer::NotModified(_) => "not_modified",
+            DerivedAnswer::Delta { .. } => "delta",
+            DerivedAnswer::Full(_) => "full",
+        }
+    }
+
+    #[rstest]
+    #[case::last_write_wins(
+        vec![vec![("a", 1.0)], vec![("a", 2.0)], vec![("a", 3.0)]],
+        &[("a", 3.0)],
+        &[]
+    )]
+    #[case::upsert_then_remove(
+        vec![vec![("a", 1.0)], vec![("a", 1.0), ("b", 2.0)], vec![("a", 1.0)]],
+        &[],
+        &["b"]
+    )]
+    #[case::remove_then_upsert(
+        vec![vec![("a", 1.0), ("b", 2.0)], vec![("a", 1.0)], vec![("a", 1.0), ("b", 5.0)]],
+        &[("b", 5.0)],
+        &[]
+    )]
+    #[case::independent_keys(
+        vec![vec![("a", 1.0), ("b", 2.0)], vec![("a", 1.5), ("b", 2.0)], vec![("a", 1.5), ("c", 4.0)]],
+        &[("a", 1.5), ("c", 4.0)],
+        &["b"]
+    )]
+    #[tokio::test]
+    async fn test_merged_delta(
+        #[case] states: Vec<Vec<(&'static str, f64)>>,
+        #[case] upserted: &[(&str, f64)],
+        #[case] removed: &[&str],
+    ) {
+        let history = published(&states);
+
+        let answer = history
+            .answer(Some(cursor(1)), None)
+            .await
+            .unwrap();
+
+        let SpotDelta::Delta {
+            from_seq,
+            seq,
+            upserted: actual_upserted,
+            removed: actual_removed,
+            ..
+        } = delta_of(answer)
+        else {
+            panic!("expected a delta");
+        };
+        let mut upserted_prices: Vec<_> = actual_upserted
+            .iter()
+            .map(|entry| (entry.component_id.as_str(), entry.price))
+            .collect();
+        upserted_prices.sort_by(|left, right| left.0.cmp(right.0));
+        let mut removed_ids: Vec<_> = actual_removed
+            .iter()
+            .map(|key| key.component_id.as_str())
+            .collect();
+        removed_ids.sort_unstable();
+        assert_eq!((from_seq, seq), (1, states.len() as u64));
+        assert_eq!(upserted_prices, upserted);
+        assert_eq!(removed_ids, removed);
+    }
+
+    #[rstest]
+    #[case::no_cursor(None, None, "full")]
+    #[case::since_latest(Some(cursor(3)), None, "not_modified")]
+    #[case::etag_of_latest(None, Some(cursor(3)), "not_modified")]
+    #[case::since_covered(Some(cursor(1)), None, "delta")]
+    #[case::since_one_behind(Some(cursor(2)), None, "delta")]
+    #[case::since_before_the_first_publish(Some(cursor(0)), None, "full")]
+    #[case::since_ahead_of_latest(Some(cursor(9)), None, "full")]
+    #[case::etag_of_an_older_update(None, Some(cursor(2)), "full")]
+    #[case::other_run(Some(DerivedCursor { run_id: RUN_ID + 1, seq: 2 }), None, "full")]
+    #[tokio::test]
+    async fn test_answer_selection(
+        #[case] since: Option<DerivedCursor>,
+        #[case] if_none_match: Option<DerivedCursor>,
+        #[case] expected: &str,
+    ) {
+        let history = published(&[&[("a", 1.0)], &[("a", 2.0)], &[("a", 3.0)]]);
+
+        let answer = history
+            .answer(since, if_none_match)
+            .await
+            .unwrap();
+
+        assert_eq!(answer_kind(&answer), expected);
+    }
+
+    #[tokio::test]
+    async fn test_answer_without_a_publish() {
+        let answer = history()
+            .answer(None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(answer_kind(&answer), "no_data");
+    }
+
+    #[rstest]
+    #[case::oldest_covered(44, "delta")]
+    #[case::just_outside(43, "full")]
+    #[tokio::test]
+    async fn test_answer_at_the_edge_of_the_change_history(
+        #[case] since_seq: u64,
+        #[case] expected: &str,
+    ) {
+        let history = history();
+        for block in 1..=300u64 {
+            history.publish(&spot(&[("a", block as f64)]), block);
+        }
+
+        let answer = history
+            .answer(Some(cursor(since_seq)), None)
+            .await
+            .unwrap();
+
+        assert_eq!(answer_kind(&answer), expected);
+    }
+
+    #[rstest]
+    #[case::same_block_same_data(&[("a", 1.0)], 10, None)]
+    #[case::same_block_changed_data(&[("a", 2.0)], 10, Some((1, 0, 10)))]
+    #[case::new_block_same_data(&[("a", 1.0)], 11, Some((0, 0, 11)))]
+    #[case::lower_block_same_data(&[("a", 1.0)], 9, Some((0, 0, 9)))]
+    #[case::new_block_data_removed(&[], 11, Some((0, 1, 11)))]
+    fn test_publish_after_a_block_at_10(
+        #[case] state: &[(&str, f64)],
+        #[case] block: u64,
+        #[case] published_as: Option<(usize, usize, u64)>,
+    ) {
+        let history = published(&[&[("a", 1.0)]]);
+
+        let summary = history.publish(&spot(state), block);
+
+        let actual = summary.map(|summary| (summary.upserted, summary.removed, summary.block));
+        assert_eq!(actual, published_as);
+        assert_eq!(history.block(), Some(published_as.map_or(10, |(_, _, block)| block)));
+    }
+
+    #[test]
+    fn test_first_publish_of_an_empty_output() {
+        let history = history();
+
+        let summary = history.publish(&spot(&[]), 10);
+
+        assert_eq!(summary.map(|summary| summary.seq), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_empty_delta_carries_the_new_block() {
+        let history = published(&[&[("a", 1.0)]]);
+        history.publish(&spot(&[("a", 1.0)]), 11);
+
+        let answer = history
+            .answer(Some(cursor(1)), None)
+            .await
+            .unwrap();
+
+        let SpotDelta::Delta { block, upserted, removed, .. } = delta_of(answer) else {
+            panic!("expected a delta");
+        };
+        assert_eq!((block, upserted.len(), removed.len()), (11, 0, 0));
+    }
+
+    #[test]
+    fn test_non_finite_prices_are_left_out_and_counted() {
+        let history = history();
+
+        let summary = history
+            .publish(&spot(&[("a", 1.0), ("b", f64::NAN)]), 10)
+            .unwrap();
+
+        assert_eq!((summary.upserted, summary.non_finite_left_out), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn test_full_update_is_served_while_fresh_and_catchable_by_delta() {
+        let history = published(&[&[("a", 1.0)]]);
+        let DerivedAnswer::Full(first) = history
+            .answer(None, None)
+            .await
+            .unwrap()
+        else {
+            panic!("expected a full update");
+        };
+        history.publish(&spot(&[("a", 2.0)]), 11);
+
+        let answer = history
+            .answer(None, None)
+            .await
+            .unwrap();
+        let catch_up = history
+            .answer(Some(first.cursor), None)
+            .await
+            .unwrap();
+
+        let DerivedAnswer::Full(second) = answer else {
+            panic!("expected a full update");
+        };
+        assert_eq!(second.json.as_ptr(), first.json.as_ptr(), "the encoding is reused");
+        assert_eq!(second.cursor, cursor(1));
+        assert_eq!(answer_kind(&catch_up), "delta");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_requests_share_one_full_encoding() {
+        let history = published(&[&[("a", 1.0)]]);
+
+        let answers = futures::future::join_all((0..8).map(|_| history.answer(None, None))).await;
+
+        let pointers: std::collections::HashSet<_> = answers
+            .into_iter()
+            .map(|answer| match answer.unwrap() {
+                DerivedAnswer::Full(full) => full.json.as_ptr(),
+                other => panic!("expected a full update, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(pointers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_full_update_is_a_snapshot_of_the_latest_output() {
+        let history = published(&[vec![("a", 1.0)], vec![("a", 1.0), ("b", 2.0)]]);
+
+        let DerivedAnswer::Full(full) = history
+            .answer(None, None)
+            .await
+            .unwrap()
+        else {
+            panic!("expected a full update");
+        };
+
+        let SpotDelta::Full { run_id, seq, block, entries } =
+            serde_json::from_slice(&full.json).unwrap()
+        else {
+            panic!("expected a full update");
+        };
+        assert_eq!((run_id, seq, block, entries.len()), (RUN_ID, 2, 11, 2));
+    }
+
+    #[tokio::test]
+    async fn test_publish_and_delta_metrics() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let history = published(&[vec![("a", 1.0)], vec![("a", 2.0), ("b", 3.0)]]);
+
+        history
+            .answer(Some(cursor(1)), None)
+            .await
+            .unwrap();
+
+        let mut recorded = Vec::new();
+        for (key, _, _, value) in recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+        {
+            let value = match value {
+                DebugValue::Gauge(block) => block.into_inner(),
+                DebugValue::Histogram(values) => values[0].into_inner(),
+                DebugValue::Counter(_) => panic!("unexpected counter"),
+            };
+            recorded.push((key.key().name().to_string(), value));
+        }
+        recorded.sort_by(|left, right| left.0.cmp(&right.0));
+        let names: Vec<_> = recorded
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["nexus_derived_block", "nexus_derived_delta_bytes", "nexus_derived_delta_entries"]
+        );
+        assert_eq!((recorded[0].1, recorded[2].1), (11.0, 2.0));
+        assert!(recorded[1].1 > 0.0);
+    }
+}

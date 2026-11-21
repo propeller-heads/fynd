@@ -89,6 +89,7 @@ pub(crate) mod tests {
         assert!(!args.disable_tls);
         assert_eq!(args.min_token_quality, defaults::MIN_TOKEN_QUALITY);
         assert_eq!((args.min_tvl, args.rpc_url), (None, None));
+        assert_eq!(args.pricing_min_pass_interval_ms, None);
     }
 
     #[rstest]
@@ -117,6 +118,13 @@ pub(crate) mod tests {
         let args = parse(&["--min-token-quality", "1"]).unwrap();
 
         assert_eq!(args.min_token_quality, 1);
+    }
+
+    #[test]
+    fn test_pricing_min_pass_interval_flag() {
+        let args = parse(&["--pricing-min-pass-interval-ms", "250"]).unwrap();
+
+        assert_eq!(args.pricing_min_pass_interval_ms, Some(250));
     }
 
     #[test]
