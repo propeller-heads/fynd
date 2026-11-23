@@ -5,6 +5,7 @@
 //! `BookVenueEntry::check_supported` and `open_book_feed`.
 
 mod bebop;
+mod euclid;
 mod hashflow;
 mod liquorice;
 /// Metric, and the chains it is served on.
@@ -20,6 +21,7 @@ use tycho_simulation::{
     pamm::protocols::metric::{self as metric_protocol, feed::MetricFeed},
     rfq::protocols::{
         bebop::{self as bebop_protocol, feed::BebopFeed},
+        euclid::{self as euclid_protocol, feed::EuclidFeed},
         hashflow::{self as hashflow_protocol, feed::HashflowFeed},
         liquorice::{self as liquorice_protocol, feed::LiquoriceFeed},
         native::{self as native_protocol, feed::NativeFeed},
@@ -46,6 +48,7 @@ pub(crate) enum BookVenue {
     Metric,
     Native,
     Liquorice,
+    Euclid,
 }
 
 impl BookVenue {
@@ -57,6 +60,7 @@ impl BookVenue {
             metric_protocol::PROTOCOL_SYSTEM => Some(Self::Metric),
             native_protocol::PROTOCOL_SYSTEM => Some(Self::Native),
             liquorice_protocol::PROTOCOL_SYSTEM => Some(Self::Liquorice),
+            euclid_protocol::PROTOCOL_SYSTEM => Some(Self::Euclid),
             _ => None,
         }
     }
@@ -110,6 +114,7 @@ impl<'a> BookVenueEntry<'a> {
             BookVenue::Metric => metric::check_supported(chain, self),
             BookVenue::Native => native::check_supported(chain, self),
             BookVenue::Liquorice => liquorice::check_supported(chain, self),
+            BookVenue::Euclid => euclid::check_supported(chain, self),
         }
     }
 }
@@ -119,7 +124,7 @@ impl<'a> BookVenueEntry<'a> {
 pub(crate) struct BookVenueContext {
     /// The chain, tokens and TVL floor the books are built from.
     pub(crate) book_config: BookFeedConfig,
-    /// Whether Bebop and Hashflow stream as one component for all their pairs.
+    /// Whether Bebop, Hashflow and Euclid stream as one component for all their pairs.
     pub(crate) aggregate_rfqs: bool,
     /// Optional client for shared Bebop, Hashflow and Metric prices. Without this client, each
     /// feed connects directly to its venue.
@@ -136,6 +141,7 @@ pub(crate) enum BookVenueFeed {
     Metric(MetricFeed),
     Native(NativeFeed),
     Liquorice(LiquoriceFeed),
+    Euclid(EuclidFeed),
     SharedPriceLevels(PriceLevelsFeed),
 }
 
@@ -153,6 +159,7 @@ impl SnapshotFeed for BookVenueFeed {
             Self::Metric(feed) => feed.run(publisher).boxed(),
             Self::Native(feed) => feed.run(publisher).boxed(),
             Self::Liquorice(feed) => feed.run(publisher).boxed(),
+            Self::Euclid(feed) => feed.run(publisher).boxed(),
             Self::SharedPriceLevels(feed) => feed.run(publisher).boxed(),
         }
     }
@@ -161,8 +168,8 @@ impl SnapshotFeed for BookVenueFeed {
 /// Builds the feed that serves `entry`, reading the venue's credentials from the environment.
 ///
 /// With a nexus client in `context`, Bebop, Hashflow and Metric build their books from the
-/// service's prices; Metric then needs no API key. Native and Liquorice always connect to the
-/// venue.
+/// service's prices; Metric then needs no API key. Native, Liquorice and Euclid always connect
+/// to the venue.
 ///
 /// # Errors
 ///
@@ -208,12 +215,13 @@ pub(crate) fn open_book_feed(
         }
         BookVenue::Native => BookVenueFeed::Native(native::direct_feed(context, entry)?),
         BookVenue::Liquorice => BookVenueFeed::Liquorice(liquorice::direct_feed(context, entry)?),
+        BookVenue::Euclid => BookVenueFeed::Euclid(euclid::direct_feed(context)?),
     })
 }
 
-/// The chain's USD stablecoins, which Bebop, Hashflow, Native and Liquorice price their books'
-/// TVL in. Metric reports each pool's USD TVL itself, so only the others need a chain that has a
-/// curated set.
+/// The chain's USD stablecoins, which Bebop, Hashflow, Native, Liquorice and Euclid price their
+/// books' TVL in. Metric reports each pool's USD TVL itself, so only the others need a chain that
+/// has a curated set.
 fn usd_quote_tokens(context: &BookVenueContext) -> Result<Arc<HashSet<Bytes>>, DataFeedError> {
     let chain = context.book_config.chain;
     usd_stablecoins_for_chain(chain)
@@ -252,6 +260,7 @@ mod tests {
     #[case::metric("rfq:metric", BookVenue::Metric)]
     #[case::native("rfq:native", BookVenue::Native)]
     #[case::liquorice("rfq:liquorice", BookVenue::Liquorice)]
+    #[case::euclid("rfq:euclid", BookVenue::Euclid)]
     fn test_parse_all_direct_entry(#[case] name: &str, #[case] venue: BookVenue) {
         let protocols = protocols(&[name]);
 
@@ -306,6 +315,12 @@ mod tests {
     #[case::bebop_executor("rfq:bebop", Chain::Bsc, "rfq:bebop has no executor on bsc")]
     #[case::metric_executor("rfq:metric", Chain::Bsc, "rfq:metric has no executor on bsc")]
     #[case::native_executor("rfq:native", Chain::Polygon, "rfq:native has no executor on polygon")]
+    #[case::euclid_executor("rfq:euclid", Chain::Base, "rfq:euclid has no executor on base")]
+    #[case::euclid_fallback(
+        "fallback:rfq:euclid",
+        Chain::Ethereum,
+        "fallback:rfq:euclid has no executor on ethereum"
+    )]
     fn test_check_supported_unsupported_chain(
         #[case] name: &str,
         #[case] chain: Chain,
@@ -325,6 +340,7 @@ mod tests {
     #[case::bebop("rfq:bebop", Chain::Ethereum)]
     #[case::metric_via_fallback_router("fallback:rfq:metric", Chain::Ethereum)]
     #[case::hashflow("rfq:hashflow", Chain::Ethereum)]
+    #[case::euclid("rfq:euclid", Chain::Ethereum)]
     fn test_check_supported_supported_chain(#[case] name: &str, #[case] chain: Chain) {
         let protocols = protocols(&[name]);
         let entries = BookVenueEntry::parse_all(&protocols).unwrap();
@@ -353,6 +369,7 @@ mod tests {
             BookVenueFeed::Metric(_) => "metric",
             BookVenueFeed::Native(_) => "native",
             BookVenueFeed::Liquorice(_) => "liquorice",
+            BookVenueFeed::Euclid(_) => "euclid",
             BookVenueFeed::SharedPriceLevels(_) => "shared",
         }
     }
@@ -368,6 +385,8 @@ mod tests {
     #[case::native_with_nexus("rfq:native", true, "native")]
     #[case::liquorice_direct("rfq:liquorice", false, "liquorice")]
     #[case::liquorice_with_nexus("rfq:liquorice", true, "liquorice")]
+    #[case::euclid_direct("rfq:euclid", false, "euclid")]
+    #[case::euclid_with_nexus("rfq:euclid", true, "euclid")]
     #[tokio::test]
     async fn test_open_book_feed(
         #[case] name: &str,

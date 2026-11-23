@@ -222,7 +222,8 @@ environment before building its feed, so a missing one is a `DataFeedError::Conf
 the stream rather than a feed that silently serves nothing: `BEBOP_KEY` for `rfq:bebop`, `HASHFLOW_USER`/`HASHFLOW_KEY` for
 `rfq:hashflow`, `METRIC_API_KEY` for `rfq:metric`
 (whose `METRIC_API_URL` stays optional, defaulting to Metric's public endpoint), `NATIVE_API_KEY`
-for `rfq:native`, and `LIQUORICE_USER`/`LIQUORICE_KEY` for `rfq:liquorice`. `rfq:metric` is
+for `rfq:native`, and `LIQUORICE_USER`/`LIQUORICE_KEY` for `rfq:liquorice`; `rfq:euclid` reads
+none, as Euclid's gateway is public. `rfq:metric` is
 also gated on `METRIC_CHAINS` (`feed/book_venues/metric.rs`), the chains tycho-execution deploys its executor to — elsewhere the
 entry is rejected instead of pricing legs that cannot be encoded. On Ethereum, Metric can come
 from either the book feed (`fallback:rfq:metric`, executing through `MetricFallbackRouter`) or the
@@ -262,7 +263,7 @@ With `--nexus-url`, `BookStream::open` makes a `NexusClient` and puts it in the
 and `rfq:metric` (and their `fallback:` forms) from the same book settings the direct feed uses,
 and hands it to `NexusClient::price_levels_feed` instead of opening the venue's
 connection. Metric then needs no `METRIC_API_KEY`; Bebop and Hashflow still read their credentials,
-which firm quotes use. Native and Liquorice always connect directly.
+which firm quotes use. Native, Liquorice and Euclid always connect directly.
 
 A `fynd-nexus` instance serves one chain, so the URL must be the instance of the pod's own chain.
 The client does not check it.
@@ -294,11 +295,11 @@ computations still run locally.
 
 ## RFQ aggregation
 
-`--aggregate-rfqs` makes `BookStream::open` stream Bebop and Hashflow (direct and `fallback:rfq:`) as
-one component per venue instead of one per token pair. A route may take one quote from Bebop, and
-one quote per market maker from Hashflow (`QuoteRule::OncePerMaker`). Metric, Native and Liquorice
-always stream per pair. The venue lists the swap directions it quotes in its `swap_directions`
-static attribute.
+`--aggregate-rfqs` makes `BookStream::open` stream Bebop and Hashflow (direct and `fallback:rfq:`),
+and Euclid, as one component per venue instead of one per token pair. A route may take one quote
+from Bebop or Euclid, and one quote per market maker from Hashflow (`QuoteRule::OncePerMaker`).
+Metric, Native and Liquorice always stream per pair. The venue lists the swap directions it quotes
+in its `swap_directions` static attribute.
 
 A component's graph edges follow its swap directions, as `types::swap_directions` reads them: the
 attribute when present, otherwise every direction between its tokens. A direction the venue drops

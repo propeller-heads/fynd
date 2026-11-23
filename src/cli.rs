@@ -179,8 +179,8 @@ pub struct ServeArgs {
     #[arg(long)]
     pub partial_blocks: bool,
 
-    /// Stream each Bebop and Hashflow venue as one component instead of one per token pair.
-    /// Metric, Native and Liquorice always stream per pair.
+    /// Stream each Bebop, Hashflow and Euclid venue as one component instead of one per token
+    /// pair. Metric, Native and Liquorice always stream per pair.
     #[arg(long, env)]
     pub aggregate_rfqs: bool,
 
@@ -188,7 +188,8 @@ pub struct ServeArgs {
     /// prices derived from the market, from Fynd Nexus instead of connecting to those venues
     /// and computing them, e.g. http://fynd-nexus:3000, the instance of this pod's chain. The
     /// instance must run the market (--tycho-url). Venue prices apply to the `rfq:` and
-    /// `fallback:rfq:` entries in --protocols; Native and Liquorice always connect directly.
+    /// `fallback:rfq:` entries in --protocols; Native, Liquorice and Euclid always connect
+    /// directly.
     #[arg(long, env)]
     pub nexus_url: Option<String>,
 

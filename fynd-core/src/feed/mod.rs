@@ -79,7 +79,8 @@ pub(crate) struct TychoFeedConfig {
     /// How far, in block time, a `Delayed` protocol may lag the last updated block before its
     /// pools are excluded from routing.
     pub(crate) max_sync_lag: Duration,
-    /// Stream each Bebop and Hashflow venue as one component instead of one per token pair.
+    /// Stream each Bebop, Hashflow and Euclid venue as one component instead of one per token
+    /// pair.
     pub(crate) aggregate_rfqs: bool,
     /// External liquidity a caller added beside the `--protocols` venues.
     pub(crate) external_liquidity: Vec<book_stream::ExternalLiquidity>,

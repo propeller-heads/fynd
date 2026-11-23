@@ -289,8 +289,8 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Streams each Bebop and Hashflow venue as one component instead of one per token pair
-    /// (default: `false`). Metric, Native and Liquorice always stream per pair.
+    /// Streams each Bebop, Hashflow and Euclid venue as one component instead of one per token
+    /// pair (default: `false`). Metric, Native and Liquorice always stream per pair.
     pub fn aggregate_rfqs(mut self, enabled: bool) -> Self {
         self.fynd_builder = self
             .fynd_builder
@@ -301,8 +301,8 @@ impl FyndRPCBuilder {
     /// Reads Bebop, Hashflow and Metric prices, and the spot prices, pool depths and token
     /// prices of the market, from the `fynd-nexus` service at `url`, such as
     /// `http://fynd-nexus:3000`, instead of connecting to those venues and computing them
-    /// (default: connect and compute). The service must run the market. Native and Liquorice
-    /// always connect directly.
+    /// (default: connect and compute). The service must run the market. Native, Liquorice
+    /// and Euclid always connect directly.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
         self.fynd_builder = self.fynd_builder.nexus_url(url);
         self
