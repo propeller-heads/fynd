@@ -754,8 +754,8 @@ impl FyndBuilder {
         self
     }
 
-    /// Streams each Bebop and Hashflow venue as one component instead of one per token pair
-    /// (default: `false`). Metric, Native and Liquorice always stream per pair.
+    /// Streams each Bebop, Hashflow and Euclid venue as one component instead of one per token
+    /// pair (default: `false`). Metric, Native and Liquorice always stream per pair.
     pub fn aggregate_rfqs(mut self, enabled: bool) -> Self {
         self.aggregate_rfqs = enabled;
         self
@@ -808,7 +808,7 @@ impl FyndBuilder {
     /// Reads Bebop, Hashflow and Metric prices, and the spot prices, pool depths and token
     /// prices of the market, from the `fynd-nexus` service at `url`, such as
     /// `http://fynd-nexus:3000`, instead of connecting to those venues and computing them
-    /// (default: connect and compute). Native and Liquorice always connect directly. The
+    /// (default: connect and compute). Native, Liquorice and Euclid always connect directly. The
     /// books are still built here, and firm quotes still go straight to the venue.
     ///
     /// While the service's snapshots are out of sync (none yet, or too many blocks old) the pod

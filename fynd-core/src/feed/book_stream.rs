@@ -149,11 +149,11 @@ impl BookStream {
     ///
     /// The venues price their books' TVL in USD stablecoins, so `config.min_tvl` is read here as a
     /// USD amount — unlike the native-token threshold the Tycho component filter takes. With
-    /// `config.aggregate_rfqs`, Bebop and Hashflow each stream as one component for all their
-    /// pairs. External sources get an [`ExternalLiquidityConfig`] with the same chain, tokens and
-    /// floor. With `config.nexus_url`, Bebop, Hashflow and Metric get their prices from
-    /// that service instead of from the venue, and Metric needs no API key. Native and Liquorice
-    /// connect directly either way.
+    /// `config.aggregate_rfqs`, Bebop, Hashflow and Euclid each stream as one component for all
+    /// their pairs. External sources get an [`ExternalLiquidityConfig`] with the same chain, tokens
+    /// and floor. With `config.nexus_url`, Bebop, Hashflow and Metric get their prices from
+    /// that service instead of from the venue, and Metric needs no API key. Native, Liquorice
+    /// and Euclid connect directly either way.
     ///
     /// # Errors
     ///
