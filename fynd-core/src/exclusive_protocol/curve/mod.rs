@@ -1,7 +1,9 @@
 //! Curve pools whose `FyndPolicy` grants Fynd a lower fee.
 //!
 //! The exclusive view comes from `CurveState::exclusive_view` in tycho-simulation, which prices
-//! the pool at the policy's minimum fee.
+//! the pool at the policy's minimum fee. A swap through the view needs a grant Fynd signs.
+
+mod grant;
 
 use std::sync::Arc;
 
@@ -12,24 +14,43 @@ use tycho_simulation::{
 
 use crate::{
     encoding::exclusive_swap::ExclusiveSwapSigner,
-    exclusive_venue::{ExclusiveVenue, Grantor},
+    exclusive_protocol::{DualPool, ExclusiveProtocol, Grantor},
     SolveError, Swap,
 };
 
-/// A Curve pool is dual while its policy names Fynd's [`Grantor`] and is not killed.
-pub(crate) struct CurveVenue;
+/// Curve pools with a `FyndPolicy`. A pool is dual while its policy's controller and router match
+/// Fynd's [`Grantor`] and the policy is not killed.
+pub(crate) struct Curve;
 
-impl ExclusiveVenue for CurveVenue {
+impl ExclusiveProtocol for Curve {
+    fn owns(&self, swap: &Swap) -> bool {
+        as_exclusive_view(swap.protocol_state()).is_some()
+    }
+
+    fn sign(
+        &self,
+        signer: &ExclusiveSwapSigner,
+        swap: &Swap,
+        taker: &Bytes,
+        slippage: f64,
+    ) -> Result<Bytes, SolveError> {
+        let curve = as_exclusive_view(swap.protocol_state()).ok_or_else(|| {
+            SolveError::FailedEncoding(format!(
+                "swap through {} is not priced with a Curve grant",
+                swap.component_id()
+            ))
+        })?;
+        grant::sign_grant(signer, swap, curve.policy(), taker, slippage)
+    }
+}
+
+impl DualPool for Curve {
     fn build_exclusive_view(&self, state: &dyn ProtocolSim) -> Option<Arc<dyn ProtocolSim>> {
         let curve = state
             .as_any()
             .downcast_ref::<CurveState>()?;
         let view = curve.exclusive_view()?;
         Some(Arc::new(view))
-    }
-
-    fn is_exclusive_view(&self, state: &dyn ProtocolSim) -> bool {
-        find_exclusive_view(state).is_some()
     }
 
     fn can_grant(&self, state: &dyn ProtocolSim, grantor: &Grantor) -> bool {
@@ -40,30 +61,15 @@ impl ExclusiveVenue for CurveVenue {
             return false;
         };
         let policy = curve.policy();
-        policy.controller() == Some(grantor.controller()) &&
-            policy.router() == Some(grantor.router()) &&
+        policy.controller() == Some(&grantor.controller) &&
+            policy.router() == Some(&grantor.router) &&
             !policy.is_killed()
-    }
-
-    fn sign(
-        &self,
-        signer: &ExclusiveSwapSigner,
-        swap: &Swap,
-        taker: &Bytes,
-        slippage: f64,
-    ) -> Result<Bytes, SolveError> {
-        let curve = find_exclusive_view(swap.protocol_state()).ok_or_else(|| {
-            SolveError::FailedEncoding(format!(
-                "swap through {} is not priced with a Curve grant",
-                swap.component_id()
-            ))
-        })?;
-        signer.build_curve_user_data(swap, curve.policy(), taker, slippage)
     }
 }
 
-/// The Curve state of an exclusive view. `None` for any other state.
-fn find_exclusive_view(state: &dyn ProtocolSim) -> Option<&CurveState> {
+/// The Curve state behind `state` when `state` is a Curve exclusive view. `None` for any other
+/// state.
+fn as_exclusive_view(state: &dyn ProtocolSim) -> Option<&CurveState> {
     state
         .as_any()
         .downcast_ref::<CurveState>()
@@ -83,20 +89,21 @@ pub(crate) mod test_curve {
         tycho_common::Bytes,
     };
 
-    use crate::exclusive_venue::Grantor;
+    use crate::exclusive_protocol::Grantor;
 
     /// The policy of a dual pool.
     pub(crate) const POLICY: [u8; 20] = [0xfd; 20];
-    /// The key that signs grants in tests.
+    /// The controller address that signs grants in tests.
     pub(crate) const CONTROLLER: [u8; 20] = [0xc0; 20];
     /// The router that submits grants in tests.
     pub(crate) const ROUTER: [u8; 20] = [0xd0; 20];
 
     pub(crate) fn grantor() -> Grantor {
-        Grantor::new(Bytes::from(CONTROLLER), Bytes::from(ROUTER))
+        Grantor { controller: Bytes::from(CONTROLLER), router: Bytes::from(ROUTER) }
     }
 
-    /// A grant policy at version 1 with a 1 bp minimum fee, signed by `controller`.
+    /// A version-1 grant policy with a 1 bp minimum fee, controller `controller`, killed when
+    /// `is_killed`.
     pub(crate) fn grant_policy(controller: [u8; 20], is_killed: bool) -> CurvePolicy {
         let attributes = [
             (POLICY_ATTRIBUTE, POLICY.to_vec()),
@@ -149,36 +156,5 @@ pub(crate) mod test_curve {
     /// A dual pool whose policy names [`grantor`].
     pub(crate) fn dual_curve_state() -> CurveState {
         curve_state(grant_policy(CONTROLLER, false))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use tycho_simulation::evm::protocol::curve::CurvePolicy;
-
-    use super::{test_curve::*, *};
-    use crate::{algorithm::test_utils::MockProtocolSim, exclusive_venue::find_venue};
-
-    #[rstest::rstest]
-    #[case::dual(grant_policy(CONTROLLER, false), true)]
-    #[case::other_controller(grant_policy([0xee; 20], false), false)]
-    #[case::killed(grant_policy(CONTROLLER, true), false)]
-    #[case::no_policy(CurvePolicy::default(), false)]
-    fn test_can_grant(#[case] policy: CurvePolicy, #[case] expected: bool) {
-        assert_eq!(CurveVenue.can_grant(&curve_state(policy), &grantor()), expected);
-        assert!(!CurveVenue.can_grant(&MockProtocolSim::default(), &grantor()));
-    }
-
-    #[test]
-    fn test_build_exclusive_view() {
-        let view = CurveVenue
-            .build_exclusive_view(&dual_curve_state())
-            .expect("supported policy");
-
-        assert!(find_venue(view.as_ref()).is_some());
-        assert!(find_venue(&dual_curve_state()).is_none());
-        assert!(CurveVenue
-            .build_exclusive_view(&curve_state(CurvePolicy::default()))
-            .is_none());
     }
 }

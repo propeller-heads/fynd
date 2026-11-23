@@ -29,7 +29,7 @@ use crate::{
         router_call::{RouterCall, RouterLayout},
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
-    exclusive_venue::{find_venue, Grantor},
+    exclusive_protocol::{protocol_of, Grantor},
     fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
@@ -351,7 +351,8 @@ impl Encoder {
         self
     }
 
-    /// The key and router of the exclusive swaps this encoder signs, if it signs any.
+    /// The controller address and router of the exclusive swaps this encoder signs, if it signs
+    /// any.
     pub(crate) fn grantor(&self) -> Option<Grantor> {
         self.exclusive_swap_signer
             .as_ref()
@@ -775,10 +776,13 @@ impl Encoder {
                     .committed_amount_out()
                     .is_some()
                 {
-                    let user_data = match find_venue(route_swap.protocol_state()) {
-                        Some(venue) => venue.sign(signer, route_swap, quote.sender(), slippage)?,
-                        None => signer.build_user_data(route_swap, slippage)?,
-                    };
+                    let protocol = protocol_of(route_swap).ok_or_else(|| {
+                        SolveError::FailedEncoding(format!(
+                            "committed leg through {} is not an exclusive leg",
+                            route_swap.component_id()
+                        ))
+                    })?;
+                    let user_data = protocol.sign(signer, route_swap, quote.sender(), slippage)?;
                     Ok(solution_swap.with_user_data(user_data))
                 } else {
                     Ok(solution_swap)

@@ -11,5 +11,3 @@ pub mod fee_fetcher;
 pub mod hooks;
 pub mod router_call;
 pub mod router_fees;
-
-mod curve_grant;

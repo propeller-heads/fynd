@@ -12,8 +12,7 @@ use tycho_simulation::tycho_common::models::Address;
 use crate::{
     bps,
     derived::TokenGasPrices,
-    exclusive_venue::find_venue,
-    feed::exclusivity::is_exclusive,
+    exclusive_protocol::protocol_of,
     types::{Commitment, OrderQuote, SurplusInfo, Swap},
 };
 
@@ -36,12 +35,13 @@ pub(crate) enum ExclusiveRouteShape {
     DoesNotReachOutput,
 }
 
-/// Whether `swap` goes through an exclusive component, or through a dual pool priced with a grant.
+/// Whether `swap` is an exclusive leg: it goes through an exclusive component, or through a dual
+/// pool priced with a grant.
 pub(crate) fn is_exclusive_leg(swap: &Swap) -> bool {
-    is_exclusive(swap.protocol_component()) || find_venue(swap.protocol_state()).is_some()
+    protocol_of(swap).is_some()
 }
 
-/// Whether any swap of `swaps` goes through an exclusive component.
+/// Whether any swap of `swaps` is an exclusive leg.
 pub(crate) fn routes_through_exclusive(swaps: &[Swap]) -> bool {
     swaps.iter().any(is_exclusive_leg)
 }

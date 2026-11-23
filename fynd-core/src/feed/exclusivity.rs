@@ -11,9 +11,10 @@
 //! A component is classified from its own data via `is_exclusive`, applied generically to every
 //! ingested component.
 //!
-//! A pool of an [`ExclusiveVenue`](crate::exclusive_venue::ExclusiveVenue) is dual, not exclusive:
-//! public workers route through it at its own price, and exclusive workers through its exclusive
-//! view.
+//! A dual pool is not exclusive: `PublicOnly` workers route through it at its own price, and
+//! `IncludeExclusive` workers through its exclusive view. A pool is dual when a
+//! `DualPool` protocol can price it with a grant Fynd signs.
+//! See `crate::exclusive_protocol`.
 
 use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
