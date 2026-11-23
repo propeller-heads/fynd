@@ -127,12 +127,13 @@ alloy = { version = "1", features = [
 # Default features minus "http2": that feature is the only thing pulling h2 ^0.3, which has no
 # patch for RUSTSEC-2026-0258. The server binds plain TCP with no TLS, so HTTP/2 was only ever
 # reachable via h2c prior knowledge. Re-enable once actix-http moves to h2 0.4.
+# Also minus "cookies": no handler reads or sets cookies, and actix-web 4 pins cookie 0.16, which has
+# no patch for RUSTSEC-2026-0594.
 actix-web = { version = "4", default-features = false, features = [
     "macros",
     "compress-brotli",
     "compress-gzip",
     "compress-zstd",
-    "cookies",
     "unicode",
     "compat",
     "ws",
