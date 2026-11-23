@@ -27,10 +27,7 @@ use tycho_simulation::tycho_common::models::{protocol::ProtocolComponent, Addres
 
 use crate::{
     algorithm::sim_guard::GuardedProtocolSim,
-    feed::{
-        component_filter::protocol_matches, events::MarketEvent, exclusivity::is_exclusive,
-        market_data::MarketDataView,
-    },
+    feed::{component_filter::protocol_matches, events::MarketEvent, market_data::MarketDataView},
     replay::replay_route,
     types::{ComponentId, FallbackLeg, Route, RouteConstraints, RouteRejection, Swap},
 };
@@ -271,7 +268,7 @@ fn is_excluded(
         return true;
     }
     let Some(component) = market.get_component(candidate) else { return false };
-    if is_exclusive(component) || market.is_priced_exclusive(candidate) {
+    if market.is_exclusive_liquidity(component) {
         return true;
     }
     filter

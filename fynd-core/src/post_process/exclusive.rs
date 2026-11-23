@@ -1,4 +1,5 @@
-//! Replaces parts of a route with one swap through an exclusive component.
+//! Replaces parts of a route with one exclusive leg: a swap through an exclusive component, or
+//! through a dual pool priced with a grant.
 
 use async_trait::async_trait;
 use num_bigint::BigInt;
@@ -13,7 +14,6 @@ use crate::{
     },
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
-        exclusivity::is_exclusive,
         market_data::{MarketData, MarketDataView},
     },
     post_process::{
@@ -99,19 +99,18 @@ impl RoutePostProcessor for ExclusiveSwapReplacer {
     }
 }
 
-/// Whether a replacement swap can go through `component`: it is exclusive, or `view` prices it with
-/// a grant.
+/// Whether a replacement swap can go through `component`: a swap through it is an exclusive leg.
 fn is_exclusive_member(view: &MarketDataView<'_>, component: &ProtocolComponent) -> bool {
-    is_exclusive(component) || view.is_priced_exclusive(&component.id)
+    view.is_exclusive_liquidity(component)
 }
 
-/// Replaces a target with one swap through an exclusive component, or splits a target, one swap or
-/// a segment, between its swaps and the exclusive component.
+/// Replaces a target with one exclusive leg, or splits a target, one swap or a segment, between its
+/// swaps and the exclusive leg's pool.
 struct ExclusiveReplacementFinder;
 
 impl ReplacementFinder for ExclusiveReplacementFinder {
-    /// An exclusive component fills partially, so it accepts a target at any index of the route. It
-    /// does not accept a route that already has an exclusive leg.
+    /// An exclusive leg fills partially, so it accepts a target at any index of the route. It does
+    /// not accept a route that already has an exclusive leg.
     fn can_replace_target(
         &self,
         swap: &Swap,

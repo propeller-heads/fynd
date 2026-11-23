@@ -16,7 +16,7 @@ use num_cpus;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{broadcast, oneshot},
+    sync::{broadcast, oneshot, RwLock},
     task::JoinHandle,
 };
 use tycho_execution::encoding::evm::swap_encoder::swap_encoder_registry::SwapEncoderRegistry;
@@ -39,12 +39,13 @@ use crate::{
         ComputationManagerConfig, DerivedComputation, SharedDerivedDataRef,
     },
     encoding::{encoder::Encoder, fee_fetcher::RouterFeeFetcher, router_fees::SharedRouterFees},
+    exclusive_protocol::Grantor,
     feed::{
         book_stream::ExternalLiquidity,
         events::{MarketEvent, MarketEventHandler},
         external_liquidity::{ExternalLiquidityConfig, LiquiditySnapshot},
         gas::GasPriceFetcher,
-        market_data::MarketData,
+        market_data::{MarketData, MarketState},
         metrics_sampler::MetricsSampler,
         tycho_feed::{PendingFeedSetup, TychoFeed},
         DataFeedError, TychoFeedConfig,
@@ -1086,8 +1087,12 @@ impl FyndBuilder {
     /// Builds the market stores and the services that keep them current, without starting them.
     ///
     /// Takes the settings it consumes out of the builder, which the caller no longer reads.
-    fn assemble_market(&mut self) -> Result<(MarketStores, MarketServices), SolverBuildError> {
-        let market_data = MarketData::new_shared();
+    fn assemble_market(
+        &mut self,
+        grantor: Option<Grantor>,
+    ) -> Result<(MarketStores, MarketServices), SolverBuildError> {
+        let market_data =
+            MarketData::new(Arc::new(RwLock::new(MarketState::new().with_grantor(grantor))));
 
         let tycho_feed_config = TychoFeedConfig::new(
             std::mem::take(&mut self.tycho_url),
@@ -1216,9 +1221,7 @@ impl FyndBuilder {
             self = self.add_default_price_providers();
         }
 
-        let (mut stores, services) = self.assemble_market()?;
-
-        let encoder = match self.encoder {
+        let encoder = match self.encoder.take() {
             Some(enc) => enc,
             None => {
                 let registry = SwapEncoderRegistry::new(self.chain)
@@ -1228,22 +1231,19 @@ impl FyndBuilder {
                     .map_err(|e| SolverBuildError::Encoder(e.to_string()))?
             }
         };
-        let encoder = match self.calldata_watermark {
+        let encoder = match self.calldata_watermark.take() {
             Some(watermark) => encoder.with_calldata_watermark(watermark),
             None => encoder,
         };
-        let encoder = match self.jit_router_address {
+        let encoder = match self.jit_router_address.take() {
             Some(jit_router) => encoder
                 .with_jit_router(jit_router)
                 .map_err(|e| SolverBuildError::Encoder(e.to_string()))?,
             None => encoder,
         };
 
-        // Workers read the market through this handle, so an exclusive worker knows which dual
-        // pools Fynd can sign for.
-        stores.market_data = stores
-            .market_data
-            .with_grantor(encoder.grantor());
+        // The market builds a dual pool's exclusive view only when this encoder can sign for it.
+        let (stores, services) = self.assemble_market(encoder.grantor())?;
 
         let mut solver_pool_handles: Vec<SolverPoolHandle> = Vec::new();
         let mut worker_pools: Vec<WorkerPool> = Vec::new();
@@ -1433,7 +1433,7 @@ impl FyndBuilder {
     /// Returns [`SolverBuildError`] if the RPC client, the computation manager or the gas token
     /// cannot be set up.
     pub fn build_market(mut self) -> Result<MarketFeed, SolverBuildError> {
-        let (stores, services) = self.assemble_market()?;
+        let (stores, services) = self.assemble_market(None)?;
         let MarketStores { market_data, derived_data, market_event_tx, derived_event_tx } = stores;
         let tasks = services.start(TychoFeed::run);
         Ok(MarketFeed {
