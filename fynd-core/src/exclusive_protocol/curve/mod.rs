@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Curve pools with a `FyndPolicy`. A pool is dual while its policy's controller and router match
-/// Fynd's [`Grantor`] and the policy is not killed.
+/// Fynd's [`Grantor`], its minimum fee is a valid Curve fee, and the policy is not killed.
 pub(crate) struct Curve;
 
 impl ExclusiveProtocol for Curve {
@@ -63,7 +63,8 @@ impl DualPool for Curve {
         let policy = curve.policy();
         policy.controller() == Some(&grantor.controller) &&
             policy.router() == Some(&grantor.router) &&
-            !policy.is_killed()
+            !policy.is_killed() &&
+            grant::min_fee(policy).is_some()
     }
 }
 

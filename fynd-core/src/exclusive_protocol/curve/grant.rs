@@ -44,6 +44,13 @@ sol! {
 /// 50% the cap still stops a grant being spent at a multiple of the size it was quoted for.
 const INPUT_CAP_TOLERANCE_BPS: u32 = 5_000;
 
+/// The policy's minimum fee, when it is a valid Curve fee: at most `FEE_DENOMINATOR`.
+pub(super) fn min_fee(policy: &CurvePolicy) -> Option<u64> {
+    u64::try_from(policy.min_fee())
+        .ok()
+        .filter(|min_fee| *min_fee <= FEE_DENOMINATOR)
+}
+
 /// Signs a grant for `swap` through a dual Curve pool under `policy`, and returns it packed as the
 /// swap's `user_data`.
 ///
@@ -53,8 +60,8 @@ const INPUT_CAP_TOLERANCE_BPS: u32 = 5_000;
 /// to the swap's committed amount.
 ///
 /// # Errors
-/// Errors if `swap` has no committed amount, the policy's `min_fee` overflows `u64`, the policy
-/// has no address, the taker or policy is not a 20-byte address, the pool's `coins`
+/// Errors if `swap` has no committed amount, the policy's `min_fee` is above `FEE_DENOMINATOR`, the
+/// policy has no address, the taker or policy is not a 20-byte address, the pool's `coins`
 /// attribute is missing, malformed or does not hold `swap`'s input token, an amount overflows
 /// `U256`, the nonce counter is exhausted, or signing fails.
 pub(super) fn sign_grant(
@@ -69,8 +76,12 @@ pub(super) fn sign_grant(
         .ok_or_else(|| {
             SolveError::FailedEncoding("Curve grant leg is missing committed_amount_out".into())
         })?;
-    let min_fee = u64::try_from(policy.min_fee())
-        .map_err(|_| SolveError::FailedEncoding("Curve policy min_fee overflows u64".into()))?;
+    let min_fee = min_fee(policy).ok_or_else(|| {
+        SolveError::FailedEncoding(format!(
+            "Curve policy min_fee {} is above the fee denominator {FEE_DENOMINATOR}",
+            policy.min_fee()
+        ))
+    })?;
     let scale_input = |factor_bps: u32| {
         to_u256(&bps::scale_truncating(swap.amount_in(), factor_bps), "grant input amount")
     };
@@ -79,7 +90,7 @@ pub(super) fn sign_grant(
         coin_in: find_coin_index(swap.protocol_component(), swap.token_in())?,
         min_amount_in: scale_input(input_floor_factor_bps(slippage))?,
         max_amount_in: scale_input(bps::DENOMINATOR.saturating_add(INPUT_CAP_TOLERANCE_BPS))?,
-        fee: U256::from(derive_grant_fee(swap.amount_out(), committed, min_fee)),
+        fee: U256::from(derive_grant_fee(swap.amount_out(), committed, min_fee)?),
         nonce: signer.next_nonce()?,
         deadline: signer.next_deadline()?,
     };
@@ -101,19 +112,21 @@ pub(super) fn sign_grant(
 }
 
 /// The highest fee that still pays out `committed`, given the output `gross` at `min_fee`. Never
-/// below `min_fee`, which the policy enforces.
-fn derive_grant_fee(gross: &BigUint, committed: &BigUint, min_fee: u64) -> u64 {
+/// below `min_fee`, which the policy enforces. `min_fee` must be at most `FEE_DENOMINATOR`.
+///
+/// # Errors
+/// Errors if the fee does not fit in a `u64`, which a `min_fee` within the denominator rules out.
+fn derive_grant_fee(gross: &BigUint, committed: &BigUint, min_fee: u64) -> Result<u64, SolveError> {
     if committed >= gross {
-        return min_fee;
+        return Ok(min_fee);
     }
     // The output scales with `FEE_DENOMINATOR - fee`, so the fee may rise until the output falls
     // to `committed`. Rounding the kept share up rounds the fee down.
     let kept_share = committed * (FEE_DENOMINATOR - min_fee);
     let kept = (kept_share + gross - 1u32) / gross;
     let fee = BigUint::from(FEE_DENOMINATOR) - kept;
-    u64::try_from(fee)
-        .unwrap_or(min_fee)
-        .max(min_fee)
+    u64::try_from(&fee)
+        .map_err(|_| SolveError::FailedEncoding(format!("Curve grant fee {fee} overflows u64")))
 }
 
 /// Finds `token`'s index in the pool's `coins` attribute.
