@@ -535,7 +535,7 @@ impl TychoFeed {
                 );
                 market_data.remove_components(removed_components.keys());
                 market_data.upsert_tokens(maybe_new_tokens);
-                market_data.update_states(updated_or_new_states);
+                market_data.update_states_at_block(new_block_number, updated_or_new_states);
                 market_data.update_sync_status(sync_states, self.config.max_sync_lag);
 
                 added_topology = upserted
@@ -1246,6 +1246,32 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_state_block() {
+        let market_data = new_shared_market_data();
+        let feed = TychoFeed::new(create_test_config(), market_data.clone());
+        let _events = feed.subscribe();
+        let (first, second) = (
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let state = || Box::new(FeedMockProtocolSim::new(1.0)) as Box<dyn ProtocolSim>;
+        let both = HashMap::from([(first.to_string(), state()), (second.to_string(), state())]);
+        let only_first = HashMap::from([(first.to_string(), state())]);
+
+        for update in
+            [Update::new(100, both, HashMap::new()), Update::new(101, only_first, HashMap::new())]
+        {
+            feed.handle_tycho_message(update)
+                .await
+                .expect("an update applies");
+        }
+
+        let data = market_data.read().await;
+        assert_eq!(data.state_block(first), Some(101));
+        assert_eq!(data.state_block(second), Some(100), "an update without it keeps its block");
     }
 
     #[tokio::test]
