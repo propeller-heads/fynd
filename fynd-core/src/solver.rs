@@ -50,6 +50,7 @@ use crate::{
         DataFeedError, TychoFeedConfig,
     },
     graph::EdgeWeightUpdaterWithDerived,
+    nexus::client::NexusClient,
     post_process::{
         registry::check_post_processor_order, PostProcessorOrderError, PostProcessorRegistry,
         UnknownPostProcessorError,
@@ -580,6 +581,7 @@ pub struct FyndBuilder {
     reconnect_delay: Duration,
     blocklisted_components: FxHashSet<String>,
     partial_blocks: bool,
+    pamm_simulation_overrides: bool,
     tycho_subscription_buffer_size: Option<usize>,
     max_sync_lag: Duration,
     aggregate_rfqs: bool,
@@ -631,6 +633,7 @@ impl FyndBuilder {
             reconnect_delay: defaults::RECONNECT_DELAY,
             blocklisted_components: FxHashSet::default(),
             partial_blocks: false,
+            pamm_simulation_overrides: true,
             tycho_subscription_buffer_size: None,
             max_sync_lag: defaults::MAX_SYNC_LAG,
             aggregate_rfqs: false,
@@ -726,6 +729,17 @@ impl FyndBuilder {
         self
     }
 
+    /// Whether the pAMM price level stream also reads Titan's quote stream (default: `true`).
+    ///
+    /// The quote stream is a second websocket that carries the account state Titan priced each
+    /// pAMM state on. Each pAMM swap then carries those simulation overrides, and simulation runs
+    /// its route on them. Quoting never reads them, so turning them off only drops the websocket,
+    /// its buffer and the overrides. Has no effect without a `pricelevelstream:` protocol.
+    pub fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.pamm_simulation_overrides = enabled;
+        self
+    }
+
     /// Sets the number of delta messages buffered for each Tycho subscription. Leaving this
     /// unset preserves Tycho's native default.
     pub fn tycho_subscription_buffer_size(mut self, size: usize) -> Self {
@@ -792,10 +806,18 @@ impl FyndBuilder {
         self
     }
 
-    /// Reads Bebop, Hashflow and Metric prices from the `fynd-nexus` service at `url`, such
-    /// as `http://fynd-nexus:3000`, instead of connecting to those venues (default: connect
-    /// directly). Native and Liquorice always connect directly. The books are still built here,
-    /// and firm quotes still go straight to the venue.
+    /// Reads Bebop, Hashflow and Metric prices, and the spot prices, pool depths and token
+    /// prices of the market, from the `fynd-nexus` service at `url`, such as
+    /// `http://fynd-nexus:3000`, instead of connecting to those venues and computing them
+    /// (default: connect and compute). Native and Liquorice always connect directly. The
+    /// books are still built here, and firm quotes still go straight to the venue.
+    ///
+    /// While the service's snapshots are out of sync (none yet, or too many blocks old) the pod
+    /// computes the spot prices, pool depths and token prices itself, and is not kept from becoming
+    /// ready. It goes back to the service after its snapshots have been in sync for a few blocks.
+    ///
+    /// The service must run the market, which it does with `--tycho-url`. Computations added
+    /// with [`with_computation`](Self::with_computation) still run here.
     pub fn nexus_url(mut self, url: impl Into<String>) -> Self {
         self.nexus_url = Some(url.into());
         self
@@ -1081,12 +1103,14 @@ impl FyndBuilder {
         .traded_n_days_ago(self.traded_n_days_ago)
         .blocklisted_components(std::mem::take(&mut self.blocklisted_components))
         .partial_blocks(self.partial_blocks)
+        .pamm_simulation_overrides(self.pamm_simulation_overrides)
         .max_sync_lag(self.max_sync_lag)
         .aggregate_rfqs(self.aggregate_rfqs)
         .external_liquidity(std::mem::take(&mut self.external_liquidity));
 
-        let tycho_feed_config = match self.nexus_url.take() {
-            Some(url) => tycho_feed_config.nexus_url(url),
+        let nexus_url = self.nexus_url.take();
+        let tycho_feed_config = match &nexus_url {
+            Some(url) => tycho_feed_config.nexus_url(url.clone()),
             None => tycho_feed_config,
         };
         let tycho_feed_config = match self.tycho_subscription_buffer_size {
@@ -1112,6 +1136,13 @@ impl FyndBuilder {
         }
         if let Some(interval) = self.pricing_min_pass_interval {
             computation_config = computation_config.with_pricing_min_pass_interval(interval);
+        }
+        if let Some(url) = &nexus_url {
+            let client = NexusClient::new(url)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
+            computation_config = computation_config
+                .with_nexus_client(client, &self.chain)
+                .map_err(|e| SolverBuildError::ComputationManager(e.to_string()))?;
         }
         // ComputationManager::new returns a broadcast receiver that we don't need here —
         // workers subscribe via computation_manager.event_sender() below.
@@ -2227,6 +2258,24 @@ mod tests {
         };
 
         assert!(matches!(error, SolverBuildError::RpcClient(_)), "got: {error:?}");
+    }
+
+    #[tokio::test]
+    async fn test_build_market_invalid_nexus_url() {
+        let Err(error) = market_builder("https://example.invalid")
+            .nexus_url("shared:3000")
+            .build_market()
+        else {
+            panic!("a nexus URL without a scheme must not build");
+        };
+
+        assert!(matches!(error, SolverBuildError::ComputationManager(_)), "got: {error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("http:// or https://"),
+            "got: {error}"
+        );
     }
 
     /// A pool budget above the router deadline cannot take effect for a request that does not

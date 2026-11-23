@@ -80,7 +80,7 @@ This modular architecture allows users to:
 │                         MarketState (Arc<RwLock<>>, via MarketData handle)          │
 │  ┌────────────────────────────────────────────────────────────────────────────┐    │
 │  │  components: HashMap<ComponentId, ProtocolComponent>                       │    │
-│  │  simulation_states: HashMap<ComponentId, Box<dyn ProtocolSim>>             │    │
+│  │  simulation_states: HashMap<ComponentId, Arc<dyn ProtocolSim>>             │    │
 │  │  tokens: HashMap<Address, Token>                                           │    │
 │  │  gas_price: Option<BlockGasPrice>                                          │    │
 │  │  protocol_sync_status: HashMap<String, SynchronizerState>                  │    │
@@ -161,7 +161,7 @@ Orchestrates quote requests across multiple worker pools:
 4. Refines gas estimates using `estimate_gas_usage` (tycho-execution) before cross-pool ranking — algorithms use a fast naive estimate internally; this step applies a more accurate one that accounts for token transfers and protocol overhead
 5. Drops candidates whose pAMM fallback cannot clear `min_amount_out`, then selects the best solution by refined `amount_out_net_gas`
 6. Optionally encodes winning solutions into on-chain transactions (when `EncodingOptions` are provided). When the best candidate fails to encode, the next candidate without an RFQ leg is tried, within the encoding retry budget
-7. Optionally simulates the encoded quotes (`--enable-simulation`, requested per quote with `EncodingOptions.simulate`)
+7. Optionally simulates the encoded quotes (`--enable-simulation`, requested per quote with `EncodingOptions.simulate`). A route through pAMM swaps whose states carry Titan's simulation overrides runs on the account state Titan priced them on: on the parent of the block Titan quoted, as that block. `finalize_quote` counts each served quote's pAMM swaps with and without overrides, and the response carries each swap's overrides
 8. Reports failures with error types and metrics
 
 ***
@@ -241,7 +241,7 @@ Graph management infrastructure:
 
 `MarketState` is the single source of truth for all market state. Contains components, simulation states, tokens, gas prices, sync status, and block info. Protected by `Arc<RwLock<>>` (write-preferring). `MarketData` is the cheap-to-clone shared handle used to access it — call `read()` for a base view or `read_labeled(label)` for an overlay-aware view.
 
-Provides `extract_subset_with_overlay()` for creating filtered snapshots that algorithms can use without holding the main lock.
+Provides `extract_subset_with_overlay()` for creating filtered snapshots that algorithms can use without holding the main lock. A snapshot shares the simulation states with the market (`Arc`), so taking one costs a pointer copy per component, not a copy of each state.
 
 ***
 
@@ -318,7 +318,7 @@ WorkerPoolRouter (drop pAMM-fallback candidates below min_amount_out, select bes
 Encoder (encode solution into on-chain transaction; on failure, retry next non-RFQ candidate)
     │
     ▼ (optional)
-QuoteSimulator (simulate the encoded quote)
+QuoteSimulator (simulate the encoded quote; pAMM swaps on Titan's simulation overrides)
     │
     ▼
 JSON Response to Client

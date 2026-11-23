@@ -7,9 +7,12 @@
 use std::{fmt, str::FromStr};
 
 use num_bigint::BigUint;
+use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::tycho_common::models::Address;
+use tycho_simulation::{
+    tycho_common::models::Address, tycho_core::simulation::protocol_sim::Price,
+};
 
 use crate::{
     derived::{
@@ -163,6 +166,15 @@ impl SpotPriceSnapshot {
         }
         Self { block, entries }
     }
+
+    /// The prices of the entries. A direction listed twice keeps its last price.
+    pub fn into_spot_prices(self) -> SpotPrices {
+        let mut prices = SpotPrices::with_capacity_and_hasher(self.entries.len(), FxBuildHasher);
+        for entry in self.entries {
+            prices.insert((entry.component_id, entry.token_in, entry.token_out), entry.price);
+        }
+        prices
+    }
 }
 
 impl PoolDepthSnapshot {
@@ -179,6 +191,16 @@ impl PoolDepthSnapshot {
         }
         Self { block, entries }
     }
+
+    /// The depths of the entries. A direction listed twice keeps its last depth.
+    pub fn into_depths(self) -> ComponentDepths {
+        let mut depths =
+            ComponentDepths::with_capacity_and_hasher(self.entries.len(), FxBuildHasher);
+        for entry in self.entries {
+            depths.insert((entry.component_id, entry.token_in, entry.token_out), entry.depth);
+        }
+        depths
+    }
 }
 
 impl TokenGasPriceSnapshot {
@@ -193,6 +215,18 @@ impl TokenGasPriceSnapshot {
             });
         }
         Self { block, entries }
+    }
+
+    /// The prices of the entries. A token listed twice keeps its last price.
+    pub fn into_token_prices(self) -> TokenGasPrices {
+        let mut prices = TokenGasPrices::default();
+        for entry in self.entries {
+            prices.insert(
+                entry.token,
+                Price { numerator: entry.numerator, denominator: entry.denominator },
+            );
+        }
+        prices
     }
 }
 
@@ -293,6 +327,33 @@ mod tests {
     )]
     fn test_snapshot_json_large_integers(#[case] actual: Value, #[case] expected: Value) {
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_snapshots_convert_back_into_the_maps_they_came_from() {
+        let spot = SpotPriceSnapshot::from_spot_prices(&spot_prices(), 9);
+        let depth = PoolDepthSnapshot::from_depths(&depths(), 9);
+        let token = TokenGasPriceSnapshot::from_token_prices(&token_prices(), 9);
+
+        assert_eq!(spot.into_spot_prices(), spot_prices());
+        assert_eq!(depth.into_depths(), depths());
+        assert_eq!(token.into_token_prices(), token_prices());
+    }
+
+    #[test]
+    fn test_duplicate_entries_keep_the_last() {
+        let entry = |price| SpotPriceEntry {
+            component_id: "pool".to_string(),
+            token_in: address(1),
+            token_out: address(2),
+            price,
+        };
+        let snapshot = SpotPriceSnapshot { block: 1, entries: vec![entry(1.0), entry(2.0)] };
+
+        let prices = snapshot.into_spot_prices();
+
+        assert_eq!(prices.len(), 1);
+        assert_eq!(prices[&("pool".to_string(), address(1), address(2))], 2.0);
     }
 
     #[rstest]
