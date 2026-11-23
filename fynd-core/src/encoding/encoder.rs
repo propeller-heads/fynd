@@ -1399,9 +1399,18 @@ mod tests {
     const LOCKER: alloy::primitives::Address = alloy::primitives::Address::repeat_byte(0x77);
 
     fn ekubo_signed_swap(committed: Option<u64>) -> crate::types::Swap {
+        ekubo_swap(committed, true)
+    }
+
+    /// A swap through an Ekubo pool with the signed-swap extension, flagged exclusive when
+    /// `exclusive`.
+    fn ekubo_swap(committed: Option<u64>, exclusive: bool) -> crate::types::Swap {
         let token_in = make_address(0x11);
         let token_out = make_address(0x22);
         let mut comp = component("ekubo-signed-pool", &[]);
+        if exclusive {
+            crate::feed::exclusivity::mark_exclusive(&mut comp);
+        }
         comp.static_attributes
             .insert("extension".to_string(), Bytes::from([0x55u8; 20].as_ref()));
         comp.static_attributes
@@ -1458,6 +1467,23 @@ mod tests {
         );
     }
 
+    /// A committed leg that no exclusive protocol owns has nothing to sign it with.
+    #[test]
+    fn test_stamp_exclusive_swaps_unowned_leg() {
+        let swap = ekubo_swap(Some(990_000), false);
+        let quote = make_order_quote(990_000).with_route(single_swap_route(swap));
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let result = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer,
+            0.01,
+        );
+
+        assert!(matches!(result, Err(SolveError::FailedEncoding(_))));
+    }
+
     /// A Curve hop priced with a grant gets a grant signed for the order's sender.
     #[test]
     fn test_stamp_exclusive_swaps_curve_grant() {
@@ -1478,7 +1504,7 @@ mod tests {
             BigUint::from(50_000u64),
             curve,
             Box::new(
-                crate::exclusive_venue::test_curve::dual_curve_state()
+                crate::exclusive_protocol::test_curve::dual_curve_state()
                     .exclusive_view()
                     .expect("supported policy"),
             ),

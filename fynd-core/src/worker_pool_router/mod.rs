@@ -1646,7 +1646,7 @@ mod tests {
         tycho_common::models::Chain,
         tycho_core::{
             models::{token::Token, Address, Chain as SimChain},
-            simulation::protocol_sim::Price,
+            simulation::protocol_sim::{Price, ProtocolSim},
             Bytes,
         },
     };
@@ -1655,6 +1655,7 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         derived::DerivedData,
+        exclusive_protocol::test_curve,
         feed::exclusivity::{is_exclusive, mark_exclusive},
         simulation::pamm_overrides::fixtures as pamm_fixtures,
         solver::defaults,
@@ -3646,15 +3647,15 @@ mod tests {
         assert_eq!(combined[0].surplus_amount(), None);
     }
 
-    /// An exclusive leg through a pool of the public reference's route is not signed: the public
-    /// ranking is returned unchanged.
+    /// A candidate whose exclusive leg goes through a pool of the public route is skipped
+    /// (`same_pool`). One through another pool is kept (`other_pool`).
     #[rstest]
     #[case::same_pool(&[("uniswap_v2", 0x01, 0x02, 1000, 900)], 900)]
     #[case::other_pool(
         &[("uniswap_v2", 0x01, 0x03, 1000, 1000), ("uniswap_v2", 0x03, 0x02, 1000, 900)],
         905
     )]
-    fn test_combine_skips_candidate_competing_with_public(
+    fn test_combine_competing_with_public(
         #[case] public_legs: &[(&str, u8, u8, u64, u64)],
         #[case] expected_head: u64,
     ) {
@@ -3679,6 +3680,34 @@ mod tests {
         );
 
         assert_eq!(*combined[0].amount_out(), BigUint::from(expected_head));
+    }
+
+    /// A public-pool quote the exclusive replacer built is dropped when its exclusive leg goes
+    /// through a pool of the public reference's route.
+    #[test]
+    fn test_combine_replacer_quote_competing_with_public() {
+        let public = make_priced_route_quote(&[("uniswap_v2", 0x01, 0x02, 1000, 900)], 900);
+        let replaced = make_priced_route_quote(&[("vm:exclusive", 0x01, 0x02, 1000, 950)], 950);
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("public_pool".to_string(), replaced.clone())),
+                worker_quote(("public_pool".to_string(), public.clone())),
+            ],
+            failed_solvers: vec![],
+        };
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![replaced, public],
+            1_000,
+            None,
+        );
+
+        assert_eq!(combined.len(), 1);
+        assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
     }
 
     /// The `NoRouteFound` placeholder `rank_quotes` returns when no public candidate succeeded.
@@ -3953,7 +3982,7 @@ mod tests {
             .expect("surplus quote should have a route")
             .swaps()
             .iter()
-            .find(|s| is_exclusive(s.protocol_component()))
+            .find(|s| is_exclusive_leg(s))
             .expect("should have an exclusive swap")
             .committed_amount_out()
             .cloned()
@@ -3966,6 +3995,10 @@ mod tests {
     #[rstest]
     #[case::first_hop(
         &[("vm:exclusive", 0x01, 0x02, 1000, 1_000_000), ("uniswap_v2", 0x02, 0x03, 1_000_000, 900_000)],
+        900_000,
+    )]
+    #[case::dual_pool_first_hop(
+        &[(DUAL_CURVE, 0x01, 0x02, 1000, 1_000_000), ("uniswap_v2", 0x02, 0x03, 1_000_000, 900_000)],
         900_000,
     )]
     #[case::before_split(
@@ -4124,6 +4157,9 @@ mod tests {
 
     /// Builds a Success quote whose route has one swap per `(protocol_system, token_in, token_out)`
     /// leg, for exercising `has_valid_exclusive_route` on multi-leg and multi-path route shapes.
+    /// The protocol system of a leg through a dual Curve pool priced with a grant.
+    const DUAL_CURVE: &str = "vm:curve_dual";
+
     fn make_route_quote(legs: &[(&str, u8, u8)]) -> OrderQuote {
         let legs: Vec<(&str, u8, u8, u64, u64)> = legs
             .iter()
@@ -4179,6 +4215,16 @@ mod tests {
             if *protocol_system == "vm:exclusive" {
                 mark_exclusive(&mut comp);
             }
+            // A dual Curve pool priced with a grant: its state is the pool's exclusive view.
+            let state: Box<dyn ProtocolSim> = if *protocol_system == DUAL_CURVE {
+                Box::new(
+                    test_curve::dual_curve_state()
+                        .exclusive_view()
+                        .expect("supported policy"),
+                )
+            } else {
+                Box::new(MockProtocolSim::default())
+            };
             swaps.push(Swap::new(
                 format!("pool-{tin}-{tout}"),
                 protocol_system.to_string(),
@@ -4188,7 +4234,7 @@ mod tests {
                 BigUint::from(*leg_out),
                 BigUint::from(50_000u64),
                 comp,
-                Box::new(MockProtocolSim::default()),
+                state,
             ));
             tokens.insert(tin, tin_token);
             tokens.insert(tout, tout_token);
@@ -4241,6 +4287,10 @@ mod tests {
     // Two exclusive legs: out of scope for v1 (ambiguous per-component attribution).
     #[case::two_exclusive_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
+    #[case::dual_pool_leg(&[(DUAL_CURVE, 0x01, 0x02)], true)]
+    #[case::two_dual_pool_legs(&[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)], false)]
+    #[case::dual_pool_and_exclusive_legs(
+        &[(DUAL_CURVE, 0x01, 0x03), ("vm:exclusive", 0x03, 0x02)], false)]
     // Diamond split: 0x01 splits into 0x01->0x02 (exclusive) and 0x01->0x03, both merging into
     // 0x02->0x04 and 0x03->0x04. The exclusive leg's output reaches 0x04 through 0x02->0x04,
     // which is not the next serialized swap.
@@ -4273,6 +4323,9 @@ mod tests {
     #[rstest]
     #[case::multiple_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)],
+        "exclusive_route_multiple_legs_total")]
+    #[case::multiple_dual_pool_legs(
+        &[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)],
         "exclusive_route_multiple_legs_total")]
     #[case::loop_after_leg(
         &[

@@ -106,13 +106,22 @@ pub(crate) mod test_curve {
     /// A version-1 grant policy with a 1 bp minimum fee, controller `controller`, killed when
     /// `is_killed`.
     pub(crate) fn grant_policy(controller: [u8; 20], is_killed: bool) -> CurvePolicy {
+        grant_policy_with_min_fee(controller, is_killed, 1_000_000)
+    }
+
+    /// A version-1 grant policy with minimum fee `min_fee`.
+    pub(crate) fn grant_policy_with_min_fee(
+        controller: [u8; 20],
+        is_killed: bool,
+        min_fee: u64,
+    ) -> CurvePolicy {
         let attributes = [
             (POLICY_ATTRIBUTE, POLICY.to_vec()),
             (POLICY_VERSION_ATTRIBUTE, vec![1]),
             (POLICY_CONTROLLER_ATTRIBUTE, controller.to_vec()),
             (POLICY_ROUTER_ATTRIBUTE, ROUTER.to_vec()),
             (POLICY_KILLED_ATTRIBUTE, vec![u8::from(is_killed)]),
-            (POLICY_MIN_FEE_ATTRIBUTE, 1_000_000u64.to_be_bytes().to_vec()),
+            (POLICY_MIN_FEE_ATTRIBUTE, min_fee.to_be_bytes().to_vec()),
         ]
         .into_iter()
         .map(|(name, value)| (name.to_string(), Bytes::from(value)))
@@ -157,5 +166,40 @@ pub(crate) mod test_curve {
     /// A dual pool whose policy names [`grantor`].
     pub(crate) fn dual_curve_state() -> CurveState {
         curve_state(grant_policy(CONTROLLER, false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_simulation::evm::protocol::curve::CurvePolicy;
+
+    use super::{test_curve::*, *};
+    use crate::algorithm::test_utils::MockProtocolSim;
+
+    #[rstest::rstest]
+    #[case::dual(grant_policy(CONTROLLER, false), true)]
+    #[case::other_controller(grant_policy([0xee; 20], false), false)]
+    #[case::killed(grant_policy(CONTROLLER, true), false)]
+    #[case::min_fee_above_denominator(
+        grant_policy_with_min_fee(CONTROLLER, false, 10_000_000_001),
+        false
+    )]
+    #[case::no_policy(CurvePolicy::default(), false)]
+    fn test_can_grant(#[case] policy: CurvePolicy, #[case] expected: bool) {
+        assert_eq!(Curve.can_grant(&curve_state(policy), &grantor()), expected);
+        assert!(!Curve.can_grant(&MockProtocolSim::default(), &grantor()));
+    }
+
+    #[test]
+    fn test_build_exclusive_view() {
+        let view = Curve
+            .build_exclusive_view(&dual_curve_state())
+            .expect("supported policy");
+
+        assert!(as_exclusive_view(view.as_ref()).is_some());
+        assert!(as_exclusive_view(&dual_curve_state()).is_none());
+        assert!(Curve
+            .build_exclusive_view(&curve_state(CurvePolicy::default()))
+            .is_none());
     }
 }

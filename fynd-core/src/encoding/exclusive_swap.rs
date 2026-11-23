@@ -528,7 +528,7 @@ fn attribute<'a>(component: &'a ProtocolComponent, key: &str) -> Result<&'a [u8]
 mod tests {
     use std::{collections::HashMap, str::FromStr};
 
-    use alloy::primitives::{b256, Address as EvmAddress, Signature};
+    use alloy::primitives::{b256, Address as EvmAddress};
     use chrono::NaiveDateTime;
     use rstest::rstest;
     use tycho_simulation::tycho_common::models::Chain as CommonChain;

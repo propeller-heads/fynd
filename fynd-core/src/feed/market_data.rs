@@ -1023,9 +1023,12 @@ mod tests {
     use tycho_simulation::{tycho_client::feed::BlockHeader, tycho_ethereum::gas::GasPrice};
 
     use super::*;
-    use crate::algorithm::test_utils::{
-        component, component_with_directions, component_with_protocol, set_last_updated_block,
-        token, MockProtocolSim,
+    use crate::{
+        algorithm::test_utils::{
+            component, component_with_directions, component_with_protocol, set_last_updated_block,
+            token, MockProtocolSim,
+        },
+        exclusive_protocol::test_curve,
     };
 
     #[test]
@@ -1378,7 +1381,10 @@ mod tests {
 
         let subset = market.extract_subset(&[&ab].into_iter().collect());
 
-        assert!(Arc::ptr_eq(&market.simulation_states[&ab], &subset.simulation_states[&ab]));
+        assert!(Arc::ptr_eq(
+            &market.simulation_states[&ab].state,
+            &subset.simulation_states[&ab].state
+        ));
     }
 
     #[test]
@@ -1769,28 +1775,37 @@ mod tests {
     }
 
     fn is_exclusive_view(state: Option<&dyn ProtocolSim>) -> bool {
-        state
-            .and_then(crate::exclusive_venue::find_venue)
-            .is_some()
+        state.is_some_and(|state| {
+            state
+                .as_any()
+                .downcast_ref::<tycho_simulation::evm::protocol::curve::CurveState>()
+                .is_some_and(|curve| curve.is_exclusive_view())
+        })
+    }
+
+    /// A market whose states get an exclusive view when the test grantor can sign for them.
+    fn market_with_grantor() -> MarketData {
+        let state = MarketState::new().with_grantor(Some(test_curve::grantor()));
+        MarketData::new(Arc::new(RwLock::new(state)))
     }
 
     /// Only a handle with exclusive views gives a dual pool's exclusive view, and only for a pool
     /// whose policy names Fynd's grantor.
     #[tokio::test]
-    async fn test_exclusive_views_give_dual_pool_view() {
-        use crate::exclusive_venue::test_curve::{curve_state, dual_curve_state, grant_policy};
-
-        let market = MarketData::new_shared()
-            .with_grantor(Some(crate::exclusive_venue::test_curve::grantor()));
+    async fn test_exclusive_views_dual_pool() {
+        let market = market_with_grantor();
         market.write().await.update_states([
-            ("dual".to_string(), Box::new(dual_curve_state()) as Box<dyn ProtocolSim>),
-            ("other".to_string(), Box::new(curve_state(grant_policy([0xee; 20], false)))),
+            ("dual".to_string(), Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>),
+            (
+                "other".to_string(),
+                Box::new(test_curve::curve_state(test_curve::grant_policy([0xee; 20], false))),
+            ),
         ]);
         let ids = ["dual".to_string(), "other".to_string()];
         let ids: FxHashSet<&ComponentId> = ids.iter().collect();
+        let exclusive_market = market.with_exclusive_views();
 
         let public = market.read().await;
-        let exclusive_market = market.with_exclusive_views();
         let exclusive = exclusive_market.read().await;
         let subset = exclusive.extract_subset(&ids);
 
@@ -1803,21 +1818,66 @@ mod tests {
         assert!(!is_exclusive_view(subset.get_simulation_state("other")));
     }
 
-    /// An overlay state replaces the base state's exclusive view with its own.
+    /// A market without a grantor gives no exclusive view, even through a handle with exclusive
+    /// views.
     #[tokio::test]
-    async fn test_exclusive_views_follow_overlay() {
-        use crate::exclusive_venue::test_curve::{
-            curve_state, dual_curve_state, grant_policy, CONTROLLER,
-        };
-
-        let market = MarketData::new_shared()
-            .with_grantor(Some(crate::exclusive_venue::test_curve::grantor()))
-            .with_exclusive_views();
+    async fn test_exclusive_views_no_grantor() {
+        let market = MarketData::new_shared().with_exclusive_views();
         market.write().await.update_states([(
             "dual".to_string(),
-            Box::new(dual_curve_state()) as Box<dyn ProtocolSim>,
+            Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>,
         )]);
-        let killed: Arc<dyn ProtocolSim> = Arc::new(curve_state(grant_policy(CONTROLLER, true)));
+
+        let view = market.read().await;
+
+        assert!(!is_exclusive_view(view.get_simulation_state("dual")));
+        assert!(!view.is_priced_exclusive("dual"));
+    }
+
+    /// A pool stops being priced with a grant once an update kills its policy, or once it is
+    /// removed.
+    #[rstest::rstest]
+    #[case::policy_killed(false)]
+    #[case::removed(true)]
+    #[tokio::test]
+    async fn test_exclusive_views_dropped(#[case] remove: bool) {
+        let market = market_with_grantor().with_exclusive_views();
+        market.write().await.update_states([(
+            "dual".to_string(),
+            Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>,
+        )]);
+        let dual = "dual".to_string();
+
+        if remove {
+            market
+                .write()
+                .await
+                .remove_components([&dual]);
+        } else {
+            let killed =
+                test_curve::curve_state(test_curve::grant_policy(test_curve::CONTROLLER, true));
+            market
+                .write()
+                .await
+                .update_states([(dual.clone(), Box::new(killed) as Box<dyn ProtocolSim>)]);
+        }
+
+        let view = market.read().await;
+        assert!(!view.is_priced_exclusive(&dual));
+        assert!(!is_exclusive_view(view.get_simulation_state(&dual)));
+    }
+
+    /// An overlay state with a killed policy hides the base state's exclusive view.
+    #[tokio::test]
+    async fn test_exclusive_views_overlay() {
+        let market = market_with_grantor().with_exclusive_views();
+        market.write().await.update_states([(
+            "dual".to_string(),
+            Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>,
+        )]);
+        let killed: Arc<dyn ProtocolSim> = Arc::new(test_curve::curve_state(
+            test_curve::grant_policy(test_curve::CONTROLLER, true),
+        ));
         market
             .register_labeled_state(
                 "killed".to_string(),
@@ -1834,17 +1894,13 @@ mod tests {
             .read_labeled(&"killed".to_string())
             .await
             .expect("overlay");
+        let base = market.read().await;
 
         assert!(!is_exclusive_view(view.get_simulation_state("dual")));
         assert!(!is_exclusive_view(
             view.extract_subset_with_overlay(&ids)
                 .get_simulation_state("dual")
         ));
-        assert!(is_exclusive_view(
-            market
-                .read()
-                .await
-                .get_simulation_state("dual")
-        ));
+        assert!(is_exclusive_view(base.get_simulation_state("dual")));
     }
 }

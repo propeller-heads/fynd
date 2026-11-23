@@ -171,3 +171,195 @@ fn to_address(bytes: &Bytes, what: &str) -> Result<Address, SolveError> {
     Address::try_from(bytes.as_ref())
         .map_err(|_| SolveError::FailedEncoding(format!("{what} is not a 20-byte address")))
 }
+
+#[cfg(test)]
+mod tests {
+    use alloy::{primitives::keccak256, signers::local::PrivateKeySigner};
+    use rstest::rstest;
+
+    use super::*;
+
+    #[test]
+    fn test_grant_eip712_type() {
+        assert_eq!(
+            Grant::eip712_encode_type(),
+            "Grant(address taker,uint8 coin_in,uint256 min_amount_in,uint256 max_amount_in,\
+             uint256 fee,uint64 nonce,uint32 deadline)"
+        );
+    }
+
+    #[rstest]
+    #[case::no_surplus(1_000, 1_000, 1_000_000, 1_000_000)]
+    #[case::committed_above_gross(1_000, 1_001, 1_000_000, 1_000_000)]
+    #[case::one_percent_surplus(1_000_000, 990_000, 0, 100_000_000)]
+    #[case::surplus_above_min_fee(1_000_000, 990_000, 1_000_000, 100_990_000)]
+    fn test_derive_grant_fee(
+        #[case] gross: u64,
+        #[case] committed: u64,
+        #[case] min_fee: u64,
+        #[case] expected: u64,
+    ) {
+        let fee = derive_grant_fee(&BigUint::from(gross), &BigUint::from(committed), min_fee)
+            .expect("fee fits in u64");
+
+        assert_eq!(fee, expected);
+    }
+
+    /// The taker's output at the grant fee is at least the committed amount, less one unit of
+    /// rounding.
+    #[rstest]
+    #[case(123_456_789, 120_000_000, 1_000_000)]
+    #[case(10_u64.pow(18), 9 * 10_u64.pow(17), 3_000_000)]
+    fn test_derive_grant_fee_paid_output(
+        #[case] gross: u64,
+        #[case] committed: u64,
+        #[case] min_fee: u64,
+    ) {
+        let fee = derive_grant_fee(&BigUint::from(gross), &BigUint::from(committed), min_fee)
+            .expect("fee fits in u64");
+        let raw = BigUint::from(gross) * FEE_DENOMINATOR / (FEE_DENOMINATOR - min_fee);
+        let paid = raw * (FEE_DENOMINATOR - fee) / FEE_DENOMINATOR;
+
+        assert!(paid >= BigUint::from(committed) - 1u32, "paid {paid} below {committed}");
+    }
+
+    /// `grant_digest` matches a digest hashed by hand from the policy's typehash string and EIP-712
+    /// domain fields.
+    #[test]
+    fn test_grant_digest() {
+        let policy = Address::repeat_byte(0xfd);
+        let grant = Grant {
+            taker: Address::repeat_byte(0xaa),
+            coin_in: 1,
+            min_amount_in: U256::from(10),
+            max_amount_in: U256::from(20),
+            fee: U256::from(30),
+            nonce: 7,
+            deadline: 1_000,
+        };
+        let word = |value: U256| value.to_be_bytes::<32>();
+        let domain_separator = keccak256(
+            [
+                keccak256(
+                    "EIP712Domain(string name,string version,uint256 chainId,\
+                     address verifyingContract)",
+                )
+                .0,
+                keccak256("FyndPolicy").0,
+                keccak256("1").0,
+                word(U256::from(1)),
+                B256::left_padding_from(policy.as_slice()).0,
+            ]
+            .concat(),
+        );
+        let struct_hash = keccak256(
+            [
+                keccak256(
+                    "Grant(address taker,uint8 coin_in,uint256 min_amount_in,\
+                     uint256 max_amount_in,uint256 fee,uint64 nonce,uint32 deadline)",
+                )
+                .0,
+                B256::left_padding_from(grant.taker.as_slice()).0,
+                word(U256::from(1)),
+                word(U256::from(10)),
+                word(U256::from(20)),
+                word(U256::from(30)),
+                word(U256::from(7)),
+                word(U256::from(1_000)),
+            ]
+            .concat(),
+        );
+        let expected = keccak256([&[0x19, 0x01][..], &domain_separator.0, &struct_hash.0].concat());
+
+        assert_eq!(grant_digest(&grant, 1, policy), expected);
+    }
+
+    const SIGNER_KEY: &str = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+
+    /// A swap of 1_000 of `0x01..` for 990 of `0x02..`, committed to 980, through a pool whose
+    /// coins are `0x02..` then `0x01..`.
+    fn grant_swap() -> Swap {
+        let mut component = ProtocolComponent::default();
+        component.static_attributes.insert(
+            "coins".to_string(),
+            Bytes::from(br#"["0x0202020202020202020202020202020202020202","0x0101010101010101010101010101010101010101"]"#.to_vec()),
+        );
+        let mut swap = Swap::new(
+            "curve".to_string(),
+            "vm:curve".to_string(),
+            Bytes::from([0x01; 20]),
+            Bytes::from([0x02; 20]),
+            BigUint::from(1_000u32),
+            BigUint::from(990u32),
+            BigUint::ZERO,
+            component,
+            Box::new(crate::algorithm::test_utils::MockProtocolSim::default()),
+        );
+        swap.set_committed_amount_out(BigUint::from(980u32));
+        swap
+    }
+
+    fn grant_policy() -> CurvePolicy {
+        crate::exclusive_protocol::test_curve::grant_policy([0xc0; 20], false)
+    }
+
+    #[test]
+    fn test_sign_grant() {
+        let key: PrivateKeySigner = SIGNER_KEY.parse().expect("key");
+        let signer = ExclusiveSwapSigner::new(key.clone(), 1, 3, 120, Address::repeat_byte(0x77));
+        let taker = Bytes::from([0xaa; 20]);
+        let swap = grant_swap();
+        let policy = grant_policy();
+
+        let user_data = sign_grant(&signer, &swap, &policy, &taker, 0.01).expect("signed");
+
+        let word = |range: std::ops::Range<usize>| U256::from_be_slice(&user_data[range]);
+        let deadline = u32::from_be_bytes(
+            user_data[124..128]
+                .try_into()
+                .expect("4 bytes"),
+        );
+        let expected = Grant {
+            taker: Address::repeat_byte(0xaa),
+            coin_in: 1,
+            min_amount_in: U256::from(990),
+            max_amount_in: U256::from(1_500),
+            fee: U256::from(
+                derive_grant_fee(&BigUint::from(990u32), &BigUint::from(980u32), 1_000_000)
+                    .expect("fee"),
+            ),
+            nonce: 3 << 32,
+            deadline,
+        };
+        assert_eq!(user_data.len(), 193);
+        assert_eq!(&user_data[..20], expected.taker.as_slice());
+        assert_eq!(word(20..52), expected.min_amount_in);
+        assert_eq!(word(52..84), expected.max_amount_in);
+        assert_eq!(word(84..116), expected.fee);
+        assert_eq!(&user_data[116..124], &expected.nonce.to_be_bytes());
+        let digest = grant_digest(&expected, 1, Address::repeat_byte(0xfd));
+        let signature =
+            alloy::primitives::Signature::try_from(&user_data[128..]).expect("signature");
+        assert_eq!(
+            signature
+                .recover_address_from_prehash(&digest)
+                .expect("recover"),
+            key.address()
+        );
+    }
+
+    #[test]
+    fn test_sign_grant_min_fee_above_denominator() {
+        let key: PrivateKeySigner = SIGNER_KEY.parse().expect("key");
+        let signer = ExclusiveSwapSigner::new(key, 1, 3, 120, Address::repeat_byte(0x77));
+        let policy = crate::exclusive_protocol::test_curve::grant_policy_with_min_fee(
+            [0xc0; 20],
+            false,
+            FEE_DENOMINATOR + 1,
+        );
+
+        let result = sign_grant(&signer, &grant_swap(), &policy, &Bytes::from([0xaa; 20]), 0.01);
+
+        assert!(matches!(result, Err(SolveError::FailedEncoding(_))));
+    }
+}
