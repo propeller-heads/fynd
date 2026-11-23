@@ -38,7 +38,12 @@ use tycho_simulation::{
     tycho_common::{models::protocol::ProtocolComponent, Bytes},
 };
 
-use crate::{bps, encoding::curve_grant::GrantTerms, exclusive_venue::Grantor, SolveError, Swap};
+use crate::{
+    bps,
+    encoding::curve_grant::{GrantTerms, INPUT_CAP_TOLERANCE_BPS},
+    exclusive_venue::Grantor,
+    SolveError, Swap,
+};
 
 /// Validity window of the exclusive-swap signature, in seconds. Well under the Ekubo extension's
 /// 30-day cap.
@@ -249,7 +254,7 @@ impl ExclusiveSwapSigner {
             swap,
             policy,
             input_floor_factor_bps(slippage),
-            bps::DENOMINATOR.saturating_add(self.output_cap_tolerance_bps),
+            bps::DENOMINATOR.saturating_add(INPUT_CAP_TOLERANCE_BPS),
             self.next_nonce()?,
             self.next_deadline()?,
         )?

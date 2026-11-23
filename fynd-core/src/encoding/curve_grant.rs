@@ -33,6 +33,13 @@ sol! {
     }
 }
 
+/// Input the grant allows above the quoted input, in basis points.
+///
+/// A leg after the first hop swaps whatever the hops before it deliver, so its input drifts with
+/// every pool move between quoting and execution, and a tight cap would revert ordinary trades. At
+/// 50% the cap still stops a grant being spent at a multiple of the size it was quoted for.
+pub(crate) const INPUT_CAP_TOLERANCE_BPS: u32 = 5_000;
+
 /// The parts of a grant that the policy checks besides the signature.
 pub(crate) struct GrantTerms {
     pub(crate) min_amount_in: U256,
