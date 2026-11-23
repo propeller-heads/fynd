@@ -7,6 +7,7 @@ import {
   extractRepoUrl,
   findNewestSection,
   replaceSectionBody,
+  sectionVersion,
   validateReply,
 } from "./llm-release-notes.mjs";
 
@@ -31,6 +32,17 @@ test("finds the newest section", () => {
 
 test("a changelog without a section is an error", () => {
   assert.throws(() => findNewestSection("# Changelog\n\nnothing\n"), /No '## ' version section/);
+});
+
+test("reads the version from a section header", () => {
+  const cases = [
+    { name: "with compare link", header: NEWEST_HEADER, version: "1.1.0" },
+    { name: "without compare link", header: "## [1.0.0] (2026-10-01)", version: "1.0.0" },
+  ];
+  for (const { name, header, version } of cases) {
+    assert.equal(sectionVersion(header), version, name);
+  }
+  assert.throws(() => sectionVersion("## Unreleased"), /No version in changelog header/);
 });
 
 test("extracts hashes in order without duplicates", () => {
