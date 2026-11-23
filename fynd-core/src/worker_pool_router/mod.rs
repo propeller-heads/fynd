@@ -63,7 +63,7 @@ use crate::{
         pamm_overrides,
         simulator::{QuoteSimulator, SimulationPurpose},
     },
-    types::RouteRejection,
+    types::{ComponentId, RouteRejection},
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
     QuoteStatus, SolveError, SolveParams,
@@ -1199,9 +1199,10 @@ impl WorkerPoolRouter {
 /// - `Swap::committed_amount_out` set on each exclusive leg, and
 /// - an order-level `SurplusInfo`.
 ///
-/// A candidate whose exclusive leg goes through a pool of the public reference's route is skipped.
-/// The pool already wins the trade at its public price, so a grant would only lower what its LPs
-/// earn.
+/// A quote whose exclusive leg goes through a pool of the public reference's route is dropped,
+/// both an `IncludeExclusive` candidate and a public-pool quote the exclusive replacer built. The
+/// pool already wins the trade at its public price, so a grant would only lower what its LPs earn.
+/// `exclusive_route_competes_with_public_total` counts the orders that drop one.
 ///
 /// If there is no commitment, this returns `public_ranked` unchanged. In default-fee mode the
 /// placeholder is the only fallback, so the order answers "no route" if there is no commitment or
@@ -1228,10 +1229,22 @@ fn combine_with_surplus(
     user_share_bps: u32,
     token_prices: Option<&TokenGasPrices>,
 ) -> Vec<OrderQuote> {
+    let public_pools = route_pools(find_public_reference(&public_ranked));
+    if responses
+        .quotes
+        .iter()
+        .any(|wq| competes_with_public(&wq.quote, &public_pools))
+    {
+        counter!("exclusive_route_competes_with_public_total").increment(1);
+    }
+    let public_ranked: Vec<OrderQuote> = public_ranked
+        .into_iter()
+        .filter(|quote| !competes_with_public(quote, &public_pools))
+        .collect();
     let public_reference = find_public_reference(&public_ranked);
 
     let Some(exclusive_candidate) =
-        best_exclusive_candidate(responses, pool_scopes, options, public_reference)
+        best_exclusive_candidate(responses, pool_scopes, options, &public_pools)
     else {
         return public_ranked;
     };
@@ -1360,7 +1373,7 @@ fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
     pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
-    public_reference: Option<&OrderQuote>,
+    public_pools: &FxHashSet<ComponentId>,
 ) -> Option<&'a OrderQuote> {
     responses
         .quotes
@@ -1374,7 +1387,7 @@ fn best_exclusive_candidate<'a>(
                 .unwrap_or(true)
         })
         .filter(|wq| has_valid_exclusive_route(&wq.quote))
-        .filter(|wq| !competes_with_public(&wq.quote, public_reference))
+        .filter(|wq| !competes_with_public(&wq.quote, public_pools))
         .max_by(|a, b| {
             a.quote
                 .amount_out_net_gas()
@@ -1383,28 +1396,29 @@ fn best_exclusive_candidate<'a>(
         .map(|wq| &wq.quote)
 }
 
-/// Whether an exclusive leg of `quote` goes through a pool that the route of `public_reference`
-/// also goes through. A dual pool can be in both routes: at its public price in the public one and
-/// with a grant in the exclusive one. Counts `exclusive_route_competes_with_public_total`.
-fn competes_with_public(quote: &OrderQuote, public_reference: Option<&OrderQuote>) -> bool {
-    let Some(public_route) = public_reference.and_then(OrderQuote::route) else {
-        return false;
+/// The pools the route of `quote` goes through. Empty when there is no quote or it has no route.
+fn route_pools(quote: Option<&OrderQuote>) -> FxHashSet<ComponentId> {
+    let Some(route) = quote.and_then(OrderQuote::route) else {
+        return FxHashSet::default();
     };
+    route
+        .swaps()
+        .iter()
+        .map(|swap| swap.component_id().to_string())
+        .collect()
+}
+
+/// Whether an exclusive leg of `quote` goes through one of `public_pools`, the pools of the public
+/// reference's route. A dual pool can be in both routes: at its public price in the public one and
+/// with a grant in the exclusive one.
+fn competes_with_public(quote: &OrderQuote, public_pools: &FxHashSet<ComponentId>) -> bool {
     let Some(route) = quote.route() else {
         return false;
     };
-    for swap in route.swaps() {
-        if !is_exclusive_leg(swap) {
-            continue;
-        }
-        for public_swap in public_route.swaps() {
-            if public_swap.component_id() == swap.component_id() {
-                counter!("exclusive_route_competes_with_public_total").increment(1);
-                return true;
-            }
-        }
-    }
-    false
+    route
+        .swaps()
+        .iter()
+        .any(|swap| is_exclusive_leg(swap) && public_pools.contains(swap.component_id()))
 }
 
 /// Returns the amount to commit if the public worker pools find no route. The amount is the
