@@ -238,11 +238,11 @@ debug = true
 [profile.dev.package."*"]
 opt-level = 2
 
-# Temporary: the Tycho branch that exposes a Curve pool's policy and grant terms
-# (propeller-heads/tycho#1848). Remove once Tycho releases it, and bump tycho-simulation instead.
+# Temporary: a Tycho commit that exposes a Curve pool's policy and grant terms. Released Tycho keeps
+# the policy private. Remove once propeller-heads/tycho#1884 is released, and bump tycho-simulation.
 [patch.crates-io]
-tycho-client = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
-tycho-common = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
-tycho-ethereum = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
-tycho-execution = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
-tycho-simulation = { git = "https://github.com/propeller-heads/tycho", branch = "tnl/curve-fynd-exclusive" }
+tycho-client = { git = "https://github.com/propeller-heads/tycho", rev = "45011cb7980ad73615c0ef15e22581c739831d84" }
+tycho-common = { git = "https://github.com/propeller-heads/tycho", rev = "45011cb7980ad73615c0ef15e22581c739831d84" }
+tycho-ethereum = { git = "https://github.com/propeller-heads/tycho", rev = "45011cb7980ad73615c0ef15e22581c739831d84" }
+tycho-execution = { git = "https://github.com/propeller-heads/tycho", rev = "45011cb7980ad73615c0ef15e22581c739831d84" }
+tycho-simulation = { git = "https://github.com/propeller-heads/tycho", rev = "45011cb7980ad73615c0ef15e22581c739831d84" }
