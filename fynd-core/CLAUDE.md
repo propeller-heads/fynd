@@ -345,27 +345,37 @@ A component is classified exclusive by `is_exclusive` (`feed/exclusivity.rs`) â€
 `is_exclusive` static attribute on the component's Tycho data, applied generically to every ingested
 component. There is no per-deployment policy to configure.
 
-A pool of an `ExclusiveVenue` (`exclusive_venue/`) is dual, not exclusive: it stays in every
-worker's graph. Each venue holds its protocol's specifics: it builds a pool's exclusive view, tells
-whether Fynd's `Grantor` (the signer's address and the router) can sign for the pool, and signs the
-swap. A new venue (for example a Metric fAMM) is one more entry in `VENUES`. `MarketState` rebuilds
-each exclusive view with its state, and `register_labeled_state` builds the views of an overlay.
+`exclusive_protocol/` holds each protocol's specifics behind two traits. An `ExclusiveProtocol`
+recognises its own exclusive legs (`owns`) and signs them (`sign`); `protocol_of` finds the protocol
+of a swap, and a swap is an exclusive leg (`is_exclusive_leg`) when one owns it. A `DualPool`
+protocol's pools are dual, not exclusive: they stay in every worker's graph, and the protocol builds
+a pool's exclusive view (the pool priced with a grant) and tells whether Fynd's `Grantor` (the
+controller address and the router) can sign for it. Ekubo is an `ExclusiveProtocol` that owns every
+component flagged exclusive. Curve is both. A new protocol is one more entry in
+`EXCLUSIVE_PROTOCOLS`, and in `DUAL_POOLS` when its pools are dual.
 
-The Curve venue calls `CurveState::exclusive_view` in tycho-simulation, which prices the pool at the
-policy's `min_fee` for a policy version the simulation models. Tycho reports the policy's facts as
-state attributes (`CurveState::policy`). The pool is dual while its policy names the `Grantor` and
-is not killed, so a new pool needs no configuration, and a key change, router change or kill makes
-the pool public again.
+`FyndBuilder::build` gives `MarketState` the encoder's `Grantor` (`MarketState::with_grantor`)
+before the feed starts. `update_states` then stores each state with its exclusive view when the
+grantor can sign for its pool, so a policy change or kill takes effect with the state update that
+carries it. `register_labeled_state` does the same for an overlay. Without a grantor (no
+`EXCLUSIVE_SWAP_CONTROLLER_KEY`, or `build_market`), no state gets a view.
+
+Curve calls `CurveState::exclusive_view` in tycho-simulation, which prices the pool at the policy's
+`min_fee` for a policy version the simulation models. Tycho reports the policy's address, version,
+controller, router, kill flag and `min_fee` as state attributes (`CurveState::policy`). The pool is
+dual while its policy's controller and router match the `Grantor`, its `min_fee` is a valid Curve
+fee (at most 1e10), and it is not killed, so a new pool needs no configuration, and a key change,
+router change or kill makes the pool public again.
 
 A `MarketData` handle from `with_exclusive_views` gives each dual pool's exclusive view in place of
 its state, in `get_simulation_state` and in subsets. `IncludeExclusive` workers read through such a
-handle, and so does `exclusive_swap_replacer` for its replacement swaps. A swap is an exclusive leg
-(`is_exclusive_leg`) when its component is exclusive or its state is an exclusive view. A pAMM hop
-never falls back to an exclusive component or a pool its view prices with a grant.
+handle, and so does `exclusive_swap_replacer` for its replacement swaps. A pAMM hop never falls back
+to a pool whose swap would be an exclusive leg (`MarketDataView::is_exclusive_liquidity`).
 
-A dual pool can be in the public reference's route at its public price and in the exclusive
-candidate's route with a grant. The router skips such a candidate (`competes_with_public`): the
-pool wins the trade anyway, and a grant would only lower what its LPs earn.
+A dual pool can be in the public reference's route at its public price and in another quote's route
+with a grant. `combine_with_surplus` drops such a quote (`competes_with_public`), whether it is an
+`IncludeExclusive` candidate or a public-pool quote the exclusive replacer built: the pool wins the
+trade anyway, and a grant would only lower what its LPs earn.
 
 Isolation is per worker, not per state: `MarketState` is never duplicated. `PublicOnly` workers filter
 exclusive components out of their local graph topology and incoming `MarketEvent`s (via
@@ -387,7 +397,7 @@ After a hook pool, a market-maker quote with a minimum order size, or a fixed-ra
 the user can get slightly less; the router's `min_amount_out` bounds that loss by the request's
 slippage.
 
-The `exclusive_swap_replacer` post-processor (`post_process/exclusive.rs`) replaces a swap or a segment of a public route with an exclusive component, or splits one swap or a segment between its swaps and the exclusive component. It acts only on a `public_only` pool for a request with `ExclusiveAccess::Granted` (`PostProcessRequest::exclusive_access`; the worker passes `Denied` on an `include_exclusive` pool), so the order is solved once. It adds at most one exclusive leg, leaves a route that already has one unchanged, and keeps a candidate only when `exclusive_route_shape` is `Valid` and `matched_commitment` returns a commitment, with the route it received as the public reference. The commitment travels on the `RouteResult` (`with_commitment`: the committed amount out and the reference amount out). The worker pins it on the quote with `pin_route_commitment`, which records `exclusive_user_savings_amount` and calls `pin_commitment`, so the router ranks the quote like any public quote. The worker rejects a processed route that has an exclusive leg and no commitment on a `public_only` pool, and a commitment on a route with no exclusive leg, on a buy order, or above the route's amount out. A post-processor that runs after the replacer and builds a new `RouteResult` drops the commitment, so the replacer must be last: `check_post_processor_order` fails the build with `SolverBuildError::PostProcessorOrder` (`PostProcessorOrderError`) for a pool that lists it before another post-processor or twice.
+The `exclusive_swap_replacer` post-processor (`post_process/exclusive.rs`) replaces a swap or a segment of a public route with an exclusive leg (through an exclusive component, or a dual pool priced with a grant), or splits one swap or a segment between its swaps and the exclusive leg's pool. It acts only on a `public_only` pool for a request with `ExclusiveAccess::Granted` (`PostProcessRequest::exclusive_access`; the worker passes `Denied` on an `include_exclusive` pool), so the order is solved once. It adds at most one exclusive leg, leaves a route that already has one unchanged, and keeps a candidate only when `exclusive_route_shape` is `Valid` and `matched_commitment` returns a commitment, with the route it received as the public reference. The commitment travels on the `RouteResult` (`with_commitment`: the committed amount out and the reference amount out). The worker pins it on the quote with `pin_route_commitment`, which records `exclusive_user_savings_amount` and calls `pin_commitment`, so the router ranks the quote like any public quote. The worker rejects a processed route that has an exclusive leg and no commitment on a `public_only` pool, and a commitment on a route with no exclusive leg, on a buy order, or above the route's amount out. A post-processor that runs after the replacer and builds a new `RouteResult` drops the commitment, so the replacer must be last: `check_post_processor_order` fails the build with `SolverBuildError::PostProcessorOrder` (`PostProcessorOrderError`) for a pool that lists it before another post-processor or twice.
 
 The rules for an exclusive route (`ExclusiveRouteShape`, `exclusive_route_shape`), the route output of an exclusive leg (`leg_route_output`) and the commitment (`matched_commitment`, `pin_commitment`, `USER_IMPROVEMENT_SHARE_BPS`) live in `exclusive_route.rs`.
 
@@ -395,7 +405,8 @@ Two counters report the exclusive candidates `has_valid_exclusive_route` rejects
 `exclusive_route_multiple_legs_total` (more than one exclusive leg) and
 `exclusive_route_does_not_reach_output_total` (the leg's output never reaches the output token, or
 the swaps after it loop back to a token already on their path). A route with no exclusive leg is
-not counted.
+not counted. `exclusive_route_competes_with_public_total` counts the orders that drop a quote
+competing with the public reference.
 
 Two gauges report what the overlay is worth, in whole gas tokens: `exclusive_fee_amount` (LP fee
 capture) and `exclusive_user_savings_amount` (user improvement over the public reference).
@@ -408,14 +419,18 @@ Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 fails the build (`SolverBuildError::NoPublicPool`) â€” there would be no pool left to establish the
 committed reference output.
 
-Encoding a committed leg is protocol-specific, and both kinds sign with
-`EXCLUSIVE_SWAP_CONTROLLER_KEY`. Encoding an exclusive leg without that env var fails.
+The encoder signs a committed leg through the `ExclusiveProtocol` that owns it, and fails on a
+committed leg no protocol owns. Ekubo and Curve legs both sign with `EXCLUSIVE_SWAP_CONTROLLER_KEY`
+through `ExclusiveSwapSigner` (`encoding/exclusive_swap.rs`), which hands out the nonce, the
+deadline and the signature. Encoding an exclusive leg without that env var fails.
 
 - Ekubo (`encoding/exclusive_swap.rs`): an EIP-712 authorization plus a derived Q32 fee, in the
   `SignedExclusiveSwap` extension's `user_data`.
-- Curve (`encoding/curve_grant.rs`, called by the Curve venue's `sign`): a grant for the order's sender, signed for the pool's policy.
-  The executor accepts the grant when its taker is the router's caller or `tx.origin`, as for
-  subsidies. Its fee brings the output at `min_fee` down to the committed amount. `user_data` is
+- Curve (`exclusive_protocol/curve/grant.rs`): a grant for the order's sender, signed for the
+  pool's policy. The executor accepts the grant when its taker is the router's caller or
+  `tx.origin`, as for subsidies. Its fee brings the output at `min_fee` down to the committed
+  amount. Its input band runs from the quoted input scaled down by the request's slippage to 5000
+  bps above it (`INPUT_CAP_TOLERANCE_BPS`), separate from Ekubo's output cap. `user_data` is
   `taker(20) | min_amount_in(32) | max_amount_in(32) | fee(32) | nonce(8) | deadline(4) |
   signature(65)`.
 
