@@ -19,8 +19,8 @@ use crate::{
     post_process::{
         replace::{
             build_index, can_replace, replace_with_swap, update_index, CandidateRoute,
-            ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity, ReplacementSolver,
-            ReplacementTarget, RouteEvaluator,
+            MembershipChanges, ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity,
+            ReplacementSolver, ReplacementTarget, RouteEvaluator,
         },
         PostProcessRequest, RoutePostProcessor,
     },
@@ -55,7 +55,14 @@ impl MarketEventHandler for ExclusiveSwapReplacer {
         let Some(market) = &self.market else {
             return Ok(());
         };
-        update_index(&mut self.index, market, event, is_exclusive_member).await;
+        update_index(
+            &mut self.index,
+            market,
+            event,
+            MembershipChanges::OnStateUpdate,
+            is_exclusive_member,
+        )
+        .await;
         Ok(())
     }
 }

@@ -131,12 +131,21 @@ pub(super) async fn build_index(
     index
 }
 
-/// Removes the components `event` removes from `index`, and indexes again the components it adds
-/// or updates: each one that passes `is_member` is in the index.
+/// When a component's membership in a replacement index can change.
+pub(super) enum MembershipChanges {
+    /// Only when the component is added: membership depends on the component alone.
+    OnAdd,
+    /// Also when its state updates: membership depends on the state, as a dual pool's does.
+    OnStateUpdate,
+}
+
+/// Applies `event` to `index`: drops the removed components and re-checks the added ones, and the
+/// updated ones under [`MembershipChanges::OnStateUpdate`], keeping those that pass `is_member`.
 pub(super) async fn update_index(
     index: &mut ReplacementComponentIndex,
     market: &MarketData,
     event: &MarketEvent,
+    changes: MembershipChanges,
     is_member: impl Fn(&MarketDataView<'_>, &ProtocolComponent) -> bool,
 ) {
     let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
@@ -144,14 +153,15 @@ pub(super) async fn update_index(
     for id in removed_components {
         index.remove(id);
     }
-    if added_components.is_empty() && updated_components.is_empty() {
+    let updated: &[ComponentId] = match changes {
+        MembershipChanges::OnAdd => &[],
+        MembershipChanges::OnStateUpdate => updated_components,
+    };
+    if added_components.is_empty() && updated.is_empty() {
         return;
     }
     let view = market.read().await;
-    for id in added_components
-        .keys()
-        .chain(updated_components)
-    {
+    for id in added_components.keys().chain(updated) {
         index.remove(id);
         if let Some(component) = view
             .get_component(id)
