@@ -295,9 +295,8 @@ impl BellmanFordAlgorithm {
     /// those tokens instead of everything `walk_hops` reaches. A caller re-solving a handful of
     /// tokens then snapshots that handful's routes, not the whole market.
     ///
-    /// Reads the market unlabeled and no derived data, cloning the snapshot in batches so the
-    /// feed's writer never waits for the whole clone. `None` when `token_in` is not in the
-    /// graph or nothing is reachable from it.
+    /// Reads the market unlabeled and no derived data, under one guard that lasts only for the
+    /// subset copy. `None` when `token_in` is not in the graph or nothing is reachable from it.
     pub(crate) async fn build_context_from_source_token(
         &self,
         graph: &StableDiGraph<()>,
@@ -338,8 +337,9 @@ impl BellmanFordAlgorithm {
             &constraints,
         )?;
         let market_data = market
-            .extract_subset_batched(&subgraph.component_ids)
-            .await;
+            .read()
+            .await
+            .extract_subset(&subgraph.component_ids);
         Some(self.context_from_snapshot(graph, market_data, subgraph, token_in_node, None))
     }
 

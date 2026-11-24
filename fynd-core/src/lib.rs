@@ -91,7 +91,10 @@ pub use replay::{replay_route, ReplayError, RouteReplay};
 // Re-exported so an external implementor names the same types without matching our
 // `rustc-hash` version itself.
 pub use rustc_hash;
-pub use simulation::simulator::{SimulationBlock, SimulationPurpose};
+pub use simulation::{
+    pamm_overrides::SimulationOverrides,
+    simulator::{SimulationBlock, SimulationPurpose},
+};
 pub use solver::{
     FyndBuilder, MarketFeed, PoolConfig, Solver, SolverBuildError, SolverParts, WaitReadyError,
 };

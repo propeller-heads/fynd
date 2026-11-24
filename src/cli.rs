@@ -173,7 +173,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub gas_price_stale_threshold_secs: Option<u64>,
 
-    /// Enable partial block (flashblock) updates from the Tycho stream.
+    /// Enable partial block updates from the Tycho stream, on chains that have them.
     /// When enabled, component state updates arrive mid-block rather than only at finalization,
     /// reducing latency. Only applies to on-chain protocols.
     #[arg(long)]
@@ -207,6 +207,12 @@ pub struct ServeArgs {
     /// Disabled by default.
     #[arg(long)]
     pub simulate_on_quote_block: bool,
+
+    /// Do not read Titan's quote stream, the second websocket that carries the account state Titan
+    /// priced each pAMM quote on. pAMM swaps then carry no simulation overrides, and simulation
+    /// runs their routes on chain state. Quoting is unaffected. Overrides are on by default.
+    #[arg(long, env = "DISABLE_PAMM_SIMULATION_OVERRIDES")]
+    pub disable_pamm_simulation_overrides: bool,
 
     /// Watermark appended to every encoded transaction's calldata (e.g. "fynd"), so on-chain
     /// observers can attribute router calls to this deployment. The EVM ignores calldata past
@@ -310,6 +316,7 @@ mod cli_tests {
         std::env::remove_var("RPC_URL");
         std::env::remove_var("TYCHO_API_KEY");
         std::env::remove_var("TYCHO_SUBSCRIPTION_BUFFER_SIZE");
+        std::env::remove_var("DISABLE_PAMM_SIMULATION_OVERRIDES");
         std::env::remove_var("MAX_SYNC_LAG_SECS");
         std::env::remove_var("TYCHO_URL");
         std::env::remove_var("HTTP_HOST");
@@ -340,6 +347,7 @@ mod cli_tests {
         assert_eq!(args.hosted_swagger_url, None);
         assert_eq!(args.collector_url, None);
         assert!(!args.partial_blocks);
+        assert!(!args.disable_pamm_simulation_overrides);
         #[cfg(feature = "metrics")]
         assert_eq!(args.metrics_port, METRICS_PORT);
     }

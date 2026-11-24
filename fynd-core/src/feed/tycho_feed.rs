@@ -8,6 +8,7 @@
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
+    sync::Arc,
     time::Instant,
 };
 
@@ -209,9 +210,13 @@ impl TychoFeed {
 
         // Opened before the Tycho stream so a bad venue, chain or credential fails on the
         // configuration rather than after the connection work.
-        let mut price_level_stream =
-            open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens)?
-                .map(Box::pin);
+        let mut price_level_stream = open_price_level_stream(
+            self.config.chain,
+            &self.config.protocols,
+            &all_tokens,
+            self.config.pamm_simulation_overrides,
+        )?
+        .map(Box::pin);
         let mut book_stream = BookStream::open(&self.config, all_tokens.clone())?;
 
         let mut protocol_stream = if has_tycho_protocols(&self.config.protocols) {
@@ -349,14 +354,18 @@ impl TychoFeed {
 
         // Opened before `setup` is answered: a bad venue, chain or credential has to reach the
         // caller as an error, not as a processor for a feed that dies on the next line.
-        let mut price_level_stream =
-            match open_price_level_stream(self.config.chain, &self.config.protocols, &all_tokens) {
-                Ok(stream) => stream.map(Box::pin),
-                Err(e) => {
-                    setup.fail(&e.to_string());
-                    return Err(e);
-                }
-            };
+        let mut price_level_stream = match open_price_level_stream(
+            self.config.chain,
+            &self.config.protocols,
+            &all_tokens,
+            self.config.pamm_simulation_overrides,
+        ) {
+            Ok(stream) => stream.map(Box::pin),
+            Err(e) => {
+                setup.fail(&e.to_string());
+                return Err(e);
+            }
+        };
         let mut book_stream = match BookStream::open(&self.config, all_tokens.clone()) {
             Ok(book_stream) => book_stream,
             Err(e) => {
@@ -677,7 +686,7 @@ struct BookUpdateParts<'a> {
     added: &'a mut Vec<ProtocolComponent>,
     removed: &'a mut Vec<ComponentId>,
     updated: &'a mut Vec<ProtocolComponent>,
-    states: &'a mut HashMap<ComponentId, Box<dyn ProtocolSim>>,
+    states: &'a mut HashMap<ComponentId, Arc<dyn ProtocolSim>>,
 }
 
 /// Removes from a book update every component the market holds under another protocol system.
@@ -1407,7 +1416,10 @@ mod tests {
                     added,
                     removed: vec![],
                     updated,
-                    states,
+                    states: states
+                        .into_iter()
+                        .map(|(id, state)| (id, Arc::from(state)))
+                        .collect(),
                 };
                 feed.handle_book_update(update)
                     .await
@@ -1481,7 +1493,7 @@ mod tests {
             if !added.is_empty() {
                 states.insert(
                     VENUE.to_string(),
-                    Box::new(FeedMockProtocolSim::new(2.0)) as Box<dyn ProtocolSim>,
+                    Arc::new(FeedMockProtocolSim::new(2.0)) as Arc<dyn ProtocolSim>,
                 );
             }
             BookUpdate {

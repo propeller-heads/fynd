@@ -1,4 +1,64 @@
 
+## [0.128.0](https://github.com/propeller-heads/fynd/compare/0.127.0...0.128.0) (2026-11-24)
+
+### Bug Fixes
+
+- Update `url` to 2.5.9 and `rustix` to 1.1.6 to pick up security fixes for a stack overflow when parsing nested blob URLs and for unwritten bytes being marked as initialized. ([4ee7df3](https://github.com/propeller-heads/fynd/commit/4ee7df3f5d2cd7fb8f7cfca8aff8b92d64eb3ec4))
+- Remove actix-web's unused cookie support from the RPC server, which drops the vulnerable `cookie` 0.16 dependency, where private cookie nonces could repeat after a fork. ([f1e159e](https://github.com/propeller-heads/fynd/commit/f1e159e93fe0c7faa4acb38c8ada1245fb3acd33))
+
+
+## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
+
+### Bug Fixes
+
+- Count pAMM simulation override legs in `finalize_quote`, so servers that compose router stages themselves (`solve`, `encode_quotes`, `simulate_quotes`, `finalize_quote`) now report the pAMM override metrics (legs, missing-block, conflict and block-mismatch) instead of zeros. With `--disable-pamm-simulation-overrides`, every pAMM swap counts as missing. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+- **Breaking:** Remove `WorkerPoolRouterConfig::with_pamm_simulation_overrides` and `WorkerPoolRouterConfig::pamm_simulation_overrides`. Use `FyndBuilder::pamm_simulation_overrides` to turn the quote stream on or off. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+
+
+## [0.126.0](https://github.com/propeller-heads/fynd/compare/0.125.2...0.126.0) (2026-11-19)
+
+### Features
+
+- Return pAMM simulation overrides on each swap as `Swap.simulation_overrides`, including the quoted block's number and timestamp and the account overrides in the State Override Set format used by `eth_call` and `eth_simulateV1`. Both clients map them and drop a malformed set without failing the quote. ([bec48e8](https://github.com/propeller-heads/fynd/commit/bec48e841372374cd507e9fe71b336200d4b4442))
+- Simulate pAMM routes on the account state Titan priced them on. The simulator merges a route's overrides, runs on the parent of the quoted block with that block's number and time, and keeps the sender's funding on a collision. Quoting, ranking and encoding ignore the overrides. New `propamm_simulation_overrides_*` and `propamm_quote_simulation*` metrics count the edge cases. Pass `--disable-pamm-simulation-overrides` to stop reading Titan's quote stream. ([052d236](https://github.com/propeller-heads/fynd/commit/052d236d51298261ffe3163e22d32147ebbc644a))
+- Set an optional `priority_fee` in the quote request options (Rust and TypeScript clients included). Fynd prices gas, ranks routes and reports the quote's gas price using the priority fee you will actually pay instead of the node's suggestion. Legacy gas prices are unchanged, and a priority fee that does not fit in 64 bits is rejected. ([e432f6a](https://github.com/propeller-heads/fynd/commit/e432f6ab8496c50784a8a0053a63748fb65c449f))
+
+### Bug Fixes
+
+- Use the values from the newest block when two pAMM swaps set the same override; route order now decides only within one block. The wire type, both clients and the guide document this. ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+- Stop counting pAMM swaps as missing overrides when `--disable-pamm-simulation-overrides` is set. ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+- Add a `base_block` label to `propamm_quote_simulations_total` and `propamm_quote_simulation_deviation_bps` that compares the simulated block with the quote's block, and export the deviation metric as a histogram with signed buckets. ([545794f](https://github.com/propeller-heads/fynd/commit/545794fb24b3b2837221003f422a2c96cd1d6e38))
+- Drop simulation overrides of the wrong size in the TypeScript client, matching the Rust client: addresses that are not 20 bytes, storage slots or values that are not 32 bytes, balances above 256 bits, nonces above 64 bits, and non-hex-quantity balances or nonces. The client now warns with the swap's component id and the reason instead of dropping them silently. ([a772e2f](https://github.com/propeller-heads/fynd/commit/a772e2fa6dc62ba0c793c3b4b930a5caa2aa31da))
+- Bump `actix-http` to 3.21.3 to fix HTTP/1.1 parsing advisories RUSTSEC-2026-0552, RUSTSEC-2026-0553 and RUSTSEC-2026-0554. ([c53eb8c](https://github.com/propeller-heads/fynd/commit/c53eb8c1955b20bf2cf741855bbec46997747975))
+
+### Performance
+
+- Share pool simulation states between solves instead of copying them under the market read lock. This avoids copying hundreds of KB per pool on large markets. **Breaking:** `MarketState.simulation_states`, `OverlayStates`, `MarketData::register_labeled_state` and `BookUpdate.states` now use `Arc<dyn ProtocolSim>`, and `MarketState::update_states` is generic over `Into<Arc<dyn ProtocolSim>>`. ([be8e37c](https://github.com/propeller-heads/fynd/commit/be8e37c78ee024349fcdb00f4c8f4b5568721b3b))
+- Take the token-price market snapshot under a single read lock, which is faster and guarantees one block. Copying 1200 components with 200 KB states drops from 4.7 ms to 0.20 ms. **Breaking:** `MarketData::extract_subset_batched` is removed; use `read().await.extract_subset` instead. ([cacdca8](https://github.com/propeller-heads/fynd/commit/cacdca85449818d3535415c2aa4e572678145309))
+
+
+
+
+## [0.125.0](https://github.com/propeller-heads/fynd/compare/0.124.1...0.125.0) (2026-11-16)
+
+### Features
+
+- Load spot prices, pool depths and token prices from fynd-nexus when a nexus URL is set, so pods no longer compute them locally. An invalid nexus URL now fails the build and names the expected scheme. Without a nexus URL, nothing changes. ([e7f92e2](https://github.com/propeller-heads/fynd/commit/e7f92e214e416165899079b3971eb34515342ab4))
+- **Breaking:** Add an optional nexus client and a `with_nexus_client` builder to `SpotPriceComputation`, `ComponentDepthComputation` and `TokenGasPriceComputation`. When a client is set, they return the latest served snapshot instead of computing. `SpotPriceComputation` is no longer a unit struct, so code that names it without calling `new()` no longer compiles. ([2b6effd](https://github.com/propeller-heads/fynd/commit/2b6effd2edb373b61235456d55169d457c76e710))
+- Compute locally while the nexus snapshot is out of sync, then return to nexus after it stays in sync for 3 blocks in a row. Pods now become ready when nexus has no snapshot or answers 404, and they stop serving ever-older data when the service is down or stuck. Pool depths always require fresh spot prices. The nexus block lag no longer goes negative when the snapshot is ahead of the pod's market. Logs warn when the snapshot falls out of sync and note when it is in sync again. ([11fbfe8](https://github.com/propeller-heads/fynd/commit/11fbfe861bc6c50233a3092dd3c89b99e6444b2f))
+- **Breaking:** Limit nexus snapshot age by time (30 seconds) instead of a fixed block count, converted to blocks using the chain's block time. This gives 2 blocks on Ethereum and 15 on Base, so fast chains keep using the service. `with_nexus_client` now takes the chain or block time. A custom chain with no registered block time fails the build with `SolverBuildError::ComputationManager`. ([aa9a50e](https://github.com/propeller-heads/fynd/commit/aa9a50e10a0c4cb863dd34439c8a3c46aabd2155))
+- Add a nexus client that fetches a derived computation's latest snapshot from `/v1/derived/{computation}`. It sends the held block as `If-None-Match`, uses a 5 s timeout, and keeps the held snapshot if the service is briefly unreachable, counting failures in `nexus_client_failed_polls_total`. It also reports block lag, snapshot age and the number of market components missing from the snapshot, and warns with a sample of up to 10 ids when that number changes. ([5bf882a](https://github.com/propeller-heads/fynd/commit/5bf882a61a1979ddb25448bec7dd5daaac0208ff))
+- Convert derived snapshots served by nexus back into the maps the store uses, with `into_spot_prices`, `into_depths` and `into_token_prices`. If a direction or token appears twice, the last entry wins. ([0922420](https://github.com/propeller-heads/fynd/commit/0922420e5d0b0a96602facb3ca729bcba1c9e515))
+
+### Bug Fixes
+
+- Count distinct blocks, not market updates, before returning to nexus. Previously, 3 updates within one block, such as RFQ order book or partial-block updates, could trigger an early return. ([33686f4](https://github.com/propeller-heads/fynd/commit/33686f45b9a78405b404714b2e03a519757f5bf9))
+
+### Performance
+
+- Check for components missing from a nexus snapshot only when a fetched snapshot replaces the cached one, rather than on every call. This avoids taking the market read lock each time. A component added between snapshots shows as missing only with the next snapshot. ([f25bdc5](https://github.com/propeller-heads/fynd/commit/f25bdc53fb1ed232e0409d7477260f7adb98e127))
+
+
 ## [0.124.1](https://github.com/propeller-heads/fynd/compare/0.124.0...0.124.1) (2026-11-13)
 
 ### Features

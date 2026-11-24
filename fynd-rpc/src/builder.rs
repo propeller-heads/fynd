@@ -250,7 +250,8 @@ impl FyndRPCBuilder {
         self
     }
 
-    /// Enables partial block (flashblock) updates from the Tycho stream (default: `false`).
+    /// Enables partial block updates from the Tycho stream, on chains that have them
+    /// (default: `false`).
     ///
     /// When enabled, the stream delivers component state updates mid-block rather than only at
     /// finalization, reducing latency. Only supported for on-chain protocols; book feeds are
@@ -259,6 +260,16 @@ impl FyndRPCBuilder {
         self.fynd_builder = self
             .fynd_builder
             .partial_blocks(enabled);
+        self
+    }
+
+    /// Whether the pAMM price level stream also reads Titan's quote stream (default: `true`).
+    ///
+    /// See [`FyndBuilder::pamm_simulation_overrides`].
+    pub fn pamm_simulation_overrides(mut self, enabled: bool) -> Self {
+        self.fynd_builder = self
+            .fynd_builder
+            .pamm_simulation_overrides(enabled);
         self
     }
 

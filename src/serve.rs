@@ -170,6 +170,11 @@ fn create_metrics_exporter(host: &str, port: u16, chain: &str) -> tokio::task::J
         )
         .expect("static bucket list is non-empty")
         .set_buckets_for_metric(
+            Matcher::Full("propamm_quote_simulation_deviation_bps".to_string()),
+            SIGNED_DEVIATION_BPS_BUCKETS,
+        )
+        .expect("static bucket list is non-empty")
+        .set_buckets_for_metric(
             Matcher::Full("rfq_signed_quote_deviation_bps".to_string()),
             SIGNED_DEVIATION_BPS_BUCKETS,
         )
@@ -382,6 +387,7 @@ async fn setup_solver(
     builder = builder.blocklist(blocklist);
     builder = builder.partial_blocks(args.partial_blocks);
     builder = builder.aggregate_rfqs(args.aggregate_rfqs);
+    builder = builder.pamm_simulation_overrides(!args.disable_pamm_simulation_overrides);
     if let Some(url) = &args.nexus_url {
         builder = builder.nexus_url(url.clone());
     }

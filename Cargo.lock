@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "actix-http"
-version = "3.21.0"
+version = "3.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3422032be73eeb15bafdb64086386385875b653eb418a80241d1f98473e86ea6"
+checksum = "b90352ea64d82226a82060c41dc5fe3925696076f55998ec1bd44ae54611e593"
 dependencies = [
  "actix-codec",
  "actix-service",
@@ -146,7 +146,6 @@ dependencies = [
  "bytes",
  "bytestring",
  "cfg-if",
- "cookie",
  "derive_more 2.1.1",
  "encoding_rs",
  "foldhash 0.2.0",
@@ -2557,17 +2556,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cookie"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e859cd57d0710d9e06c381b550c06e76992472a8c6d527aecd2fc673dcc231fb"
-dependencies = [
- "percent-encoding",
- "time",
- "version_check",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3010,9 +2998,9 @@ dependencies = [
 
 [[package]]
 name = "ekubo_sdk"
-version = "3.1.2"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa1080f5ab48d30a0221e764e51bb7de756251834b639fa1bbd187a60c04608"
+checksum = "103896a0ad8abb2beee70f138c1e40e54e174ad31579f340933c477659efc514"
 dependencies = [
  "alloy-primitives 0.6.4",
  "alloy-primitives 1.6.0",
@@ -3134,7 +3122,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3276,9 +3264,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3422,7 +3410,7 @@ checksum = "42012b0f064e01aa58b545fe3727f90f7dd4020f4a3ea735b50344965f5a57e9"
 
 [[package]]
 name = "fynd"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "actix-web",
  "alloy",
@@ -3462,7 +3450,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-bench-harness"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3484,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-benchmark"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3508,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-client"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "alloy",
  "bytes",
@@ -3527,7 +3515,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-core"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "alloy",
  "async-channel",
@@ -3570,7 +3558,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-gas-audit"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3595,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-nexus"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3622,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "actix-web",
  "anyhow",
@@ -3658,7 +3646,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-rpc-types"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "bytes",
  "fynd-core",
@@ -3674,7 +3662,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-swap-cli"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3691,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-test-fixtures"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "anyhow",
  "fynd-core",
@@ -3709,7 +3697,7 @@ dependencies = [
 
 [[package]]
 name = "fynd-tools-common"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4973,7 +4961,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5779,7 +5767,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.4",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5946,7 +5934,7 @@ dependencies = [
 
 [[package]]
 name = "record-market"
-version = "0.124.1"
+version = "0.128.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -6498,15 +6486,15 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.0",
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6565,7 +6553,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7279,7 +7267,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7961,9 +7949,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.507.0"
+version = "0.525.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "164ae51b7d43de8d04c4ff3dae4c7c7fc0f379bdc93d8e8728d50d56e3cd6cdc"
+checksum = "6edce07e002d97cf7ebd46b730eed8200d6c75e1f682bec30ecd92585f1be6f5"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7992,9 +7980,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.507.0"
+version = "0.525.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d110a9aaa72c78f18c553fb5d06ec2035f1c158c8d69ad388b2af9b586ae501e"
+checksum = "7192fad4f366a5385a28498d25081486600de943e7583a7eac7be2c5dbceeaae"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8021,9 +8009,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.507.0"
+version = "0.525.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edc1915bef9e5a87aa9b94cbee3e21a193a1e64db0dc99d996fb4fcdac9dd707"
+checksum = "6cb953ab70812430344bd73dc03257a1beeece0428c0a97b6d2e8b4221a76cb1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8043,9 +8031,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.507.0"
+version = "0.525.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d5fc0de55327f907bc1feaa0564775093bf53f3094024c8c08e49c3d93c6b7c"
+checksum = "fa1bbb6812ae863e679505991ea713e7baade53880c2bf447df541838b1cda8c"
 dependencies = [
  "alloy",
  "chrono",
@@ -8067,9 +8055,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.507.0"
+version = "0.525.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d7135f5db25f05cb0f419cfc0a23b26e1680964bc3cee3b4d83ca8cea900de7"
+checksum = "d066fa68a381b5ea589e4780c5d2c89b6e947c5cf75c6c3fedcd6447a9198e7a"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8241,9 +8229,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -8606,7 +8594,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
