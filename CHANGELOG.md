@@ -1,4 +1,23 @@
 
+## [0.129.0](https://github.com/propeller-heads/fynd/compare/0.128.0...0.129.0) (2026-11-24)
+
+### Features
+
+- **Breaking:** Route exclusive orders through Curve pools whose policy grants Fynd a lower fee, while public orders keep using the same pools at their regular fee. Fynd now signs a Curve grant for the order's sender on each exclusive Curve hop, and it never falls back to a grant-priced pool on a pAMM hop. Dual pools are detected from each pool's policy, so no policy addresses need configuring. ([c94c515](https://github.com/propeller-heads/fynd/commit/c94c515b20028ecc8f019965d1f585800ba4bcc2))
+
+### Bug Fixes
+
+- Skip an exclusive route that goes through a pool the best public route already uses. The pool wins the trade at its public price, so its LPs keep their full fee and no grant is signed. Fynd picks the next exclusive candidate instead. ([8392a54](https://github.com/propeller-heads/fynd/commit/8392a54dccc3c210b9cfc4832a71094f78d93ddd))
+- Drop public-pool quotes whose exclusive leg goes through a pool of the public route, so a grant is no longer signed for a pool the public route already uses. The public reference is re-picked from the remaining quotes, and `exclusive_route_competes_with_public_total` now counts once per order instead of once per checked quote. ([2978a9f](https://github.com/propeller-heads/fynd/commit/2978a9f060414cbbb5781b752348e885d601afc2))
+- Refuse Curve policies whose minimum fee is above 100%. Such pools get no exclusive view, and encoding fails with the fee in the error message instead of panicking on an integer underflow. ([1c42654](https://github.com/propeller-heads/fynd/commit/1c42654cbe5a7af68101979e2bc13d8b57343d70))
+- Return an error when the derived Curve grant fee does not fit in a u64, instead of silently falling back to the minimum fee. ([1c42654](https://github.com/propeller-heads/fynd/commit/1c42654cbe5a7af68101979e2bc13d8b57343d70))
+- Give Curve grants their own 50% input cap tolerance. Tuning the Ekubo output-cap setting through the environment no longer changes how far a Curve grant's input can drift before the swap reverts. ([d4e91ff](https://github.com/propeller-heads/fynd/commit/d4e91ffae7582a5eb1d6fe4b36300490def9fc43))
+
+### Performance
+
+- Re-check updated components on market updates only in the exclusive replacer, where a pool's policy state can change its membership. The RFQ replacer no longer does this needless work on every block. ([f8a8f95](https://github.com/propeller-heads/fynd/commit/f8a8f95274bbc02e87c307f74f879fad2ba91085))
+
+
 ## [0.128.0](https://github.com/propeller-heads/fynd/compare/0.127.0...0.128.0) (2026-11-24)
 
 ### Bug Fixes
