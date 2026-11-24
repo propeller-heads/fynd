@@ -3122,7 +3122,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4961,7 +4961,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5767,7 +5767,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.4",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6494,7 +6494,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6553,7 +6553,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7267,7 +7267,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7949,9 +7949,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-client"
-version = "0.525.0"
+version = "0.539.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6edce07e002d97cf7ebd46b730eed8200d6c75e1f682bec30ecd92585f1be6f5"
+checksum = "9fca48d0e541f93c4ead4be36931a05c4aa0047849157e0cc3b160a2b905d65b"
 dependencies = [
  "async-trait",
  "backoff",
@@ -7980,9 +7980,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-common"
-version = "0.525.0"
+version = "0.539.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7192fad4f366a5385a28498d25081486600de943e7583a7eac7be2c5dbceeaae"
+checksum = "a89a9a3592bfbda73b5527ec7f616ecbb3df6dd86018ef1af170b299b2ba3050"
 dependencies = [
  "anyhow",
  "arrayvec",
@@ -8009,9 +8009,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-ethereum"
-version = "0.525.0"
+version = "0.539.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb953ab70812430344bd73dc03257a1beeece0428c0a97b6d2e8b4221a76cb1"
+checksum = "2d120285adc0fc44369d1a4c21095304b0b89ae525a0c38043792f23420e61c5"
 dependencies = [
  "alloy",
  "async-trait",
@@ -8031,9 +8031,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-execution"
-version = "0.525.0"
+version = "0.539.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa1bbb6812ae863e679505991ea713e7baade53880c2bf447df541838b1cda8c"
+checksum = "eabc4f033982204db6f031b5e7c8f7cd22fa44e8056009523af481168be07b6e"
 dependencies = [
  "alloy",
  "chrono",
@@ -8055,9 +8055,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulation"
-version = "0.525.0"
+version = "0.539.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d066fa68a381b5ea589e4780c5d2c89b6e947c5cf75c6c3fedcd6447a9198e7a"
+checksum = "5460362a5e9895bb5c1e8d9c9e36df1210109605380b16849763cd19c82773ec"
 dependencies = [
  "alloy",
  "alloy-chains",
@@ -8594,7 +8594,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
