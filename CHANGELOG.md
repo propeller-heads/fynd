@@ -1,4 +1,12 @@
 
+## [0.128.0](https://github.com/propeller-heads/fynd/compare/0.127.0...0.128.0) (2026-11-24)
+
+### Bug Fixes
+
+- Update `url` to 2.5.9 and `rustix` to 1.1.6 to pick up security fixes for a stack overflow when parsing nested blob URLs and for unwritten bytes being marked as initialized. ([4ee7df3](https://github.com/propeller-heads/fynd/commit/4ee7df3f5d2cd7fb8f7cfca8aff8b92d64eb3ec4))
+- Remove actix-web's unused cookie support from the RPC server, which drops the vulnerable `cookie` 0.16 dependency, where private cookie nonces could repeat after a fork. ([f1e159e](https://github.com/propeller-heads/fynd/commit/f1e159e93fe0c7faa4acb38c8ada1245fb3acd33))
+
+
 ## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
 
 ### Bug Fixes
