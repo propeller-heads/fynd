@@ -1,4 +1,12 @@
 
+## [0.128.0](https://github.com/propeller-heads/fynd/compare/0.127.0...0.128.0) (2026-11-24)
+
+### Bug Fixes
+
+* bump url and rustix to their patched releases ([4ee7df3](https://github.com/propeller-heads/fynd/commit/4ee7df3f5d2cd7fb8f7cfca8aff8b92d64eb3ec4))
+* **rpc:** drop actix-web's cookie support ([f1e159e](https://github.com/propeller-heads/fynd/commit/f1e159e93fe0c7faa4acb38c8ada1245fb3acd33))
+
+
 ## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
 
 ### Bug Fixes
