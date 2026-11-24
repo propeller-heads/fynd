@@ -1,4 +1,22 @@
 
+## [0.129.0](https://github.com/propeller-heads/fynd/compare/0.128.0...0.129.0) (2026-11-24)
+
+### Features
+
+* route exclusive flow through dual Curve pools and sign grants ([c94c515](https://github.com/propeller-heads/fynd/commit/c94c515b20028ecc8f019965d1f585800ba4bcc2))
+
+### Bug Fixes
+
+* **core:** drop public-pool quotes that compete with the public route ([2978a9f](https://github.com/propeller-heads/fynd/commit/2978a9f060414cbbb5781b752348e885d601afc2))
+* **core:** refuse a Curve policy whose min_fee is above 100% ([1c42654](https://github.com/propeller-heads/fynd/commit/1c42654cbe5a7af68101979e2bc13d8b57343d70))
+* **core:** give the Curve grant its own input cap ([d4e91ff](https://github.com/propeller-heads/fynd/commit/d4e91ffae7582a5eb1d6fe4b36300490def9fc43))
+* **core:** skip an exclusive route that competes with the public route ([8392a54](https://github.com/propeller-heads/fynd/commit/8392a54dccc3c210b9cfc4832a71094f78d93ddd))
+
+### Performance Improvements
+
+* **core:** re-check updated components only in the exclusive replacer ([f8a8f95](https://github.com/propeller-heads/fynd/commit/f8a8f95274bbc02e87c307f74f879fad2ba91085))
+
+
 ## [0.128.0](https://github.com/propeller-heads/fynd/compare/0.127.0...0.128.0) (2026-11-24)
 
 ### Bug Fixes
