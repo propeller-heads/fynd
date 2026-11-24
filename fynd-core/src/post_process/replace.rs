@@ -110,7 +110,7 @@ pub(super) fn replace_with_swap(
 /// Indexes the components of the base market state that pass `is_member`.
 pub(super) async fn build_index(
     market: &MarketData,
-    is_member: impl Fn(&ProtocolComponent) -> bool,
+    is_member: impl Fn(&MarketDataView<'_>, &ProtocolComponent) -> bool,
 ) -> ReplacementComponentIndex {
     let mut index = ReplacementComponentIndex::default();
     let view = market.read().await;
@@ -122,7 +122,7 @@ pub(super) async fn build_index(
         for id in state.components_by_protocol(system) {
             if let Some(component) = state
                 .get_component(id)
-                .filter(|component| is_member(component))
+                .filter(|component| is_member(&view, component))
             {
                 index.insert(id.clone(), component.tokens.clone());
             }
@@ -131,29 +131,43 @@ pub(super) async fn build_index(
     index
 }
 
-/// Removes the components `event` removes from `index`, and indexes the components it adds that
-/// pass `is_member`.
+/// When a component's membership in a replacement index can change.
+pub(super) enum MembershipChanges {
+    /// Only when the component is added: membership depends on the component alone.
+    OnAdd,
+    /// Also when its state updates: membership depends on the state, as a dual pool's does.
+    OnStateUpdate,
+}
+
+/// Applies `event` to `index`: drops the removed components and re-checks the added ones, and the
+/// updated ones under [`MembershipChanges::OnStateUpdate`], keeping those that pass `is_member`.
 pub(super) async fn update_index(
     index: &mut ReplacementComponentIndex,
     market: &MarketData,
     event: &MarketEvent,
-    is_member: impl Fn(&ProtocolComponent) -> bool,
+    changes: MembershipChanges,
+    is_member: impl Fn(&MarketDataView<'_>, &ProtocolComponent) -> bool,
 ) {
-    let MarketEvent::MarketUpdated { added_components, removed_components, .. } = event;
+    let MarketEvent::MarketUpdated { added_components, removed_components, updated_components } =
+        event;
     for id in removed_components {
         index.remove(id);
     }
-    if added_components.is_empty() {
+    let updated: &[ComponentId] = match changes {
+        MembershipChanges::OnAdd => &[],
+        MembershipChanges::OnStateUpdate => updated_components,
+    };
+    if added_components.is_empty() && updated.is_empty() {
         return;
     }
     let view = market.read().await;
-    for (id, topology) in added_components {
+    for id in added_components.keys().chain(updated) {
         index.remove(id);
-        if view
+        if let Some(component) = view
             .get_component(id)
-            .is_some_and(&is_member)
+            .filter(|component| is_member(&view, component))
         {
-            index.insert(id.clone(), topology.tokens.clone());
+            index.insert(id.clone(), component.tokens.clone());
         }
     }
 }
