@@ -4,8 +4,8 @@
 
 ### Bug Fixes
 
-- Update the `url` and `rustix` dependencies to patched releases, fixing a stack overflow when parsing deeply nested blob URLs and a flaw that marked unwritten bytes as initialized. ([4ee7df3](https://github.com/propeller-heads/fynd/commit/4ee7df3f5d2cd7fb8f7cfca8aff8b92d64eb3ec4))
-- Remove unused cookie support from the RPC server's `actix-web` dependency, eliminating a vulnerable `cookie` version whose private cookie nonces could repeat after a fork. ([f1e159e](https://github.com/propeller-heads/fynd/commit/f1e159e93fe0c7faa4acb38c8ada1245fb3acd33))
+- Update `url` to 2.5.9 and `rustix` to 1.1.6 to pick up security fixes for a stack overflow when parsing nested blob URLs and for uninitialized-byte handling. ([4ee7df3](https://github.com/propeller-heads/fynd/commit/4ee7df3f5d2cd7fb8f7cfca8aff8b92d64eb3ec4))
+- Remove cookie support from the RPC server's `actix-web` dependency, which eliminates a vulnerable `cookie` version whose private cookie nonces could repeat after a fork. The server never used cookies. ([f1e159e](https://github.com/propeller-heads/fynd/commit/f1e159e93fe0c7faa4acb38c8ada1245fb3acd33))
 
 
 ## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
