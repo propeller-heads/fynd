@@ -53,17 +53,17 @@ use crate::{
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_route_shape, leg_route_output, matched_commitment, pin_commitment,
-        record_gas_token_amount, routes_through_exclusive, to_gas_token_wei, ExclusiveRouteShape,
-        RouteOutput, USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
+        exclusive_route_shape, is_exclusive_leg, leg_route_output, matched_commitment,
+        pin_commitment, record_gas_token_amount, routes_through_exclusive, to_gas_token_wei,
+        ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
     },
-    feed::{exclusivity::is_exclusive, protocol_registry::is_rfq_protocol},
+    feed::protocol_registry::is_rfq_protocol,
     price_guard::guard::PriceGuard,
     simulation::{
         pamm_overrides,
         simulator::{QuoteSimulator, SimulationPurpose},
     },
-    types::RouteRejection,
+    types::{ComponentId, RouteRejection},
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
     QuoteStatus, SolveError, SolveParams,
@@ -1199,6 +1199,11 @@ impl WorkerPoolRouter {
 /// - `Swap::committed_amount_out` set on each exclusive leg, and
 /// - an order-level `SurplusInfo`.
 ///
+/// A quote whose exclusive leg goes through a pool of the public reference's route is dropped,
+/// both an `IncludeExclusive` candidate and a public-pool quote the exclusive replacer built. The
+/// pool already wins the trade at its public price, so a grant would only lower what its LPs earn.
+/// `exclusive_route_competes_with_public_total` counts the orders that drop one.
+///
 /// If there is no commitment, this returns `public_ranked` unchanged. In default-fee mode the
 /// placeholder is the only fallback, so the order answers "no route" if there is no commitment or
 /// the price guard rejects the exclusive quote.
@@ -1224,12 +1229,25 @@ fn combine_with_surplus(
     user_share_bps: u32,
     token_prices: Option<&TokenGasPrices>,
 ) -> Vec<OrderQuote> {
-    let Some(exclusive_candidate) = best_exclusive_candidate(responses, pool_scopes, options)
+    let public_pools = route_pools(find_public_reference(&public_ranked));
+    if responses
+        .quotes
+        .iter()
+        .any(|wq| competes_with_public(&wq.quote, &public_pools))
+    {
+        counter!("exclusive_route_competes_with_public_total").increment(1);
+    }
+    let public_ranked: Vec<OrderQuote> = public_ranked
+        .into_iter()
+        .filter(|quote| !competes_with_public(quote, &public_pools))
+        .collect();
+    let public_reference = find_public_reference(&public_ranked);
+
+    let Some(exclusive_candidate) =
+        best_exclusive_candidate(responses, pool_scopes, options, &public_pools)
     else {
         return public_ranked;
     };
-
-    let public_reference = find_public_reference(&public_ranked);
 
     let commitment = match public_reference {
         Some(public_reference) => matched_commitment(
@@ -1349,11 +1367,13 @@ fn is_rankable(quote: &OrderQuote, options: &QuoteOptions) -> bool {
 }
 
 /// Returns the exclusive-access candidate with the highest output net of gas. The candidate must
-/// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`.
+/// obey the request `max_gas` and the route shape rules of `has_valid_exclusive_route`, and must
+/// not compete with `public_reference` (see `competes_with_public`).
 fn best_exclusive_candidate<'a>(
     responses: &'a OrderResponses,
     pool_scopes: &FxHashMap<String, LiquidityScope>,
     options: &QuoteOptions,
+    public_pools: &FxHashSet<ComponentId>,
 ) -> Option<&'a OrderQuote> {
     responses
         .quotes
@@ -1367,12 +1387,38 @@ fn best_exclusive_candidate<'a>(
                 .unwrap_or(true)
         })
         .filter(|wq| has_valid_exclusive_route(&wq.quote))
+        .filter(|wq| !competes_with_public(&wq.quote, public_pools))
         .max_by(|a, b| {
             a.quote
                 .amount_out_net_gas()
                 .cmp(b.quote.amount_out_net_gas())
         })
         .map(|wq| &wq.quote)
+}
+
+/// The pools the route of `quote` goes through. Empty when there is no quote or it has no route.
+fn route_pools(quote: Option<&OrderQuote>) -> FxHashSet<ComponentId> {
+    let Some(route) = quote.and_then(OrderQuote::route) else {
+        return FxHashSet::default();
+    };
+    route
+        .swaps()
+        .iter()
+        .map(|swap| swap.component_id().to_string())
+        .collect()
+}
+
+/// Whether an exclusive leg of `quote` goes through one of `public_pools`, the pools of the public
+/// reference's route. A dual pool can be in both routes: at its public price in the public one and
+/// with a grant in the exclusive one.
+fn competes_with_public(quote: &OrderQuote, public_pools: &FxHashSet<ComponentId>) -> bool {
+    let Some(route) = quote.route() else {
+        return false;
+    };
+    route
+        .swaps()
+        .iter()
+        .any(|swap| is_exclusive_leg(swap) && public_pools.contains(swap.component_id()))
 }
 
 /// Returns the amount to commit if the public worker pools find no route. The amount is the
@@ -1389,7 +1435,7 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     let swaps = route.swaps();
     let leg = swaps
         .iter()
-        .find(|swap| is_exclusive(swap.protocol_component()))?;
+        .find(|swap| is_exclusive_leg(swap))?;
     let (numerator, denominator) = leg_route_output(swaps, leg, &route.output_token()?)?;
 
     let realized_amount_out = exclusive_candidate.amount_out();
@@ -1600,7 +1646,7 @@ mod tests {
         tycho_common::models::Chain,
         tycho_core::{
             models::{token::Token, Address, Chain as SimChain},
-            simulation::protocol_sim::Price,
+            simulation::protocol_sim::{Price, ProtocolSim},
             Bytes,
         },
     };
@@ -1609,7 +1655,8 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component, component_with_protocol, MockProtocolSim},
         derived::DerivedData,
-        feed::exclusivity::mark_exclusive,
+        exclusive_protocol::test_curve,
+        feed::exclusivity::{is_exclusive, mark_exclusive},
         simulation::pamm_overrides::fixtures as pamm_fixtures,
         solver::defaults,
         tests::metrics::recorded_metrics,
@@ -3600,6 +3647,69 @@ mod tests {
         assert_eq!(combined[0].surplus_amount(), None);
     }
 
+    /// A candidate whose exclusive leg goes through a pool of the public route is skipped
+    /// (`same_pool`). One through another pool is kept (`other_pool`).
+    #[rstest]
+    #[case::same_pool(&[("uniswap_v2", 0x01, 0x02, 1000, 900)], 900)]
+    #[case::other_pool(
+        &[("uniswap_v2", 0x01, 0x03, 1000, 1000), ("uniswap_v2", 0x03, 0x02, 1000, 900)],
+        905
+    )]
+    fn test_combine_competing_with_public(
+        #[case] public_legs: &[(&str, u8, u8, u64, u64)],
+        #[case] expected_head: u64,
+    ) {
+        let public = make_priced_route_quote(public_legs, 900);
+        let exclusive = make_priced_route_quote(&[("vm:exclusive", 0x01, 0x02, 1000, 950)], 950);
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("public_pool".to_string(), public.clone())),
+                worker_quote(("exclusive_access_pool".to_string(), exclusive)),
+            ],
+            failed_solvers: vec![],
+        };
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![public],
+            1_000,
+            None,
+        );
+
+        assert_eq!(*combined[0].amount_out(), BigUint::from(expected_head));
+    }
+
+    /// A public-pool quote the exclusive replacer built is dropped when its exclusive leg goes
+    /// through a pool of the public reference's route.
+    #[test]
+    fn test_combine_replacer_quote_competing_with_public() {
+        let public = make_priced_route_quote(&[("uniswap_v2", 0x01, 0x02, 1000, 900)], 900);
+        let replaced = make_priced_route_quote(&[("vm:exclusive", 0x01, 0x02, 1000, 950)], 950);
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("public_pool".to_string(), replaced.clone())),
+                worker_quote(("public_pool".to_string(), public.clone())),
+            ],
+            failed_solvers: vec![],
+        };
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![replaced, public],
+            1_000,
+            None,
+        );
+
+        assert_eq!(combined.len(), 1);
+        assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
+    }
+
     /// The `NoRouteFound` placeholder `rank_quotes` returns when no public candidate succeeded.
     fn no_route_quote() -> OrderQuote {
         OrderQuote::new(
@@ -3872,7 +3982,7 @@ mod tests {
             .expect("surplus quote should have a route")
             .swaps()
             .iter()
-            .find(|s| is_exclusive(s.protocol_component()))
+            .find(|s| is_exclusive_leg(s))
             .expect("should have an exclusive swap")
             .committed_amount_out()
             .cloned()
@@ -3885,6 +3995,10 @@ mod tests {
     #[rstest]
     #[case::first_hop(
         &[("vm:exclusive", 0x01, 0x02, 1000, 1_000_000), ("uniswap_v2", 0x02, 0x03, 1_000_000, 900_000)],
+        900_000,
+    )]
+    #[case::dual_pool_first_hop(
+        &[(DUAL_CURVE, 0x01, 0x02, 1000, 1_000_000), ("uniswap_v2", 0x02, 0x03, 1_000_000, 900_000)],
         900_000,
     )]
     #[case::before_split(
@@ -4043,6 +4157,9 @@ mod tests {
 
     /// Builds a Success quote whose route has one swap per `(protocol_system, token_in, token_out)`
     /// leg, for exercising `has_valid_exclusive_route` on multi-leg and multi-path route shapes.
+    /// The protocol system of a leg through a dual Curve pool priced with a grant.
+    const DUAL_CURVE: &str = "vm:curve_dual";
+
     fn make_route_quote(legs: &[(&str, u8, u8)]) -> OrderQuote {
         let legs: Vec<(&str, u8, u8, u64, u64)> = legs
             .iter()
@@ -4098,6 +4215,16 @@ mod tests {
             if *protocol_system == "vm:exclusive" {
                 mark_exclusive(&mut comp);
             }
+            // A dual Curve pool priced with a grant: its state is the pool's exclusive view.
+            let state: Box<dyn ProtocolSim> = if *protocol_system == DUAL_CURVE {
+                Box::new(
+                    test_curve::dual_curve_state()
+                        .exclusive_view()
+                        .expect("supported policy"),
+                )
+            } else {
+                Box::new(MockProtocolSim::default())
+            };
             swaps.push(Swap::new(
                 format!("pool-{tin}-{tout}"),
                 protocol_system.to_string(),
@@ -4107,7 +4234,7 @@ mod tests {
                 BigUint::from(*leg_out),
                 BigUint::from(50_000u64),
                 comp,
-                Box::new(MockProtocolSim::default()),
+                state,
             ));
             tokens.insert(tin, tin_token);
             tokens.insert(tout, tout_token);
@@ -4160,6 +4287,10 @@ mod tests {
     // Two exclusive legs: out of scope for v1 (ambiguous per-component attribution).
     #[case::two_exclusive_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
+    #[case::dual_pool_leg(&[(DUAL_CURVE, 0x01, 0x02)], true)]
+    #[case::two_dual_pool_legs(&[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)], false)]
+    #[case::dual_pool_and_exclusive_legs(
+        &[(DUAL_CURVE, 0x01, 0x03), ("vm:exclusive", 0x03, 0x02)], false)]
     // Diamond split: 0x01 splits into 0x01->0x02 (exclusive) and 0x01->0x03, both merging into
     // 0x02->0x04 and 0x03->0x04. The exclusive leg's output reaches 0x04 through 0x02->0x04,
     // which is not the next serialized swap.
@@ -4192,6 +4323,9 @@ mod tests {
     #[rstest]
     #[case::multiple_legs(
         &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)],
+        "exclusive_route_multiple_legs_total")]
+    #[case::multiple_dual_pool_legs(
+        &[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)],
         "exclusive_route_multiple_legs_total")]
     #[case::loop_after_leg(
         &[

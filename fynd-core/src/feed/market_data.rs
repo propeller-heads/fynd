@@ -30,7 +30,8 @@ use tycho_simulation::{
 };
 
 use crate::{
-    feed::component_filter::protocol_matches,
+    exclusive_protocol::{build_exclusive_view, Grantor},
+    feed::{component_filter::protocol_matches, exclusivity::is_exclusive},
     types::{
         swap_directions, BlockInfo, ComponentId, ComponentTopology, ResolvedRouteConstraints,
         RouteConstraints, SwapDirection,
@@ -44,15 +45,48 @@ use crate::{
 pub type StateLabel = String;
 
 /// An immutable snapshot of per-component simulation states for one overlay layer.
-pub type OverlayStates = Arc<FxHashMap<ComponentId, Arc<dyn ProtocolSim>>>;
+type OverlayStates = Arc<FxHashMap<ComponentId, SimulationState>>;
 
 /// A named simulation-state overlay with a block-number expiry.
-pub struct OverlayEntry {
+struct OverlayEntry {
     /// The overlay component states (only components that differ from base state).
-    pub states: OverlayStates,
+    states: OverlayStates,
     /// Last block number for which this overlay is valid.
     /// The overlay is automatically evicted before block `valid_until + 1` is applied.
-    pub valid_until: u64,
+    valid_until: u64,
+}
+
+/// A component's simulation state, with its exclusive view when Fynd can price the pool with a
+/// grant.
+#[derive(Debug, Clone)]
+struct SimulationState {
+    state: Arc<dyn ProtocolSim>,
+    /// Built with the state, so a state update that kills the pool's policy drops the view with
+    /// it.
+    exclusive_view: Option<Arc<dyn ProtocolSim>>,
+}
+
+impl SimulationState {
+    /// Wraps `state`, with its exclusive view when `grantor` can sign for the pool.
+    fn new(state: Arc<dyn ProtocolSim>, grantor: Option<&Grantor>) -> Self {
+        let exclusive_view =
+            grantor.and_then(|grantor| build_exclusive_view(state.as_ref(), grantor));
+        Self { state, exclusive_view }
+    }
+
+    /// The state to price the pool with: its exclusive view when `exclusive` and it has one.
+    fn priced(&self, exclusive: bool) -> &Arc<dyn ProtocolSim> {
+        match &self.exclusive_view {
+            Some(view) if exclusive => view,
+            _ => &self.state,
+        }
+    }
+
+    /// The entry a subset holds: the priced state alone, so the subset prices the pool as the view
+    /// it came from does.
+    fn subset_entry(&self, exclusive: bool) -> Self {
+        Self { state: Arc::clone(self.priced(exclusive)), exclusive_view: None }
+    }
 }
 
 /// The shared overlay registry: maps each label to its snapshot.
@@ -81,12 +115,27 @@ pub struct MarketData {
     /// Set by [`MarketData::with_priority_fee`]. It lives on the handle, not on the shared state,
     /// so one request can solve at its own priority fee without any other request seeing it.
     priority_fee: Option<BigUint>,
+    /// Whether this handle's views give a dual pool's exclusive view in place of its state.
+    gives_exclusive_views: bool,
 }
 
 impl MarketData {
     /// Creates a new handle wrapping the given data store.
     pub fn new(data: Arc<RwLock<MarketState>>) -> Self {
-        Self { data, overlays: Arc::new(RwLock::new(FxHashMap::default())), priority_fee: None }
+        Self {
+            data,
+            overlays: Arc::new(RwLock::new(FxHashMap::default())),
+            priority_fee: None,
+            gives_exclusive_views: false,
+        }
+    }
+
+    /// A handle over the same data whose views give each dual pool's exclusive view in place of
+    /// its state. The market state holds exclusive views only when it was built
+    /// [`MarketState::with_grantor`].
+    #[must_use]
+    pub(crate) fn with_exclusive_views(&self) -> Self {
+        Self { gives_exclusive_views: true, ..self.clone() }
     }
 
     /// Creates a new empty market data store wrapped in a `MarketData`.
@@ -102,21 +151,22 @@ impl MarketData {
     /// written no gas price, this handle reports none, like every other handle.
     #[must_use]
     pub fn with_priority_fee(&self, priority_fee: BigUint) -> Self {
-        Self {
-            data: Arc::clone(&self.data),
-            overlays: Arc::clone(&self.overlays),
-            priority_fee: Some(priority_fee),
-        }
+        Self { priority_fee: Some(priority_fee), ..self.clone() }
     }
 
     /// Builds a view over `guard` that reports this handle's gas price.
     fn view<'a>(
         &self,
         guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
-        overlay: Option<(StateLabel, OverlayStates)>,
+        overlay: Option<Overlay>,
     ) -> MarketDataView<'a> {
         let gas_price = self.replace_priority_fee(guard.gas_price());
-        MarketDataView { guard, overlay, gas_price }
+        MarketDataView {
+            guard,
+            overlay,
+            gas_price,
+            gives_exclusive_views: self.gives_exclusive_views,
+        }
     }
 
     /// Returns `gas_price` with this handle's priority fee, or `None` when the handle carries no
@@ -158,8 +208,8 @@ impl MarketData {
     ) -> Result<MarketDataView<'_>, ReadLabeledError> {
         let guard = self.data.read().await;
         if let Some(e) = self.overlays.read().await.get(label) {
-            let states = Arc::clone(&e.states);
-            return Ok(self.view(guard, Some((label.clone(), states))));
+            let overlay = Overlay { label: label.clone(), states: Arc::clone(&e.states) };
+            return Ok(self.view(guard, Some(overlay)));
         }
         if &guard.label == label {
             return Ok(self.view(guard, None));
@@ -200,17 +250,24 @@ impl MarketData {
 
     // ==================== Overlay CRUD ====================
 
-    /// Registers or replaces an overlay for the given label.
+    /// Registers or replaces an overlay for the given label. Each overlay state gets its own
+    /// exclusive view, as a base state does.
     pub async fn register_labeled_state(
         &self,
         label: StateLabel,
         states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
         valid_until: u64,
     ) {
+        let grantor = self.data.read().await.grantor.clone();
+        let states = states
+            .into_iter()
+            .map(|(id, state)| (id, SimulationState::new(state, grantor.as_ref())))
+            .collect();
+        let entry = OverlayEntry { states: Arc::new(states), valid_until };
         self.overlays
             .write()
             .await
-            .insert(label, OverlayEntry { states: Arc::new(states), valid_until });
+            .insert(label, entry);
     }
 
     /// Removes the overlay for the given label, if it exists.
@@ -261,13 +318,23 @@ impl MarketData {
 ///
 /// Holds a read lock on the base `MarketState` and an optional overlay snapshot.
 /// Use `get_simulation_state` for overlay-aware component lookups. `gas_price` and
-/// `extract_subset` report the handle's gas price; all other accessors delegate to the base data.
+/// `extract_subset` report the handle's gas price. A view from a handle built
+/// `MarketData::with_exclusive_views` gives each dual pool's exclusive view in place of its
+/// state, in `get_simulation_state` and in subsets. All other accessors delegate to the base data.
 pub struct MarketDataView<'a> {
     guard: tokio::sync::RwLockReadGuard<'a, MarketState>,
-    overlay: Option<(StateLabel, OverlayStates)>,
+    overlay: Option<Overlay>,
     /// Gas price this view reports in place of the base data's, set when the handle it came from
     /// carries a priority fee. Built once per view so `gas_price` can hand out a reference.
     gas_price: Option<BlockGasPrice>,
+    /// Whether this view gives a dual pool's exclusive view in place of its state.
+    gives_exclusive_views: bool,
+}
+
+/// The overlay a view reads.
+struct Overlay {
+    label: StateLabel,
+    states: OverlayStates,
 }
 
 impl<'a> MarketDataView<'a> {
@@ -275,17 +342,39 @@ impl<'a> MarketDataView<'a> {
     pub fn state_label(&self) -> Option<&StateLabel> {
         self.overlay
             .as_ref()
-            .map(|(label, _)| label)
+            .map(|overlay| &overlay.label)
     }
 
-    /// Returns the simulation state for the given component, checking the overlay first.
+    /// Returns the simulation state for the given component, checking the overlay first. For a
+    /// dual pool, returns its exclusive view when this view gives exclusive views.
     pub fn get_simulation_state(&self, id: &str) -> Option<&dyn ProtocolSim> {
-        if let Some((_, ref states)) = self.overlay {
-            if let Some(s) = states.get(id) {
-                return Some(s.as_ref());
-            }
-        }
-        self.guard.get_simulation_state(id)
+        self.simulation_state(id).map(|entry| {
+            entry
+                .priced(self.gives_exclusive_views)
+                .as_ref()
+        })
+    }
+
+    /// Whether this view prices `id` with a grant: `id` is a dual pool Fynd can sign for, and this
+    /// view gives exclusive views.
+    pub(crate) fn is_priced_exclusive(&self, id: &str) -> bool {
+        self.gives_exclusive_views &&
+            self.simulation_state(id)
+                .is_some_and(|entry| entry.exclusive_view.is_some())
+    }
+
+    /// Whether a swap through `component` is an exclusive leg: the component is exclusive, or this
+    /// view prices it with a grant.
+    pub(crate) fn is_exclusive_liquidity(&self, component: &ProtocolComponent) -> bool {
+        is_exclusive(component) || self.is_priced_exclusive(&component.id)
+    }
+
+    /// The simulation state of `id`, from the overlay when it holds one, else from the base data.
+    fn simulation_state(&self, id: &str) -> Option<&SimulationState> {
+        self.overlay
+            .as_ref()
+            .and_then(|overlay| overlay.states.get(id))
+            .or_else(|| self.guard.simulation_states.get(id))
     }
 
     /// Extracts a base-data subset for the given component IDs, then layers the active overlay
@@ -297,15 +386,10 @@ impl<'a> MarketDataView<'a> {
         component_ids: &FxHashSet<&ComponentId>,
     ) -> MarketState {
         let mut subset = self.extract_subset(component_ids);
-        if let Some((ref label, ref states)) = self.overlay {
-            for (id, state) in states.iter() {
-                if subset
-                    .simulation_states
-                    .contains_key(id)
-                {
-                    subset
-                        .simulation_states
-                        .insert(id.clone(), Arc::clone(state));
+        if let Some(Overlay { label, states }) = &self.overlay {
+            for (id, entry) in states.iter() {
+                if let Some(subset_entry) = subset.simulation_states.get_mut(id) {
+                    *subset_entry = entry.subset_entry(self.gives_exclusive_views);
                 }
             }
             subset.label = label.clone();
@@ -331,8 +415,12 @@ impl<'a> MarketDataView<'a> {
     /// Extracts a base-data subset for the given component IDs (no overlay applied).
     ///
     /// The subset reports this view's gas price, because algorithms price routes off the subset.
+    /// When this view gives exclusive views, the subset holds each dual pool's exclusive view in
+    /// place of its state.
     pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
-        let mut subset = self.guard.extract_subset(component_ids);
+        let mut subset = self
+            .guard
+            .extract_priced_subset(component_ids, self.gives_exclusive_views);
         if let Some(gas_price) = self.gas_price.clone() {
             subset.update_gas_price(gas_price);
         }
@@ -408,8 +496,11 @@ pub struct MarketState {
     label: StateLabel,
     /// All components indexed by their ID, each with its swap directions.
     components: FxHashMap<ComponentId, StoredComponent>,
-    /// All states indexed by their component ID.
-    simulation_states: FxHashMap<ComponentId, Arc<dyn ProtocolSim>>,
+    /// All states indexed by their component ID, each with its exclusive view if it has one.
+    simulation_states: FxHashMap<ComponentId, SimulationState>,
+    /// Fynd's controller address and router. A state gets an exclusive view only when they can
+    /// sign for its pool; with none, no state gets one.
+    grantor: Option<Grantor>,
     /// All tokens indexed by their address. Shared for the same reason as `components`.
     tokens: FxHashMap<Address, Arc<Token>>,
     /// Current gas price. None if not fetched yet.
@@ -481,6 +572,7 @@ impl MarketState {
             label: String::new(),
             components: FxHashMap::default(),
             simulation_states: FxHashMap::default(),
+            grantor: None,
             tokens: FxHashMap::default(),
             gas_price: None,
             protocol_sync_status: FxHashMap::default(),
@@ -490,6 +582,14 @@ impl MarketState {
             components_by_protocol: FxHashMap::default(),
             constraint_generation: 0,
         }
+    }
+
+    /// Gives each state an exclusive view when `grantor` can sign for its pool. Call it before the
+    /// first state arrives: a state stored earlier keeps no view until it is updated.
+    #[must_use]
+    pub(crate) fn with_grantor(mut self, grantor: Option<Grantor>) -> Self {
+        self.grantor = grantor;
+        self
     }
 
     /// Returns the label identifying the block or overlay this state was produced from.
@@ -611,7 +711,7 @@ impl MarketState {
     pub fn get_simulation_state(&self, id: &str) -> Option<&dyn ProtocolSim> {
         self.simulation_states
             .get(id)
-            .map(|b| b.as_ref())
+            .map(|entry| entry.state.as_ref())
     }
 
     /// Gets a token by address.
@@ -808,8 +908,8 @@ impl MarketState {
         states: impl IntoIterator<Item = (ComponentId, S)>,
     ) {
         for (id, state) in states {
-            self.simulation_states
-                .insert(id, state.into());
+            let entry = SimulationState::new(state.into(), self.grantor.as_ref());
+            self.simulation_states.insert(id, entry);
         }
     }
 
@@ -828,6 +928,16 @@ impl MarketState {
     /// - Gas price and block info
     /// - The unsynced protocols and their pools
     pub fn extract_subset(&self, component_ids: &FxHashSet<&ComponentId>) -> MarketState {
+        self.extract_priced_subset(component_ids, false)
+    }
+
+    /// [`Self::extract_subset`], with each dual pool's exclusive view in place of its state when
+    /// `exclusive`.
+    fn extract_priced_subset(
+        &self,
+        component_ids: &FxHashSet<&ComponentId>,
+        exclusive: bool,
+    ) -> MarketState {
         let mut components =
             FxHashMap::with_capacity_and_hasher(component_ids.len(), rustc_hash::FxBuildHasher);
         let mut simulation_states =
@@ -844,8 +954,8 @@ impl MarketState {
             }
             // A component without a simulation state is legitimate: the recording skips `vm:*`
             // states, and a component can be announced a block before its first state arrives.
-            if let Some(state) = self.simulation_states.get(id) {
-                simulation_states.insert(id.clone(), Arc::clone(state));
+            if let Some(entry) = self.simulation_states.get(id) {
+                simulation_states.insert(id.clone(), entry.subset_entry(exclusive));
             }
         }
 
@@ -863,6 +973,7 @@ impl MarketState {
             label: self.label.clone(),
             components,
             simulation_states,
+            grantor: None,
             tokens,
             gas_price: self.gas_price.clone(),
             protocol_sync_status: FxHashMap::default(), // Not needed for simulation
@@ -912,9 +1023,12 @@ mod tests {
     use tycho_simulation::{tycho_client::feed::BlockHeader, tycho_ethereum::gas::GasPrice};
 
     use super::*;
-    use crate::algorithm::test_utils::{
-        component, component_with_directions, component_with_protocol, set_last_updated_block,
-        token, MockProtocolSim,
+    use crate::{
+        algorithm::test_utils::{
+            component, component_with_directions, component_with_protocol, set_last_updated_block,
+            token, MockProtocolSim,
+        },
+        exclusive_protocol::test_curve,
     };
 
     #[test]
@@ -1267,7 +1381,10 @@ mod tests {
 
         let subset = market.extract_subset(&[&ab].into_iter().collect());
 
-        assert!(Arc::ptr_eq(&market.simulation_states[&ab], &subset.simulation_states[&ab]));
+        assert!(Arc::ptr_eq(
+            &market.simulation_states[&ab].state,
+            &subset.simulation_states[&ab].state
+        ));
     }
 
     #[test]
@@ -1655,5 +1772,135 @@ mod tests {
             .extract_subset(&FxHashSet::default())
             .gas_price()
             .is_none());
+    }
+
+    fn is_exclusive_view(state: Option<&dyn ProtocolSim>) -> bool {
+        state.is_some_and(|state| {
+            state
+                .as_any()
+                .downcast_ref::<tycho_simulation::evm::protocol::curve::CurveState>()
+                .is_some_and(|curve| curve.is_exclusive_view())
+        })
+    }
+
+    /// A market whose states get an exclusive view when the test grantor can sign for them.
+    fn market_with_grantor() -> MarketData {
+        let state = MarketState::new().with_grantor(Some(test_curve::grantor()));
+        MarketData::new(Arc::new(RwLock::new(state)))
+    }
+
+    /// Only a handle with exclusive views gives a dual pool's exclusive view, and only for a pool
+    /// whose policy names Fynd's grantor.
+    #[tokio::test]
+    async fn test_exclusive_views_dual_pool() {
+        let market = market_with_grantor();
+        market.write().await.update_states([
+            ("dual".to_string(), Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>),
+            (
+                "other".to_string(),
+                Box::new(test_curve::curve_state(test_curve::grant_policy([0xee; 20], false))),
+            ),
+        ]);
+        let ids = ["dual".to_string(), "other".to_string()];
+        let ids: FxHashSet<&ComponentId> = ids.iter().collect();
+        let exclusive_market = market.with_exclusive_views();
+
+        let public = market.read().await;
+        let exclusive = exclusive_market.read().await;
+        let subset = exclusive.extract_subset(&ids);
+
+        assert!(!is_exclusive_view(public.get_simulation_state("dual")));
+        assert!(!public.is_priced_exclusive("dual"));
+        assert!(is_exclusive_view(exclusive.get_simulation_state("dual")));
+        assert!(exclusive.is_priced_exclusive("dual"));
+        assert!(is_exclusive_view(subset.get_simulation_state("dual")));
+        assert!(!is_exclusive_view(exclusive.get_simulation_state("other")));
+        assert!(!is_exclusive_view(subset.get_simulation_state("other")));
+    }
+
+    /// A market without a grantor gives no exclusive view, even through a handle with exclusive
+    /// views.
+    #[tokio::test]
+    async fn test_exclusive_views_no_grantor() {
+        let market = MarketData::new_shared().with_exclusive_views();
+        market.write().await.update_states([(
+            "dual".to_string(),
+            Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>,
+        )]);
+
+        let view = market.read().await;
+
+        assert!(!is_exclusive_view(view.get_simulation_state("dual")));
+        assert!(!view.is_priced_exclusive("dual"));
+    }
+
+    /// A pool stops being priced with a grant once an update kills its policy, or once it is
+    /// removed.
+    #[rstest::rstest]
+    #[case::policy_killed(false)]
+    #[case::removed(true)]
+    #[tokio::test]
+    async fn test_exclusive_views_dropped(#[case] remove: bool) {
+        let market = market_with_grantor().with_exclusive_views();
+        market.write().await.update_states([(
+            "dual".to_string(),
+            Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>,
+        )]);
+        let dual = "dual".to_string();
+
+        if remove {
+            market
+                .write()
+                .await
+                .remove_components([&dual]);
+        } else {
+            let killed =
+                test_curve::curve_state(test_curve::grant_policy(test_curve::CONTROLLER, true));
+            market
+                .write()
+                .await
+                .update_states([(dual.clone(), Box::new(killed) as Box<dyn ProtocolSim>)]);
+        }
+
+        let view = market.read().await;
+        assert!(!view.is_priced_exclusive(&dual));
+        assert!(!is_exclusive_view(view.get_simulation_state(&dual)));
+    }
+
+    /// An overlay state with a killed policy hides the base state's exclusive view.
+    #[tokio::test]
+    async fn test_exclusive_views_overlay() {
+        let market = market_with_grantor().with_exclusive_views();
+        market.write().await.update_states([(
+            "dual".to_string(),
+            Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>,
+        )]);
+        let killed: Arc<dyn ProtocolSim> = Arc::new(test_curve::curve_state(
+            test_curve::grant_policy(test_curve::CONTROLLER, true),
+        ));
+        market
+            .register_labeled_state(
+                "killed".to_string(),
+                [("dual".to_string(), killed)]
+                    .into_iter()
+                    .collect(),
+                u64::MAX,
+            )
+            .await;
+        let ids = ["dual".to_string()];
+        let ids: FxHashSet<&ComponentId> = ids.iter().collect();
+
+        let view = market
+            .read_labeled(&"killed".to_string())
+            .await
+            .expect("overlay");
+        let base = market.read().await;
+
+        assert!(!is_exclusive_view(view.get_simulation_state("dual")));
+        assert!(!is_exclusive_view(
+            view.extract_subset_with_overlay(&ids)
+                .get_simulation_state("dual")
+        ));
+        assert!(is_exclusive_view(base.get_simulation_state("dual")));
     }
 }

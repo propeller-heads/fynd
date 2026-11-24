@@ -495,9 +495,13 @@ where
         }
     }
 
-    /// Sets which liquidity this worker ingests.
+    /// Sets which liquidity this worker ingests. An `IncludeExclusive` worker prices each dual pool
+    /// with a grant.
     pub(crate) fn with_liquidity_scope(mut self, scope: LiquidityScope) -> Self {
         self.liquidity_scope = scope;
+        if scope == LiquidityScope::IncludeExclusive {
+            self.market_data = self.market_data.with_exclusive_views();
+        }
         self
     }
 

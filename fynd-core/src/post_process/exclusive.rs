@@ -1,8 +1,10 @@
-//! Replaces parts of a route with one swap through an exclusive component.
+//! Replaces parts of a route with one exclusive leg: a swap through an exclusive component, or
+//! through a dual pool priced with a grant.
 
 use async_trait::async_trait;
 use num_bigint::BigInt;
 use tracing::debug;
+use tycho_simulation::tycho_common::models::protocol::ProtocolComponent;
 
 use crate::{
     algorithm::paths::read_market,
@@ -12,14 +14,13 @@ use crate::{
     },
     feed::{
         events::{EventError, MarketEvent, MarketEventHandler},
-        exclusivity::is_exclusive,
-        market_data::MarketData,
+        market_data::{MarketData, MarketDataView},
     },
     post_process::{
         replace::{
             build_index, can_replace, replace_with_swap, update_index, CandidateRoute,
-            ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity, ReplacementSolver,
-            ReplacementTarget, RouteEvaluator,
+            MembershipChanges, ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity,
+            ReplacementSolver, ReplacementTarget, RouteEvaluator,
         },
         PostProcessRequest, RoutePostProcessor,
     },
@@ -54,7 +55,14 @@ impl MarketEventHandler for ExclusiveSwapReplacer {
         let Some(market) = &self.market else {
             return Ok(());
         };
-        update_index(&mut self.index, market, event, is_exclusive).await;
+        update_index(
+            &mut self.index,
+            market,
+            event,
+            MembershipChanges::OnStateUpdate,
+            is_exclusive_member,
+        )
+        .await;
         Ok(())
     }
 }
@@ -62,8 +70,10 @@ impl MarketEventHandler for ExclusiveSwapReplacer {
 #[async_trait]
 impl RoutePostProcessor for ExclusiveSwapReplacer {
     async fn initialize(&mut self, market: &MarketData) {
-        self.index = build_index(market, is_exclusive).await;
-        self.market = Some(market.clone());
+        // Its view gives each dual pool's exclusive view, the state of a replacement swap.
+        let market = market.with_exclusive_views();
+        self.index = build_index(&market, is_exclusive_member).await;
+        self.market = Some(market);
     }
 
     async fn process(
@@ -78,7 +88,8 @@ impl RoutePostProcessor for ExclusiveSwapReplacer {
         {
             return None;
         }
-        let liquidity = match read_market(request.market(), request.label().cloned()).await {
+        let market = request.market().with_exclusive_views();
+        let liquidity = match read_market(&market, request.label().cloned()).await {
             Ok(view) => ReplacementLiquidity::from_market_for_route(
                 &self.index,
                 &view,
@@ -95,13 +106,18 @@ impl RoutePostProcessor for ExclusiveSwapReplacer {
     }
 }
 
-/// Replaces a target with one swap through an exclusive component, or splits a target, one swap or
-/// a segment, between its swaps and the exclusive component.
+/// Whether a replacement swap can go through `component`: a swap through it is an exclusive leg.
+fn is_exclusive_member(view: &MarketDataView<'_>, component: &ProtocolComponent) -> bool {
+    view.is_exclusive_liquidity(component)
+}
+
+/// Replaces a target with one exclusive leg, or splits a target, one swap or a segment, between its
+/// swaps and the exclusive leg's pool.
 struct ExclusiveReplacementFinder;
 
 impl ReplacementFinder for ExclusiveReplacementFinder {
-    /// An exclusive component fills partially, so it accepts a target at any index of the route. It
-    /// does not accept a route that already has an exclusive leg.
+    /// An exclusive leg fills partially, so it accepts a target at any index of the route. It does
+    /// not accept a route that already has an exclusive leg.
     fn can_replace_target(
         &self,
         swap: &Swap,
