@@ -460,7 +460,10 @@ mod tests {
     use num_bigint::BigUint;
     use rstest::rstest;
     use serde_json::{json, Value};
-    use tycho_simulation::tycho_common::models::{Address, Chain};
+    use tycho_simulation::tycho_common::{
+        models::{Address, Chain},
+        Bytes,
+    };
 
     use super::*;
     use crate::api::request_capture::test_utils::{order, request_with_signatures};
@@ -627,7 +630,7 @@ mod tests {
     fn test_record_solved_quote() {
         let value = solved_record();
         assert_eq!(value["chain"], "ethereum");
-        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["schema_version"], 5);
         assert_eq!(
             value["client"],
             json!({
@@ -682,6 +685,82 @@ mod tests {
         assert!(solved_record()["outcome"]["orders"][0]
             .get("subsidy_amount")
             .is_none());
+    }
+
+    /// An order encoded for a request that signs nothing of the user's.
+    fn encoded_json(quote_order: fynd_core::OrderQuote) -> Value {
+        let encoding = fynd_rpc_types::EncodingOptions::new(0.005);
+        let options = fynd_rpc_types::QuoteOptions::default().with_encoding_options(encoding);
+        let request = fynd_rpc_types::QuoteRequest::new(vec![order()]).with_options(options);
+        let quote = finalize_quote(vec![quote_order], 42, None);
+        record_json(request_record(request), &Ok(quote), None)
+    }
+
+    fn with_transaction(mut order: fynd_core::OrderQuote) -> fynd_core::OrderQuote {
+        order.set_transaction(fynd_core::Transaction::new(
+            Bytes::from([0x99u8; 20]),
+            BigUint::from(7u64),
+            vec![0xde, 0xad, 0xbe, 0xef],
+        ));
+        order
+    }
+
+    #[test]
+    fn test_record_encoded_transaction() {
+        let order = with_transaction(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+        );
+
+        let value = encoded_json(order);
+
+        assert_eq!(
+            value["outcome"]["orders"][0]["encoded_transaction"],
+            json!({
+                "to": "0x9999999999999999999999999999999999999999",
+                "value": "7",
+                "data": "0xdeadbeef"
+            })
+        );
+    }
+
+    #[test]
+    fn test_record_encoded_transaction_with_permit2_signature() {
+        let order = with_transaction(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+        );
+        let quote = finalize_quote(vec![order], 42, None);
+
+        let value = record_json(request_record(request_with_signatures()), &Ok(quote), None);
+
+        let order = &value["outcome"]["orders"][0];
+        assert!(
+            order
+                .get("encoded_transaction")
+                .is_none(),
+            "in {order}"
+        );
+        assert!(!value.to_string().contains("deadbeef"), "calldata leaked: {value}");
+    }
+
+    #[test]
+    fn test_record_encoded_transaction_of_unencoded_order() {
+        let value = encoded_json(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+        );
+
+        let order = &value["outcome"]["orders"][0];
+        assert!(
+            order
+                .get("encoded_transaction")
+                .is_none(),
+            "in {order}"
+        );
     }
 
     /// The collector reads `served_at` as a fixed-width UTC timestamp, so the precision is part
