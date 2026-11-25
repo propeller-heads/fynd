@@ -182,6 +182,39 @@ mod tests {
         }
     }
 
+    /// A pool that stops being exclusive drops to 0; a pool reported before and still exclusive
+    /// stays at 1.
+    #[test]
+    fn test_emit_exclusive_pools() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let reported = FxHashMap::from_iter([
+            ("curve".to_string(), "vm:curve".to_string()),
+            ("killed".to_string(), "vm:curve".to_string()),
+        ]);
+        let exclusive_pools = FxHashMap::from_iter([
+            ("curve".to_string(), "vm:curve".to_string()),
+            ("ekubo".to_string(), "ekubo_v3".to_string()),
+        ]);
+
+        metrics::with_local_recorder(&recorder, || {
+            emit_exclusive_pools(&exclusive_pools, &reported);
+        });
+
+        let recorded = snapshotter.snapshot().into_vec();
+        let eligible = |protocol: &str, component: &str| {
+            find_gauge(
+                &recorded,
+                "exclusive_pool_eligible",
+                &[("protocol", protocol), ("component", component)],
+            )
+        };
+        assert_eq!(eligible("vm:curve", "curve"), 1.0);
+        assert_eq!(eligible("ekubo_v3", "ekubo"), 1.0);
+        assert_eq!(eligible("vm:curve", "killed"), 0.0);
+        assert_eq!(recorded.len(), 3);
+    }
+
     #[test]
     fn emit_market_metrics_records_component_and_sync_gauges() {
         let recorder = DebuggingRecorder::new();
