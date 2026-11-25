@@ -53,23 +53,49 @@ pub(crate) fn first_exclusive_leg(swaps: &[Swap]) -> Option<&Swap> {
 
 /// Returns the shape of the exclusive legs of `swaps`, without incrementing metrics.
 pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> ExclusiveRouteShape {
-    let mut has_exclusive_leg = false;
-    for leg in swaps
-        .iter()
-        .filter(|swap| is_exclusive_leg(swap))
-    {
-        has_exclusive_leg = true;
-        let reaches_output = leg_route_output(swaps, leg, output_token)
-            .is_some_and(|(numerator, _)| numerator > BigUint::ZERO);
-        if !reaches_output {
-            return ExclusiveRouteShape::DoesNotReachOutput;
+    match exclusive_legs(swaps, output_token) {
+        None => ExclusiveRouteShape::DoesNotReachOutput,
+        Some(legs) if legs.is_empty() => ExclusiveRouteShape::NoExclusiveLeg,
+        Some(_) => ExclusiveRouteShape::Valid,
+    }
+}
+
+/// An exclusive leg of a route and the route output it produces.
+pub(crate) struct ExclusiveLeg {
+    /// The position of the leg in the route's swaps.
+    pub(crate) index: usize,
+    /// The route output the leg produces, as the exact fraction `(numerator, denominator)` of
+    /// [`leg_route_output`]. The numerator is never zero.
+    pub(crate) route_output: (BigUint, BigUint),
+}
+
+impl ExclusiveLeg {
+    /// The route output the leg produces, rounded down: the weight of its part of the surplus and
+    /// the base of its default fee. Zero for a leg that produces less than one unit.
+    pub(crate) fn rounded_route_output(&self) -> BigUint {
+        let (numerator, denominator) = &self.route_output;
+        numerator / denominator
+    }
+}
+
+/// Returns the exclusive legs of `swaps`, in route order, with the route output each produces.
+///
+/// Returns `None` when some exclusive leg does not reach `output_token`: no swap carries its output
+/// there, or the swaps after it loop back to a token already on their path. An empty list means
+/// the route has no exclusive leg.
+pub(crate) fn exclusive_legs(swaps: &[Swap], output_token: &Address) -> Option<Vec<ExclusiveLeg>> {
+    let mut legs = Vec::new();
+    for (index, swap) in swaps.iter().enumerate() {
+        if !is_exclusive_leg(swap) {
+            continue;
         }
+        let route_output = leg_route_output(swaps, swap, output_token)?;
+        if route_output.0 == BigUint::ZERO {
+            return None;
+        }
+        legs.push(ExclusiveLeg { index, route_output });
     }
-    if has_exclusive_leg {
-        ExclusiveRouteShape::Valid
-    } else {
-        ExclusiveRouteShape::NoExclusiveLeg
-    }
+    Some(legs)
 }
 
 /// Returns the route output that `leg`'s output produces, as the fraction
@@ -79,7 +105,7 @@ pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> E
 /// its token's route output that its output makes up of all that the later swaps take of the
 /// token. This is the average price of the pools after the leg. Returns `None` when the swaps after
 /// the leg loop back to a token already on their path.
-pub(crate) fn leg_route_output(
+fn leg_route_output(
     swaps: &[Swap],
     leg: &Swap,
     output_token: &Address,
@@ -270,64 +296,45 @@ pub(crate) fn pin_commitment(
 
     let mut surplus_quote = exclusive_candidate.clone();
 
-    // Route output each exclusive leg produces, read before the swaps are borrowed mutably.
-    let leg_route_outputs: Vec<Option<(BigUint, BigUint)>> = surplus_quote
+    // The exclusive legs, read before the swaps are borrowed mutably. The router pins only routes
+    // whose legs all reach the output token.
+    let legs = surplus_quote
         .route()
-        .map(|route| {
-            let swaps = route.swaps();
-            let output_token = route.output_token();
-            swaps
-                .iter()
-                .map(|swap| {
-                    let output_token = output_token.as_ref()?;
-                    if !is_exclusive_leg(swap) {
-                        return None;
-                    }
-                    leg_route_output(swaps, swap, output_token)
-                })
-                .collect()
-        })
+        .and_then(|route| exclusive_legs(route.swaps(), &route.output_token()?))
         .unwrap_or_default();
 
-    // The weights of the split: the route output each exclusive leg produces, rounded down. A leg
-    // below one unit weighs nothing, captures nothing, and is still committed so it gets signed.
-    let total_leg_output: BigUint = leg_route_outputs
+    // The weights of the split: the route output each leg produces, rounded down. A leg below one
+    // unit weighs nothing, captures nothing, and is still committed so it gets signed.
+    let total_leg_output: BigUint = legs
         .iter()
-        .flatten()
-        .map(|(numerator, denominator)| numerator / denominator)
+        .map(ExclusiveLeg::rounded_route_output)
         .sum();
 
     if let Some(route) = surplus_quote.route_mut() {
-        let surplus = exclusive_route_amount_out - &committed_amount_out;
-        for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
-            if is_exclusive_leg(swap) {
-                let Some(Some((numerator, denominator))) = leg_route_outputs.get(i) else {
-                    continue;
-                };
-                if *numerator == BigUint::ZERO {
-                    continue;
-                }
-                let leg_output = numerator / denominator;
-                let captured = if total_leg_output == BigUint::ZERO {
-                    BigUint::ZERO
-                } else {
-                    (&surplus * &leg_output / &total_leg_output).min(leg_output)
-                };
-                // Convert into the leg's own token at the average price of the pools after the
-                // leg, rounding down so any error is taken from the protocol, not the user. The
-                // user gets at least the committed amount when those pools give less per unit
-                // as their input grows. A leg that outputs the route's output token converts at
-                // a price of exactly 1.
-                let captured_swap_amount_out =
-                    &captured * swap.amount_out() * denominator / numerator;
-                debug_assert!(
-                    captured_swap_amount_out <= *swap.amount_out(),
-                    "captured amount ({captured_swap_amount_out}) must not exceed the leg's output ({})",
-                    swap.amount_out(),
-                );
-                let committed_swap_amount_out = swap.amount_out() - &captured_swap_amount_out;
-                swap.set_committed_amount_out(committed_swap_amount_out);
-            }
+        let swaps = route.swaps_mut();
+        for leg in &legs {
+            let Some(swap) = swaps.get_mut(leg.index) else {
+                continue;
+            };
+            let leg_output = leg.rounded_route_output();
+            let captured = if total_leg_output == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                (&surplus_amount * &leg_output / &total_leg_output).min(leg_output)
+            };
+            // Convert into the leg's own token at the average price of the pools after the leg,
+            // rounding down so any error is taken from the protocol, not the user. The user gets
+            // at least the committed amount when those pools give less per unit as their input
+            // grows. A leg that outputs the route's output token converts at a price of exactly 1.
+            let (numerator, denominator) = &leg.route_output;
+            let captured_swap_amount_out = &captured * swap.amount_out() * denominator / numerator;
+            debug_assert!(
+                captured_swap_amount_out <= *swap.amount_out(),
+                "captured amount ({captured_swap_amount_out}) must not exceed the leg's output ({})",
+                swap.amount_out(),
+            );
+            let committed_swap_amount_out = swap.amount_out() - &captured_swap_amount_out;
+            swap.set_committed_amount_out(committed_swap_amount_out);
         }
     }
 

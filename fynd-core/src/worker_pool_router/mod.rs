@@ -53,7 +53,7 @@ use crate::{
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_route_shape, first_exclusive_leg, is_exclusive_leg, leg_route_output,
+        exclusive_legs, exclusive_route_shape, first_exclusive_leg, is_exclusive_leg,
         matched_commitment, pin_commitment, record_gas_token_amount, routes_through_exclusive,
         to_gas_token_wei, ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS,
         WEI_PER_GAS_TOKEN,
@@ -1483,21 +1483,14 @@ fn competes_with_public(quote: &OrderQuote, public_pools: &FxHashSet<ComponentId
 /// leg.
 fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     let route = exclusive_candidate.route()?;
-    let swaps = route.swaps();
-    let output_token = route.output_token()?;
-    let mut fee = BigUint::ZERO;
-    let mut has_exclusive_leg = false;
-    for leg in swaps
-        .iter()
-        .filter(|swap| is_exclusive_leg(swap))
-    {
-        has_exclusive_leg = true;
-        let (numerator, denominator) = leg_route_output(swaps, leg, &output_token)?;
-        fee += bps::scale_truncating(&(numerator / denominator), NO_PUBLIC_ROUTE_FEE_BPS);
-    }
-    if !has_exclusive_leg {
+    let legs = exclusive_legs(route.swaps(), &route.output_token()?)?;
+    if legs.is_empty() {
         return None;
     }
+    let fee: BigUint = legs
+        .iter()
+        .map(|leg| bps::scale_truncating(&leg.rounded_route_output(), NO_PUBLIC_ROUTE_FEE_BPS))
+        .sum();
 
     let realized_amount_out = exclusive_candidate.amount_out();
     let committed_amount_out = realized_amount_out.checked_sub(&fee)?;
