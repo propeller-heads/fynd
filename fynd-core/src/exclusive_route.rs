@@ -63,10 +63,10 @@ pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> E
 /// An exclusive leg of a route and the route output it produces.
 pub(crate) struct ExclusiveLeg {
     /// The position of the leg in the route's swaps.
-    pub(crate) index: usize,
+    index: usize,
     /// The route output the leg produces, as the exact fraction `(numerator, denominator)` of
     /// [`leg_route_output`]. The numerator is never zero.
-    pub(crate) route_output: (BigUint, BigUint),
+    route_output: (BigUint, BigUint),
 }
 
 impl ExclusiveLeg {
