@@ -9,8 +9,7 @@
 //!
 //! An order's `encoded_transaction` is the exception: its calldata names the receiver and carries
 //! the signatures Fynd attaches, which expire within minutes. A Permit2 signature is the user's,
-//! with a deadline the user chooses, so an order whose request carried one is recorded without its
-//! encoded transaction.
+//! with a deadline the user chooses, so the record zeroes it out of the calldata.
 //!
 //! Only requests that reached the solver produce a record. A request rejected by
 //! `validate_quote_request` returns 400 without one, so the collector sees solver outcomes and
@@ -27,6 +26,7 @@ use fynd_core::{
 use fynd_rpc_types::{AccountOverride, SimulationOverrides};
 use serde::{Serialize, Serializer};
 use serde_with::{serde_as, DisplayFromStr};
+use tracing::warn;
 use tycho_simulation::tycho_common::{
     models::{Address, Chain},
     Bytes,
@@ -78,7 +78,7 @@ impl QuoteRecord {
         head: Option<BlockInfo>,
     ) -> Self {
         let outcome = match result {
-            Ok(quote) => OutcomeRecord::solved(quote, head, request.records_calldata()),
+            Ok(quote) => OutcomeRecord::solved(quote, head, request.permit2_signature.as_ref()),
             Err(error) => OutcomeRecord::failed(error, request.replay.num_orders(), head),
         };
         Self {
@@ -169,10 +169,10 @@ pub struct RequestRecord {
     /// Absent when the request asked for no encoding.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding: Option<EncodingRecord>,
-    /// Whether the request carried a Permit2 signature, which the encoder writes into the
-    /// calldata.
+    /// The request's Permit2 signature, which the encoder writes into the calldata and the record
+    /// zeroes out of it.
     #[serde(skip)]
-    has_permit2_signature: bool,
+    permit2_signature: Option<Bytes>,
 }
 
 impl RequestRecord {
@@ -184,17 +184,12 @@ impl RequestRecord {
                 .options()
                 .encoding_options()
                 .map(EncodingRecord::capture),
-            has_permit2_signature: request
+            permit2_signature: request
                 .options()
                 .encoding_options()
-                .is_some_and(|options| options.permit2_signature().is_some()),
+                .and_then(EncodingOptions::permit2_signature)
+                .cloned(),
         }
-    }
-
-    /// Whether to record the orders' calldata. A request with a Permit2 signature records none,
-    /// because the calldata would contain that signature.
-    fn records_calldata(&self) -> bool {
-        !self.has_permit2_signature
     }
 }
 
@@ -269,7 +264,7 @@ struct OutcomeRecord {
 }
 
 impl OutcomeRecord {
-    fn solved(quote: &Quote, head: Option<BlockInfo>, records_calldata: bool) -> Self {
+    fn solved(quote: &Quote, head: Option<BlockInfo>, permit2_signature: Option<&Bytes>) -> Self {
         // One solve answers every order at one block and one gas price.
         let orders = quote.orders();
         let (block, block_source) = match priced_block(quote) {
@@ -288,7 +283,7 @@ impl OutcomeRecord {
             block_source,
             orders: orders
                 .iter()
-                .map(|order| OrderRecord::from_quote(order, records_calldata))
+                .map(|order| OrderRecord::from_quote(order, permit2_signature))
                 .collect(),
         }
     }
@@ -346,14 +341,15 @@ struct OrderRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     algorithm: Option<String>,
     route: Vec<SwapRecord>,
-    /// The order's `transaction` as `/v1/quote` returned it. Absent when the order was not
-    /// encoded, and when its request carried a Permit2 signature.
+    /// The order's `transaction` as `/v1/quote` returned it, with the request's Permit2 signature
+    /// zeroed. Absent when the order was not encoded, and when the signature could not be found
+    /// in the calldata.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoded_transaction: Option<EncodedTransaction>,
 }
 
 impl OrderRecord {
-    fn from_quote(order: &OrderQuote, records_calldata: bool) -> Self {
+    fn from_quote(order: &OrderQuote, permit2_signature: Option<&Bytes>) -> Self {
         let status = quote_status_code(order.status()).to_string();
         let failure_reason =
             failure_reason_slug(order.status(), order.no_route_cause()).to_string();
@@ -379,8 +375,9 @@ impl OrderRecord {
                 .collect(),
             encoded_transaction: order
                 .transaction()
-                .filter(|_| records_calldata)
-                .map(EncodedTransaction::from_transaction),
+                .and_then(|transaction| {
+                    EncodedTransaction::redacted(transaction, permit2_signature)
+                }),
         }
     }
 
@@ -411,13 +408,43 @@ struct EncodedTransaction {
 }
 
 impl EncodedTransaction {
-    fn from_transaction(transaction: &Transaction) -> Self {
-        Self {
+    /// Copies `transaction` with every occurrence of `permit2_signature` in its calldata zeroed,
+    /// which keeps the calldata's length and layout.
+    ///
+    /// Returns `None` when the calldata does not contain the signature, so that calldata whose
+    /// signature was encoded some other way is never recorded.
+    fn redacted(transaction: &Transaction, permit2_signature: Option<&Bytes>) -> Option<Self> {
+        let mut data = transaction.data().to_vec();
+        if let Some(signature) = permit2_signature.filter(|signature| !signature.is_empty()) {
+            if !zero_occurrences(&mut data, signature) {
+                warn!(
+                    "permit2 signature not found in the calldata; recording no encoded transaction"
+                );
+                return None;
+            }
+        }
+        Some(Self {
             to: transaction.to().clone(),
             value: transaction.value().to_string(),
-            data: Bytes::from(transaction.data().to_vec()),
-        }
+            data: Bytes::from(data),
+        })
     }
+}
+
+/// Zeroes every occurrence of `needle` in `haystack`. Returns whether there was any.
+fn zero_occurrences(haystack: &mut [u8], needle: &[u8]) -> bool {
+    let mut found = false;
+    let mut start = 0;
+    while let Some(offset) = haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let at = start + offset;
+        haystack[at..at + needle.len()].fill(0);
+        found = true;
+        start = at + needle.len();
+    }
+    found
 }
 
 /// One swap of a served route.
