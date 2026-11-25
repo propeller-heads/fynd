@@ -64,7 +64,7 @@ use crate::{
         pamm_overrides,
         simulator::{QuoteSimulator, SimulationPurpose},
     },
-    types::{ComponentId, RouteRejection},
+    types::{ComponentId, RouteRejection, Swap},
     worker_pool::task_queue::TaskQueueHandle,
     BlockInfo, EncodingOptions, Order, OrderQuote, OrderSide, Quote, QuoteOptions, QuoteRequest,
     QuoteStatus, SolveError, SolveParams,
@@ -1372,9 +1372,8 @@ fn record_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices>) {
 /// under every pool it has an exclusive leg through, so its sum over pools counts a quote with
 /// several legs more than once.
 ///
-/// `exclusive_won_fee_amount` is in whole gas tokens, priced like
-/// `worker_router_won_volume_gas_token`. A quote with no price adds nothing to it and is still
-/// counted.
+/// The fee gauges are in whole gas tokens, priced like `worker_router_won_volume_gas_token`. A
+/// quote with no price adds nothing to them and is still counted.
 fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices>) {
     if quote.status() != QuoteStatus::Success {
         return;
@@ -1385,13 +1384,7 @@ fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices
     }
     let worker_pool = quote.worker_pool().to_string();
     let simulated = simulated_label(simulation_outcome(quote).0);
-    counter!(
-        "exclusive_won_routes_total",
-        "exclusive_legs" => legs.len().to_string(),
-        "pool" => worker_pool.clone(),
-        "simulated" => simulated
-    )
-    .increment(1);
+    record_exclusive_route_win(quote, &legs, &worker_pool, simulated, token_prices);
     for (leg, captured) in legs {
         let protocol = leg.protocol().to_string();
         let component = leg.component_id().to_string();
@@ -1416,6 +1409,51 @@ fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices
             )
             .increment(fee / WEI_PER_GAS_TOKEN);
         }
+    }
+}
+
+/// Counts a served quote once in `exclusive_won_routes_total` and adds its whole fee to
+/// `exclusive_won_routes_fee_amount`, both labelled by its number of exclusive `legs` and their
+/// protocols.
+///
+/// The `protocols` label lists the protocol of each leg, sorted, joined with `+`: two Ekubo legs
+/// give `ekubo_v3+ekubo_v3`, and an Ekubo and a Curve leg give `ekubo_v3+vm:curve` in either
+/// order. A new exclusive protocol shows up as new values without a change here.
+fn record_exclusive_route_win(
+    quote: &OrderQuote,
+    legs: &[(&Swap, Option<BigUint>)],
+    worker_pool: &str,
+    simulated: &'static str,
+    token_prices: Option<&TokenGasPrices>,
+) {
+    let mut protocols: Vec<&str> = legs
+        .iter()
+        .map(|(leg, _)| leg.protocol())
+        .collect();
+    protocols.sort_unstable();
+    let protocols = protocols.join("+");
+    let exclusive_legs = legs.len().to_string();
+    counter!(
+        "exclusive_won_routes_total",
+        "exclusive_legs" => exclusive_legs.clone(),
+        "protocols" => protocols.clone(),
+        "pool" => worker_pool.to_string(),
+        "simulated" => simulated
+    )
+    .increment(1);
+
+    let fee = quote
+        .surplus_amount()
+        .and_then(|surplus| to_gas_token_wei(quote, surplus, token_prices))
+        .and_then(|fee_wei| fee_wei.to_f64());
+    if let Some(fee) = fee {
+        gauge!(
+            "exclusive_won_routes_fee_amount",
+            "exclusive_legs" => exclusive_legs,
+            "protocols" => protocols,
+            "pool" => worker_pool.to_string()
+        )
+        .increment(fee / WEI_PER_GAS_TOKEN);
     }
 }
 
@@ -5218,6 +5256,7 @@ mod tests {
         let quote = exclusive_win_quote(&[("uniswap_v2", 0x01, 0x03), (protocol, 0x03, 0x02)]);
         let prices = one_gas_token_per_thousand();
         let component = leg_component(&quote, 1);
+        let protocols = format!("protocols={protocol}");
         let protocol = format!("protocol={protocol}");
 
         let recorded = record_exclusive_win_metrics(&quote, Some(&prices));
@@ -5241,10 +5280,20 @@ mod tests {
                     "1".to_string()
                 ),
                 (
+                    "exclusive_won_routes_fee_amount".to_string(),
+                    vec![
+                        "exclusive_legs=1".to_string(),
+                        "pool=pool".to_string(),
+                        protocols.clone()
+                    ],
+                    "1".to_string()
+                ),
+                (
                     "exclusive_won_routes_total".to_string(),
                     vec![
                         "exclusive_legs=1".to_string(),
                         "pool=pool".to_string(),
+                        protocols,
                         "simulated=none".to_string()
                     ],
                     "1".to_string()
@@ -5289,6 +5338,7 @@ mod tests {
                 vec![
                     "exclusive_legs=2".to_string(),
                     "pool=pool".to_string(),
+                    format!("protocols={DUAL_CURVE}+vm:exclusive"),
                     "simulated=none".to_string()
                 ],
                 "1".to_string()

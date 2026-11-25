@@ -432,8 +432,10 @@ counts a dual pool's swap under its protocol with or without a grant.
 `exclusive_legs_signed_total{outcome=signed|failed}` (`encoding/encoder.rs`) counts each signature
 of a committed leg, once per encode, so a retried order can count twice.
 `finalize_quote` counts each served quote with exclusive legs once in
-`exclusive_won_routes_total{exclusive_legs,pool,simulated}`, by its number of exclusive legs.
-It also counts the quote under each of its exclusive legs in
+`exclusive_won_routes_total{exclusive_legs,protocols,pool,simulated}` and adds its whole fee to
+`exclusive_won_routes_fee_amount{exclusive_legs,protocols,pool}`. `protocols` lists each leg's
+protocol, sorted and joined with `+` (`ekubo_v3+vm:curve`), so a new exclusive protocol needs no
+change. It also counts the quote under each of its exclusive legs in
 `exclusive_won_quotes_total{pool,simulated}`, so the sum of that counter over pools counts a quote
 with several legs more than once.
 `simulated` takes the values of `winning_quote_swaps_total`. Each leg adds the part of the surplus
