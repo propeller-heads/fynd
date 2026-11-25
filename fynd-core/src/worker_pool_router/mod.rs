@@ -5358,6 +5358,49 @@ mod tests {
         assert_eq!(of("exclusive_won_fee_amount").len(), 2);
     }
 
+    /// A served route is labelled by its legs' protocols, sorted and joined with `+`, and adds its
+    /// whole fee once, whatever the order of its legs.
+    #[rstest]
+    #[case::same_protocol_twice(
+        &[("vm:exclusive", 0x01, 0x03), ("vm:exclusive", 0x03, 0x02)],
+        "vm:exclusive+vm:exclusive"
+    )]
+    #[case::curve_then_exclusive(
+        &[(DUAL_CURVE, 0x01, 0x03), ("vm:exclusive", 0x03, 0x02)],
+        "vm:curve_dual+vm:exclusive"
+    )]
+    #[case::exclusive_then_curve(
+        &[("vm:exclusive", 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)],
+        "vm:curve_dual+vm:exclusive"
+    )]
+    fn test_record_exclusive_route_protocols(
+        #[case] legs: &[(&str, u8, u8)],
+        #[case] protocols: &str,
+    ) {
+        let quote = exclusive_win_quote(legs);
+        let prices = one_gas_token_per_thousand();
+
+        let recorded = record_exclusive_win_metrics(&quote, Some(&prices));
+
+        let route_fees: Vec<_> = recorded
+            .iter()
+            .filter(|(name, _, _)| name == "exclusive_won_routes_fee_amount")
+            .cloned()
+            .collect();
+        assert_eq!(
+            route_fees,
+            vec![(
+                "exclusive_won_routes_fee_amount".to_string(),
+                vec![
+                    "exclusive_legs=2".to_string(),
+                    "pool=pool".to_string(),
+                    format!("protocols={protocols}")
+                ],
+                "1".to_string()
+            )]
+        );
+    }
+
     /// The part of the surplus each leg captures in the metrics is the part `pin_commitment` took
     /// from it. Both legs output the route's token, so a leg's part is its output minus its
     /// committed amount.
