@@ -53,7 +53,7 @@ use crate::{
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_route_shape, first_exclusive_leg, is_exclusive_leg, leg_route_output,
+        exclusive_legs, exclusive_route_shape, first_exclusive_leg, is_exclusive_leg,
         matched_commitment, pin_commitment, record_gas_token_amount, routes_through_exclusive,
         to_gas_token_wei, ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS,
         WEI_PER_GAS_TOKEN,
@@ -1215,10 +1215,11 @@ impl WorkerPoolRouter {
 /// executes on exclusive liquidity at the public price.
 ///
 /// Per-leg attribution: the route's surplus over the committed amount (`realized − committed`)
-/// is deducted from the exclusive legs — each leg absorbs what it can, capped at the route output
-/// it produces, in route order. Only exclusive legs can withhold output, so the whole surplus must
-/// come out of them; public branches pay out in full. If the exclusive legs cannot absorb all of
-/// it, the remainder is left with the user (who then receives more than the committed amount).
+/// is deducted from the exclusive legs — each leg absorbs a part in proportion to the route output
+/// it produces, capped at that output. Only exclusive legs can withhold output, so the whole
+/// surplus must come out of them; public branches pay out in full. If the exclusive legs cannot
+/// absorb all of it, the remainder is left with the user (who then receives more than the
+/// committed amount).
 ///
 /// Exact-in orders only: the commitment, both gates, and the surplus are all denominated in
 /// `amount_out`. Exact-out support would invert the logic — fixed output, commitment and surplus
@@ -1472,25 +1473,27 @@ fn competes_with_public(quote: &OrderQuote, public_pools: &FxHashSet<ComponentId
 }
 
 /// Returns the amount to commit if the public worker pools find no route. The amount is the
-/// candidate output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the route output the exclusive leg
+/// candidate output minus `NO_PUBLIC_ROUTE_FEE_BPS` of the route output each exclusive leg
 /// produces.
 ///
-/// The fee applies to the exclusive leg only, not to the whole route. The public market prices the
-/// public branches of a split route, so the protocol takes nothing from them.
+/// The fee applies to the exclusive legs only, not to the whole route. The public market prices
+/// the public branches of a split route, so the protocol takes nothing from them.
 ///
 /// Returns `None` if the commitment does not cover the route gas, or if the route has no exclusive
 /// leg.
 fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     let route = exclusive_candidate.route()?;
-    let swaps = route.swaps();
-    let leg = swaps
+    let legs = exclusive_legs(route.swaps(), &route.output_token()?)?;
+    if legs.is_empty() {
+        return None;
+    }
+    let fee: BigUint = legs
         .iter()
-        .find(|swap| is_exclusive_leg(swap))?;
-    let (numerator, denominator) = leg_route_output(swaps, leg, &route.output_token()?)?;
+        .map(|leg| bps::scale_truncating(&leg.rounded_route_output(), NO_PUBLIC_ROUTE_FEE_BPS))
+        .sum();
 
     let realized_amount_out = exclusive_candidate.amount_out();
-    let fee = bps::scale_truncating(&(numerator / denominator), NO_PUBLIC_ROUTE_FEE_BPS);
-    let committed_amount_out = realized_amount_out - fee;
+    let committed_amount_out = realized_amount_out.checked_sub(&fee)?;
 
     let gas_cost = realized_amount_out - exclusive_candidate.amount_out_net_gas();
     if committed_amount_out <= gas_cost {
@@ -1499,9 +1502,8 @@ fn default_fee_commitment(exclusive_candidate: &OrderQuote) -> Option<BigUint> {
     Some(committed_amount_out)
 }
 
-/// Whether the route of `quote` is [`ExclusiveRouteShape::Valid`]. Counts the two rejections that
-/// have a metric: `exclusive_route_multiple_legs_total` and
-/// `exclusive_route_does_not_reach_output_total`.
+/// Whether the route of `quote` is [`ExclusiveRouteShape::Valid`]. Counts the rejection that has a
+/// metric: `exclusive_route_does_not_reach_output_total`.
 fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
     let Some(route) = quote.route() else {
         return false;
@@ -1512,10 +1514,6 @@ fn has_valid_exclusive_route(quote: &OrderQuote) -> bool {
     match exclusive_route_shape(route.swaps(), &output_token) {
         ExclusiveRouteShape::Valid => true,
         ExclusiveRouteShape::NoExclusiveLeg => false,
-        ExclusiveRouteShape::MultipleLegs => {
-            counter!("exclusive_route_multiple_legs_total").increment(1);
-            false
-        }
         ExclusiveRouteShape::DoesNotReachOutput => {
             counter!("exclusive_route_does_not_reach_output_total").increment(1);
             false
@@ -3655,10 +3653,6 @@ mod tests {
         make_exclusive_quote(1100).order().clone(),
         Some(50_000)
     )]
-    #[case::two_exclusive_legs(
-        make_route_quote(&[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)]),
-        None
-    )]
     fn test_combine_filters_exclusive_candidate(
         #[case] exclusive_quote: OrderQuote,
         #[case] max_gas: Option<u64>,
@@ -3758,6 +3752,88 @@ mod tests {
 
         assert_eq!(combined.len(), 1);
         assert_eq!(*combined[0].amount_out(), BigUint::from(900u64));
+    }
+
+    /// Each exclusive leg captures a part of the 90 surplus (1000 out, 910 committed) in proportion
+    /// to the route output it produces. Expected: the committed output of each exclusive leg.
+    #[rstest]
+    // Both legs produce the whole route output, so each captures 45.
+    #[case::legs_in_sequence(
+        &[("vm:exclusive", 0x01, 0x02, 1000, 1000), ("vm:exclusive", 0x02, 0x03, 1000, 1000)],
+        vec![955, 955]
+    )]
+    // The legs produce 300 and 700 of the route output, so they capture 27 and 63.
+    #[case::legs_on_parallel_branches(
+        &[
+            ("vm:exclusive", 0x01, 0x03, 300, 300),
+            ("uniswap_v2", 0x01, 0x02, 700, 700),
+            ("vm:exclusive", 0x02, 0x03, 700, 700),
+        ],
+        vec![273, 637]
+    )]
+    // The pool between the legs gives 0.5 of 0x03 per 0x02, so the first leg's 45 of the route
+    // output is 90 of its own token. Weighting by each leg's own output (2000 and 1000) would
+    // split the surplus 60 and 30 instead.
+    #[case::legs_around_a_pool_at_half_price(
+        &[
+            ("vm:exclusive", 0x01, 0x02, 1000, 2000),
+            ("uniswap_v2", 0x02, 0x03, 2000, 1000),
+            ("vm:exclusive", 0x03, 0x04, 1000, 1000),
+        ],
+        vec![1910, 955]
+    )]
+    // The first leg's 1 of 0x02 makes up half of what 0x02 -> 0x03 takes in, so it produces half
+    // a unit of the route output: it captures nothing and is still committed, so it gets signed.
+    #[case::dust_leg_next_to_a_leg(
+        &[
+            ("vm:exclusive", 0x01, 0x02, 1, 1),
+            ("uniswap_v2", 0x01, 0x02, 1, 1),
+            ("uniswap_v2", 0x02, 0x03, 2, 1),
+            ("vm:exclusive", 0x01, 0x03, 997, 999),
+        ],
+        vec![1, 909]
+    )]
+    // No leg produces a whole unit of the route output, so none captures anything.
+    #[case::only_a_dust_leg(
+        &[
+            ("vm:exclusive", 0x01, 0x02, 1, 1),
+            ("uniswap_v2", 0x01, 0x02, 1, 1),
+            ("uniswap_v2", 0x02, 0x03, 2, 1),
+        ],
+        vec![1]
+    )]
+    fn test_combine_splits_surplus_between_exclusive_legs(
+        #[case] legs: &[(&str, u8, u8, u64, u64)],
+        #[case] expected_committed: Vec<u64>,
+    ) {
+        let exclusive = make_priced_route_quote(legs, 1000);
+        let public = make_public_quote_zero_gas(900)
+            .order()
+            .clone();
+        let responses = OrderResponses {
+            order_id: "test-order".to_string(),
+            quotes: vec![
+                worker_quote(("public_pool".to_string(), public.clone())),
+                worker_quote(("exclusive_access_pool".to_string(), exclusive)),
+            ],
+            failed_solvers: vec![],
+        };
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![public],
+            1_000,
+            None,
+        );
+
+        assert_eq!(*combined[0].amount_out(), BigUint::from(910u64));
+        let expected: Vec<BigUint> = expected_committed
+            .into_iter()
+            .map(BigUint::from)
+            .collect();
+        assert_eq!(exclusive_leg_commitments(&combined[0]), expected);
     }
 
     /// The `NoRouteFound` placeholder `rank_quotes` returns when no public candidate succeeded.
@@ -3868,6 +3944,52 @@ mod tests {
             .find(|s| is_exclusive(s.protocol_component()))
             .expect("should have an exclusive swap");
         assert_eq!(exclusive_leg.committed_amount_out(), Some(&BigUint::from(499_750u64)));
+    }
+
+    /// With no public reference, each exclusive leg adds 5 bps of the route output it produces to
+    /// the fee. Expected: the committed route output and the committed output of each leg.
+    #[rstest]
+    // Both legs produce the whole 1_000_000, so the fee is 500 + 500.
+    #[case::legs_in_sequence(
+        &[
+            ("vm:exclusive", 0x01, 0x02, 1_000_000, 1_000_000),
+            ("vm:exclusive", 0x02, 0x03, 1_000_000, 1_000_000),
+        ],
+        999_000,
+        vec![999_500, 999_500]
+    )]
+    // The legs produce 300_000 and 700_000, so the fee is 150 + 350.
+    #[case::legs_on_parallel_branches(
+        &[
+            ("vm:exclusive", 0x01, 0x03, 300_000, 300_000),
+            ("uniswap_v2", 0x01, 0x02, 700_000, 700_000),
+            ("vm:exclusive", 0x02, 0x03, 700_000, 700_000),
+        ],
+        999_500,
+        vec![299_850, 699_650]
+    )]
+    fn test_combine_no_public_route_default_fee_per_exclusive_leg(
+        #[case] legs: &[(&str, u8, u8, u64, u64)],
+        #[case] expected_amount_out: u64,
+        #[case] expected_committed: Vec<u64>,
+    ) {
+        let responses = no_public_route_responses(make_priced_route_quote(legs, 1_000_000));
+
+        let combined = combine_with_surplus(
+            &responses,
+            &exclusive_access_pool_scopes(),
+            &QuoteOptions::default(),
+            vec![no_route_quote()],
+            1_000,
+            None,
+        );
+
+        assert_eq!(*combined[0].amount_out(), BigUint::from(expected_amount_out));
+        let expected: Vec<BigUint> = expected_committed
+            .into_iter()
+            .map(BigUint::from)
+            .collect();
+        assert_eq!(exclusive_leg_commitments(&combined[0]), expected);
     }
 
     #[test]
@@ -4038,6 +4160,17 @@ mod tests {
             .cloned()
     }
 
+    /// The committed output of each exclusive leg of `quote`, in route order.
+    fn exclusive_leg_commitments(quote: &OrderQuote) -> Vec<BigUint> {
+        quote
+            .route()
+            .expect("surplus quote should have a route")
+            .swaps()
+            .iter()
+            .filter_map(|swap| swap.committed_amount_out().cloned())
+            .collect()
+    }
+
     /// The exclusive leg (0x01 -> 0x02) outputs 1_000_000 of 0x02, which the pools after it turn
     /// into 900_000 of the output token 0x03: an average price of 0.9. Against a public 880_000
     /// with no user share, the 20_000 surplus converts to 20_000 / 0.9 = 22_222 of 0x02 (rounded
@@ -4147,6 +4280,60 @@ mod tests {
             .get_amount_out(committed_leg, &leg_token, &output_token)
             .expect("thin pool should quote the committed amount")
             .amount;
+        assert!(
+            user_amount_out >= committed_amount_out,
+            "user gets {user_amount_out}, below the committed {committed_amount_out}",
+        );
+    }
+
+    /// A thin Uniswap V2 pool sits between two exclusive legs, so the first leg's fee lowers the
+    /// second leg's input. Re-running the route with each leg keeping its fee share must give the
+    /// user at least the committed route output.
+    #[test]
+    fn test_pin_commitment_thin_pool_between_exclusive_legs() {
+        use alloy::primitives::U256;
+        use tycho_simulation::{
+            evm::protocol::uniswap_v2::state::UniswapV2State,
+            tycho_common::simulation::protocol_sim::ProtocolSim,
+        };
+
+        use crate::algorithm::test_utils::token_with_decimals;
+
+        let first_leg_token = token_with_decimals(0x02, "MID", 18);
+        let second_leg_token = token_with_decimals(0x03, "MID2", 18);
+        let thin_pool = UniswapV2State::new(U256::from(2_000_000u64), U256::from(2_000_000u64));
+        let first_leg_amount_out = 1_000_000u64;
+        let pool_amount_out = thin_pool
+            .get_amount_out(
+                BigUint::from(first_leg_amount_out),
+                &first_leg_token,
+                &second_leg_token,
+            )
+            .expect("thin pool should quote the first leg's output")
+            .amount
+            .to_u64()
+            .expect("pool output fits in u64");
+        let quote = make_priced_route_quote(
+            &[
+                ("vm:exclusive", 0x01, 0x02, 1000, first_leg_amount_out),
+                ("uniswap_v2", 0x02, 0x03, first_leg_amount_out, pool_amount_out),
+                ("vm:exclusive", 0x03, 0x04, pool_amount_out, pool_amount_out),
+            ],
+            pool_amount_out,
+        );
+        let committed_amount_out = BigUint::from(pool_amount_out - pool_amount_out / 100);
+
+        let pinned = pin_commitment(&quote, committed_amount_out.clone(), None);
+
+        let [first_committed, second_committed] =
+            <[BigUint; 2]>::try_from(exclusive_leg_commitments(&pinned))
+                .expect("both legs should be committed");
+        let second_leg_amount_in = thin_pool
+            .get_amount_out(first_committed, &first_leg_token, &second_leg_token)
+            .expect("thin pool should quote the first leg's committed amount")
+            .amount;
+        // The second leg prices 1:1 and keeps the same share of its output at any input.
+        let user_amount_out = second_leg_amount_in * second_committed / pool_amount_out;
         assert!(
             user_amount_out >= committed_amount_out,
             "user gets {user_amount_out}, below the committed {committed_amount_out}",
@@ -4305,7 +4492,7 @@ mod tests {
         .with_route(Route::new(swaps, tokens).expect("non-empty route"))
     }
 
-    /// Route-shape validation: exactly one exclusive leg, whose output reaches the output token.
+    /// Route-shape validation: every exclusive leg's output reaches the output token.
     #[rstest]
     #[case::terminal_exclusive_leg(
         &[("uniswap_v2", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)], true)]
@@ -4334,13 +4521,16 @@ mod tests {
         true)]
     #[case::no_exclusive_leg(
         &[("uniswap_v2", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03)], false)]
-    // Two exclusive legs: out of scope for v1 (ambiguous per-component attribution).
-    #[case::two_exclusive_legs(
-        &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)], false)]
+    #[case::two_exclusive_legs_in_sequence(
+        &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x02, 0x03)], true)]
+    // The second leg's output 0x08 is not taken by any later swap.
+    #[case::second_exclusive_leg_output_unused(
+        &[("vm:exclusive", 0x01, 0x02), ("uniswap_v2", 0x02, 0x03), ("vm:exclusive", 0x01, 0x08)],
+        false)]
     #[case::dual_pool_leg(&[(DUAL_CURVE, 0x01, 0x02)], true)]
-    #[case::two_dual_pool_legs(&[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)], false)]
+    #[case::two_dual_pool_legs(&[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)], true)]
     #[case::dual_pool_and_exclusive_legs(
-        &[(DUAL_CURVE, 0x01, 0x03), ("vm:exclusive", 0x03, 0x02)], false)]
+        &[(DUAL_CURVE, 0x01, 0x03), ("vm:exclusive", 0x03, 0x02)], true)]
     // Diamond split: 0x01 splits into 0x01->0x02 (exclusive) and 0x01->0x03, both merging into
     // 0x02->0x04 and 0x03->0x04. The exclusive leg's output reaches 0x04 through 0x02->0x04,
     // which is not the next serialized swap.
@@ -4371,12 +4561,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::multiple_legs(
-        &[("vm:exclusive", 0x01, 0x02), ("vm:exclusive", 0x01, 0x02)],
-        "exclusive_route_multiple_legs_total")]
-    #[case::multiple_dual_pool_legs(
-        &[(DUAL_CURVE, 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)],
-        "exclusive_route_multiple_legs_total")]
     #[case::loop_after_leg(
         &[
             ("vm:exclusive", 0x01, 0x02),

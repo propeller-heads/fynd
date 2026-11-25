@@ -387,10 +387,16 @@ beats the committed amount and records the difference as `SurplusInfo`
 (`OrderQuote::surplus_amount()`, `committed_amount_out()`, `Swap::committed_amount_out()`). All are
 `#[serde(skip)]` — internal, not on the wire.
 
-The one exclusive leg can sit at any hop of the route (`has_valid_exclusive_route`). When pools
-follow it, `pin_commitment` converts the surplus into the leg's token at the average price of those
-pools (`leg_route_output`): the route output the leg's output produces, divided by the leg's
-output. The conversion runs no simulation. On split and merging routes the leg gets the share of
+A route can have several exclusive legs, each at any hop (`has_valid_exclusive_route`). Each leg's
+output must reach the output token. `pin_commitment` splits the surplus between the legs in
+proportion to the route output each one produces, capped at that output: two legs in sequence each
+capture half. Each signer turns its leg's part into a fee rate, so an earlier leg's fee lowers a
+later leg's input and the user gets at least the committed amount. The encoder widens each leg's
+input floor (the request's slippage) by the share of its input that the fees of the exclusive legs
+upstream took (`upstream_fee_shares`), so a later leg's grant or authorization still applies.
+When pools follow a leg,
+`pin_commitment` converts its part into the leg's token at the average price of those pools
+(`leg_route_output`): the route output the leg's output produces, divided by the leg's output. The conversion runs no simulation. On split and merging routes the leg gets the share of
 its token's route output that its own output makes up. The user gets at least the committed amount
 when the pools after the leg give less per unit as their input grows, which holds for AMM pools.
 After a hook pool, a market-maker quote with a minimum order size, or a fixed-rate pool (rounding),
@@ -399,11 +405,10 @@ slippage.
 
 The `exclusive_swap_replacer` post-processor (`post_process/exclusive.rs`) replaces a swap or a segment of a public route with an exclusive leg (through an exclusive component, or a dual pool priced with a grant), or splits one swap or a segment between its swaps and the exclusive leg's pool. It acts only on a `public_only` pool for a request with `ExclusiveAccess::Granted` (`PostProcessRequest::exclusive_access`; the worker passes `Denied` on an `include_exclusive` pool), so the order is solved once. It adds at most one exclusive leg, leaves a route that already has one unchanged, and keeps a candidate only when `exclusive_route_shape` is `Valid` and `matched_commitment` returns a commitment, with the route it received as the public reference. The commitment travels on the `RouteResult` (`with_commitment`: the committed amount out and the reference amount out). The worker pins it on the quote with `pin_route_commitment`, which records `exclusive_user_savings_amount` and calls `pin_commitment`, so the router ranks the quote like any public quote. The worker rejects a processed route that has an exclusive leg and no commitment on a `public_only` pool, and a commitment on a route with no exclusive leg, on a buy order, or above the route's amount out. A post-processor that runs after the replacer and builds a new `RouteResult` drops the commitment, so the replacer must be last: `check_post_processor_order` fails the build with `SolverBuildError::PostProcessorOrder` (`PostProcessorOrderError`) for a pool that lists it before another post-processor or twice.
 
-The rules for an exclusive route (`ExclusiveRouteShape`, `exclusive_route_shape`), the route output of an exclusive leg (`leg_route_output`) and the commitment (`matched_commitment`, `pin_commitment`, `USER_IMPROVEMENT_SHARE_BPS`) live in `exclusive_route.rs`.
+The rules for an exclusive route (`ExclusiveRouteShape`, `exclusive_route_shape`), the exclusive legs and the route output each produces (`exclusive_legs`, `leg_route_output`), the fee share upstream of each leg (`upstream_fee_shares`) and the commitment (`matched_commitment`, `pin_commitment`, `USER_IMPROVEMENT_SHARE_BPS`) live in `exclusive_route.rs`.
 
-Two counters report the exclusive candidates `has_valid_exclusive_route` rejects:
-`exclusive_route_multiple_legs_total` (more than one exclusive leg) and
-`exclusive_route_does_not_reach_output_total` (the leg's output never reaches the output token, or
+One counter reports the exclusive candidates `has_valid_exclusive_route` rejects:
+`exclusive_route_does_not_reach_output_total` (a leg's output never reaches the output token, or
 the swaps after it loop back to a token already on their path). A route with no exclusive leg is
 not counted. `exclusive_route_competes_with_public_total` counts the orders that drop a quote
 competing with the public reference.

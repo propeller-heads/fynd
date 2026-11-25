@@ -30,6 +30,7 @@ use crate::{
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     exclusive_protocol::{protocol_of, Grantor},
+    exclusive_route::{is_exclusive_leg, upstream_fee_shares},
     fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
@@ -507,6 +508,7 @@ impl Encoder {
         )?
         .with_user_transfer_type(encoding_options.transfer_type().clone());
 
+        check_exclusive_legs_committed(quote)?;
         let solution = match &self.exclusive_swap_signer {
             Some(signer) => {
                 Self::stamp_exclusive_swaps(solution, quote, signer, encoding_options.slippage())?
@@ -752,9 +754,10 @@ impl Encoder {
 
     /// Stamps controller-signed `user_data` onto each exclusive leg of `solution`.
     ///
-    /// A leg is exclusive when its route swap carries a committed amount. The solution's swaps are
-    /// built 1:1 from the route's swaps, so they are matched by index. Returns `solution` unchanged
-    /// when no leg is exclusive.
+    /// A leg is exclusive when its route swap carries a committed amount. Each leg's input floor
+    /// allows for the request's slippage plus the fees of the exclusive legs that feed it. The
+    /// solution's swaps are built 1:1 from the route's swaps, so they are matched by index.
+    /// Returns `solution` unchanged when no leg is exclusive.
     fn stamp_exclusive_swaps(
         solution: Solution,
         quote: &OrderQuote,
@@ -775,36 +778,39 @@ impl Encoder {
         }
 
         // `route_swaps` carry `committed_amount_out` and the component attributes;
-        // `solution.swaps()`
-        // are built 1:1 from them by `Solution::try_from` and are what the router executes.
-        // We read the committed amount from the route swap but stamp `user_data` onto the
-        // matching solution swap, matched by index via the zip below.
-        let swaps = solution
+        // `solution.swaps()` are built 1:1 from them by `Solution::try_from` and are what the
+        // router executes. We read the committed amount from the route swap but stamp `user_data`
+        // onto the matching solution swap, matched by index.
+        //
+        // The fees of exclusive legs upstream lower a leg's input, so its input floor allows for
+        // them on top of the slippage.
+        let fee_shares = upstream_fee_shares(route_swaps);
+        let mut swaps = Vec::with_capacity(route_swaps.len());
+        for ((solution_swap, route_swap), fee_share) in solution
             .swaps()
             .iter()
             .cloned()
             .zip(route_swaps.iter())
-            // Only the exclusive leg (the route swap carrying a committed amount) gets signed
-            // `user_data`; every other solution swap passes through unchanged.
-            .map(|(solution_swap, route_swap)| {
-                if route_swap
-                    .committed_amount_out()
-                    .is_some()
-                {
-                    let protocol = protocol_of(route_swap).ok_or_else(|| {
-                        SolveError::FailedEncoding(format!(
-                            "committed leg through {} is not an exclusive leg",
-                            route_swap.component_id()
-                        ))
-                    })?;
-                    let signed = protocol.sign(signer, route_swap, quote.sender(), slippage);
-                    record_exclusive_signature(route_swap, signed.is_ok());
-                    Ok(solution_swap.with_user_data(signed?))
-                } else {
-                    Ok(solution_swap)
-                }
-            })
-            .collect::<Result<Vec<_>, SolveError>>()?;
+            .zip(fee_shares)
+        {
+            if route_swap
+                .committed_amount_out()
+                .is_none()
+            {
+                swaps.push(solution_swap);
+                continue;
+            }
+            let protocol = protocol_of(route_swap).ok_or_else(|| {
+                SolveError::FailedEncoding(format!(
+                    "committed leg through {} is not an exclusive leg",
+                    route_swap.component_id()
+                ))
+            })?;
+            let leg_slippage = slippage + fee_share;
+            let signed = protocol.sign(signer, route_swap, quote.sender(), leg_slippage);
+            record_exclusive_signature(route_swap, signed.is_ok());
+            swaps.push(solution_swap.with_user_data(signed?));
+        }
 
         Ok(solution.with_swaps(swaps))
     }
@@ -1196,6 +1202,28 @@ impl From<EncodingError> for SolveError {
     }
 }
 
+/// Fails when an exclusive leg of `quote` has no committed amount.
+///
+/// The encoder signs only the legs with a committed amount. An exclusive leg is priced at the
+/// price its signature gives, so an unsigned one reverts (a signed Ekubo pool) or charges the
+/// pool's full fee (a dual Curve pool), and the user gets less than the quote.
+fn check_exclusive_legs_committed(quote: &OrderQuote) -> Result<(), SolveError> {
+    let Some(route) = quote.route() else {
+        return Ok(());
+    };
+    let uncommitted = route
+        .swaps()
+        .iter()
+        .find(|swap| is_exclusive_leg(swap) && swap.committed_amount_out().is_none());
+    match uncommitted {
+        Some(swap) => Err(SolveError::FailedEncoding(format!(
+            "exclusive leg through {} has no committed amount, so it would not be signed",
+            swap.component_id()
+        ))),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes, B256};
@@ -1421,21 +1449,34 @@ mod tests {
     /// A swap through an Ekubo pool with the signed-swap extension, flagged exclusive when
     /// `exclusive`.
     fn ekubo_swap(committed: Option<u64>, exclusive: bool) -> crate::types::Swap {
-        let token_in = make_address(0x11);
-        let token_out = make_address(0x22);
-        let mut comp = component("ekubo-signed-pool", &[]);
+        ekubo_hop(0x11, 0x22, committed, exclusive, [0x55; 20])
+    }
+
+    /// A swap from `token_in` to `token_out` through an Ekubo pool on `extension`, 1_000_000 in
+    /// and out, flagged exclusive when `exclusive`.
+    fn ekubo_hop(
+        token_in: u8,
+        token_out: u8,
+        committed: Option<u64>,
+        exclusive: bool,
+        extension: [u8; 20],
+    ) -> crate::types::Swap {
+        let token_in = make_address(token_in);
+        let token_out = make_address(token_out);
+        let mut comp =
+            component_with_protocol(&format!("ekubo-{token_in}-{token_out}"), "ekubo_v3", &[]);
         if exclusive {
             crate::feed::exclusivity::mark_exclusive(&mut comp);
         }
         comp.static_attributes
-            .insert("extension".to_string(), Bytes::from([0x55u8; 20].as_ref()));
+            .insert("extension".to_string(), Bytes::from(extension.as_ref()));
         comp.static_attributes
             .insert("fee".to_string(), Bytes::from(0u64));
         comp.static_attributes
             .insert("pool_type_config".to_string(), Bytes::from(0u32));
 
         let mut swap = crate::types::Swap::new(
-            "ekubo-signed-pool".to_string(),
+            comp.id.clone(),
             "ekubo_v3".to_string(),
             token_in,
             token_out,
@@ -1513,6 +1554,9 @@ mod tests {
             )
         });
 
+        let component = quote.route().expect("route").swaps()[0]
+            .component_id()
+            .to_string();
         let expected: Vec<_> = outcome
             .into_iter()
             .map(|outcome| {
@@ -1520,7 +1564,7 @@ mod tests {
                     "exclusive_legs_signed_total".to_string(),
                     vec![
                         "protocol=ekubo_v3".to_string(),
-                        "component=ekubo-signed-pool".to_string(),
+                        format!("component={component}"),
                         format!("outcome={outcome}"),
                     ],
                     metrics_util::debugging::DebugValue::Counter(1),
@@ -1547,18 +1591,37 @@ mod tests {
         assert!(matches!(result, Err(SolveError::FailedEncoding(_))));
     }
 
-    /// A Curve hop priced with a grant gets a grant signed for the order's sender.
-    #[test]
-    fn test_stamp_exclusive_swaps_curve_grant() {
-        let token_in = make_address(0x11);
-        let token_out = make_address(0x22);
-        let mut curve = component("curve-pool", &[]);
+    /// A swap through a dual Curve pool from `token_in` to `token_out`, 1_000_000 in and out,
+    /// priced with a grant and committed to `committed`.
+    fn curve_grant_swap(token_in: u8, token_out: u8, committed: u64) -> crate::types::Swap {
+        let mut swap = dual_curve_swap(token_in, token_out, true);
+        swap.set_committed_amount_out(BigUint::from(committed));
+        swap
+    }
+
+    /// A swap through a dual Curve pool from `token_in` to `token_out`, 1_000_000 in and out,
+    /// priced with a grant when `with_grant`, at the pool's public fee otherwise.
+    fn dual_curve_swap(token_in: u8, token_out: u8, with_grant: bool) -> crate::types::Swap {
+        let state = crate::exclusive_protocol::test_curve::dual_curve_state();
+        let state: Box<dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim> =
+            if with_grant {
+                Box::new(
+                    state
+                        .exclusive_view()
+                        .expect("supported policy"),
+                )
+            } else {
+                Box::new(state)
+            };
+        let token_in = make_address(token_in);
+        let token_out = make_address(token_out);
+        let mut curve = component(&format!("curve-{token_in}-{token_out}"), &[]);
         let coins = format!(r#"["{token_in}","{token_out}"]"#);
         curve
             .static_attributes
             .insert("coins".to_string(), Bytes::from(coins.as_bytes()));
-        let mut swap = crate::types::Swap::new(
-            "curve-pool".to_string(),
+        crate::types::Swap::new(
+            curve.id.clone(),
             "vm:curve".to_string(),
             token_in,
             token_out,
@@ -1566,14 +1629,56 @@ mod tests {
             BigUint::from(1_000_000u64),
             BigUint::from(50_000u64),
             curve,
-            Box::new(
-                crate::exclusive_protocol::test_curve::dual_curve_state()
-                    .exclusive_view()
-                    .expect("supported policy"),
-            ),
-        );
-        swap.set_committed_amount_out(BigUint::from(990_000u64));
+            state,
+        )
+    }
+
+    /// An exclusive leg must carry a committed amount to be encoded: the encoder signs only legs
+    /// that have one. A dual Curve pool at its public fee is not an exclusive leg.
+    #[rstest]
+    #[case::uncommitted_ekubo_leg(ekubo_swap(None, true), false)]
+    #[case::uncommitted_curve_leg_with_grant(dual_curve_swap(0x11, 0x22, true), false)]
+    #[case::curve_leg_at_public_fee(dual_curve_swap(0x11, 0x22, false), true)]
+    #[case::committed_ekubo_leg(ekubo_swap(Some(990_000), true), true)]
+    #[case::committed_curve_leg_with_grant(curve_grant_swap(0x11, 0x22, 990_000), true)]
+    #[case::public_ekubo_leg(ekubo_swap(None, false), true)]
+    fn test_check_exclusive_legs_committed(
+        #[case] swap: crate::types::Swap,
+        #[case] encodable: bool,
+    ) {
         let quote = make_order_quote(990_000).with_route(single_swap_route(swap));
+
+        let result = check_exclusive_legs_committed(&quote);
+
+        assert_eq!(result.is_ok(), encodable, "{result:?}");
+    }
+
+    /// An exclusive leg with no committed amount fails the encoding instead of shipping unsigned.
+    #[tokio::test]
+    async fn test_encode_rejects_uncommitted_exclusive_leg() {
+        let encoder = real_encoder();
+        let quote =
+            make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(None)));
+
+        let result = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .expect("a failing order is reported on the order, not on the call");
+
+        assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
+        assert!(result[0].transaction().is_none());
+    }
+
+    /// The `min_amount_in` of a signed Curve grant.
+    fn grant_min_amount_in(user_data: &Bytes) -> BigUint {
+        BigUint::from_bytes_be(&user_data[20..52])
+    }
+
+    /// A Curve hop priced with a grant gets a grant signed for the order's sender.
+    #[test]
+    fn test_stamp_exclusive_swaps_curve_grant() {
+        let quote = make_order_quote(990_000)
+            .with_route(single_swap_route(curve_grant_swap(0x11, 0x22, 990_000)));
         let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
 
         let solution = Encoder::stamp_exclusive_swaps(
@@ -1589,6 +1694,70 @@ mod tests {
             .clone()
             .expect("signed");
         assert_eq!(user_data.len(), 193, "the grant size the Curve executor reads");
+        assert_eq!(grant_min_amount_in(&user_data), BigUint::from(990_000u64));
+    }
+
+    /// Each exclusive leg keeps 1% as its fee, and the slippage is 1%. A leg's input floor allows
+    /// for the slippage plus the fees of the exclusive legs that feed it. Expected: the floor of
+    /// each signed leg, which the bps rounding of the slippage may put up to 1 bp lower.
+    #[rstest]
+    // The second leg's input lost the first leg's 1%.
+    #[case::legs_in_sequence(
+        vec![curve_grant_swap(0x11, 0x22, 990_000), curve_grant_swap(0x22, 0x33, 990_000)],
+        vec![990_000, 980_000]
+    )]
+    // The second leg's input comes from a public pool, not from the first leg.
+    #[case::legs_on_parallel_branches(
+        vec![
+            curve_grant_swap(0x11, 0x33, 990_000).with_split(0.5),
+            ekubo_swap(None, false),
+            curve_grant_swap(0x22, 0x33, 990_000),
+        ],
+        vec![990_000, 990_000]
+    )]
+    // Half of the last leg's input comes from the first leg, which kept 1% of it.
+    #[case::legs_after_a_merge(
+        vec![
+            curve_grant_swap(0x11, 0x22, 990_000).with_split(0.5),
+            ekubo_swap(None, false),
+            curve_grant_swap(0x22, 0x33, 990_000),
+        ],
+        vec![990_000, 985_000]
+    )]
+    fn test_stamp_exclusive_swaps_input_floors(
+        #[case] swaps: Vec<crate::types::Swap>,
+        #[case] expected_floors: Vec<u64>,
+    ) {
+        let tokens = FxHashMap::from_iter(
+            [0x11, 0x22, 0x33].map(|byte| (make_address(byte), make_token(make_address(byte)))),
+        );
+        let route = crate::types::Route::new(swaps, tokens).expect("non-empty route");
+        let quote = make_order_quote(980_100).with_route(route);
+        let signer = ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let solution = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer,
+            0.01,
+        )
+        .unwrap();
+
+        let floors: Vec<BigUint> = solution
+            .swaps()
+            .iter()
+            .filter_map(|swap| {
+                swap.user_data()
+                    .as_ref()
+                    .map(grant_min_amount_in)
+            })
+            .collect();
+        assert_eq!(floors.len(), expected_floors.len(), "floors {floors:?}");
+        for (floor, expected) in floors.iter().zip(expected_floors) {
+            let expected = BigUint::from(expected);
+            let lowest = &expected - BigUint::from(100u64);
+            assert!(*floor <= expected && *floor >= lowest, "floor {floor}, expected {expected}");
+        }
     }
 
     #[tokio::test]
@@ -1606,6 +1775,75 @@ mod tests {
 
         assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
         assert!(result[0].transaction().is_none(), "an unsigned exclusive leg must not be encoded");
+    }
+
+    /// Two Ekubo hops in a row form one swap group, whether both are signed or only one is. The
+    /// calldata carries the signed balance limits of each signed hop.
+    #[rstest]
+    #[case::both_signed(Some(990_000), Some(990_000))]
+    #[case::public_then_signed(None, Some(990_000))]
+    #[case::signed_then_public(Some(990_000), None)]
+    #[tokio::test]
+    async fn test_encode_groups_signed_ekubo_hops(
+        #[case] first_committed: Option<u64>,
+        #[case] second_committed: Option<u64>,
+    ) {
+        let hop = |token_in, token_out, committed: Option<u64>| {
+            let extension = if committed.is_some() { [0x55; 20] } else { [0; 20] };
+            ekubo_hop(token_in, token_out, committed, committed.is_some(), extension)
+        };
+        let swaps = vec![hop(0x11, 0x22, first_committed), hop(0x22, 0x33, second_committed)];
+        let tokens = FxHashMap::from_iter(
+            [0x11, 0x22, 0x33].map(|byte| (make_address(byte), make_token(make_address(byte)))),
+        );
+        let route = crate::types::Route::new(swaps, tokens).expect("non-empty route");
+        let quote = make_order_quote(980_100).with_route(route);
+        let signer =
+            || ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let stamped = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer(),
+            0.01,
+        )
+        .unwrap();
+        let groups = tycho_execution::encoding::evm::group_swaps(stamped.swaps());
+        assert_eq!(groups.len(), 1, "both hops in one group");
+        assert_eq!(groups[0].swaps.len(), 2);
+
+        let encoder = real_encoder().with_exclusive_swap_signer(signer());
+        let result = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .unwrap();
+
+        assert_eq!(result[0].status(), QuoteStatus::Success);
+        let calldata = result[0]
+            .transaction()
+            .expect("encoded")
+            .data();
+        let signed_hops: Vec<&Bytes> = stamped
+            .swaps()
+            .iter()
+            .filter_map(|swap| swap.user_data().as_ref())
+            .collect();
+        let expected_signed = [first_committed, second_committed]
+            .iter()
+            .filter(|committed| committed.is_some())
+            .count();
+        assert_eq!(signed_hops.len(), expected_signed);
+        for user_data in signed_hops {
+            // fee(8) | meta(32) | minBalanceUpdate(32) | signature: the balance limits do not
+            // depend on the signing time, so the calldata carries the same 32 bytes.
+            let min_balance_update = &user_data[40..72];
+            assert!(
+                calldata
+                    .windows(min_balance_update.len())
+                    .any(|window| window == min_balance_update),
+                "calldata misses a signed hop's balance limits"
+            );
+        }
     }
 
     #[test]

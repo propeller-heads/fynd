@@ -2503,7 +2503,7 @@ pub struct Swap {
     split: f64,
     /// Per-leg committed output for an exclusive swap.
     ///
-    /// Set only on the single exclusive leg of a surplus route. The encoding layer turns it into
+    /// Set only on the exclusive legs of a surplus route. The encoding layer turns it into
     /// the protocol's exclusive-swap payload, which limits the taker's output to the committed
     /// amount; the component then captures `amount_out - committed_amount_out` as surplus,
     /// denominated in this swap's `token_out`. `None` for ordinary public swaps. In-process only —
@@ -2617,7 +2617,7 @@ impl Swap {
 
     /// Sets the per-leg committed output for an exclusive swap.
     ///
-    /// The router stamps this onto the single exclusive leg of a surplus route so the encoding
+    /// The router stamps this onto each exclusive leg of a surplus route so the encoding
     /// layer can build the leg's exclusive-swap payload. See [`Swap::committed_amount_out`].
     pub(crate) fn set_committed_amount_out(&mut self, committed_amount_out: BigUint) {
         self.committed_amount_out = Some(committed_amount_out);
