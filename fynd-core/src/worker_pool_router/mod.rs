@@ -5026,7 +5026,7 @@ mod tests {
             vec![
                 (
                     "exclusive_won_fee_amount".to_string(),
-                    vec![component.clone(), protocol.clone()],
+                    vec![component.clone(), "pool=pool".to_string(), protocol.clone()],
                     "1".to_string()
                 ),
                 (
