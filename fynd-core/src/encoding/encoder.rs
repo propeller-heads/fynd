@@ -1483,6 +1483,53 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::signed(Some(990_000), 120, Some("signed"))]
+    #[case::deadline_overflows(Some(990_000), u32::MAX, Some("failed"))]
+    #[case::public_leg(None, 120, None)]
+    fn test_stamp_exclusive_swaps_metrics(
+        #[case] committed: Option<u64>,
+        #[case] deadline_window_secs: u32,
+        #[case] outcome: Option<&str>,
+    ) {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let quote =
+            make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(committed)));
+        let signer = ExclusiveSwapSigner::new(
+            CONTROLLER_KEY.parse().unwrap(),
+            1,
+            0,
+            deadline_window_secs,
+            LOCKER,
+        );
+
+        let _ = metrics::with_local_recorder(&recorder, || {
+            Encoder::stamp_exclusive_swaps(
+                Solution::try_from(&quote).unwrap(),
+                &quote,
+                &signer,
+                0.01,
+            )
+        });
+
+        let expected: Vec<_> = outcome
+            .into_iter()
+            .map(|outcome| {
+                (
+                    "exclusive_legs_signed_total".to_string(),
+                    vec![
+                        "protocol=ekubo_v3".to_string(),
+                        "component=ekubo-signed-pool".to_string(),
+                        format!("outcome={outcome}"),
+                    ],
+                    metrics_util::debugging::DebugValue::Counter(1),
+                )
+            })
+            .collect();
+        assert_eq!(crate::tests::metrics::recorded_metrics(&snapshotter), expected);
+    }
+
     /// A committed leg that no exclusive protocol owns has nothing to sign it with.
     #[test]
     fn test_stamp_exclusive_swaps_unowned_leg() {
