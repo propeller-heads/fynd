@@ -271,6 +271,21 @@ fn record_signed_quote_shortfall(quote: &OrderQuote, error: &EncodingError) {
     .increment(1);
 }
 
+/// Counts one signature of the exclusive leg `swap`, under its protocol and pool, by whether it
+/// was signed.
+///
+/// A quote is signed each time it is encoded, so an order the router retries can count more than
+/// once.
+fn record_exclusive_signature(swap: &crate::Swap, signed: bool) {
+    metrics::counter!(
+        "exclusive_legs_signed_total",
+        "protocol" => swap.protocol().to_string(),
+        "component" => swap.component_id().to_string(),
+        "outcome" => if signed { "signed" } else { "failed" }
+    )
+    .increment(1);
+}
+
 impl Encoder {
     /// Whether Tycho has a router deployment (and thus encoding support) for `chain`.
     pub fn is_supported(chain: Chain) -> bool {
@@ -782,8 +797,9 @@ impl Encoder {
                             route_swap.component_id()
                         ))
                     })?;
-                    let user_data = protocol.sign(signer, route_swap, quote.sender(), slippage)?;
-                    Ok(solution_swap.with_user_data(user_data))
+                    let signed = protocol.sign(signer, route_swap, quote.sender(), slippage);
+                    record_exclusive_signature(route_swap, signed.is_ok());
+                    Ok(solution_swap.with_user_data(signed?))
                 } else {
                     Ok(solution_swap)
                 }
@@ -1465,6 +1481,53 @@ mod tests {
                 .is_some(),
             signed
         );
+    }
+
+    #[rstest]
+    #[case::signed(Some(990_000), 120, Some("signed"))]
+    #[case::deadline_overflows(Some(990_000), u32::MAX, Some("failed"))]
+    #[case::public_leg(None, 120, None)]
+    fn test_stamp_exclusive_swaps_metrics(
+        #[case] committed: Option<u64>,
+        #[case] deadline_window_secs: u32,
+        #[case] outcome: Option<&str>,
+    ) {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let quote =
+            make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(committed)));
+        let signer = ExclusiveSwapSigner::new(
+            CONTROLLER_KEY.parse().unwrap(),
+            1,
+            0,
+            deadline_window_secs,
+            LOCKER,
+        );
+
+        let _ = metrics::with_local_recorder(&recorder, || {
+            Encoder::stamp_exclusive_swaps(
+                Solution::try_from(&quote).unwrap(),
+                &quote,
+                &signer,
+                0.01,
+            )
+        });
+
+        let expected: Vec<_> = outcome
+            .into_iter()
+            .map(|outcome| {
+                (
+                    "exclusive_legs_signed_total".to_string(),
+                    vec![
+                        "protocol=ekubo_v3".to_string(),
+                        "component=ekubo-signed-pool".to_string(),
+                        format!("outcome={outcome}"),
+                    ],
+                    metrics_util::debugging::DebugValue::Counter(1),
+                )
+            })
+            .collect();
+        assert_eq!(crate::tests::metrics::recorded_metrics(&snapshotter), expected);
     }
 
     /// A committed leg that no exclusive protocol owns has nothing to sign it with.
