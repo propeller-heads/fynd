@@ -296,9 +296,8 @@ pub(crate) fn pin_commitment(
 
     let mut surplus_quote = exclusive_candidate.clone();
 
-    // The exclusive legs, read before the swaps are borrowed mutably. The router pins only routes
-    // whose legs all reach the output token.
-    let legs = surplus_quote
+    // The router pins only routes whose legs all reach the output token.
+    let legs = exclusive_candidate
         .route()
         .and_then(|route| exclusive_legs(route.swaps(), &route.output_token()?))
         .unwrap_or_default();
@@ -405,7 +404,7 @@ fn fee_fraction(amount_out: &BigUint, committed: &BigUint) -> f64 {
     let (Some(amount_out), Some(committed)) = (amount_out.to_f64(), committed.to_f64()) else {
         return 0.0;
     };
-    if amount_out <= 0.0 || committed >= amount_out {
+    if committed >= amount_out {
         return 0.0;
     }
     1.0 - committed / amount_out
