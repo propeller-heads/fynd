@@ -271,6 +271,21 @@ fn record_signed_quote_shortfall(quote: &OrderQuote, error: &EncodingError) {
     .increment(1);
 }
 
+/// Counts one signature of the exclusive leg `swap`, under its protocol and pool, by whether it
+/// was signed.
+///
+/// A quote is signed each time it is encoded, so an order the router retries can count more than
+/// once.
+fn record_exclusive_signature(swap: &crate::Swap, signed: bool) {
+    metrics::counter!(
+        "exclusive_legs_signed_total",
+        "protocol" => swap.protocol().to_string(),
+        "component" => swap.component_id().to_string(),
+        "outcome" => if signed { "signed" } else { "failed" }
+    )
+    .increment(1);
+}
+
 impl Encoder {
     /// Whether Tycho has a router deployment (and thus encoding support) for `chain`.
     pub fn is_supported(chain: Chain) -> bool {
@@ -782,8 +797,9 @@ impl Encoder {
                             route_swap.component_id()
                         ))
                     })?;
-                    let user_data = protocol.sign(signer, route_swap, quote.sender(), slippage)?;
-                    Ok(solution_swap.with_user_data(user_data))
+                    let signed = protocol.sign(signer, route_swap, quote.sender(), slippage);
+                    record_exclusive_signature(route_swap, signed.is_ok());
+                    Ok(solution_swap.with_user_data(signed?))
                 } else {
                     Ok(solution_swap)
                 }
