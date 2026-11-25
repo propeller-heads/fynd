@@ -4,8 +4,13 @@
 //! The JSON shape is the wire format the collector accepts on `POST /v1/records`
 //! (fynd-hosted-service, `crates/collector`); the two field lists must match. Like the
 //! [`ReplayRequest`](crate::api::request_capture::ReplayRequest) it embeds, the record is an
-//! allowlist by construction: every field is copied by name, so `sender`, `receiver`, signatures,
-//! calldata and fee breakdowns cannot leak into it.
+//! allowlist by construction: every field is copied by name, so `sender`, `receiver`, signatures
+//! and fee breakdowns cannot leak into it as fields of their own.
+//!
+//! An order's `encoded_transaction` is the exception: its calldata names the receiver and carries
+//! the signatures Fynd attaches, which expire within minutes. A Permit2 signature is the user's,
+//! with a deadline the user chooses, so an order whose request carried one is recorded without its
+//! encoded transaction.
 //!
 //! Only requests that reached the solver produce a record. A request rejected by
 //! `validate_quote_request` returns 400 without one, so the collector sees solver outcomes and
@@ -13,12 +18,16 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use fynd_core::{
-    types::BlockInfo, ClientFeeParams, EncodingOptions, ExclusiveAccess, OrderQuote, Quote,
-    QuoteRequest, SolveError, Swap, UserTransferType,
+    types::{BlockInfo, Transaction},
+    ClientFeeParams, EncodingOptions, ExclusiveAccess, OrderQuote, Quote, QuoteRequest, SolveError,
+    Swap, UserTransferType,
 };
 use serde::{Serialize, Serializer};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::tycho_common::models::{Address, Chain};
+use tycho_simulation::tycho_common::{
+    models::{Address, Chain},
+    Bytes,
+};
 
 pub use crate::api::middleware::ClientInfo;
 use crate::api::{
@@ -31,7 +40,7 @@ use crate::api::{
 
 /// Version of the record layout. Bump it when a field is added, removed or changes meaning, so a
 /// reader can tell records of different layouts apart.
-pub const SCHEMA_VERSION: u16 = 4;
+pub const SCHEMA_VERSION: u16 = 5;
 
 /// One answered quote request, as the collector receives it.
 #[must_use]
@@ -66,7 +75,7 @@ impl QuoteRecord {
         head: Option<BlockInfo>,
     ) -> Self {
         let outcome = match result {
-            Ok(quote) => OutcomeRecord::solved(quote, head),
+            Ok(quote) => OutcomeRecord::solved(quote, head, request.records_calldata()),
             Err(error) => OutcomeRecord::failed(error, request.replay.num_orders(), head),
         };
         Self {
@@ -157,6 +166,10 @@ pub struct RequestRecord {
     /// Absent when the request asked for no encoding.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding: Option<EncodingRecord>,
+    /// Whether the request carried a Permit2 signature, which the encoder writes into the
+    /// calldata.
+    #[serde(skip)]
+    has_permit2_signature: bool,
 }
 
 impl RequestRecord {
@@ -168,7 +181,17 @@ impl RequestRecord {
                 .options()
                 .encoding_options()
                 .map(EncodingRecord::capture),
+            has_permit2_signature: request
+                .options()
+                .encoding_options()
+                .is_some_and(|options| options.permit2_signature().is_some()),
         }
+    }
+
+    /// Whether to record the orders' calldata. A request with a Permit2 signature records none,
+    /// because the calldata would contain that signature.
+    fn records_calldata(&self) -> bool {
+        !self.has_permit2_signature
     }
 }
 
@@ -243,7 +266,7 @@ struct OutcomeRecord {
 }
 
 impl OutcomeRecord {
-    fn solved(quote: &Quote, head: Option<BlockInfo>) -> Self {
+    fn solved(quote: &Quote, head: Option<BlockInfo>, records_calldata: bool) -> Self {
         // One solve answers every order at one block and one gas price.
         let orders = quote.orders();
         let (block, block_source) = match priced_block(quote) {
@@ -262,7 +285,7 @@ impl OutcomeRecord {
             block_source,
             orders: orders
                 .iter()
-                .map(OrderRecord::from_quote)
+                .map(|order| OrderRecord::from_quote(order, records_calldata))
                 .collect(),
         }
     }
@@ -320,10 +343,14 @@ struct OrderRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     algorithm: Option<String>,
     route: Vec<SwapRecord>,
+    /// The order's `transaction` as `/v1/quote` returned it. Absent when the order was not
+    /// encoded, and when its request carried a Permit2 signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoded_transaction: Option<EncodedTransaction>,
 }
 
 impl OrderRecord {
-    fn from_quote(order: &OrderQuote) -> Self {
+    fn from_quote(order: &OrderQuote, records_calldata: bool) -> Self {
         let status = quote_status_code(order.status()).to_string();
         let failure_reason =
             failure_reason_slug(order.status(), order.no_route_cause()).to_string();
@@ -347,6 +374,10 @@ impl OrderRecord {
                 .iter()
                 .map(SwapRecord::from_swap)
                 .collect(),
+            encoded_transaction: order
+                .transaction()
+                .filter(|_| records_calldata)
+                .map(EncodedTransaction::from_transaction),
         }
     }
 
@@ -362,6 +393,26 @@ impl OrderRecord {
             price_impact_bps: None,
             algorithm: None,
             route: Vec::new(),
+            encoded_transaction: None,
+        }
+    }
+}
+
+/// The transaction Fynd encoded for one order, for the client to sign and send.
+#[derive(Debug, Clone, Serialize)]
+struct EncodedTransaction {
+    to: Bytes,
+    /// Native value sent with the call, in wei.
+    value: String,
+    data: Bytes,
+}
+
+impl EncodedTransaction {
+    fn from_transaction(transaction: &Transaction) -> Self {
+        Self {
+            to: transaction.to().clone(),
+            value: transaction.value().to_string(),
+            data: Bytes::from(transaction.data().to_vec()),
         }
     }
 }
