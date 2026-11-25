@@ -289,17 +289,13 @@ pub(crate) fn pin_commitment(
         })
         .unwrap_or_default();
 
-    // Route output each exclusive leg produces, rounded down, and their sum: the weights of the
-    // split.
-    let mut leg_outputs: Vec<BigUint> = Vec::with_capacity(leg_route_outputs.len());
-    for fraction in &leg_route_outputs {
-        let output = match fraction {
-            Some((numerator, denominator)) => numerator / denominator,
-            None => BigUint::ZERO,
-        };
-        leg_outputs.push(output);
-    }
-    let total_leg_output: BigUint = leg_outputs.iter().sum();
+    // The weights of the split: the route output each exclusive leg produces, rounded down. A leg
+    // below one unit weighs nothing, captures nothing, and is still committed so it gets signed.
+    let total_leg_output: BigUint = leg_route_outputs
+        .iter()
+        .flatten()
+        .map(|(numerator, denominator)| numerator / denominator)
+        .sum();
 
     if let Some(route) = surplus_quote.route_mut() {
         let surplus = exclusive_route_amount_out - &committed_amount_out;
@@ -311,11 +307,12 @@ pub(crate) fn pin_commitment(
                 if *numerator == BigUint::ZERO {
                     continue;
                 }
-                let leg_output = &leg_outputs[i];
-                if *leg_output == BigUint::ZERO {
-                    continue;
-                }
-                let captured = (&surplus * leg_output / &total_leg_output).min(leg_output.clone());
+                let leg_output = numerator / denominator;
+                let captured = if total_leg_output == BigUint::ZERO {
+                    BigUint::ZERO
+                } else {
+                    (&surplus * &leg_output / &total_leg_output).min(leg_output)
+                };
                 // Convert into the leg's own token at the average price of the pools after the
                 // leg, rounding down so any error is taken from the protocol, not the user. The
                 // user gets at least the committed amount when those pools give less per unit
