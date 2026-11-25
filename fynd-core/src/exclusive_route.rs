@@ -44,11 +44,34 @@ pub(crate) fn routes_through_exclusive(swaps: &[Swap]) -> bool {
     swaps.iter().any(is_exclusive_leg)
 }
 
-/// The first exclusive leg of `swaps`. `None` when no swap is one.
-pub(crate) fn first_exclusive_leg(swaps: &[Swap]) -> Option<&Swap> {
-    swaps
-        .iter()
-        .find(|swap| is_exclusive_leg(swap))
+/// The exclusive legs of `quote`'s route, each with the part of the quote's surplus it captures, in
+/// the route's output token (see [`pin_commitment`]). The part is `None` when the quote carries no
+/// surplus. Empty when the route has no exclusive leg or a leg does not reach the output token.
+pub(crate) fn exclusive_leg_captures(quote: &OrderQuote) -> Vec<(&Swap, Option<BigUint>)> {
+    let Some(route) = quote.route() else {
+        return Vec::new();
+    };
+    let swaps = route.swaps();
+    let Some(legs) = route
+        .output_token()
+        .and_then(|output_token| exclusive_legs(swaps, &output_token))
+    else {
+        return Vec::new();
+    };
+    let parts = quote
+        .surplus_amount()
+        .map(|surplus| surplus_parts(&legs, surplus));
+    legs.iter()
+        .enumerate()
+        .filter_map(|(i, leg)| {
+            let part = parts
+                .as_ref()
+                .and_then(|parts| parts.get(i).cloned());
+            swaps
+                .get(leg.index)
+                .map(|swap| (swap, part))
+        })
+        .collect()
 }
 
 /// Returns the shape of the exclusive legs of `swaps`, without incrementing metrics.
@@ -302,24 +325,13 @@ pub(crate) fn pin_commitment(
         .and_then(|route| exclusive_legs(route.swaps(), &route.output_token()?))
         .unwrap_or_default();
 
-    // The weights of the split: the route output each leg produces, rounded down. A leg below one
-    // unit weighs nothing, captures nothing, and is still committed so it gets signed.
-    let total_leg_output: BigUint = legs
-        .iter()
-        .map(ExclusiveLeg::rounded_route_output)
-        .sum();
+    let parts = surplus_parts(&legs, &surplus_amount);
 
     if let Some(route) = surplus_quote.route_mut() {
         let swaps = route.swaps_mut();
-        for leg in &legs {
+        for (leg, captured) in legs.iter().zip(parts) {
             let Some(swap) = swaps.get_mut(leg.index) else {
                 continue;
-            };
-            let leg_output = leg.rounded_route_output();
-            let captured = if total_leg_output == BigUint::ZERO {
-                BigUint::ZERO
-            } else {
-                (&surplus_amount * &leg_output / &total_leg_output).min(leg_output)
             };
             // Convert into the leg's own token at the average price of the pools after the leg,
             // rounding down so any error is taken from the protocol, not the user. The user gets
@@ -346,6 +358,26 @@ pub(crate) fn pin_commitment(
 
     let surplus_info = SurplusInfo::new(surplus_amount, committed_amount_out);
     surplus_quote.with_surplus(surplus_info)
+}
+
+/// Splits `surplus` between `legs`, in proportion to the route output each produces, rounded down
+/// and capped at that output. A leg below one unit weighs nothing and captures nothing. Rounding
+/// and the cap leave any remainder with the user.
+fn surplus_parts(legs: &[ExclusiveLeg], surplus: &BigUint) -> Vec<BigUint> {
+    let total_leg_output: BigUint = legs
+        .iter()
+        .map(ExclusiveLeg::rounded_route_output)
+        .sum();
+    legs.iter()
+        .map(|leg| {
+            let leg_output = leg.rounded_route_output();
+            if total_leg_output == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                (surplus * &leg_output / &total_leg_output).min(leg_output)
+            }
+        })
+        .collect()
 }
 
 /// Pins the commitment of a post-processed route on `quote`, and records how much the user gains

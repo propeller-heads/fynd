@@ -53,7 +53,7 @@ use crate::{
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_legs, exclusive_route_shape, first_exclusive_leg, is_exclusive_leg,
+        exclusive_leg_captures, exclusive_legs, exclusive_route_shape, is_exclusive_leg,
         matched_commitment, pin_commitment, record_gas_token_amount, routes_through_exclusive,
         to_gas_token_wei, ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS,
         WEI_PER_GAS_TOKEN,
@@ -1360,13 +1360,17 @@ fn record_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices>) {
     .increment(volume / WEI_PER_GAS_TOKEN);
 }
 
-/// Counts a served quote with an exclusive leg under the leg's protocol and pool, and adds the fee
-/// its commitment captures.
+/// Counts a served quote with exclusive legs once by its number of exclusive legs, and once under
+/// each leg's protocol and pool, and adds the part of the fee each leg captures.
 ///
 /// `winning_quote_swaps_total` counts a dual pool's swap whether or not it carries a grant, so it
 /// cannot show that the pool executes as an exclusive leg. The `simulated` label takes the values
 /// of `winning_quote_swaps_total`; a leg whose signed payload does not execute counts as
 /// `reverted`.
+///
+/// `exclusive_won_routes_total` counts each quote once. `exclusive_won_quotes_total` counts a quote
+/// under every pool it has an exclusive leg through, so its sum over pools counts a quote with
+/// several legs more than once.
 ///
 /// `exclusive_won_fee_amount` is in whole gas tokens, priced like
 /// `worker_router_won_volume_gas_token`. A quote with no price adds nothing to it and is still
@@ -1375,36 +1379,43 @@ fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices
     if quote.status() != QuoteStatus::Success {
         return;
     }
-    let Some(leg) = quote
-        .route()
-        .and_then(|route| first_exclusive_leg(route.swaps()))
-    else {
+    let legs = exclusive_leg_captures(quote);
+    if legs.is_empty() {
         return;
-    };
-    let protocol = leg.protocol().to_string();
-    let component = leg.component_id().to_string();
+    }
     let worker_pool = quote.worker_pool().to_string();
+    let simulated = simulated_label(simulation_outcome(quote).0);
     counter!(
-        "exclusive_won_quotes_total",
-        "protocol" => protocol.clone(),
-        "component" => component.clone(),
+        "exclusive_won_routes_total",
+        "exclusive_legs" => legs.len().to_string(),
         "pool" => worker_pool.clone(),
-        "simulated" => simulated_label(simulation_outcome(quote).0)
+        "simulated" => simulated
     )
     .increment(1);
-
-    let fee = quote
-        .surplus_amount()
-        .and_then(|surplus| to_gas_token_wei(quote, surplus, token_prices))
-        .and_then(|fee_wei| fee_wei.to_f64());
-    if let Some(fee) = fee {
-        gauge!(
-            "exclusive_won_fee_amount",
-            "protocol" => protocol,
-            "component" => component,
-            "pool" => worker_pool
+    for (leg, captured) in legs {
+        let protocol = leg.protocol().to_string();
+        let component = leg.component_id().to_string();
+        counter!(
+            "exclusive_won_quotes_total",
+            "protocol" => protocol.clone(),
+            "component" => component.clone(),
+            "pool" => worker_pool.clone(),
+            "simulated" => simulated
         )
-        .increment(fee / WEI_PER_GAS_TOKEN);
+        .increment(1);
+
+        let fee = captured
+            .and_then(|captured| to_gas_token_wei(quote, &captured, token_prices))
+            .and_then(|fee_wei| fee_wei.to_f64());
+        if let Some(fee) = fee {
+            gauge!(
+                "exclusive_won_fee_amount",
+                "protocol" => protocol,
+                "component" => component,
+                "pool" => worker_pool.clone()
+            )
+            .increment(fee / WEI_PER_GAS_TOKEN);
+        }
     }
 }
 
@@ -5181,10 +5192,11 @@ mod tests {
         recorded
     }
 
-    /// A served quote through `legs` from pool `pool`, capturing a surplus of one gas token.
+    /// A served quote through `legs` from pool `pool`, each leg producing 1_000, capturing a
+    /// surplus of 1_000: one gas token at [`one_gas_token_per_thousand`].
     fn exclusive_win_quote(legs: &[(&str, u8, u8)]) -> OrderQuote {
         let mut quote = make_route_quote(legs)
-            .with_surplus(SurplusInfo::new(BigUint::from(10u64.pow(18)), BigUint::from(1_000u64)));
+            .with_surplus(SurplusInfo::new(BigUint::from(1_000u64), BigUint::from(1_000u64)));
         quote.set_worker_pool("pool".to_string());
         quote
     }
@@ -5194,12 +5206,17 @@ mod tests {
         format!("component={}", route.swaps()[index].component_id())
     }
 
+    /// Prices token 0x02 so that 1_000 of it is one gas token.
+    fn one_gas_token_per_thousand() -> TokenGasPrices {
+        gas_prices(&[(0x02, 1, 10u64.pow(15))])
+    }
+
     #[rstest]
     #[case::exclusive_component("vm:exclusive")]
     #[case::dual_pool(DUAL_CURVE)]
     fn test_record_exclusive_win(#[case] protocol: &str) {
         let quote = exclusive_win_quote(&[("uniswap_v2", 0x01, 0x03), (protocol, 0x03, 0x02)]);
-        let prices = gas_prices(&[(0x02, 1, 1)]);
+        let prices = one_gas_token_per_thousand();
         let component = leg_component(&quote, 1);
         let protocol = format!("protocol={protocol}");
 
@@ -5223,6 +5240,15 @@ mod tests {
                     ],
                     "1".to_string()
                 ),
+                (
+                    "exclusive_won_routes_total".to_string(),
+                    vec![
+                        "exclusive_legs=1".to_string(),
+                        "pool=pool".to_string(),
+                        "simulated=none".to_string()
+                    ],
+                    "1".to_string()
+                ),
             ]
         );
     }
@@ -5237,7 +5263,7 @@ mod tests {
             .iter()
             .map(|(name, _, _)| name.as_str())
             .collect();
-        assert_eq!(names, vec!["exclusive_won_quotes_total"]);
+        assert_eq!(names, vec!["exclusive_won_quotes_total", "exclusive_won_routes_total"]);
     }
 
     #[rstest]
