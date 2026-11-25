@@ -1,4 +1,17 @@
 
+## [0.129.1](https://github.com/propeller-heads/fynd/compare/0.129.0...0.129.1) (2026-11-25)
+
+### Features
+
+* **core:** label the exclusive fee gauge by worker pool ([8aabce9](https://github.com/propeller-heads/fynd/commit/8aabce951afe35111b16574aa1c34cd58c907ad2))
+* **core:** report which pools can carry an exclusive leg ([c836168](https://github.com/propeller-heads/fynd/commit/c8361688c888315a1be57d5e3ff2385cd95e0e62))
+* **core:** count signatures of exclusive legs by pool ([d84ebeb](https://github.com/propeller-heads/fynd/commit/d84ebeb1c0f21521079f9985f5f52c77a006b0ba))
+* **core:** count served quotes with an exclusive leg by pool ([8b17852](https://github.com/propeller-heads/fynd/commit/8b178526d5e074ada76049abcea0fa9551270e9f))
+* **rpc:** zero the Permit2 signature instead of dropping calldata ([c5f8d2f](https://github.com/propeller-heads/fynd/commit/c5f8d2f16793eea35d3cb4b0902f225d1ebe122e))
+* **rpc:** record the simulation overrides of each pAMM swap ([941c1bb](https://github.com/propeller-heads/fynd/commit/941c1bb58bdc1dcaa74d8f6a3ad00e9b9f5fee86))
+* **rpc:** record each order's encoded transaction ([5b089cc](https://github.com/propeller-heads/fynd/commit/5b089ccdc3265fdaae576c7697275b80b422c0aa))
+
+
 ## [0.129.0](https://github.com/propeller-heads/fynd/compare/0.128.0...0.129.0) (2026-11-24)
 
 ### Features
