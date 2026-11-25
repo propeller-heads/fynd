@@ -1,4 +1,19 @@
 
+## [0.129.2](https://github.com/propeller-heads/fynd/compare/0.129.1...0.129.2) (2026-11-25)
+
+### Features
+
+* **core:** split the surplus between several exclusive hops ([d7b3203](https://github.com/propeller-heads/fynd/commit/d7b320340ce8d9a1888f7cffe7e5b608c6ee42cf))
+
+### Bug Fixes
+
+* **deps:** bump tycho to 0.540.1 ([bb18ae5](https://github.com/propeller-heads/fynd/commit/bb18ae5fe4825e7fa358fb1334369f7b8ce9f1d0))
+* **core:** refuse to encode an exclusive leg with no committed amount ([8bbef9c](https://github.com/propeller-heads/fynd/commit/8bbef9cb9e03d7e1f3620c5dd50bdefe19a2ed23))
+* **core:** commit a dust exclusive leg so it still gets signed ([2456c85](https://github.com/propeller-heads/fynd/commit/2456c85273c883130d9c6b37cf34b2b809d5d557))
+* **core:** count only the fees that feed each exclusive hop's input ([aaecdfc](https://github.com/propeller-heads/fynd/commit/aaecdfcd040fa0f839cb7238cfc7450fbceb08a8))
+* **core:** allow for earlier hop fees in each exclusive hop's input floor ([5766b03](https://github.com/propeller-heads/fynd/commit/5766b039a9fbfd50e5134b0cc36c1cf39e2c9ad1))
+
+
 ## [0.129.1](https://github.com/propeller-heads/fynd/compare/0.129.0...0.129.1) (2026-11-25)
 
 ### Features
