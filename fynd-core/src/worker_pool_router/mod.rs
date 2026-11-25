@@ -1382,11 +1382,12 @@ fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices
     };
     let protocol = leg.protocol().to_string();
     let component = leg.component_id().to_string();
+    let worker_pool = quote.worker_pool().to_string();
     counter!(
         "exclusive_won_quotes_total",
         "protocol" => protocol.clone(),
         "component" => component.clone(),
-        "pool" => quote.worker_pool().to_string(),
+        "pool" => worker_pool.clone(),
         "simulated" => simulated_label(simulation_outcome(quote).0)
     )
     .increment(1);
@@ -1396,8 +1397,13 @@ fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices
         .and_then(|surplus| to_gas_token_wei(quote, surplus, token_prices))
         .and_then(|fee_wei| fee_wei.to_f64());
     if let Some(fee) = fee {
-        gauge!("exclusive_won_fee_amount", "protocol" => protocol, "component" => component)
-            .increment(fee / WEI_PER_GAS_TOKEN);
+        gauge!(
+            "exclusive_won_fee_amount",
+            "protocol" => protocol,
+            "component" => component,
+            "pool" => worker_pool
+        )
+        .increment(fee / WEI_PER_GAS_TOKEN);
     }
 }
 

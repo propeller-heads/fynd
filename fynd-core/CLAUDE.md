@@ -428,8 +428,8 @@ counts a dual pool's swap under its protocol with or without a grant.
 of a committed leg, once per encode, so a retried order can count twice.
 `finalize_quote` counts the served quotes with an exclusive leg in
 `exclusive_won_quotes_total{pool,simulated}`, where `simulated` takes the values of
-`winning_quote_swaps_total`, and adds their captured surplus to `exclusive_won_fee_amount` in
-whole gas tokens. An unpriced quote adds nothing to the gauge.
+`winning_quote_swaps_total`, and adds their captured surplus to `exclusive_won_fee_amount{pool}`
+in whole gas tokens. An unpriced quote adds nothing to the gauge.
 
 Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 `liquidity_scope = "include_exclusive"` in `worker_pools.toml`. A deployment where every pool sets it
