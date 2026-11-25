@@ -763,11 +763,15 @@ mod tests {
         record_json(request_record(request), &Ok(quote), None)
     }
 
-    fn with_transaction(mut order: fynd_core::OrderQuote) -> fynd_core::OrderQuote {
+    fn with_transaction(order: fynd_core::OrderQuote) -> fynd_core::OrderQuote {
+        with_calldata(order, vec![0xde, 0xad, 0xbe, 0xef])
+    }
+
+    fn with_calldata(mut order: fynd_core::OrderQuote, data: Vec<u8>) -> fynd_core::OrderQuote {
         order.set_transaction(fynd_core::Transaction::new(
             Bytes::from([0x99u8; 20]),
             BigUint::from(7u64),
-            vec![0xde, 0xad, 0xbe, 0xef],
+            data,
         ));
         order
     }
@@ -794,6 +798,25 @@ mod tests {
 
     #[test]
     fn test_record_encoded_transaction_with_permit2_signature() {
+        // `request_with_signatures` signs its permit with 65 bytes of 0x22.
+        let calldata = [&[0xde, 0xad, 0xbe, 0xef][..], &[0x22; 65], &[0x01, 0x02]].concat();
+        let order = with_calldata(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+            calldata,
+        );
+        let quote = finalize_quote(vec![order], 42, None);
+
+        let value = record_json(request_record(request_with_signatures()), &Ok(quote), None);
+
+        let expected = format!("0xdeadbeef{}0102", "00".repeat(65));
+        assert_eq!(value["outcome"]["orders"][0]["encoded_transaction"]["data"], expected);
+    }
+
+    /// Calldata that does not hold the request's Permit2 signature is not recorded.
+    #[test]
+    fn test_record_encoded_transaction_without_its_permit2_signature() {
         let order = with_transaction(
             routed_order(QuoteStatus::Success)
                 .route(route())
@@ -810,7 +833,19 @@ mod tests {
                 .is_none(),
             "in {order}"
         );
-        assert!(!value.to_string().contains("deadbeef"), "calldata leaked: {value}");
+    }
+
+    #[rstest]
+    #[case::once(vec![9, 1, 2, 9], vec![9, 0, 0, 9], true)]
+    #[case::twice(vec![1, 2, 9, 1, 2], vec![0, 0, 9, 0, 0], true)]
+    #[case::absent(vec![9, 1, 9, 2], vec![9, 1, 9, 2], false)]
+    fn test_zero_occurrences(
+        #[case] mut haystack: Vec<u8>,
+        #[case] expected: Vec<u8>,
+        #[case] found: bool,
+    ) {
+        assert_eq!(zero_occurrences(&mut haystack, &[1, 2]), found);
+        assert_eq!(haystack, expected);
     }
 
     #[test]
