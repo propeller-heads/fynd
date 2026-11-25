@@ -803,6 +803,93 @@ mod tests {
         );
     }
 
+    /// A route of one pAMM swap whose state carries Titan's simulation overrides.
+    fn pamm_route() -> Route {
+        use std::collections::BTreeMap;
+
+        use tycho_simulation::{
+            price_level_stream::{
+                overrides::{AccountOverride, PammSimulationOverrides},
+                state::{PriceLevelStreamQuote, PriceLevelStreamState},
+            },
+            tycho_common::Bytes,
+        };
+
+        let account = AccountOverride {
+            balance: Some(Bytes::from(vec![0x0e, 0x40])),
+            nonce: Some(1),
+            state_diff: BTreeMap::from([(Bytes::from([0u8; 32]), Bytes::from([0x04u8; 32]))]),
+        };
+        let overrides = PammSimulationOverrides {
+            accounts: BTreeMap::from([(Bytes::from([0xa1u8; 20]), account)]),
+            block_number: Some(26_201_954),
+            block_timestamp: Some(1_792_115_924),
+            built_at_ns: 1_792_115_920_127_487_452,
+        };
+        let level = PriceLevelStreamQuote::new(BigUint::from(1_000u64), BigUint::from(990u64));
+        let state = PriceLevelStreamState::new(
+            Address::from([0xAAu8; 20]),
+            Address::from([0xBBu8; 20]),
+            vec![level.clone()],
+            vec![level],
+            BigUint::from(100_000u64),
+        )
+        .with_simulation_overrides(overrides);
+        let swap = Swap::new(
+            "pamm".to_string(),
+            "fallback:fermiswap".to_string(),
+            Address::from([0xAAu8; 20]),
+            Address::from([0xBBu8; 20]),
+            BigUint::from(1_000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            component("pamm", &[token(0xAA, "TIN"), token(0xBB, "TOUT")]),
+            Box::new(state),
+        );
+        Route::new(vec![swap], Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn test_record_pamm_simulation_overrides() {
+        let value = solved_json(
+            vec![routed_order(QuoteStatus::Success)
+                .route(pamm_route())
+                .build()],
+            None,
+        );
+
+        let overrides = &value["outcome"]["orders"][0]["route"][0]["simulation_overrides"];
+        assert_eq!(overrides["block_number"], 26_201_954);
+        assert_eq!(overrides["block_timestamp"], 1_792_115_924);
+        let accounts: Value = serde_json::from_str(
+            overrides["accounts"]
+                .as_str()
+                .expect("accounts is JSON text"),
+        )
+        .unwrap();
+        assert_eq!(
+            accounts,
+            json!({
+                "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+                    "balance": "0xe40",
+                    "nonce": "0x1",
+                    "stateDiff": { format!("0x{}", "00".repeat(32)): format!("0x{}", "04".repeat(32)) }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_record_simulation_overrides_of_other_swaps() {
+        let swap = &solved_record()["outcome"]["orders"][0]["route"][0];
+
+        assert!(
+            swap.get("simulation_overrides")
+                .is_none(),
+            "in {swap}"
+        );
+    }
+
     /// The collector reads `served_at` as a fixed-width UTC timestamp, so the precision is part
     /// of the contract, not an accident of chrono's default.
     #[test]
