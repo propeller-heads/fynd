@@ -4,21 +4,33 @@
 //! The JSON shape is the wire format the collector accepts on `POST /v1/records`
 //! (fynd-hosted-service, `crates/collector`); the two field lists must match. Like the
 //! [`ReplayRequest`](crate::api::request_capture::ReplayRequest) it embeds, the record is an
-//! allowlist by construction: every field is copied by name, so `sender`, `receiver`, signatures,
-//! calldata and fee breakdowns cannot leak into it.
+//! allowlist by construction: every field is copied by name, so `sender`, `receiver`, signatures
+//! and fee breakdowns cannot leak into it as fields of their own.
+//!
+//! An order's `encoded_transaction` is the exception: its calldata names the receiver and carries
+//! the signatures Fynd attaches, which expire within minutes. A Permit2 signature is the user's,
+//! with a deadline the user chooses, so the record zeroes it out of the calldata.
 //!
 //! Only requests that reached the solver produce a record. A request rejected by
 //! `validate_quote_request` returns 400 without one, so the collector sees solver outcomes and
 //! not client-side rejections.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use fynd_core::{
-    types::BlockInfo, ClientFeeParams, EncodingOptions, ExclusiveAccess, OrderQuote, Quote,
-    QuoteRequest, SolveError, Swap, UserTransferType,
+    types::{BlockInfo, Transaction},
+    ClientFeeParams, EncodingOptions, ExclusiveAccess, OrderQuote, Quote, QuoteRequest, SolveError,
+    Swap, UserTransferType,
 };
+use fynd_rpc_types::{AccountOverride, SimulationOverrides};
 use serde::{Serialize, Serializer};
 use serde_with::{serde_as, DisplayFromStr};
-use tycho_simulation::tycho_common::models::{Address, Chain};
+use tracing::warn;
+use tycho_simulation::tycho_common::{
+    models::{Address, Chain},
+    Bytes,
+};
 
 pub use crate::api::middleware::ClientInfo;
 use crate::api::{
@@ -31,7 +43,7 @@ use crate::api::{
 
 /// Version of the record layout. Bump it when a field is added, removed or changes meaning, so a
 /// reader can tell records of different layouts apart.
-pub const SCHEMA_VERSION: u16 = 4;
+pub const SCHEMA_VERSION: u16 = 5;
 
 /// One answered quote request, as the collector receives it.
 #[must_use]
@@ -66,7 +78,7 @@ impl QuoteRecord {
         head: Option<BlockInfo>,
     ) -> Self {
         let outcome = match result {
-            Ok(quote) => OutcomeRecord::solved(quote, head),
+            Ok(quote) => OutcomeRecord::solved(quote, head, request.permit2_signature.as_ref()),
             Err(error) => OutcomeRecord::failed(error, request.replay.num_orders(), head),
         };
         Self {
@@ -157,6 +169,10 @@ pub struct RequestRecord {
     /// Absent when the request asked for no encoding.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding: Option<EncodingRecord>,
+    /// The request's Permit2 signature, which the encoder writes into the calldata and the record
+    /// zeroes out of it.
+    #[serde(skip)]
+    permit2_signature: Option<Bytes>,
 }
 
 impl RequestRecord {
@@ -168,6 +184,11 @@ impl RequestRecord {
                 .options()
                 .encoding_options()
                 .map(EncodingRecord::capture),
+            permit2_signature: request
+                .options()
+                .encoding_options()
+                .and_then(EncodingOptions::permit2_signature)
+                .cloned(),
         }
     }
 }
@@ -243,7 +264,7 @@ struct OutcomeRecord {
 }
 
 impl OutcomeRecord {
-    fn solved(quote: &Quote, head: Option<BlockInfo>) -> Self {
+    fn solved(quote: &Quote, head: Option<BlockInfo>, permit2_signature: Option<&Bytes>) -> Self {
         // One solve answers every order at one block and one gas price.
         let orders = quote.orders();
         let (block, block_source) = match priced_block(quote) {
@@ -262,7 +283,7 @@ impl OutcomeRecord {
             block_source,
             orders: orders
                 .iter()
-                .map(OrderRecord::from_quote)
+                .map(|order| OrderRecord::from_quote(order, permit2_signature))
                 .collect(),
         }
     }
@@ -320,10 +341,15 @@ struct OrderRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     algorithm: Option<String>,
     route: Vec<SwapRecord>,
+    /// The order's `transaction` as `/v1/quote` returned it, with the request's Permit2 signature
+    /// zeroed. Absent when the order was not encoded, and when the signature could not be found
+    /// in the calldata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoded_transaction: Option<EncodedTransaction>,
 }
 
 impl OrderRecord {
-    fn from_quote(order: &OrderQuote) -> Self {
+    fn from_quote(order: &OrderQuote, permit2_signature: Option<&Bytes>) -> Self {
         let status = quote_status_code(order.status()).to_string();
         let failure_reason =
             failure_reason_slug(order.status(), order.no_route_cause()).to_string();
@@ -347,6 +373,11 @@ impl OrderRecord {
                 .iter()
                 .map(SwapRecord::from_swap)
                 .collect(),
+            encoded_transaction: order
+                .transaction()
+                .and_then(|transaction| {
+                    EncodedTransaction::redacted(transaction, permit2_signature)
+                }),
         }
     }
 
@@ -362,8 +393,58 @@ impl OrderRecord {
             price_impact_bps: None,
             algorithm: None,
             route: Vec::new(),
+            encoded_transaction: None,
         }
     }
+}
+
+/// The transaction Fynd encoded for one order, for the client to sign and send.
+#[derive(Debug, Clone, Serialize)]
+struct EncodedTransaction {
+    to: Bytes,
+    /// Native value sent with the call, in wei.
+    value: String,
+    data: Bytes,
+}
+
+impl EncodedTransaction {
+    /// Copies `transaction` with every occurrence of `permit2_signature` in its calldata zeroed,
+    /// which keeps the calldata's length and layout.
+    ///
+    /// Returns `None` when the calldata does not contain the signature, so that calldata whose
+    /// signature was encoded some other way is never recorded.
+    fn redacted(transaction: &Transaction, permit2_signature: Option<&Bytes>) -> Option<Self> {
+        let mut data = transaction.data().to_vec();
+        if let Some(signature) = permit2_signature.filter(|signature| !signature.is_empty()) {
+            if !zero_occurrences(&mut data, signature) {
+                warn!(
+                    "permit2 signature not found in the calldata; recording no encoded transaction"
+                );
+                return None;
+            }
+        }
+        Some(Self {
+            to: transaction.to().clone(),
+            value: transaction.value().to_string(),
+            data: Bytes::from(data),
+        })
+    }
+}
+
+/// Zeroes every occurrence of `needle` in `haystack`. Returns whether there was any.
+fn zero_occurrences(haystack: &mut [u8], needle: &[u8]) -> bool {
+    let mut found = false;
+    let mut start = 0;
+    while let Some(offset) = haystack[start..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let at = start + offset;
+        haystack[at..at + needle.len()].fill(0);
+        found = true;
+        start = at + needle.len();
+    }
+    found
 }
 
 /// One swap of a served route.
@@ -378,6 +459,39 @@ struct SwapRecord {
     gas_estimate: String,
     /// Share of the order through this swap, `0.5` meaning half.
     split: String,
+    /// The account state a pAMM venue was priced on, to re-simulate the swap with. Absent for
+    /// every other swap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_overrides: Option<SimulationOverridesRecord>,
+}
+
+/// A pAMM swap's `simulation_overrides` as `/v1/quote` returns them, except that `accounts` is
+/// JSON text: its keys are addresses and storage slots, which a fixed column schema cannot hold.
+#[derive(Debug, Clone, Serialize)]
+struct SimulationOverridesRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_timestamp: Option<u64>,
+    /// The State Override Set `eth_call` and `eth_simulateV1` take.
+    #[serde(serialize_with = "json_text")]
+    accounts: BTreeMap<fynd_rpc_types::Bytes, AccountOverride>,
+}
+
+impl SimulationOverridesRecord {
+    fn from_wire(overrides: SimulationOverrides) -> Self {
+        Self {
+            block_number: overrides.block_number(),
+            block_timestamp: overrides.block_timestamp(),
+            accounts: overrides.accounts().clone(),
+        }
+    }
+}
+
+/// Serializes `value` as a string holding its JSON.
+fn json_text<T: Serialize, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+    let text = serde_json::to_string(value).map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&text)
 }
 
 impl SwapRecord {
@@ -391,6 +505,10 @@ impl SwapRecord {
             amount_out: swap.amount_out().to_string(),
             gas_estimate: swap.gas_estimate().to_string(),
             split: swap.split().to_string(),
+            simulation_overrides: swap
+                .simulation_overrides()
+                .map(SimulationOverrides::from)
+                .map(SimulationOverridesRecord::from_wire),
         }
     }
 }
@@ -409,7 +527,10 @@ mod tests {
     use num_bigint::BigUint;
     use rstest::rstest;
     use serde_json::{json, Value};
-    use tycho_simulation::tycho_common::models::{Address, Chain};
+    use tycho_simulation::tycho_common::{
+        models::{Address, Chain},
+        Bytes,
+    };
 
     use super::*;
     use crate::api::request_capture::test_utils::{order, request_with_signatures};
@@ -576,7 +697,7 @@ mod tests {
     fn test_record_solved_quote() {
         let value = solved_record();
         assert_eq!(value["chain"], "ethereum");
-        assert_eq!(value["schema_version"], 4);
+        assert_eq!(value["schema_version"], 5);
         assert_eq!(
             value["client"],
             json!({
@@ -631,6 +752,204 @@ mod tests {
         assert!(solved_record()["outcome"]["orders"][0]
             .get("subsidy_amount")
             .is_none());
+    }
+
+    /// An order encoded for a request that signs nothing of the user's.
+    fn encoded_json(quote_order: fynd_core::OrderQuote) -> Value {
+        let encoding = fynd_rpc_types::EncodingOptions::new(0.005);
+        let options = fynd_rpc_types::QuoteOptions::default().with_encoding_options(encoding);
+        let request = fynd_rpc_types::QuoteRequest::new(vec![order()]).with_options(options);
+        let quote = finalize_quote(vec![quote_order], 42, None);
+        record_json(request_record(request), &Ok(quote), None)
+    }
+
+    fn with_transaction(order: fynd_core::OrderQuote) -> fynd_core::OrderQuote {
+        with_calldata(order, vec![0xde, 0xad, 0xbe, 0xef])
+    }
+
+    fn with_calldata(mut order: fynd_core::OrderQuote, data: Vec<u8>) -> fynd_core::OrderQuote {
+        order.set_transaction(fynd_core::Transaction::new(
+            Bytes::from([0x99u8; 20]),
+            BigUint::from(7u64),
+            data,
+        ));
+        order
+    }
+
+    #[test]
+    fn test_record_encoded_transaction() {
+        let order = with_transaction(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+        );
+
+        let value = encoded_json(order);
+
+        assert_eq!(
+            value["outcome"]["orders"][0]["encoded_transaction"],
+            json!({
+                "to": "0x9999999999999999999999999999999999999999",
+                "value": "7",
+                "data": "0xdeadbeef"
+            })
+        );
+    }
+
+    #[test]
+    fn test_record_encoded_transaction_with_permit2_signature() {
+        // `request_with_signatures` signs its permit with 65 bytes of 0x22.
+        let calldata = [&[0xde, 0xad, 0xbe, 0xef][..], &[0x22; 65], &[0x01, 0x02]].concat();
+        let order = with_calldata(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+            calldata,
+        );
+        let quote = finalize_quote(vec![order], 42, None);
+
+        let value = record_json(request_record(request_with_signatures()), &Ok(quote), None);
+
+        let expected = format!("0xdeadbeef{}0102", "00".repeat(65));
+        assert_eq!(value["outcome"]["orders"][0]["encoded_transaction"]["data"], expected);
+    }
+
+    /// Calldata that does not hold the request's Permit2 signature is not recorded.
+    #[test]
+    fn test_record_encoded_transaction_without_its_permit2_signature() {
+        let order = with_transaction(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+        );
+        let quote = finalize_quote(vec![order], 42, None);
+
+        let value = record_json(request_record(request_with_signatures()), &Ok(quote), None);
+
+        let order = &value["outcome"]["orders"][0];
+        assert!(
+            order
+                .get("encoded_transaction")
+                .is_none(),
+            "in {order}"
+        );
+    }
+
+    #[rstest]
+    #[case::once(vec![9, 1, 2, 9], vec![9, 0, 0, 9], true)]
+    #[case::twice(vec![1, 2, 9, 1, 2], vec![0, 0, 9, 0, 0], true)]
+    #[case::absent(vec![9, 1, 9, 2], vec![9, 1, 9, 2], false)]
+    fn test_zero_occurrences(
+        #[case] mut haystack: Vec<u8>,
+        #[case] expected: Vec<u8>,
+        #[case] found: bool,
+    ) {
+        assert_eq!(zero_occurrences(&mut haystack, &[1, 2]), found);
+        assert_eq!(haystack, expected);
+    }
+
+    #[test]
+    fn test_record_encoded_transaction_of_unencoded_order() {
+        let value = encoded_json(
+            routed_order(QuoteStatus::Success)
+                .route(route())
+                .build(),
+        );
+
+        let order = &value["outcome"]["orders"][0];
+        assert!(
+            order
+                .get("encoded_transaction")
+                .is_none(),
+            "in {order}"
+        );
+    }
+
+    /// A route of one pAMM swap whose state carries Titan's simulation overrides.
+    fn pamm_route() -> Route {
+        use std::collections::BTreeMap;
+
+        use tycho_simulation::{
+            price_level_stream::{
+                overrides::{AccountOverride, PammSimulationOverrides},
+                state::{PriceLevelStreamQuote, PriceLevelStreamState},
+            },
+            tycho_common::Bytes,
+        };
+
+        let account = AccountOverride {
+            balance: Some(Bytes::from(vec![0x0e, 0x40])),
+            nonce: Some(1),
+            state_diff: BTreeMap::from([(Bytes::from([0u8; 32]), Bytes::from([0x04u8; 32]))]),
+        };
+        let overrides = PammSimulationOverrides {
+            accounts: BTreeMap::from([(Bytes::from([0xa1u8; 20]), account)]),
+            block_number: Some(26_201_954),
+            block_timestamp: Some(1_792_115_924),
+            built_at_ns: 1_792_115_920_127_487_452,
+        };
+        let level = PriceLevelStreamQuote::new(BigUint::from(1_000u64), BigUint::from(990u64));
+        let state = PriceLevelStreamState::new(
+            Address::from([0xAAu8; 20]),
+            Address::from([0xBBu8; 20]),
+            vec![level.clone()],
+            vec![level],
+            BigUint::from(100_000u64),
+        )
+        .with_simulation_overrides(overrides);
+        let swap = Swap::new(
+            "pamm".to_string(),
+            "fallback:fermiswap".to_string(),
+            Address::from([0xAAu8; 20]),
+            Address::from([0xBBu8; 20]),
+            BigUint::from(1_000u64),
+            BigUint::from(990u64),
+            BigUint::from(100_000u64),
+            component("pamm", &[token(0xAA, "TIN"), token(0xBB, "TOUT")]),
+            Box::new(state),
+        );
+        Route::new(vec![swap], Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn test_record_pamm_simulation_overrides() {
+        let value = solved_json(
+            vec![routed_order(QuoteStatus::Success)
+                .route(pamm_route())
+                .build()],
+            None,
+        );
+
+        let overrides = &value["outcome"]["orders"][0]["route"][0]["simulation_overrides"];
+        assert_eq!(overrides["block_number"], 26_201_954);
+        assert_eq!(overrides["block_timestamp"], 1_792_115_924);
+        let accounts: Value = serde_json::from_str(
+            overrides["accounts"]
+                .as_str()
+                .expect("accounts is JSON text"),
+        )
+        .unwrap();
+        assert_eq!(
+            accounts,
+            json!({
+                "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+                    "balance": "0xe40",
+                    "nonce": "0x1",
+                    "stateDiff": { format!("0x{}", "00".repeat(32)): format!("0x{}", "04".repeat(32)) }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_record_simulation_overrides_of_other_swaps() {
+        let swap = &solved_record()["outcome"]["orders"][0]["route"][0];
+
+        assert!(
+            swap.get("simulation_overrides")
+                .is_none(),
+            "in {swap}"
+        );
     }
 
     /// The collector reads `served_at` as a fixed-width UTC timestamp, so the precision is part
