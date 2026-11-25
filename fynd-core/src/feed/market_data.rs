@@ -648,6 +648,22 @@ impl MarketState {
             .collect()
     }
 
+    /// The components a swap through can be an exclusive leg, with their protocol systems: the
+    /// components flagged exclusive, and the dual pools whose state has an exclusive view.
+    pub(crate) fn exclusive_pools(&self) -> FxHashMap<ComponentId, String> {
+        let mut pools = FxHashMap::default();
+        for (id, stored) in &self.components {
+            let has_view = self
+                .simulation_states
+                .get(id)
+                .is_some_and(|entry| entry.exclusive_view.is_some());
+            if has_view || is_exclusive(&stored.component) {
+                pools.insert(id.clone(), stored.component.protocol_system.clone());
+            }
+        }
+        pools
+    }
+
     /// Returns the sync status of every protocol system.
     pub fn protocol_sync_states(&self) -> &FxHashMap<String, SynchronizerState> {
         &self.protocol_sync_status
@@ -1816,6 +1832,40 @@ mod tests {
         assert!(is_exclusive_view(subset.get_simulation_state("dual")));
         assert!(!is_exclusive_view(exclusive.get_simulation_state("other")));
         assert!(!is_exclusive_view(subset.get_simulation_state("other")));
+    }
+
+    /// The exclusive pools are the components flagged exclusive and the dual pools Fynd's grantor
+    /// can sign for, with their protocol systems.
+    #[tokio::test]
+    async fn test_exclusive_pools() {
+        let market = market_with_grantor();
+        let tokens = [token(0x0A, "A"), token(0x0B, "B")];
+        let mut ekubo = component_with_protocol("ekubo", "ekubo_v3", &tokens);
+        crate::feed::exclusivity::mark_exclusive(&mut ekubo);
+        let mut state = market.write().await;
+        state.upsert_components([
+            component_with_protocol("dual", "vm:curve", &tokens),
+            component_with_protocol("other", "vm:curve", &tokens),
+            component_with_protocol("plain", "uniswap_v2", &tokens),
+            ekubo,
+        ]);
+        state.update_states([
+            ("dual".to_string(), Box::new(test_curve::dual_curve_state()) as Box<dyn ProtocolSim>),
+            (
+                "other".to_string(),
+                Box::new(test_curve::curve_state(test_curve::grant_policy([0xee; 20], false))),
+            ),
+        ]);
+
+        let pools = state.exclusive_pools();
+
+        assert_eq!(
+            pools,
+            FxHashMap::from_iter([
+                ("dual".to_string(), "vm:curve".to_string()),
+                ("ekubo".to_string(), "ekubo_v3".to_string()),
+            ])
+        );
     }
 
     /// A market without a grantor gives no exclusive view, even through a handle with exclusive

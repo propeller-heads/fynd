@@ -46,6 +46,13 @@ pub(crate) fn routes_through_exclusive(swaps: &[Swap]) -> bool {
     swaps.iter().any(is_exclusive_leg)
 }
 
+/// The first exclusive leg of `swaps`. `None` when no swap is one.
+pub(crate) fn first_exclusive_leg(swaps: &[Swap]) -> Option<&Swap> {
+    swaps
+        .iter()
+        .find(|swap| is_exclusive_leg(swap))
+}
+
 /// Returns the shape of the exclusive legs of `swaps`, without incrementing metrics.
 pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> ExclusiveRouteShape {
     let mut exclusive_legs = swaps
