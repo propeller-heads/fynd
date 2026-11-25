@@ -1426,21 +1426,34 @@ mod tests {
     /// A swap through an Ekubo pool with the signed-swap extension, flagged exclusive when
     /// `exclusive`.
     fn ekubo_swap(committed: Option<u64>, exclusive: bool) -> crate::types::Swap {
-        let token_in = make_address(0x11);
-        let token_out = make_address(0x22);
-        let mut comp = component("ekubo-signed-pool", &[]);
+        ekubo_hop(0x11, 0x22, committed, exclusive, [0x55; 20])
+    }
+
+    /// A swap from `token_in` to `token_out` through an Ekubo pool on `extension`, 1_000_000 in
+    /// and out, flagged exclusive when `exclusive`.
+    fn ekubo_hop(
+        token_in: u8,
+        token_out: u8,
+        committed: Option<u64>,
+        exclusive: bool,
+        extension: [u8; 20],
+    ) -> crate::types::Swap {
+        let token_in = make_address(token_in);
+        let token_out = make_address(token_out);
+        let mut comp =
+            component_with_protocol(&format!("ekubo-{token_in}-{token_out}"), "ekubo_v3", &[]);
         if exclusive {
             crate::feed::exclusivity::mark_exclusive(&mut comp);
         }
         comp.static_attributes
-            .insert("extension".to_string(), Bytes::from([0x55u8; 20].as_ref()));
+            .insert("extension".to_string(), Bytes::from(extension.as_ref()));
         comp.static_attributes
             .insert("fee".to_string(), Bytes::from(0u64));
         comp.static_attributes
             .insert("pool_type_config".to_string(), Bytes::from(0u32));
 
         let mut swap = crate::types::Swap::new(
-            "ekubo-signed-pool".to_string(),
+            comp.id.clone(),
             "ekubo_v3".to_string(),
             token_in,
             token_out,
@@ -1518,6 +1531,9 @@ mod tests {
             )
         });
 
+        let component = quote.route().expect("route").swaps()[0]
+            .component_id()
+            .to_string();
         let expected: Vec<_> = outcome
             .into_iter()
             .map(|outcome| {
@@ -1525,7 +1541,7 @@ mod tests {
                     "exclusive_legs_signed_total".to_string(),
                     vec![
                         "protocol=ekubo_v3".to_string(),
-                        "component=ekubo-signed-pool".to_string(),
+                        format!("component={component}"),
                         format!("outcome={outcome}"),
                     ],
                     metrics_util::debugging::DebugValue::Counter(1),
@@ -1609,12 +1625,37 @@ mod tests {
         assert_eq!(grant_min_amount_in(&user_data), BigUint::from(990_000u64));
     }
 
-    /// Two exclusive hops in a row: the first keeps 1% as its fee, so the second hop's input floor
-    /// allows for 1% slippage plus that 1%.
-    #[test]
-    fn test_stamp_exclusive_swaps_two_hops() {
-        let swaps =
-            vec![curve_grant_swap(0x11, 0x22, 990_000), curve_grant_swap(0x22, 0x33, 990_000)];
+    /// Each exclusive leg keeps 1% as its fee, and the slippage is 1%. A leg's input floor allows
+    /// for the slippage plus the fees of the exclusive legs that feed it. Expected: the floor of
+    /// each signed leg, which the bps rounding of the slippage may put up to 1 bp lower.
+    #[rstest]
+    // The second leg's input lost the first leg's 1%.
+    #[case::legs_in_sequence(
+        vec![curve_grant_swap(0x11, 0x22, 990_000), curve_grant_swap(0x22, 0x33, 990_000)],
+        vec![990_000, 980_000]
+    )]
+    // The second leg's input comes from a public pool, not from the first leg.
+    #[case::legs_on_parallel_branches(
+        vec![
+            curve_grant_swap(0x11, 0x33, 990_000).with_split(0.5),
+            ekubo_swap(None, false),
+            curve_grant_swap(0x22, 0x33, 990_000),
+        ],
+        vec![990_000, 990_000]
+    )]
+    // Half of the last leg's input comes from the first leg, which kept 1% of it.
+    #[case::legs_after_a_merge(
+        vec![
+            curve_grant_swap(0x11, 0x22, 990_000).with_split(0.5),
+            ekubo_swap(None, false),
+            curve_grant_swap(0x22, 0x33, 990_000),
+        ],
+        vec![990_000, 985_000]
+    )]
+    fn test_stamp_exclusive_swaps_input_floors(
+        #[case] swaps: Vec<crate::types::Swap>,
+        #[case] expected_floors: Vec<u64>,
+    ) {
         let tokens = FxHashMap::from_iter(
             [0x11, 0x22, 0x33].map(|byte| (make_address(byte), make_token(make_address(byte)))),
         );
@@ -1633,17 +1674,18 @@ mod tests {
         let floors: Vec<BigUint> = solution
             .swaps()
             .iter()
-            .map(|swap| {
-                grant_min_amount_in(
-                    swap.user_data()
-                        .as_ref()
-                        .expect("signed"),
-                )
+            .filter_map(|swap| {
+                swap.user_data()
+                    .as_ref()
+                    .map(grant_min_amount_in)
             })
             .collect();
-        assert_eq!(floors[0], BigUint::from(990_000u64));
-        assert!(floors[1] <= BigUint::from(980_000u64), "second floor {}", floors[1]);
-        assert!(floors[1] >= BigUint::from(979_000u64), "second floor {}", floors[1]);
+        assert_eq!(floors.len(), expected_floors.len(), "floors {floors:?}");
+        for (floor, expected) in floors.iter().zip(expected_floors) {
+            let expected = BigUint::from(expected);
+            let lowest = &expected - BigUint::from(100u64);
+            assert!(*floor <= expected && *floor >= lowest, "floor {floor}, expected {expected}");
+        }
     }
 
     #[tokio::test]
@@ -1661,6 +1703,75 @@ mod tests {
 
         assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
         assert!(result[0].transaction().is_none(), "an unsigned exclusive leg must not be encoded");
+    }
+
+    /// Two Ekubo hops in a row form one swap group, whether both are signed or only one is. The
+    /// calldata carries the signed balance limits of each signed hop.
+    #[rstest]
+    #[case::both_signed(Some(990_000), Some(990_000))]
+    #[case::public_then_signed(None, Some(990_000))]
+    #[case::signed_then_public(Some(990_000), None)]
+    #[tokio::test]
+    async fn test_encode_groups_signed_ekubo_hops(
+        #[case] first_committed: Option<u64>,
+        #[case] second_committed: Option<u64>,
+    ) {
+        let hop = |token_in, token_out, committed: Option<u64>| {
+            let extension = if committed.is_some() { [0x55; 20] } else { [0; 20] };
+            ekubo_hop(token_in, token_out, committed, committed.is_some(), extension)
+        };
+        let swaps = vec![hop(0x11, 0x22, first_committed), hop(0x22, 0x33, second_committed)];
+        let tokens = FxHashMap::from_iter(
+            [0x11, 0x22, 0x33].map(|byte| (make_address(byte), make_token(make_address(byte)))),
+        );
+        let route = crate::types::Route::new(swaps, tokens).expect("non-empty route");
+        let quote = make_order_quote(980_100).with_route(route);
+        let signer =
+            || ExclusiveSwapSigner::new(CONTROLLER_KEY.parse().unwrap(), 1, 0, 120, LOCKER);
+
+        let stamped = Encoder::stamp_exclusive_swaps(
+            Solution::try_from(&quote).unwrap(),
+            &quote,
+            &signer(),
+            0.01,
+        )
+        .unwrap();
+        let groups = tycho_execution::encoding::evm::group_swaps(stamped.swaps());
+        assert_eq!(groups.len(), 1, "both hops in one group");
+        assert_eq!(groups[0].swaps.len(), 2);
+
+        let encoder = real_encoder().with_exclusive_swap_signer(signer());
+        let result = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .unwrap();
+
+        assert_eq!(result[0].status(), QuoteStatus::Success);
+        let calldata = result[0]
+            .transaction()
+            .expect("encoded")
+            .data();
+        let signed_hops: Vec<&Bytes> = stamped
+            .swaps()
+            .iter()
+            .filter_map(|swap| swap.user_data().as_ref())
+            .collect();
+        let expected_signed = [first_committed, second_committed]
+            .iter()
+            .filter(|committed| committed.is_some())
+            .count();
+        assert_eq!(signed_hops.len(), expected_signed);
+        for user_data in signed_hops {
+            // fee(8) | meta(32) | minBalanceUpdate(32) | signature: the balance limits do not
+            // depend on the signing time, so the calldata carries the same 32 bytes.
+            let min_balance_update = &user_data[40..72];
+            assert!(
+                calldata
+                    .windows(min_balance_update.len())
+                    .any(|window| window == min_balance_update),
+                "calldata misses a signed hop's balance limits"
+            );
+        }
     }
 
     #[test]

@@ -480,6 +480,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::algorithm::test_utils::{addr, component, MockProtocolSim};
 
     #[rstest]
     #[case::zero("0", Some(0))]
@@ -491,5 +492,68 @@ mod tests {
     #[case::empty("", None)]
     fn test_parse_user_improvement_share_bps(#[case] raw: &str, #[case] expected: Option<u32>) {
         assert_eq!(parse_user_improvement_share_bps(raw), expected);
+    }
+
+    /// A swap from `token_in` to `token_out` that outputs `amount_out`, committed to `committed`
+    /// when it is an exclusive leg.
+    fn swap(token_in: u8, token_out: u8, amount_out: u64, committed: Option<u64>) -> Swap {
+        let mut swap = Swap::new(
+            format!("pool-{token_in}-{token_out}"),
+            "uniswap_v2".to_string(),
+            addr(token_in),
+            addr(token_out),
+            BigUint::from(1_000u64),
+            BigUint::from(amount_out),
+            BigUint::ZERO,
+            component(&format!("pool-{token_in}-{token_out}"), &[]),
+            Box::new(MockProtocolSim::default()),
+        );
+        if let Some(committed) = committed {
+            swap.set_committed_amount_out(BigUint::from(committed));
+        }
+        swap
+    }
+
+    /// Exclusive legs keep 1% or 2% of their output as their fee. Expected: the share of each
+    /// swap's input that the fees upstream took.
+    #[rstest]
+    #[case::single_leg(vec![swap(0x01, 0x02, 1000, Some(990))], vec![0.0])]
+    #[case::legs_in_sequence(
+        vec![swap(0x01, 0x02, 1000, Some(990)), swap(0x02, 0x03, 1000, Some(990))],
+        vec![0.0, 0.01]
+    )]
+    #[case::fees_add_up_through_a_public_pool(
+        vec![
+            swap(0x01, 0x02, 1000, Some(990)),
+            swap(0x02, 0x03, 1000, Some(980)),
+            swap(0x03, 0x04, 1000, None),
+            swap(0x04, 0x05, 1000, Some(990)),
+        ],
+        vec![0.0, 0.01, 0.03, 0.03]
+    )]
+    #[case::legs_on_parallel_branches(
+        vec![
+            swap(0x01, 0x03, 300, Some(297)),
+            swap(0x01, 0x02, 700, None),
+            swap(0x02, 0x03, 700, Some(693)),
+        ],
+        vec![0.0, 0.0, 0.0]
+    )]
+    // 0x02 comes 300 from a leg that kept 1% and 700 from a public pool.
+    #[case::leg_after_a_merge(
+        vec![
+            swap(0x01, 0x02, 300, Some(297)),
+            swap(0x01, 0x02, 700, None),
+            swap(0x02, 0x03, 1000, Some(990)),
+        ],
+        vec![0.0, 0.0, 0.003]
+    )]
+    fn test_upstream_fee_shares(#[case] swaps: Vec<Swap>, #[case] expected: Vec<f64>) {
+        let shares = upstream_fee_shares(&swaps);
+
+        assert_eq!(shares.len(), expected.len());
+        for (share, expected) in shares.iter().zip(expected) {
+            assert!((share - expected).abs() < 1e-9, "shares {shares:?}");
+        }
     }
 }
