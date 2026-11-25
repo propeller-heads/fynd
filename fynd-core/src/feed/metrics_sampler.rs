@@ -2,7 +2,8 @@
 //!
 //! Runs off the block-update path: on a fixed interval it takes a non-blocking
 //! read of [`MarketState`](crate::feed::market_data::MarketState) and exports
-//! component counts and synchronizer status per protocol. Sampling independently of
+//! component counts and synchronizer status per protocol, and the pools that can carry an
+//! exclusive leg. Sampling independently of
 //! the Tycho feed keeps these gauges flowing even when the feed itself is
 //! stalled — which is exactly when the sync-status metrics matter.
 
@@ -13,9 +14,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::time::{interval, MissedTickBehavior};
 use tycho_simulation::tycho_client::feed::SynchronizerState;
 
-use crate::feed::market_data::MarketData;
+use crate::{feed::market_data::MarketData, types::ComponentId};
 
-/// Periodically exports per-protocol component counts and sync status as gauges.
+/// Periodically exports per-protocol component counts, sync status and exclusive pools as gauges.
 pub(crate) struct MetricsSampler {
     market_data: MarketData,
     sample_interval: Duration,
@@ -30,6 +31,7 @@ impl MetricsSampler {
         let mut ticker = interval(self.sample_interval);
         // Skip missed ticks rather than catching up — samples are best-effort.
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut reported_exclusive_pools = FxHashMap::default();
 
         loop {
             ticker.tick().await;
@@ -41,9 +43,12 @@ impl MetricsSampler {
             };
             let component_counts = state.component_counts_by_protocol();
             let sync_states = state.protocol_sync_states().clone();
+            let exclusive_pools = state.exclusive_pools();
             drop(state);
 
             emit_market_metrics(&component_counts, &sync_states);
+            emit_exclusive_pools(&exclusive_pools, &reported_exclusive_pools);
+            reported_exclusive_pools = exclusive_pools;
         }
     }
 }
@@ -76,6 +81,34 @@ fn emit_market_metrics(
         if let Some(block_number) = sync_state_block_number(sync_state) {
             gauge!("market_protocol_block", "protocol" => protocol.clone())
                 .set(block_number as f64);
+        }
+    }
+}
+
+/// Sets `exclusive_pool_eligible` to 1 for each of `exclusive_pools`, and to 0 for each pool of
+/// `reported` that is no longer one, such as a Curve pool whose policy was killed.
+///
+/// Both maps hold each pool's protocol system by component id.
+fn emit_exclusive_pools(
+    exclusive_pools: &FxHashMap<ComponentId, String>,
+    reported: &FxHashMap<ComponentId, String>,
+) {
+    for (component, protocol) in exclusive_pools {
+        gauge!(
+            "exclusive_pool_eligible",
+            "protocol" => protocol.clone(),
+            "component" => component.clone()
+        )
+        .set(1.0);
+    }
+    for (component, protocol) in reported {
+        if !exclusive_pools.contains_key(component) {
+            gauge!(
+                "exclusive_pool_eligible",
+                "protocol" => protocol.clone(),
+                "component" => component.clone()
+            )
+            .set(0.0);
         }
     }
 }

@@ -648,6 +648,22 @@ impl MarketState {
             .collect()
     }
 
+    /// The components a swap through can be an exclusive leg, with their protocol systems: the
+    /// components flagged exclusive, and the dual pools whose state has an exclusive view.
+    pub(crate) fn exclusive_pools(&self) -> FxHashMap<ComponentId, String> {
+        let mut pools = FxHashMap::default();
+        for (id, stored) in &self.components {
+            let has_view = self
+                .simulation_states
+                .get(id)
+                .is_some_and(|entry| entry.exclusive_view.is_some());
+            if has_view || is_exclusive(&stored.component) {
+                pools.insert(id.clone(), stored.component.protocol_system.clone());
+            }
+        }
+        pools
+    }
+
     /// Returns the sync status of every protocol system.
     pub fn protocol_sync_states(&self) -> &FxHashMap<String, SynchronizerState> {
         &self.protocol_sync_status
