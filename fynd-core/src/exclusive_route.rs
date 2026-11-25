@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 use metrics::{counter, gauge};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
+use rustc_hash::FxHashMap;
 use tracing::warn;
 use tycho_simulation::tycho_common::models::Address;
 
@@ -363,6 +364,75 @@ pub(crate) fn pin_route_commitment(
             .clone(),
         token_prices,
     )
+}
+
+/// Returns, for each swap of `swaps`, the share of its input that the fees of the exclusive legs
+/// upstream took.
+///
+/// A leg with a committed amount keeps `1 - committed / amount_out` of its output as its fee (see
+/// [`pin_commitment`]). Each token carries the share of its amount that the fees upstream took:
+/// the average over the swaps that produce it, weighted by their output. A swap gets the share of
+/// its input token, so a leg on another branch does not count. The swaps are in execution order,
+/// so the swaps that produce a token come before the swaps that take it in.
+///
+/// The shares of legs in sequence add up instead of multiplying, which puts an input floor built
+/// from them a little below the real input.
+pub(crate) fn upstream_fee_shares(swaps: &[Swap]) -> Vec<f64> {
+    let mut token_shares: FxHashMap<&Address, FeeShare> = FxHashMap::default();
+    let mut input_shares = Vec::with_capacity(swaps.len());
+    for swap in swaps {
+        let input_share = token_shares
+            .get(swap.token_in())
+            .map_or(0.0, FeeShare::share);
+        let own_fee = swap
+            .committed_amount_out()
+            .map_or(0.0, |committed| fee_fraction(swap.amount_out(), committed));
+        token_shares
+            .entry(swap.token_out())
+            .or_default()
+            .add(swap.amount_out(), input_share + own_fee);
+        input_shares.push(input_share);
+    }
+    input_shares
+}
+
+/// The part of `amount_out` that a leg committed to `committed` keeps as its fee.
+fn fee_fraction(amount_out: &BigUint, committed: &BigUint) -> f64 {
+    let (Some(amount_out), Some(committed)) = (amount_out.to_f64(), committed.to_f64()) else {
+        return 0.0;
+    };
+    if amount_out <= 0.0 || committed >= amount_out {
+        return 0.0;
+    }
+    1.0 - committed / amount_out
+}
+
+/// The part of a token's amount that the fees of exclusive legs upstream took, summed over the
+/// swaps that produce the token.
+#[derive(Default)]
+struct FeeShare {
+    /// Each producing swap's output times its fee share.
+    taken: f64,
+    /// The producing swaps' output.
+    produced: f64,
+}
+
+impl FeeShare {
+    /// Adds a swap that produces `amount_out` of the token, `fee_share` of which fees took.
+    fn add(&mut self, amount_out: &BigUint, fee_share: f64) {
+        let amount_out = amount_out.to_f64().unwrap_or(0.0);
+        self.taken += amount_out * fee_share;
+        self.produced += amount_out;
+    }
+
+    /// The share of the token's amount that fees took, averaged over its producing swaps.
+    fn share(&self) -> f64 {
+        if self.produced > 0.0 {
+            self.taken / self.produced
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Restates an output-token `amount` of `quote` in wei.

@@ -6,7 +6,6 @@ use alloy::{
 };
 use futures::{StreamExt, TryStreamExt};
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
 use serde_json::Value;
 use tycho_execution::encoding::{
     errors::EncodingError,
@@ -31,6 +30,7 @@ use crate::{
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     exclusive_protocol::{protocol_of, Grantor},
+    exclusive_route::upstream_fee_shares,
     fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
@@ -754,7 +754,7 @@ impl Encoder {
     /// Stamps controller-signed `user_data` onto each exclusive leg of `solution`.
     ///
     /// A leg is exclusive when its route swap carries a committed amount. Each leg's input floor
-    /// allows for the request's slippage plus the fees of the exclusive legs before it. The
+    /// allows for the request's slippage plus the fees of the exclusive legs that feed it. The
     /// solution's swaps are built 1:1 from the route's swaps, so they are matched by index.
     /// Returns `solution` unchanged when no leg is exclusive.
     fn stamp_exclusive_swaps(
@@ -781,31 +781,34 @@ impl Encoder {
         // router executes. We read the committed amount from the route swap but stamp `user_data`
         // onto the matching solution swap, matched by index.
         //
-        // The fee of an exclusive leg lowers the input of the swaps after it. Each leg's input
-        // floor allows for the fees of the exclusive legs before it, on top of the slippage.
-        let mut earlier_fees = 0.0;
+        // The fees of exclusive legs upstream lower a leg's input, so its input floor allows for
+        // them on top of the slippage.
+        let fee_shares = upstream_fee_shares(route_swaps);
         let mut swaps = Vec::with_capacity(route_swaps.len());
-        for (solution_swap, route_swap) in solution
+        for ((solution_swap, route_swap), fee_share) in solution
             .swaps()
             .iter()
             .cloned()
             .zip(route_swaps.iter())
+            .zip(fee_shares)
         {
-            let Some(committed) = route_swap.committed_amount_out() else {
+            if route_swap
+                .committed_amount_out()
+                .is_none()
+            {
                 swaps.push(solution_swap);
                 continue;
-            };
+            }
             let protocol = protocol_of(route_swap).ok_or_else(|| {
                 SolveError::FailedEncoding(format!(
                     "committed leg through {} is not an exclusive leg",
                     route_swap.component_id()
                 ))
             })?;
-            let leg_slippage = slippage + earlier_fees;
+            let leg_slippage = slippage + fee_share;
             let signed = protocol.sign(signer, route_swap, quote.sender(), leg_slippage);
             record_exclusive_signature(route_swap, signed.is_ok());
             swaps.push(solution_swap.with_user_data(signed?));
-            earlier_fees += fee_fraction(route_swap.amount_out(), committed);
         }
 
         Ok(solution.with_swaps(swaps))
@@ -1198,16 +1201,6 @@ impl From<EncodingError> for SolveError {
     }
 }
 
-/// The part of `amount_out` that an exclusive leg keeps as its fee, as a fraction.
-fn fee_fraction(amount_out: &BigUint, committed: &BigUint) -> f64 {
-    let (Some(amount_out), Some(committed)) = (amount_out.to_f64(), committed.to_f64()) else {
-        return 0.0;
-    };
-    if amount_out <= 0.0 || committed >= amount_out {
-        return 0.0;
-    }
-    1.0 - committed / amount_out
-}
 #[cfg(test)]
 mod tests {
     use alloy::primitives::{Address as EvmAddress, Bytes as EvmBytes, B256};
