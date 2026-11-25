@@ -5266,6 +5266,81 @@ mod tests {
         assert_eq!(names, vec!["exclusive_won_quotes_total", "exclusive_won_routes_total"]);
     }
 
+    /// Two exclusive legs in sequence each produce the whole route output, so each captures half
+    /// the surplus. The quote counts once by its number of legs and once under each leg.
+    #[test]
+    fn test_record_exclusive_win_two_legs() {
+        let quote = exclusive_win_quote(&[("vm:exclusive", 0x01, 0x03), (DUAL_CURVE, 0x03, 0x02)]);
+        let prices = one_gas_token_per_thousand();
+        let components = [leg_component(&quote, 0), leg_component(&quote, 1)];
+
+        let recorded = record_exclusive_win_metrics(&quote, Some(&prices));
+
+        let of = |metric: &str| -> Vec<(Vec<String>, String)> {
+            recorded
+                .iter()
+                .filter(|(name, _, _)| name == metric)
+                .map(|(_, labels, value)| (labels.clone(), value.clone()))
+                .collect()
+        };
+        assert_eq!(
+            of("exclusive_won_routes_total"),
+            vec![(
+                vec![
+                    "exclusive_legs=2".to_string(),
+                    "pool=pool".to_string(),
+                    "simulated=none".to_string()
+                ],
+                "1".to_string()
+            )]
+        );
+        for component in &components {
+            let quotes = of("exclusive_won_quotes_total");
+            let fees = of("exclusive_won_fee_amount");
+            assert!(quotes
+                .iter()
+                .any(|(labels, value)| labels.contains(component) && value == "1"));
+            assert!(fees
+                .iter()
+                .any(|(labels, value)| labels.contains(component) && value == "0.5"));
+        }
+        assert_eq!(of("exclusive_won_quotes_total").len(), 2);
+        assert_eq!(of("exclusive_won_fee_amount").len(), 2);
+    }
+
+    /// The part of the surplus each leg captures in the metrics is the part `pin_commitment` took
+    /// from it. Both legs output the route's token, so a leg's part is its output minus its
+    /// committed amount.
+    #[test]
+    fn test_exclusive_leg_captures_match_pin_commitment() {
+        let quote = make_priced_route_quote(
+            &[
+                ("vm:exclusive", 0x01, 0x03, 300, 300),
+                ("uniswap_v2", 0x01, 0x02, 700, 700),
+                ("vm:exclusive", 0x02, 0x03, 700, 700),
+            ],
+            1000,
+        );
+
+        let pinned = pin_commitment(&quote, BigUint::from(910u64), None);
+        let captures = exclusive_leg_captures(&pinned);
+
+        let parts: Vec<BigUint> = captures
+            .iter()
+            .map(|(_, part)| {
+                part.clone()
+                    .expect("pinned quote carries a surplus")
+            })
+            .collect();
+        assert_eq!(parts, vec![BigUint::from(27u64), BigUint::from(63u64)]);
+        for (leg, part) in captures {
+            let committed = leg
+                .committed_amount_out()
+                .expect("pinned leg is committed");
+            assert_eq!(leg.amount_out() - committed, part.expect("part"));
+        }
+    }
+
     #[rstest]
     #[case::reverted(SimulationResult::Reverted { reason: "grant".to_string() }, "reverted")]
     #[case::success(
