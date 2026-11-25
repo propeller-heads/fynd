@@ -16,12 +16,15 @@
 //! `validate_quote_request` returns 400 without one, so the collector sees solver outcomes and
 //! not client-side rejections.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use fynd_core::{
     types::{BlockInfo, Transaction},
     ClientFeeParams, EncodingOptions, ExclusiveAccess, OrderQuote, Quote, QuoteRequest, SolveError,
     Swap, UserTransferType,
 };
+use fynd_rpc_types::{AccountOverride, SimulationOverrides};
 use serde::{Serialize, Serializer};
 use serde_with::{serde_as, DisplayFromStr};
 use tycho_simulation::tycho_common::{
@@ -429,6 +432,39 @@ struct SwapRecord {
     gas_estimate: String,
     /// Share of the order through this swap, `0.5` meaning half.
     split: String,
+    /// The account state a pAMM venue was priced on, to re-simulate the swap with. Absent for
+    /// every other swap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    simulation_overrides: Option<SimulationOverridesRecord>,
+}
+
+/// A pAMM swap's `simulation_overrides` as `/v1/quote` returns them, except that `accounts` is
+/// JSON text: its keys are addresses and storage slots, which a fixed column schema cannot hold.
+#[derive(Debug, Clone, Serialize)]
+struct SimulationOverridesRecord {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_timestamp: Option<u64>,
+    /// The State Override Set `eth_call` and `eth_simulateV1` take.
+    #[serde(serialize_with = "json_text")]
+    accounts: BTreeMap<fynd_rpc_types::Bytes, AccountOverride>,
+}
+
+impl SimulationOverridesRecord {
+    fn from_wire(overrides: SimulationOverrides) -> Self {
+        Self {
+            block_number: overrides.block_number(),
+            block_timestamp: overrides.block_timestamp(),
+            accounts: overrides.accounts().clone(),
+        }
+    }
+}
+
+/// Serializes `value` as a string holding its JSON.
+fn json_text<T: Serialize, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+    let text = serde_json::to_string(value).map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&text)
 }
 
 impl SwapRecord {
@@ -442,6 +478,10 @@ impl SwapRecord {
             amount_out: swap.amount_out().to_string(),
             gas_estimate: swap.gas_estimate().to_string(),
             split: swap.split().to_string(),
+            simulation_overrides: swap
+                .simulation_overrides()
+                .map(SimulationOverrides::from)
+                .map(SimulationOverridesRecord::from_wire),
         }
     }
 }
