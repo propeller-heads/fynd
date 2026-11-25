@@ -286,7 +286,7 @@ pub(super) fn record_winning_protocols(quote: &OrderQuote) {
 /// protocol's total. A route counts once per protocol it crosses, which is what makes the shares
 /// add up to the swaps executed rather than to the quotes served.
 fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome: &'static str) {
-    let simulated = if outcome.is_empty() { "none" } else { outcome };
+    let simulated = simulated_label(outcome);
     for (protocol, swaps) in swaps_per_protocol {
         counter!(
             "winning_quote_swaps_total",
@@ -294,6 +294,16 @@ fn count_swaps_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, outcome:
             "simulated" => simulated
         )
         .increment(*swaps as u64);
+    }
+}
+
+/// The `simulated` label of a served quote that simulated with `outcome`. It is `none` for a
+/// quote that asked for no simulation.
+pub(super) fn simulated_label(outcome: &'static str) -> &'static str {
+    if outcome.is_empty() {
+        "none"
+    } else {
+        outcome
     }
 }
 
@@ -330,7 +340,7 @@ fn record_shortfall_per_protocol(swaps_per_protocol: &BTreeMap<&str, usize>, bps
 /// The deviation is against the route's own output after fees, not the quote's `amount_out`. A
 /// solution hook's raise is not the pools' to deliver, and an unpaid one would otherwise read as a
 /// shortfall on every protocol the route crosses.
-fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
+pub(super) fn simulation_outcome(quote: &OrderQuote) -> (&'static str, Option<f64>) {
     match quote.simulation_result() {
         None => ("", None),
         Some(SimulationResult::Reverted { .. }) => ("reverted", None),
