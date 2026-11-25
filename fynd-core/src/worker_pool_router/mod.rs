@@ -35,7 +35,7 @@ pub use allocation::ExclusiveAccess;
 use allocation::{allocate, validate_pool_allowlist, Allocation, OrderClass};
 use config::WorkerPoolRouterConfig;
 use futures::stream::{FuturesUnordered, StreamExt};
-use instrumentation::record_quote_comparison;
+use instrumentation::{record_quote_comparison, simulated_label, simulation_outcome};
 use metrics::{counter, gauge, histogram};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive, Zero};
@@ -53,9 +53,10 @@ use crate::{
     derived::{types::mul_div_ceil, SharedDerivedDataRef, TokenGasPrices},
     encoding::encoder::Encoder,
     exclusive_route::{
-        exclusive_route_shape, is_exclusive_leg, leg_route_output, matched_commitment,
-        pin_commitment, record_gas_token_amount, routes_through_exclusive, to_gas_token_wei,
-        ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS, WEI_PER_GAS_TOKEN,
+        exclusive_route_shape, first_exclusive_leg, is_exclusive_leg, leg_route_output,
+        matched_commitment, pin_commitment, record_gas_token_amount, routes_through_exclusive,
+        to_gas_token_wei, ExclusiveRouteShape, RouteOutput, USER_IMPROVEMENT_SHARE_BPS,
+        WEI_PER_GAS_TOKEN,
     },
     feed::protocol_registry::is_rfq_protocol,
     price_guard::guard::PriceGuard,
@@ -483,6 +484,7 @@ pub fn finalize_quote(
 ) -> Quote {
     for quote in &order_quotes {
         record_win(quote, token_prices);
+        record_exclusive_win(quote, token_prices);
         instrumentation::record_winning_protocols(quote);
         if let Some(route) = quote.route() {
             let (_, report) = pamm_overrides::collect(route);
@@ -1355,6 +1357,48 @@ fn record_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices>) {
         "post_processed_by" => post_processed_by
     )
     .increment(volume / WEI_PER_GAS_TOKEN);
+}
+
+/// Counts a served quote with an exclusive leg under the leg's protocol and pool, and adds the fee
+/// its commitment captures.
+///
+/// `winning_quote_swaps_total` counts a dual pool's swap whether or not it carries a grant, so it
+/// cannot show that the pool executes as an exclusive leg. The `simulated` label takes the values
+/// of `winning_quote_swaps_total`; a leg whose signed payload does not execute counts as
+/// `reverted`.
+///
+/// `exclusive_won_fee_amount` is in whole gas tokens, priced like
+/// `worker_router_won_volume_gas_token`. A quote with no price adds nothing to it and is still
+/// counted.
+fn record_exclusive_win(quote: &OrderQuote, token_prices: Option<&TokenGasPrices>) {
+    if quote.status() != QuoteStatus::Success {
+        return;
+    }
+    let Some(leg) = quote
+        .route()
+        .and_then(|route| first_exclusive_leg(route.swaps()))
+    else {
+        return;
+    };
+    let protocol = leg.protocol().to_string();
+    let component = leg.component_id().to_string();
+    counter!(
+        "exclusive_won_quotes_total",
+        "protocol" => protocol.clone(),
+        "component" => component.clone(),
+        "pool" => quote.worker_pool().to_string(),
+        "simulated" => simulated_label(simulation_outcome(quote).0)
+    )
+    .increment(1);
+
+    let fee = quote
+        .surplus_amount()
+        .and_then(|surplus| to_gas_token_wei(quote, surplus, token_prices))
+        .and_then(|fee_wei| fee_wei.to_f64());
+    if let Some(fee) = fee {
+        gauge!("exclusive_won_fee_amount", "protocol" => protocol, "component" => component)
+            .increment(fee / WEI_PER_GAS_TOKEN);
+    }
 }
 
 /// Whether a quote is eligible to be ranked against the others for this request.
