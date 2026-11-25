@@ -413,6 +413,17 @@ capture) and `exclusive_user_savings_amount` (user improvement over the public r
 `to_gas_token_wei` converts without a price lookup — the quote states its gas cost both in wei
 (`gas_estimate * gas_price`) and in output-token units (`amount_out - amount_out_net_gas`), so that
 pair is the rate. An unpriced output token increments `exclusive_unpriced_output_total` instead.
+Both count candidates, not only the quotes served.
+
+Three series follow one exclusive leg by its `protocol` and pool (`component`), so a dashboard can
+tell whether a given pool executes as an exclusive leg. `winning_quote_swaps_total` cannot: it
+counts a dual pool's swap under its protocol with or without a grant.
+`exclusive_legs_signed_total{outcome=signed|failed}` (`encoding/encoder.rs`) counts each signature
+of a committed leg, once per encode, so a retried order can count twice.
+`finalize_quote` counts the served quotes with an exclusive leg in
+`exclusive_won_quotes_total{pool,simulated}`, where `simulated` takes the values of
+`winning_quote_swaps_total`, and adds their captured surplus to `exclusive_won_fee_amount` in
+whole gas tokens. An unpriced quote adds nothing to the gauge.
 
 Enable by setting the scope per pool via `PoolConfig::with_liquidity_scope()` or
 `liquidity_scope = "include_exclusive"` in `worker_pools.toml`. A deployment where every pool sets it
