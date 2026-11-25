@@ -3,13 +3,13 @@
 
 ### Features
 
-* **core:** label the exclusive fee gauge by worker pool ([8aabce9](https://github.com/propeller-heads/fynd/commit/8aabce951afe35111b16574aa1c34cd58c907ad2))
-* **core:** report which pools can carry an exclusive leg ([c836168](https://github.com/propeller-heads/fynd/commit/c8361688c888315a1be57d5e3ff2385cd95e0e62))
-* **core:** count signatures of exclusive legs by pool ([d84ebeb](https://github.com/propeller-heads/fynd/commit/d84ebeb1c0f21521079f9985f5f52c77a006b0ba))
-* **core:** count served quotes with an exclusive leg by pool ([8b17852](https://github.com/propeller-heads/fynd/commit/8b178526d5e074ada76049abcea0fa9551270e9f))
-* **rpc:** zero the Permit2 signature instead of dropping calldata ([c5f8d2f](https://github.com/propeller-heads/fynd/commit/c5f8d2f16793eea35d3cb4b0902f225d1ebe122e))
-* **rpc:** record the simulation overrides of each pAMM swap ([941c1bb](https://github.com/propeller-heads/fynd/commit/941c1bb58bdc1dcaa74d8f6a3ad00e9b9f5fee86))
-* **rpc:** record each order's encoded transaction ([5b089cc](https://github.com/propeller-heads/fynd/commit/5b089ccdc3265fdaae576c7697275b80b422c0aa))
+- Record each order's encoded transaction (`to`, `value`, `data`) in quote records so quotes can be re-simulated and analysed later. Quote record schema version is now 5; the collector must accept it. ([5b089cc](https://github.com/propeller-heads/fynd/commit/5b089ccdc3265fdaae576c7697275b80b422c0aa))
+- Zero the Permit2 signature in recorded calldata instead of dropping the calldata. Route encoding, amounts and other signatures are kept. If the signature isn't found in the calldata, no transaction is recorded and a warning is logged. Re-simulating such calldata only works through a non-permit entry point. ([c5f8d2f](https://github.com/propeller-heads/fynd/commit/c5f8d2f16793eea35d3cb4b0902f225d1ebe122e))
+- Record the simulation overrides (`block_number`, `block_timestamp`, `accounts`) of each pAMM swap in quote records, so stored pAMM quotes can be re-simulated against the state they were priced on. ([941c1bb](https://github.com/propeller-heads/fynd/commit/941c1bb58bdc1dcaa74d8f6a3ad00e9b9f5fee86))
+- Add the `exclusive_won_quotes_total` metric, which counts served quotes with an exclusive leg by protocol, component, worker pool and simulation outcome. Also add the surplus those quotes capture to `exclusive_won_fee_amount`, in whole gas tokens, by protocol and component. ([8b17852](https://github.com/propeller-heads/fynd/commit/8b178526d5e074ada76049abcea0fa9551270e9f))
+- Add a `pool` label to `exclusive_won_fee_amount` so dashboards can show which worker pool earned the fee. ([8aabce9](https://github.com/propeller-heads/fynd/commit/8aabce951afe35111b16574aa1c34cd58c907ad2))
+- Add the `exclusive_legs_signed_total` metric, which counts signatures of committed exclusive legs by protocol, component and whether signing succeeded. ([d84ebeb](https://github.com/propeller-heads/fynd/commit/d84ebeb1c0f21521079f9985f5f52c77a006b0ba))
+- Add the `exclusive_pool_eligible` metric, which reports 1 for each pool that can carry an exclusive leg and 0 once a previously reported pool no longer can, for example when a Curve policy is killed or points to another controller or router. ([c836168](https://github.com/propeller-heads/fynd/commit/c8361688c888315a1be57d5e3ff2385cd95e0e62))
 
 
 ## [0.129.0](https://github.com/propeller-heads/fynd/compare/0.128.0...0.129.0) (2026-11-24)
