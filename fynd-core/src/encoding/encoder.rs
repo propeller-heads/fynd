@@ -1594,6 +1594,25 @@ mod tests {
     /// A swap through a dual Curve pool from `token_in` to `token_out`, 1_000_000 in and out,
     /// priced with a grant and committed to `committed`.
     fn curve_grant_swap(token_in: u8, token_out: u8, committed: u64) -> crate::types::Swap {
+        let mut swap = dual_curve_swap(token_in, token_out, true);
+        swap.set_committed_amount_out(BigUint::from(committed));
+        swap
+    }
+
+    /// A swap through a dual Curve pool from `token_in` to `token_out`, 1_000_000 in and out,
+    /// priced with a grant when `with_grant`, at the pool's public fee otherwise.
+    fn dual_curve_swap(token_in: u8, token_out: u8, with_grant: bool) -> crate::types::Swap {
+        let state = crate::exclusive_protocol::test_curve::dual_curve_state();
+        let state: Box<dyn tycho_simulation::tycho_common::simulation::protocol_sim::ProtocolSim> =
+            if with_grant {
+                Box::new(
+                    state
+                        .exclusive_view()
+                        .expect("supported policy"),
+                )
+            } else {
+                Box::new(state)
+            };
         let token_in = make_address(token_in);
         let token_out = make_address(token_out);
         let mut curve = component(&format!("curve-{token_in}-{token_out}"), &[]);
@@ -1601,7 +1620,7 @@ mod tests {
         curve
             .static_attributes
             .insert("coins".to_string(), Bytes::from(coins.as_bytes()));
-        let mut swap = crate::types::Swap::new(
+        crate::types::Swap::new(
             curve.id.clone(),
             "vm:curve".to_string(),
             token_in,
@@ -1610,14 +1629,44 @@ mod tests {
             BigUint::from(1_000_000u64),
             BigUint::from(50_000u64),
             curve,
-            Box::new(
-                crate::exclusive_protocol::test_curve::dual_curve_state()
-                    .exclusive_view()
-                    .expect("supported policy"),
-            ),
-        );
-        swap.set_committed_amount_out(BigUint::from(committed));
-        swap
+            state,
+        )
+    }
+
+    /// An exclusive leg must carry a committed amount to be encoded: the encoder signs only legs
+    /// that have one. A dual Curve pool at its public fee is not an exclusive leg.
+    #[rstest]
+    #[case::uncommitted_ekubo_leg(ekubo_swap(None, true), false)]
+    #[case::uncommitted_curve_leg_with_grant(dual_curve_swap(0x11, 0x22, true), false)]
+    #[case::curve_leg_at_public_fee(dual_curve_swap(0x11, 0x22, false), true)]
+    #[case::committed_ekubo_leg(ekubo_swap(Some(990_000), true), true)]
+    #[case::committed_curve_leg_with_grant(curve_grant_swap(0x11, 0x22, 990_000), true)]
+    #[case::public_ekubo_leg(ekubo_swap(None, false), true)]
+    fn test_check_exclusive_legs_committed(
+        #[case] swap: crate::types::Swap,
+        #[case] encodable: bool,
+    ) {
+        let quote = make_order_quote(990_000).with_route(single_swap_route(swap));
+
+        let result = check_exclusive_legs_committed(&quote);
+
+        assert_eq!(result.is_ok(), encodable, "{result:?}");
+    }
+
+    /// An exclusive leg with no committed amount fails the encoding instead of shipping unsigned.
+    #[tokio::test]
+    async fn test_encode_rejects_uncommitted_exclusive_leg() {
+        let encoder = real_encoder();
+        let quote =
+            make_order_quote(990_000).with_route(single_swap_route(ekubo_signed_swap(None)));
+
+        let result = encoder
+            .encode(vec![quote], EncodingOptions::new(0.01))
+            .await
+            .expect("a failing order is reported on the order, not on the call");
+
+        assert_eq!(result[0].status(), QuoteStatus::EncodingFailed);
+        assert!(result[0].transaction().is_none());
     }
 
     /// The `min_amount_in` of a signed Curve grant.
