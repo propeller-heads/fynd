@@ -1706,7 +1706,7 @@ mod tests {
         tests::metrics::recorded_metrics,
         types::internal::SolveTask,
         EncodingOptions, FeeBreakdown, NoPathReason, OrderSide, PermitDetails, PermitSingle, Route,
-        RouteConstraints, SimulationResult, SingleOrderQuote, Swap, UserTransferType,
+        RouteConstraints, SimulationResult, SingleOrderQuote, SurplusInfo, Swap, UserTransferType,
     };
 
     fn default_encoder() -> Encoder {
@@ -4964,6 +4964,120 @@ mod tests {
         let quote = make_rate_quote(1_000, 900, 0);
 
         assert!(capture_winning_protocols(&quote).is_empty());
+    }
+
+    /// The labels of each metric `record_exclusive_win` records for `quote`, sorted, with the
+    /// recorded value as text.
+    fn record_exclusive_win_metrics(
+        quote: &OrderQuote,
+        token_prices: Option<&TokenGasPrices>,
+    ) -> Vec<(String, Vec<String>, String)> {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || record_exclusive_win(quote, token_prices));
+        let mut recorded: Vec<_> = recorded_metrics(&snapshotter)
+            .into_iter()
+            .map(|(name, mut labels, value)| {
+                labels.sort();
+                let value = match value {
+                    metrics_util::debugging::DebugValue::Counter(count) => count.to_string(),
+                    metrics_util::debugging::DebugValue::Gauge(amount) => amount.0.to_string(),
+                    metrics_util::debugging::DebugValue::Histogram(_) => "histogram".to_string(),
+                };
+                (name, labels, value)
+            })
+            .collect();
+        recorded.sort();
+        recorded
+    }
+
+    /// A served quote through `legs` from pool `pool`, capturing a surplus of one gas token.
+    fn exclusive_win_quote(legs: &[(&str, u8, u8)]) -> OrderQuote {
+        let mut quote = make_route_quote(legs)
+            .with_surplus(SurplusInfo::new(BigUint::from(10u64.pow(18)), BigUint::from(1_000u64)));
+        quote.set_worker_pool("pool".to_string());
+        quote
+    }
+
+    fn leg_component(quote: &OrderQuote, index: usize) -> String {
+        let route = quote.route().expect("route");
+        format!("component={}", route.swaps()[index].component_id())
+    }
+
+    #[rstest]
+    #[case::exclusive_component("vm:exclusive")]
+    #[case::dual_pool(DUAL_CURVE)]
+    fn test_record_exclusive_win(#[case] protocol: &str) {
+        let quote = exclusive_win_quote(&[("uniswap_v2", 0x01, 0x03), (protocol, 0x03, 0x02)]);
+        let prices = gas_prices(&[(0x02, 1, 1)]);
+        let component = leg_component(&quote, 1);
+        let protocol = format!("protocol={protocol}");
+
+        let recorded = record_exclusive_win_metrics(&quote, Some(&prices));
+
+        assert_eq!(
+            recorded,
+            vec![
+                (
+                    "exclusive_won_fee_amount".to_string(),
+                    vec![component.clone(), protocol.clone()],
+                    "1".to_string()
+                ),
+                (
+                    "exclusive_won_quotes_total".to_string(),
+                    vec![
+                        component,
+                        "pool=pool".to_string(),
+                        protocol,
+                        "simulated=none".to_string()
+                    ],
+                    "1".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_record_exclusive_win_unpriced() {
+        let quote = exclusive_win_quote(&[("vm:exclusive", 0x01, 0x02)]);
+
+        let recorded = record_exclusive_win_metrics(&quote, None);
+
+        let names: Vec<&str> = recorded
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        assert_eq!(names, vec!["exclusive_won_quotes_total"]);
+    }
+
+    #[rstest]
+    #[case::reverted(SimulationResult::Reverted { reason: "grant".to_string() }, "reverted")]
+    #[case::success(
+        SimulationResult::Success { amount_out: BigUint::from(1_000u64), gas_used: 1, logs: vec![] },
+        "success"
+    )]
+    fn test_record_exclusive_win_simulated(
+        #[case] simulation: SimulationResult,
+        #[case] expected: &str,
+    ) {
+        let mut quote = exclusive_win_quote(&[("vm:exclusive", 0x01, 0x02)]);
+        quote.set_simulation_result(simulation);
+
+        let recorded = record_exclusive_win_metrics(&quote, None);
+
+        assert!(recorded[0]
+            .1
+            .contains(&format!("simulated={expected}")));
+    }
+
+    #[rstest]
+    #[case::public_route(QuoteStatus::Success, "uniswap_v2")]
+    #[case::not_served(QuoteStatus::EncodingFailed, "vm:exclusive")]
+    fn test_record_exclusive_win_skipped(#[case] status: QuoteStatus, #[case] protocol: &str) {
+        let mut quote = exclusive_win_quote(&[(protocol, 0x01, 0x02)]);
+        quote.set_status(status);
+
+        assert!(record_exclusive_win_metrics(&quote, None).is_empty());
     }
 
     /// The post-processor label reaches the win counter and whichever volume metric the quote
