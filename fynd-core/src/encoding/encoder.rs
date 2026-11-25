@@ -30,7 +30,7 @@ use crate::{
         router_fees::{FeeRates, RouterFees, SharedRouterFees},
     },
     exclusive_protocol::{protocol_of, Grantor},
-    exclusive_route::upstream_fee_shares,
+    exclusive_route::{is_exclusive_leg, upstream_fee_shares},
     fallback::user_data::fallback_user_data,
     EncodingOptions, FeeBreakdown, OrderQuote, QuoteStatus, Route, SolveError, Transaction,
 };
@@ -508,6 +508,7 @@ impl Encoder {
         )?
         .with_user_transfer_type(encoding_options.transfer_type().clone());
 
+        check_exclusive_legs_committed(quote)?;
         let solution = match &self.exclusive_swap_signer {
             Some(signer) => {
                 Self::stamp_exclusive_swaps(solution, quote, signer, encoding_options.slippage())?
@@ -1198,6 +1199,28 @@ impl Encoder {
 impl From<EncodingError> for SolveError {
     fn from(err: EncodingError) -> Self {
         SolveError::FailedEncoding(err.to_string())
+    }
+}
+
+/// Fails when an exclusive leg of `quote` has no committed amount.
+///
+/// The encoder signs only the legs with a committed amount. An exclusive leg is priced at the
+/// price its signature gives, so an unsigned one reverts (a signed Ekubo pool) or charges the
+/// pool's full fee (a dual Curve pool), and the user gets less than the quote.
+fn check_exclusive_legs_committed(quote: &OrderQuote) -> Result<(), SolveError> {
+    let Some(route) = quote.route() else {
+        return Ok(());
+    };
+    let uncommitted = route
+        .swaps()
+        .iter()
+        .find(|swap| is_exclusive_leg(swap) && swap.committed_amount_out().is_none());
+    match uncommitted {
+        Some(swap) => Err(SolveError::FailedEncoding(format!(
+            "exclusive leg through {} has no committed amount, so it would not be signed",
+            swap.component_id()
+        ))),
+        None => Ok(()),
     }
 }
 
