@@ -83,6 +83,10 @@ overrides for `eth_call`).
 `block_number`, `block_timestamp` and `accounts` as alloy's `StateOverride`. A malformed set is
 dropped with a warning and never fails the quote. The dry run does not apply them; the TypeScript
 client maps them to `Swap.simulationOverrides`, with `accounts` in viem's `StateOverride` shape.
+`Route::simulation_overrides()` (TypeScript: `mergeSimulationOverrides(route.swaps)`, in
+`simulation-overrides.ts`) merges a route's pAMM swaps into one set by the rules of core
+`pamm_overrides::collect`: union per account and slot, the newer block's value winning a conflict,
+route order within one block, the newest block with its timestamp.
 
 **`ApprovalParams`** — `new(token, allowance_check: AllowanceCheck)` where `AllowanceCheck` is
 `Skip` (always build approval) or `AtLeast(BigUint)` (check current allowance first; skip if

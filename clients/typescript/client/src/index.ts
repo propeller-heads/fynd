@@ -55,6 +55,7 @@ export {
   zeroClientFee,
 } from "./client-fee.js";
 export type { ClientFeeSwapContext } from "./client-fee.js";
+export { mergeSimulationOverrides } from "./simulation-overrides.js";
 export { FyndClient } from "./client.js";
 export type {
   EthProvider,

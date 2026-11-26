@@ -19,6 +19,7 @@ clients/typescript/
       signing.ts              # EIP-712 signing utilities
       permit2.ts              # Permit2 helpers
       client-fee.ts           # Client fee helpers
+      simulation-overrides.ts # mergeSimulationOverrides: one pAMM override set per route
       error.ts                # Error types
       viem.ts                 # Viem integration utilities
       index.ts                # Public API re-exports
