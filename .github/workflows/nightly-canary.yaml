@@ -46,8 +46,8 @@ jobs:
             --duration-secs 120 \
             --output-dir fynd-core/tests/fixtures
         env:
-          TYCHO_URL: ${{ secrets.TYCHO_URL }}
-          RPC_URL: ${{ secrets.RPC_URL }}
+          TYCHO_URL: tycho-beta.propellerheads.xyz
+          RPC_URL: ${{ secrets.ETH_RPC_URL }}
           TYCHO_API_KEY: ${{ secrets.TYCHO_API_KEY }}
 
       - name: Run solver against live market
