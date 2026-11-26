@@ -542,6 +542,31 @@ mod tests {
         assert_eq!(committed_amount_out, committed.map(BigUint::from));
     }
 
+    /// Exclusive pools on both hops of the route: each replaces its hop, and the route commits
+    /// against the route the replacer received (4000 out), not against the route with one
+    /// exclusive leg it built on the way (6000 out, which would commit 6300). The user gets 4000
+    /// plus 10% of the 5000 improvement.
+    #[tokio::test]
+    async fn test_exclusive_legs_on_two_hops_commit_against_the_received_route() {
+        let (a, b, c) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
+        add_exclusive(&market, "excl_bc", (&b, &c), MockProtocolSim::new(3.0).with_gas(10)).await;
+        let replacer = replacer(&market).await;
+
+        let replaced_route = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
+        );
+
+        assert_eq!(component_ids(&replaced_route), ["excl_ab", "excl_bc"]);
+        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(8980));
+        let commitment = replaced_route
+            .commitment()
+            .expect("the replacement commits");
+        assert_eq!(commitment.committed_amount_out(), &BigUint::from(4500u64));
+        assert_eq!(commitment.reference_amount_out(), &BigUint::from(4000u64));
+    }
+
     #[tokio::test]
     async fn test_exclusive_lower_amount_out() {
         let (a, b, c) = tokens();
