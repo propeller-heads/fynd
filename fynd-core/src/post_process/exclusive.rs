@@ -32,12 +32,13 @@ use crate::{
 /// component, or splits one swap or a segment between its swaps and the exclusive component. It
 /// keeps a replacement only when the net amount out rises and the route can commit to a price.
 ///
-/// The route gets at most one exclusive leg, and a route that already has one does not change. It
-/// acts only on a `public_only` pool, for a request with exclusive access: a pool that includes
-/// exclusive liquidity already routes through it.
+/// Each round of the search can add an exclusive leg, so the route can get one on each of several
+/// hops. A route the algorithm returns with an exclusive leg does not change. It acts only on a
+/// `public_only` pool, for a request with exclusive access: a pool that includes exclusive
+/// liquidity already routes through it.
 ///
 /// The result commits to the amount the router would commit to for an exclusive route against the
-/// route it replaces: see `matched_commitment`. A replacement the finder rejects is dropped.
+/// route it received: see `matched_commitment`. A replacement the finder rejects is dropped.
 #[derive(Default)]
 pub(crate) struct ExclusiveSwapReplacer {
     market: Option<MarketData>,
@@ -116,8 +117,8 @@ fn is_exclusive_member(view: &MarketDataView<'_>, component: &ProtocolComponent)
 struct ExclusiveReplacementFinder;
 
 impl ReplacementFinder for ExclusiveReplacementFinder {
-    /// An exclusive leg fills partially, so it accepts a target at any index of the route. It does
-    /// not accept a route that already has an exclusive leg.
+    /// An exclusive leg fills partially, so it accepts a target at any index of the route, also in
+    /// a route that already has an exclusive leg.
     fn can_replace_target(
         &self,
         swap: &Swap,
@@ -125,7 +126,7 @@ impl ReplacementFinder for ExclusiveReplacementFinder {
         route_swaps: &[Swap],
         _evaluator: &RouteEvaluator<'_>,
     ) -> bool {
-        !routes_through_exclusive(route_swaps) && can_replace(swap, target, route_swaps)
+        can_replace(swap, target, route_swaps)
     }
 
     fn find_best_replacement_route(
@@ -385,7 +386,6 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component_with_protocol, ConstantProductSim, MockProtocolSim},
         derived::DerivedData,
-        exclusive_route::is_exclusive_leg,
         feed::exclusivity::mark_exclusive,
         post_process::test_utils::{
             add_component, added, component_ids, far_deadline, insert_component, market, replaced,
@@ -540,29 +540,6 @@ mod tests {
                     .clone()
             });
         assert_eq!(committed_amount_out, committed.map(BigUint::from));
-    }
-
-    #[tokio::test]
-    async fn test_exclusive_one_leg() {
-        let (a, b, c) = tokens();
-        let market = market();
-        add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
-        add_exclusive(&market, "excl_bc", (&b, &c), MockProtocolSim::new(3.0).with_gas(10)).await;
-        let replacer = replacer(&market).await;
-
-        let replaced_route = replaced(
-            run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
-        );
-
-        let exclusive_legs = replaced_route
-            .route()
-            .swaps()
-            .iter()
-            .filter(|swap| is_exclusive_leg(swap))
-            .count();
-        assert_eq!(exclusive_legs, 1);
-        assert_eq!(component_ids(&replaced_route), ["excl_ab", "bc"]);
-        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(5980));
     }
 
     #[tokio::test]
