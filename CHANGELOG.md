@@ -1,4 +1,16 @@
 
+## [0.129.3](https://github.com/propeller-heads/fynd/compare/0.129.2...0.129.3) (2026-11-26)
+
+### Features
+
+* **core:** label served exclusive routes by their protocols and fee ([8b9fe8c](https://github.com/propeller-heads/fynd/commit/8b9fe8c1c1b5e8c1bf4bcdc7c50d5a464283fcd0))
+* **core:** count each exclusive leg of a served quote ([7bf5eb6](https://github.com/propeller-heads/fynd/commit/7bf5eb6ae8ce7de0456eecd80112f88ad89abc73))
+
+### Bug Fixes
+
+* **curve:** leave room under the policy's grant window ([caa13b9](https://github.com/propeller-heads/fynd/commit/caa13b955ba5b80168ed2945163503bb9872b265))
+
+
 ## [0.129.2](https://github.com/propeller-heads/fynd/compare/0.129.1...0.129.2) (2026-11-25)
 
 ### Features
