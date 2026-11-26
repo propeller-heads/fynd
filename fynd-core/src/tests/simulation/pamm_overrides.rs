@@ -69,6 +69,48 @@ fn test_conversion_storage_free_account() {
     assert_eq!(converted.accounts()[&alloy_address(0x48)].state_diff, None);
 }
 
+/// A 20-byte address holding `value` in its low bytes.
+fn low_address(value: u16) -> Bytes {
+    let mut address = vec![0; 20];
+    address[18..].copy_from_slice(&value.to_be_bytes());
+    Bytes::from(address)
+}
+
+#[rstest::rstest]
+#[case::ecrecover(0x01, false)]
+#[case::last_bls12_381(0x11, false)]
+#[case::p256verify(0x100, false)]
+#[case::zero_address(0x00, true)]
+#[case::after_consecutive_range(0x12, true)]
+#[case::beside_p256verify(0x101, true)]
+fn test_conversion_precompile_accounts(#[case] low: u16, #[case] kept: bool) {
+    let account = TychoAccountOverride {
+        balance: Some(Bytes::from(vec![0x03])),
+        nonce: Some(0),
+        state_diff: Default::default(),
+    };
+    let mut entry = overrides(Some(1), [(0x48, storage(&[(0, 1)]))]);
+    entry
+        .accounts
+        .insert(low_address(low), account);
+    let swap = pamm_swap("pamm", Some(entry));
+
+    let converted = swap
+        .simulation_overrides()
+        .expect("a pAMM swap with overrides");
+
+    let address = Address::try_from(low_address(low).as_ref()).expect("20 bytes");
+    assert_eq!(
+        converted
+            .accounts()
+            .contains_key(&address),
+        kept
+    );
+    assert!(converted
+        .accounts()
+        .contains_key(&alloy_address(0x48)));
+}
+
 #[rstest::rstest]
 #[case::short_address(Bytes::from(vec![0x48; 19]), storage(&[(0, 1)]))]
 #[case::wide_balance(
