@@ -228,14 +228,6 @@ impl ExclusiveSwapSigner {
         Ok((u64::from(self.nonce_prefix) << 32) | u64::from(counter))
     }
 
-    /// The deadline, in unix seconds, of a payload signed now: now plus `deadline_window_secs`.
-    pub(crate) fn next_deadline(&self) -> Result<u32, SolveError> {
-        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
-        u32::try_from(deadline).map_err(|_| {
-            SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
-        })
-    }
-
     /// The chain id every payload from this signer is bound to.
     pub(crate) fn chain_id(&self) -> u64 {
         self.chain_id
@@ -278,7 +270,7 @@ impl ExclusiveSwapSigner {
 
         let fee = derive_fee_q32(swap.amount_out(), committed);
         let nonce = self.next_nonce()?;
-        let deadline = self.next_deadline()?;
+        let deadline = deadline_after(self.deadline_window_secs)?;
 
         // The extension's `isAuthorized` accepts only this locker, so a third party that lifts the
         // signed bytes cannot execute them through its own contract. The locker is the router,
@@ -314,6 +306,16 @@ impl ExclusiveSwapSigner {
         user_data.extend_from_slice(&signature.as_bytes());
         Ok(Bytes::from(user_data))
     }
+}
+
+/// The deadline, in unix seconds, of a payload signed now that stays valid for `window_secs`.
+///
+/// # Errors
+/// Errors if the system clock is before the Unix epoch or the deadline overflows `u32`.
+pub(crate) fn deadline_after(window_secs: u32) -> Result<u32, SolveError> {
+    let deadline = now_unix_secs()?.saturating_add(u64::from(window_secs));
+    u32::try_from(deadline)
+        .map_err(|_| SolveError::FailedEncoding("signed swap deadline overflows u32".to_string()))
 }
 
 /// Current Unix time in seconds, for the deadline the exclusive-swap signature carries.
