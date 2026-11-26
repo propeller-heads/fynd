@@ -376,4 +376,36 @@ mod tests {
 
         assert!(matches!(result, Err(SolveError::FailedEncoding(_))));
     }
+
+    /// The policy accepts the grant on a block up to `BLOCK_AGE_ALLOWANCE_SECS` older than the
+    /// signing time, and the grant has not expired at signing.
+    #[test]
+    fn test_sign_grant_deadline() {
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs()
+        };
+        let key: PrivateKeySigner = SIGNER_KEY.parse().expect("key");
+        let signer = ExclusiveSwapSigner::new(key, 1, 3, 120, Address::repeat_byte(0x77));
+
+        let before = now();
+        let user_data =
+            sign_grant(&signer, &grant_swap(), &grant_policy(), &Bytes::from([0xaa; 20]), 0.01)
+                .expect("signed");
+        let after = now();
+
+        let deadline = u64::from(u32::from_be_bytes(
+            user_data[124..128]
+                .try_into()
+                .expect("4 bytes"),
+        ));
+        let oldest_block = before - u64::from(BLOCK_AGE_ALLOWANCE_SECS);
+        assert!(
+            deadline <= oldest_block + u64::from(POLICY_MAX_GRANT_WINDOW_SECS),
+            "deadline {deadline} is past the policy window of a block at {oldest_block}"
+        );
+        assert!(deadline >= after, "deadline {deadline} expired at signing ({after})");
+    }
 }
