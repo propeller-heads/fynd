@@ -156,22 +156,25 @@ jobs:
       RUSTFLAGS: "-D warnings"
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           persist-credentials: false
           lfs: true
       - name: Setup toolchain
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # v1
         with:
           toolchain: stable
       - name: Setup Rust Cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
+          # Bumped from the default v0-rust: the cache under the old key restored in full but
+          # cargo rebuilt every dependency from it, and rust-cache never replaces an exact match.
+          prefix-key: v1-rust
           cache-on-failure: true
       - name: Install latest nextest release
-        uses: taiki-e/install-action@2b15ad09ca0f06a76791407e35ab20f0b712d615  # nextest
+        uses: taiki-e/install-action@d75f3433052800716ea4e9618494c31d16de4188  # nextest
       - name: Run integration tests
-        run: cargo nextest run -p fynd-core --features test-utils --test integration
+        run: cargo nextest run -p fynd-core --features test-utils --test integration --locked
 
   security_audit:
     name: Security Audit
