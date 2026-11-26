@@ -18,9 +18,9 @@ use crate::{
     },
     post_process::{
         replace::{
-            build_index, can_replace, replace_with_swap, update_index, CandidateRoute,
-            MembershipChanges, ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity,
-            ReplacementSolver, ReplacementTarget, RouteEvaluator,
+            build_index, replace_with_swap, update_index, CandidateRoute, MembershipChanges,
+            ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity, ReplacementSolver,
+            ReplacementTarget, RouteEvaluator,
         },
         PostProcessRequest, RoutePostProcessor,
     },
@@ -116,19 +116,10 @@ fn is_exclusive_member(view: &MarketDataView<'_>, component: &ProtocolComponent)
 /// swaps and the exclusive leg's pool.
 struct ExclusiveReplacementFinder;
 
+/// An exclusive leg fills partially, so it takes the default rule of
+/// [`ReplacementFinder::can_replace_target`]: a target at any index of the route, also in a route
+/// that already has an exclusive leg.
 impl ReplacementFinder for ExclusiveReplacementFinder {
-    /// An exclusive leg fills partially, so it accepts a target at any index of the route, also in
-    /// a route that already has an exclusive leg.
-    fn can_replace_target(
-        &self,
-        swap: &Swap,
-        target: &ReplacementTarget,
-        route_swaps: &[Swap],
-        _evaluator: &RouteEvaluator<'_>,
-    ) -> bool {
-        can_replace(swap, target, route_swaps)
-    }
-
     fn find_best_replacement_route(
         &self,
         swap: &Swap,

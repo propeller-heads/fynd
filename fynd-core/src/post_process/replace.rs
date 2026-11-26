@@ -308,14 +308,17 @@ impl CandidateRoute {
 /// Decides which swaps may replace a target, and finds the best route that puts one of them in
 /// its place: alone, or splitting the target with its own swaps. [`ReplacementSolver`] runs it.
 pub(super) trait ReplacementFinder {
-    /// Whether `swap` may replace `target` of `route_swaps`.
+    /// Whether `swap` may replace `target` of `route_swaps`. By default a swap may replace a
+    /// target at any index of the route, so only [`can_replace`] applies.
     fn can_replace_target(
         &self,
         swap: &Swap,
         target: &ReplacementTarget,
         route_swaps: &[Swap],
-        evaluator: &RouteEvaluator<'_>,
-    ) -> bool;
+        _evaluator: &RouteEvaluator<'_>,
+    ) -> bool {
+        can_replace(swap, target, route_swaps)
+    }
 
     /// Returns the replacement of `target` through `swap` that has the highest net amount out, if
     /// that amount is above `min_net_amount_out`. Evaluates each replacement with `evaluator`. A
