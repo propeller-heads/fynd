@@ -223,12 +223,18 @@ mod tests {
     use num_bigint::BigInt;
     use rstest::rstest;
     use rustc_hash::FxHashMap;
+    use tycho_simulation::tycho_core::models::token::Token;
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{order, setup_market_weighted, token},
+        algorithm::test_utils::{
+            component_with_protocol, order, setup_market_weighted, token, MockProtocolSim,
+        },
         derived::{DerivedData, SharedDerivedDataRef},
-        post_process::test_utils::{route_result, with_net_amount_out, MockPostProcessor},
+        feed::exclusivity::mark_exclusive,
+        post_process::test_utils::{
+            result, route_result, swap_through_pool, tokens, with_net_amount_out, MockPostProcessor,
+        },
         types::{Order, OrderSide, ResolvedRouteConstraints},
     };
 
@@ -565,6 +571,44 @@ mod tests {
             }
             None => assert!(gains.is_empty()),
         }
+    }
+
+    /// The gain of a replacement is labelled by the number of exclusive legs it routes through.
+    #[tokio::test]
+    async fn test_run_gain_bps_counts_exclusive_legs() {
+        let (a, b, c) = tokens();
+        let exclusive_swap = |id: &str, pair: (&Token, &Token)| {
+            let mut pool = component_with_protocol(
+                id,
+                "exclusive:ekubo_v3",
+                &[pair.0.clone(), pair.1.clone()],
+            );
+            mark_exclusive(&mut pool);
+            swap_through_pool(pool, pair, (1000, 2000), 0.0, MockProtocolSim::new(2.0))
+        };
+        let two_legs = result(
+            vec![exclusive_swap("excl_ab", (&a, &b)), exclusive_swap("excl_bc", (&b, &c))],
+            &[&a, &b, &c],
+        );
+        let set = MockPostProcessor::new(move |_| with_net_amount_out(two_legs.clone(), 125));
+        let post_processors = build_post_processors(vec![("set", set)]);
+        let fixture = Fixture::new();
+
+        let recorded = recorded_run(&post_processors, &fixture.request(), route_result(100)).await;
+
+        let labels: Vec<_> = recorded
+            .iter()
+            .filter(|(name, _, _)| name == "worker_pool_post_processor_gain_bps")
+            .map(|(_, labels, _)| labels.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![vec![
+                "pool=test_pool".to_string(),
+                "post_processor=set".to_string(),
+                "exclusive_legs=2".to_string()
+            ]]
+        );
     }
 
     #[tokio::test]
