@@ -15,7 +15,7 @@ use std::{
 };
 
 use alloy::{
-    primitives::{map::B256HashMap, Address, B256, U256},
+    primitives::{address, map::B256HashMap, Address, B256, U256},
     rpc::types::state::{AccountOverride, StateOverride},
 };
 use metrics::counter;
@@ -71,10 +71,30 @@ pub(crate) fn base_block_label(quoted_block_number: Option<u64>, quote_block: u6
     }
 }
 
+/// The highest of the precompiles at consecutive addresses from `0x01`: `ecrecover` up to the
+/// BLS12-381 precompiles of Prague.
+const LAST_CONSECUTIVE_PRECOMPILE: u8 = 0x11;
+
+/// Osaka's `P256VERIFY` precompile, the one precompile outside the consecutive range.
+const P256VERIFY_PRECOMPILE: Address = address!("0000000000000000000000000000000000000100");
+
+/// Whether `address` holds an Ethereum precompile.
+///
+/// Titan lists every account its simulation touched, so a venue that checks a signature brings in
+/// `ecrecover`'s address with its balance and nonce. Geth's `eth_simulateV1` stops running a
+/// precompile whose account is overridden, and every signature check in the call then reverts.
+fn is_precompile(address: &Address) -> bool {
+    let (prefix, last) = address.0.split_at(19);
+    let consecutive = prefix.iter().all(|byte| *byte == 0) &&
+        (1..=LAST_CONSECUTIVE_PRECOMPILE).contains(&last[0]);
+    consecutive || *address == P256VERIFY_PRECOMPILE
+}
+
 /// The account state Titan priced one pAMM swap's venue on, in alloy's override types.
 ///
 /// Every account sets only `balance`, `nonce` and `state_diff`, never a full `state`. An absent
-/// field means Titan's simulation read the chain's value, never that the value is zero.
+/// field means Titan's simulation read the chain's value, never that the value is zero. Precompile
+/// accounts are left out: no venue state lives in them, and overriding one breaks the precompile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimulationOverrides {
     block_number: Option<u64>,
@@ -111,6 +131,9 @@ impl SimulationOverrides {
         for (address, account) in &overrides.accounts {
             let address = Address::try_from(address.as_ref())
                 .map_err(|_| format!("account {address} is {} bytes, not 20", address.len()))?;
+            if is_precompile(&address) {
+                continue;
+            }
             let balance = match &account.balance {
                 Some(balance) => Some(U256::try_from_be_slice(balance).ok_or_else(|| {
                     format!("balance of {address} is {} bytes, more than 32", balance.len())
