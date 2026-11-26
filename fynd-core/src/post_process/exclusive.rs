@@ -772,6 +772,28 @@ mod tests {
         assert_eq!(replaced_route.net_amount_out(), &BigInt::from(1991));
     }
 
+    /// Two shallow exclusive pools beat a deep public pool on their first units. One round splits
+    /// the hop with one of them; the next splits the public remainder with the other.
+    #[tokio::test]
+    async fn test_exclusive_split_between_two_exclusive_pools() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl1_ab", (&a, &b), constant_product_state(1000, 2500)).await;
+        add_exclusive(&market, "excl2_ab", (&a, &b), constant_product_state(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+
+        let replaced_route = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &b), deep_route(&a, &b)).await,
+        );
+
+        assert_eq!(component_ids(&replaced_route), ["excl1_ab", "excl2_ab", "ab"]);
+        assert_eq!(splits_of(&replaced_route), [0.14589803375031532, 0.12461179749810718, 0.0]);
+        assert_eq!(total_amount_in_for_token(&replaced_route, &a), BigUint::from(1000u64));
+        // One exclusive pool alone nets 1991: see
+        // test_exclusive_split_when_price_falls_with_amount.
+        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(2012));
+    }
+
     #[tokio::test]
     async fn test_exclusive_split_limited_liquidity() {
         let (a, b, _) = tokens();
