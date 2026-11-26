@@ -1,4 +1,19 @@
 
+## [0.129.2](https://github.com/propeller-heads/fynd/compare/0.129.1...0.129.2) (2026-11-25)
+
+### Features
+
+- Keep the exclusive price on routes with several exclusive hops, such as an Ekubo hop followed by a dual Curve hop, instead of falling back to the public quote. Each exclusive hop receives a share of the surplus in proportion to the route output it produces, and the no-public-route fee is charged on each one. ([d7b3203](https://github.com/propeller-heads/fynd/commit/d7b320340ce8d9a1888f7cffe7e5b608c6ee42cf))
+
+### Bug Fixes
+
+- Stop Fynd pods from restarting on chains that only produce a block when someone transacts, such as Elysium. Upgrading tycho to 0.540.1 makes the stream skip a round with no block instead of failing. ([bb18ae5](https://github.com/propeller-heads/fynd/commit/bb18ae5fe4825e7fa358fb1334369f7b8ce9f1d0))
+- Refuse to encode an exclusive leg that has no committed amount, so a quote never ships an unsigned exclusive leg that could revert or charge the full fee. ([8bbef9c](https://github.com/propeller-heads/fynd/commit/8bbef9cb9e03d7e1f3620c5dd50bdefe19a2ed23))
+- Sign exclusive legs whose route output rounds down to zero by committing them to their whole output with no fee, and avoid a divide-by-zero when no leg produces a whole unit of output. ([2456c85](https://github.com/propeller-heads/fynd/commit/2456c85273c883130d9c6b37cf34b2b809d5d557))
+- Tighten each exclusive hop's input floor so it allows only for fees that lower its own input, ignoring fees from hops on other branches. ([aaecdfc](https://github.com/propeller-heads/fynd/commit/aaecdfcd040fa0f839cb7238cfc7450fbceb08a8))
+- Keep the signed price on a later exclusive hop when an earlier hop's fee lowers its input, by widening its input floor beyond the request's slippage. ([5766b03](https://github.com/propeller-heads/fynd/commit/5766b039a9fbfd50e5134b0cc36c1cf39e2c9ad1))
+
+
 ## [0.129.1](https://github.com/propeller-heads/fynd/compare/0.129.0...0.129.1) (2026-11-25)
 
 ### Features
