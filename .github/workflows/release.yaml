@@ -32,38 +32,13 @@ jobs:
         with:
           cache-on-failure: true
 
-      # Publishes in dependency order, skipping versions already on crates.io so a
-      # partially failed release run can be recovered by re-running the job. A single
-      # retry (with an index re-check) covers crates.io index propagation lag between
-      # consecutive publishes.
+      # Publishes in dependency order, uploading crates that do not depend on each other together,
+      # and skips crates already on crates.io so a rerun resumes a partial release.
       - name: Publish crates
-        run: |
-          set -euo pipefail
-          version="$(cargo metadata --format-version 1 --no-deps \
-            | jq -r '.packages[] | select(.name == "fynd") | .version')"
-          published() {
-            curl -sf "https://crates.io/api/v1/crates/$1/${version}" \
-              -H "User-Agent: fynd-ci (github.com/propeller-heads/fynd)" >/dev/null
-          }
-          # Dependency order: every crate is published before anything that depends on it,
-          # because cargo resolves a dependency against the registry when it packages.
-          # fynd-test-fixtures precedes fynd-bench-harness, which depends on it; both follow
-          # fynd-core. fynd-tools-common follows fynd-client. fynd-nexus follows fynd-rpc.
-          for crate in fynd-core fynd-rpc-types fynd-rpc fynd-nexus fynd-client \
-                       fynd-test-fixtures fynd-tools-common fynd-bench-harness fynd; do
-            if published "${crate}"; then
-              echo "${crate} ${version} already on crates.io, skipping"
-              continue
-            fi
-            if cargo publish --locked --package "${crate}"; then
-              continue
-            fi
-            echo "publish of ${crate} failed, re-checking index and retrying in 30s"
-            sleep 30
-            if ! published "${crate}"; then
-              cargo publish --locked --package "${crate}"
-            fi
-          done
+        run: >
+          .github/scripts/publish-crates.sh
+          fynd-core fynd-rpc-types fynd-rpc fynd-nexus fynd-client
+          fynd-test-fixtures fynd-tools-common fynd-bench-harness fynd
 
   publish-npm:
     name: Publish TypeScript packages to npm
