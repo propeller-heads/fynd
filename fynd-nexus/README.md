@@ -37,6 +37,7 @@ BEBOP_KEY=... HASHFLOW_USER=... HASHFLOW_KEY=... METRIC_API_KEY=... \
 | `--tycho-api-key` | `TYCHO_API_KEY` | | Tycho API key. |
 | `--disable-tls` | `DISABLE_TLS` | `false` | Disable TLS for the Tycho connection. |
 | `--min-tvl` | `MIN_TVL` | the chain's low TVL threshold | Minimum TVL, in the chain's native token, for a component to be tracked. |
+| `--min-token-quality` | `MIN_TOKEN_QUALITY` | `100` | Minimum Tycho token quality score; tokens below it are excluded. |
 | `--rpc-url` | `RPC_URL` | | Node RPC URL, which the market reads gas prices from. |
 
 Another binary can start the service with `fynd_nexus::run(Cli::parse())`, where `Cli` is
@@ -49,10 +50,10 @@ serves prices and derived data only: expose it inside the cluster.
 ## Market
 
 With `--tycho-url` set, the service also runs the Tycho client for its chain. It tracks every
-on-chain protocol system Tycho serves, above the TVL floor and without the default blocklist's
-components, and keeps the market and the derived data computed from it (spot prices, depths, token
-gas prices) up to date and serves the derived data (see [Derived data](#derived-data)). Startup
-fails when `--tycho-url` is set without `--rpc-url`.
+on-chain protocol system Tycho serves, above the TVL and token quality floors and without the
+default blocklist's components, and keeps the market and the derived data computed from it (spot
+prices, depths, token gas prices) up to date and serves the derived data (see [Derived
+data](#derived-data)). Startup fails when `--tycho-url` is set without `--rpc-url`.
 
 The service waits up to 15 minutes for the first block and the derived data, and logs while it
 waits. It stops with an error when the Tycho feed ends or the market does not become ready, so the

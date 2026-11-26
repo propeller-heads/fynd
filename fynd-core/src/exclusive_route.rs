@@ -6,64 +6,96 @@ use std::sync::LazyLock;
 use metrics::{counter, gauge};
 use num_bigint::BigUint;
 use num_traits::{CheckedSub, ToPrimitive};
+use rustc_hash::FxHashMap;
 use tracing::warn;
 use tycho_simulation::tycho_common::models::Address;
 
 use crate::{
     bps,
     derived::TokenGasPrices,
-    feed::exclusivity::is_exclusive,
+    exclusive_protocol::protocol_of,
     types::{Commitment, OrderQuote, SurplusInfo, Swap},
 };
 
 /// How the exclusive legs of a route fit the rules for an exclusive route.
 ///
-/// A route has exactly one exclusive leg, at any hop, on any branch of a split route. The output
-/// of the leg must reach the route's output token, and the swaps after the leg must not loop back
-/// to a token already on their path. With one exclusive leg, the surplus has one leg to come
-/// from.
+/// A route has one or more exclusive legs, at any hop, on any branch of a split route. The output
+/// of each leg must reach the route's output token, and the swaps after each leg must not loop back
+/// to a token already on their path. `pin_commitment` splits the surplus between the legs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExclusiveRouteShape {
-    /// One exclusive leg that reaches the route's output token.
+    /// Every exclusive leg reaches the route's output token.
     Valid,
     /// The route has no exclusive leg.
     NoExclusiveLeg,
-    /// The route has more than one exclusive leg.
-    MultipleLegs,
-    /// No swap carries the leg's output to the output token, or the swaps after the leg loop back
-    /// to a token already on their path.
+    /// For some exclusive leg, no swap carries its output to the output token, or the swaps after
+    /// it loop back to a token already on their path.
     DoesNotReachOutput,
 }
 
-/// Whether `swap` goes through an exclusive component.
+/// Whether `swap` is an exclusive leg: it goes through an exclusive component, or through a dual
+/// pool priced with a grant.
 pub(crate) fn is_exclusive_leg(swap: &Swap) -> bool {
-    is_exclusive(swap.protocol_component())
+    protocol_of(swap).is_some()
 }
 
-/// Whether any swap of `swaps` goes through an exclusive component.
+/// Whether any swap of `swaps` is an exclusive leg.
 pub(crate) fn routes_through_exclusive(swaps: &[Swap]) -> bool {
     swaps.iter().any(is_exclusive_leg)
 }
 
+/// The first exclusive leg of `swaps`. `None` when no swap is one.
+pub(crate) fn first_exclusive_leg(swaps: &[Swap]) -> Option<&Swap> {
+    swaps
+        .iter()
+        .find(|swap| is_exclusive_leg(swap))
+}
+
 /// Returns the shape of the exclusive legs of `swaps`, without incrementing metrics.
 pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> ExclusiveRouteShape {
-    let mut exclusive_legs = swaps
-        .iter()
-        .filter(|swap| is_exclusive_leg(swap));
-    let Some(leg) = exclusive_legs.next() else {
-        return ExclusiveRouteShape::NoExclusiveLeg;
-    };
-    if exclusive_legs.next().is_some() {
-        return ExclusiveRouteShape::MultipleLegs;
+    match exclusive_legs(swaps, output_token) {
+        None => ExclusiveRouteShape::DoesNotReachOutput,
+        Some(legs) if legs.is_empty() => ExclusiveRouteShape::NoExclusiveLeg,
+        Some(_) => ExclusiveRouteShape::Valid,
     }
+}
 
-    let reaches_output = leg_route_output(swaps, leg, output_token)
-        .is_some_and(|(numerator, _)| numerator > BigUint::ZERO);
-    if reaches_output {
-        ExclusiveRouteShape::Valid
-    } else {
-        ExclusiveRouteShape::DoesNotReachOutput
+/// An exclusive leg of a route and the route output it produces.
+pub(crate) struct ExclusiveLeg {
+    /// The position of the leg in the route's swaps.
+    index: usize,
+    /// The route output the leg produces, as the exact fraction `(numerator, denominator)` of
+    /// [`leg_route_output`]. The numerator is never zero.
+    route_output: (BigUint, BigUint),
+}
+
+impl ExclusiveLeg {
+    /// The route output the leg produces, rounded down: the weight of its part of the surplus and
+    /// the base of its default fee. Zero for a leg that produces less than one unit.
+    pub(crate) fn rounded_route_output(&self) -> BigUint {
+        let (numerator, denominator) = &self.route_output;
+        numerator / denominator
     }
+}
+
+/// Returns the exclusive legs of `swaps`, in route order, with the route output each produces.
+///
+/// Returns `None` when some exclusive leg does not reach `output_token`: no swap carries its output
+/// there, or the swaps after it loop back to a token already on their path. An empty list means
+/// the route has no exclusive leg.
+pub(crate) fn exclusive_legs(swaps: &[Swap], output_token: &Address) -> Option<Vec<ExclusiveLeg>> {
+    let mut legs = Vec::new();
+    for (index, swap) in swaps.iter().enumerate() {
+        if !is_exclusive_leg(swap) {
+            continue;
+        }
+        let route_output = leg_route_output(swaps, swap, output_token)?;
+        if route_output.0 == BigUint::ZERO {
+            return None;
+        }
+        legs.push(ExclusiveLeg { index, route_output });
+    }
+    Some(legs)
 }
 
 /// Returns the route output that `leg`'s output produces, as the fraction
@@ -73,7 +105,7 @@ pub(crate) fn exclusive_route_shape(swaps: &[Swap], output_token: &Address) -> E
 /// its token's route output that its output makes up of all that the later swaps take of the
 /// token. This is the average price of the pools after the leg. Returns `None` when the swaps after
 /// the leg loop back to a token already on their path.
-pub(crate) fn leg_route_output(
+fn leg_route_output(
     swaps: &[Swap],
     leg: &Swap,
     output_token: &Address,
@@ -242,7 +274,10 @@ pub(crate) fn matched_commitment(
 /// Sets `exclusive_candidate` to `committed_amount_out`. This sets the committed amount on each
 /// leg, sets `amount_out` and `amount_out_net_gas`, and attaches the `SurplusInfo`.
 ///
-/// The exclusive components capture all output above the commitment.
+/// The exclusive components capture all output above the commitment. Each exclusive leg captures
+/// a part of the surplus in proportion to the route output it produces, capped at that output.
+/// Two legs in sequence both produce the whole route output, so each captures half. Rounding and
+/// the cap leave any remainder with the user.
 pub(crate) fn pin_commitment(
     exclusive_candidate: &OrderQuote,
     committed_amount_out: BigUint,
@@ -261,57 +296,44 @@ pub(crate) fn pin_commitment(
 
     let mut surplus_quote = exclusive_candidate.clone();
 
-    // Route output each exclusive leg produces, read before the swaps are borrowed mutably.
-    let leg_route_outputs: Vec<Option<(BigUint, BigUint)>> = surplus_quote
+    // The router pins only routes whose legs all reach the output token.
+    let legs = exclusive_candidate
         .route()
-        .map(|route| {
-            let swaps = route.swaps();
-            let output_token = route.output_token();
-            swaps
-                .iter()
-                .map(|swap| {
-                    let output_token = output_token.as_ref()?;
-                    if !is_exclusive(swap.protocol_component()) {
-                        return None;
-                    }
-                    leg_route_output(swaps, swap, output_token)
-                })
-                .collect()
-        })
+        .and_then(|route| exclusive_legs(route.swaps(), &route.output_token()?))
         .unwrap_or_default();
 
+    // The weights of the split: the route output each leg produces, rounded down. A leg below one
+    // unit weighs nothing, captures nothing, and is still committed so it gets signed.
+    let total_leg_output: BigUint = legs
+        .iter()
+        .map(ExclusiveLeg::rounded_route_output)
+        .sum();
+
     if let Some(route) = surplus_quote.route_mut() {
-        // Capture the route's surplus at the exclusive legs.
-        // Each leg absorbs up to the route output it produces; any remainder is left with the
-        // user.
-        let mut surplus = exclusive_route_amount_out - &committed_amount_out;
-        for (i, swap) in route.swaps_mut().iter_mut().enumerate() {
-            if is_exclusive(swap.protocol_component()) {
-                let Some(Some((numerator, denominator))) = leg_route_outputs.get(i) else {
-                    continue;
-                };
-                if *numerator == BigUint::ZERO {
-                    continue;
-                }
-                let captured = surplus
-                    .clone()
-                    .min(numerator / denominator);
-                // Convert into the leg's own token at the average price of the pools after the
-                // leg, rounding down so any error is taken from the protocol, not the user. The
-                // user gets at least the committed amount when those pools give less per unit
-                // as their input grows. A leg that outputs the route's output token converts at
-                // a price of exactly 1.
-                let captured_swap_amount_out =
-                    &captured * swap.amount_out() * denominator / numerator;
-                debug_assert!(
-                    captured_swap_amount_out <= *swap.amount_out(),
-                    "captured amount ({captured_swap_amount_out}) must not exceed the leg's output ({})",
-                    swap.amount_out(),
-                );
-                let committed_swap_amount_out = swap.amount_out() - &captured_swap_amount_out;
-                surplus -= captured;
-                swap.set_committed_amount_out(committed_swap_amount_out);
-            }
+        let swaps = route.swaps_mut();
+        for leg in &legs {
+            let Some(swap) = swaps.get_mut(leg.index) else {
+                continue;
+            };
+            let leg_output = leg.rounded_route_output();
+            let captured = if total_leg_output == BigUint::ZERO {
+                BigUint::ZERO
+            } else {
+                (&surplus_amount * &leg_output / &total_leg_output).min(leg_output)
+            };
+            // Convert into the leg's own token at the average price of the pools after the leg,
+            // rounding down so any error is taken from the protocol, not the user. The user gets
+            // at least the committed amount when those pools give less per unit as their input
+            // grows. A leg that outputs the route's output token converts at a price of exactly 1.
+            let (numerator, denominator) = &leg.route_output;
+            let captured_swap_amount_out = &captured * swap.amount_out() * denominator / numerator;
+            debug_assert!(
+                captured_swap_amount_out <= *swap.amount_out(),
+                "captured amount ({captured_swap_amount_out}) must not exceed the leg's output ({})",
+                swap.amount_out(),
+            );
+            let committed_swap_amount_out = swap.amount_out() - &captured_swap_amount_out;
+            swap.set_committed_amount_out(committed_swap_amount_out);
         }
     }
 
@@ -345,6 +367,75 @@ pub(crate) fn pin_route_commitment(
             .clone(),
         token_prices,
     )
+}
+
+/// Returns, for each swap of `swaps`, the share of its input that the fees of the exclusive legs
+/// upstream took.
+///
+/// A leg with a committed amount keeps `1 - committed / amount_out` of its output as its fee (see
+/// [`pin_commitment`]). Each token carries the share of its amount that the fees upstream took:
+/// the average over the swaps that produce it, weighted by their output. A swap gets the share of
+/// its input token, so a leg on another branch does not count. The swaps are in execution order,
+/// so the swaps that produce a token come before the swaps that take it in.
+///
+/// The shares of legs in sequence add up instead of multiplying, which puts an input floor built
+/// from them a little below the real input.
+pub(crate) fn upstream_fee_shares(swaps: &[Swap]) -> Vec<f64> {
+    let mut token_shares: FxHashMap<&Address, FeeShare> = FxHashMap::default();
+    let mut input_shares = Vec::with_capacity(swaps.len());
+    for swap in swaps {
+        let input_share = token_shares
+            .get(swap.token_in())
+            .map_or(0.0, FeeShare::share);
+        let own_fee = swap
+            .committed_amount_out()
+            .map_or(0.0, |committed| fee_fraction(swap.amount_out(), committed));
+        token_shares
+            .entry(swap.token_out())
+            .or_default()
+            .add(swap.amount_out(), input_share + own_fee);
+        input_shares.push(input_share);
+    }
+    input_shares
+}
+
+/// The part of `amount_out` that a leg committed to `committed` keeps as its fee.
+fn fee_fraction(amount_out: &BigUint, committed: &BigUint) -> f64 {
+    let (Some(amount_out), Some(committed)) = (amount_out.to_f64(), committed.to_f64()) else {
+        return 0.0;
+    };
+    if committed >= amount_out {
+        return 0.0;
+    }
+    1.0 - committed / amount_out
+}
+
+/// The part of a token's amount that the fees of exclusive legs upstream took, summed over the
+/// swaps that produce the token.
+#[derive(Default)]
+struct FeeShare {
+    /// Each producing swap's output times its fee share.
+    taken: f64,
+    /// The producing swaps' output.
+    produced: f64,
+}
+
+impl FeeShare {
+    /// Adds a swap that produces `amount_out` of the token, `fee_share` of which fees took.
+    fn add(&mut self, amount_out: &BigUint, fee_share: f64) {
+        let amount_out = amount_out.to_f64().unwrap_or(0.0);
+        self.taken += amount_out * fee_share;
+        self.produced += amount_out;
+    }
+
+    /// The share of the token's amount that fees took, averaged over its producing swaps.
+    fn share(&self) -> f64 {
+        if self.produced > 0.0 {
+            self.taken / self.produced
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Restates an output-token `amount` of `quote` in wei.
@@ -388,6 +479,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::algorithm::test_utils::{addr, component, MockProtocolSim};
 
     #[rstest]
     #[case::zero("0", Some(0))]
@@ -399,5 +491,68 @@ mod tests {
     #[case::empty("", None)]
     fn test_parse_user_improvement_share_bps(#[case] raw: &str, #[case] expected: Option<u32>) {
         assert_eq!(parse_user_improvement_share_bps(raw), expected);
+    }
+
+    /// A swap from `token_in` to `token_out` that outputs `amount_out`, committed to `committed`
+    /// when it is an exclusive leg.
+    fn swap(token_in: u8, token_out: u8, amount_out: u64, committed: Option<u64>) -> Swap {
+        let mut swap = Swap::new(
+            format!("pool-{token_in}-{token_out}"),
+            "uniswap_v2".to_string(),
+            addr(token_in),
+            addr(token_out),
+            BigUint::from(1_000u64),
+            BigUint::from(amount_out),
+            BigUint::ZERO,
+            component(&format!("pool-{token_in}-{token_out}"), &[]),
+            Box::new(MockProtocolSim::default()),
+        );
+        if let Some(committed) = committed {
+            swap.set_committed_amount_out(BigUint::from(committed));
+        }
+        swap
+    }
+
+    /// Exclusive legs keep 1% or 2% of their output as their fee. Expected: the share of each
+    /// swap's input that the fees upstream took.
+    #[rstest]
+    #[case::single_leg(vec![swap(0x01, 0x02, 1000, Some(990))], vec![0.0])]
+    #[case::legs_in_sequence(
+        vec![swap(0x01, 0x02, 1000, Some(990)), swap(0x02, 0x03, 1000, Some(990))],
+        vec![0.0, 0.01]
+    )]
+    #[case::fees_add_up_through_a_public_pool(
+        vec![
+            swap(0x01, 0x02, 1000, Some(990)),
+            swap(0x02, 0x03, 1000, Some(980)),
+            swap(0x03, 0x04, 1000, None),
+            swap(0x04, 0x05, 1000, Some(990)),
+        ],
+        vec![0.0, 0.01, 0.03, 0.03]
+    )]
+    #[case::legs_on_parallel_branches(
+        vec![
+            swap(0x01, 0x03, 300, Some(297)),
+            swap(0x01, 0x02, 700, None),
+            swap(0x02, 0x03, 700, Some(693)),
+        ],
+        vec![0.0, 0.0, 0.0]
+    )]
+    // 0x02 comes 300 from a leg that kept 1% and 700 from a public pool.
+    #[case::leg_after_a_merge(
+        vec![
+            swap(0x01, 0x02, 300, Some(297)),
+            swap(0x01, 0x02, 700, None),
+            swap(0x02, 0x03, 1000, Some(990)),
+        ],
+        vec![0.0, 0.0, 0.003]
+    )]
+    fn test_upstream_fee_shares(#[case] swaps: Vec<Swap>, #[case] expected: Vec<f64>) {
+        let shares = upstream_fee_shares(&swaps);
+
+        assert_eq!(shares.len(), expected.len());
+        for (share, expected) in shares.iter().zip(expected) {
+            assert!((share - expected).abs() < 1e-9, "shares {shares:?}");
+        }
     }
 }

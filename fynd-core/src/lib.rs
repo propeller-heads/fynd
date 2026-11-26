@@ -30,6 +30,8 @@ mod bps;
 pub mod derived;
 /// Encodes solved routes into ABI-encoded on-chain calldata via Tycho's router contracts.
 pub mod encoding;
+/// The protocols Fynd signs exclusive swaps for.
+mod exclusive_protocol;
 /// The rules for a route with an exclusive leg.
 mod exclusive_route;
 /// Picks the pool each pAMM leg falls back to and computes what the route delivers through those

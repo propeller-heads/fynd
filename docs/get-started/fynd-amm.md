@@ -15,7 +15,7 @@ A Fynd AMM pool is a normal concentrated liquidity pool (like a Uniswap v4 or Ek
 
 Other AMMs or hooks have fixed fees or adjust their fee per block or even per trade, but are blind to what competing pools bid.
 
-Fynd AMM sets its fee just-in-time, just under the highest fee that still wins the trade.
+Fynd AMM sets its fee just-in-time. Fynd compares the best public route with the route through the Fynd AMM pool, and the pool charges 90% of the difference. The trader keeps the other 10%, so whenever the pool can improve on the public route, it wins the trade.
 
 * **Low competition:** the trade pays a high fee.
 * **High competition:** the trade pays a low fee, and the pool still wins it.
@@ -38,13 +38,43 @@ Say SPY trades at 760 USD. AMMs and propAMMs answer:
 
 Aerodrome wins. But Aerodrome bid more than it needed: 759.83 would have won too, and its LPs would have kept 2 cents more. Metric lost the trade, even though a bid of 759.86 would have won it at a 14 cent profit.
 
-Fynd AMM fixes this. Fynd looks up the best competing offer and tells Fynd AMM, which bids just above it.
+Fynd AMM fixes this. Fynd looks up the best competing offer and tells Fynd AMM, which beats it and keeps 90% of the difference as fee. See [How the fee is set](fynd-amm.md#how-the-fee-is-set).
 
 <figure><img src="../.gitbook/assets/assetsfynd-amm-static-bids.png" alt=""><figcaption></figcaption></figure>
 
-As a result traders get a better price than anywhere else, and the Fynd AMM LPs earn close to the highest fee that still wins the trade.
+As a result traders get at least the best public price, plus 10% of what the pool adds, and the Fynd AMM LPs earn most of the pool's edge on every trade.
 
 <figure><img src="../.gitbook/assets/assetsfynd-amm-price-curve-crossing.gif" alt="Fynd AMM adjusts its bid per trade."><figcaption><p>Fynd AMM adjusts its bid per trade.</p></figcaption></figure>
+
+## How the fee is set
+
+For every quote, Fynd solves the trade twice:
+
+1. **Public route:** the best route using public liquidity only. This is the price to beat.
+2. **Fynd AMM route:** the best route that can also use the Fynd AMM pool, priced at zero fee.
+
+If the Fynd AMM route pays out more, the difference is the pool's **edge**. Fynd splits it:
+
+* **10% to the trader,** on top of what the public route pays.
+* **90% is the fee.** The pool takes it from its own leg of the trade, in the output token. LPs get 80% of the fee and Fynd keeps 20%.
+
+<figure><picture><source srcset="../.gitbook/assets/fynd-amm-fee-waterfall-dark.png" media="(prefers-color-scheme: dark)"><img src="../.gitbook/assets/fynd-amm-fee-waterfall-light.png" alt="Waterfall: the best public route pays 759.85 USDC. The Fynd AMM route at zero fee pays 0.10 more. The fee takes 0.09, 90% of the edge: 0.072 to LPs and 0.018 to Fynd. The trader gets 759.86."></picture><figcaption><p>Illustrative: the SPY order from above. Say that at zero fee the Fynd AMM route would pay 759.95, an edge of 0.10 over Aerodrome. The pool charges 0.09 and the trader gets 759.86.</p></figcaption></figure>
+
+The trader is never quoted less than the public route. If the Fynd AMM route has no edge, Fynd uses the public route and the pool doesn't trade.
+
+The fee grows with the edge, not with the trade size. When public pools charge more, are shallower or price the trade worse, the edge is bigger and the pool earns more. When competition is tight, the fee is close to zero and the pool still wins the trade.
+
+### Split and multi-hop routes
+
+The pool doesn't have to fill a whole trade. Fynd can send part of a trade through the pool and the rest through public pools, or use the pool for one hop of a longer route (for example SPY → USDC → ETH).
+
+* The edge is measured on the **whole route**. If the pool's slice lowers the price impact on the rest of a large trade, that saving counts as edge.
+* The fee is taken only from the **pool's leg**. Public legs pay out in full.
+* Gas counts: the edge is measured net of each route's gas cost.
+
+### When there is no public route
+
+If Fynd finds no public route for a trade, there is no price to beat. The pool then charges a flat 5 bps on its leg.
 
 ## How to provide liquidity
 
@@ -83,7 +113,7 @@ The rest of this page is for readers who want the mechanics: who can trade on th
 
 1. A trader (via a wallet, aggregator or Fynd InBlock) asks Fynd for a quote.
 2. Fynd solves the order twice: once with public liquidity only, and once including the Fynd AMM pool at zero fee.
-3. If the Fynd AMM route is better, Fynd sets the fee from the difference.
+3. If the Fynd AMM route is better, Fynd sets the fee to 90% of the difference (see [How the fee is set](fynd-amm.md#how-the-fee-is-set)).
 4. Fynd signs the fee, a deadline, a nonce, and the expected trade size, and encodes the signature into the swap calldata.
 5. The trader sends the transaction to the Tycho Router.
 6. The router swaps through Ekubo Core, which forwards the swap to the `SignedExclusiveSwap` extension.
@@ -109,7 +139,7 @@ Because only Fynd-signed swaps can trade on the pool, nobody else arbitrages it.
 
 On a normal pool a stale price is a loss for LPs: an arbitrageur trades against it at the old price and keeps the difference. On a Fynd AMM pool it isn't:
 
-* When a trade crosses the gap between the pool price and the market price, the fee rule charges that gap to the trade as fee, because the gap is part of the improvement over the public route. The value goes to the LPs.
+* The price to beat is the best public route, not an external market price. When a trade crosses a gap between the pool's price and the public pools' prices, that gap is part of the pool's edge, so 90% of it is charged as fee and goes to the LPs (after the owner fee). If the public pools have drifted too, the edge is only what the pool offers beyond them.
 * Fynd also runs a rebalancing bot that keeps the pool aligned with the market. It trades through the pool and back through a public pool, and its swaps go through Fynd like any other trade. So Fynd charges them the same per-trade fee, and most of the price gap the bot closes goes to the LPs as fees. When the gap is small, that fee is close to zero. These swaps show up in the pool's trades and count toward volume and fees, but the pools page excludes them from the "Swap fee 24h" range.
 
 The gap still matters for LPs in one way: the inventory you hold while the pool lags the market moves with the market. That is ordinary inventory risk, not a fee loss.
@@ -136,19 +166,18 @@ The Ekubo extension enforces these properties, not Fynd's off-chain code:
 
 ### Contracts
 
-Ekubo `SignedExclusiveSwap` extension (Fynd controller):
+Ekubo `SignedExclusiveSwap` extension (Fynd controller), at the same address on Ethereum, Robinhood Chain, Base and BSC: `0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09`
 
-* Ethereum: `0x55b703eED01b35641963da2FB2E14885993605A3`
-* Robinhood Chain: `0x550CFe1292d0D9c0d28f232b3F42Edb4439B1D09`
+Live pools (Ekubo pool IDs), as listed on [swap.fynd.xyz/pools](https://swap.fynd.xyz/pools):
 
-Live pools (Ekubo pool IDs):
-
-* Ethereum, ETH/USDC: `0x9efd723a29a4e7f40c955f7b968144a5e2a7261a4a0f1573fbb0e2653600e4a4`
-* Robinhood Chain, ETH/USDG: `0xb67e0601a0363a1ad259dd848cad1c52d6cc4eb18bc526a0dd4f4bdf83773546`
-* Robinhood Chain, SPY/USDG: `0xf893e7a59d7645501877e680332860a61f784332e7e722a5e9bb9a8cbad38656`
-* Robinhood Chain, PONS/USDG: `0xbc2615db1f10ca2f2cc9d491fe697ac8a11290f8c900fad313be53bb6763df79`
+* Ethereum, ETH/USDC: `0x158035970f75e9e11b86d8f6ac43e95d8c3b4a88faa1e77b41570ea0b8430360`
 * Robinhood Chain, AI/USDG: `0x46e76723bc9334ec559b6c1302a8ac15bef0edbdc42ce139a642df711eae9715`
-* Robinhood Chain, UBIK/USDG: `0x29936f43df20cce7583ff081144b26fc8984cd38d3f413f04695640928729524`
+* Robinhood Chain, ETH/USDG: `0xb67e0601a0363a1ad259dd848cad1c52d6cc4eb18bc526a0dd4f4bdf83773546`
+* Robinhood Chain, NVDA/USDG: `0xa9a97762fae3ec95a9b7e51ac6844a1270eee0a223ae69ce598950990ba7becb`
+* Robinhood Chain, PONS/USDG: `0xbc2615db1f10ca2f2cc9d491fe697ac8a11290f8c900fad313be53bb6763df79`
+* Base, DRV/USDC: `0x628dc44c0a6a6e4a6300db8faa081ed4f391fcac359cf494bf3bbe26b49cee3a`
+* Base, WETH/USDC: `0x34d55c244920f8e10638cab7086defe26974752142a894d52c9451e45c91d209`
+* BSC, BNCB/USDT: `0x942e8f465b349913a0a115c8f346028f549129748184d8eac4fafc7b88c863a9`
 
 All pools use pool fee `0` and tick spacing `1024`.
 
@@ -162,4 +191,4 @@ The `SignedExclusiveSwap` extension is part of Ekubo's [evm-contracts](https://g
 
 ### Further reading
 
-* [Fynd In-Block Solver](/broken/pages/c8ca654eacf3b9c983b3b6543ca6b32d263f18c5)
+* [Fynd In-Block Solver](fynd-in-block-solver.md)

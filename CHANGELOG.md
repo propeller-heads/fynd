@@ -1,4 +1,67 @@
 
+## [0.129.2](https://github.com/propeller-heads/fynd/compare/0.129.1...0.129.2) (2026-11-25)
+
+### Features
+
+- Keep the exclusive price on routes with several exclusive hops, such as an Ekubo hop followed by a dual Curve hop, instead of falling back to the public quote. Each exclusive hop receives a share of the surplus in proportion to the route output it produces, and the no-public-route fee is charged on each one. ([d7b3203](https://github.com/propeller-heads/fynd/commit/d7b320340ce8d9a1888f7cffe7e5b608c6ee42cf))
+
+### Bug Fixes
+
+- Stop Fynd pods from restarting on chains that only produce a block when someone transacts, such as Elysium. Upgrading tycho to 0.540.1 makes the stream skip a round with no block instead of failing. ([bb18ae5](https://github.com/propeller-heads/fynd/commit/bb18ae5fe4825e7fa358fb1334369f7b8ce9f1d0))
+- Refuse to encode an exclusive leg that has no committed amount, so a quote never ships an unsigned exclusive leg that could revert or charge the full fee. ([8bbef9c](https://github.com/propeller-heads/fynd/commit/8bbef9cb9e03d7e1f3620c5dd50bdefe19a2ed23))
+- Sign exclusive legs whose route output rounds down to zero by committing them to their whole output with no fee, and avoid a divide-by-zero when no leg produces a whole unit of output. ([2456c85](https://github.com/propeller-heads/fynd/commit/2456c85273c883130d9c6b37cf34b2b809d5d557))
+- Tighten each exclusive hop's input floor so it allows only for fees that lower its own input, ignoring fees from hops on other branches. ([aaecdfc](https://github.com/propeller-heads/fynd/commit/aaecdfcd040fa0f839cb7238cfc7450fbceb08a8))
+- Keep the signed price on a later exclusive hop when an earlier hop's fee lowers its input, by widening its input floor beyond the request's slippage. ([5766b03](https://github.com/propeller-heads/fynd/commit/5766b039a9fbfd50e5134b0cc36c1cf39e2c9ad1))
+
+
+## [0.129.1](https://github.com/propeller-heads/fynd/compare/0.129.0...0.129.1) (2026-11-25)
+
+### Features
+
+- Record each order's encoded transaction (`to`, `value`, `data`) in quote records so quotes can be re-simulated and analysed later. Quote record schema version is now 5; the collector must accept it. ([5b089cc](https://github.com/propeller-heads/fynd/commit/5b089ccdc3265fdaae576c7697275b80b422c0aa))
+- Zero the Permit2 signature in recorded calldata instead of dropping the calldata. Route encoding, amounts and other signatures are kept. If the signature isn't found in the calldata, no transaction is recorded and a warning is logged. Re-simulating such calldata only works through a non-permit entry point. ([c5f8d2f](https://github.com/propeller-heads/fynd/commit/c5f8d2f16793eea35d3cb4b0902f225d1ebe122e))
+- Record the simulation overrides (`block_number`, `block_timestamp`, `accounts`) of each pAMM swap in quote records, so stored pAMM quotes can be re-simulated against the state they were priced on. ([941c1bb](https://github.com/propeller-heads/fynd/commit/941c1bb58bdc1dcaa74d8f6a3ad00e9b9f5fee86))
+- Add the `exclusive_won_quotes_total` metric, which counts served quotes with an exclusive leg by protocol, component, worker pool and simulation outcome. Also add the surplus those quotes capture to `exclusive_won_fee_amount`, in whole gas tokens, by protocol and component. ([8b17852](https://github.com/propeller-heads/fynd/commit/8b178526d5e074ada76049abcea0fa9551270e9f))
+- Add a `pool` label to `exclusive_won_fee_amount` so dashboards can show which worker pool earned the fee. ([8aabce9](https://github.com/propeller-heads/fynd/commit/8aabce951afe35111b16574aa1c34cd58c907ad2))
+- Add the `exclusive_legs_signed_total` metric, which counts signatures of committed exclusive legs by protocol, component and whether signing succeeded. ([d84ebeb](https://github.com/propeller-heads/fynd/commit/d84ebeb1c0f21521079f9985f5f52c77a006b0ba))
+- Add the `exclusive_pool_eligible` metric, which reports 1 for each pool that can carry an exclusive leg and 0 once a previously reported pool no longer can, for example when a Curve policy is killed or points to another controller or router. ([c836168](https://github.com/propeller-heads/fynd/commit/c8361688c888315a1be57d5e3ff2385cd95e0e62))
+
+
+## [0.129.0](https://github.com/propeller-heads/fynd/compare/0.128.0...0.129.0) (2026-11-24)
+
+### Features
+
+- **Breaking:** Route exclusive orders through Curve pools whose policy grants Fynd a lower fee, while public orders keep using the same pools at their regular fee. Fynd now signs a Curve grant for the order's sender on each exclusive Curve hop, and it never falls back to a grant-priced pool on a pAMM hop. Dual pools are detected from each pool's policy, so no policy addresses need configuring. ([c94c515](https://github.com/propeller-heads/fynd/commit/c94c515b20028ecc8f019965d1f585800ba4bcc2))
+
+### Bug Fixes
+
+- Skip an exclusive route that goes through a pool the best public route already uses. The pool wins the trade at its public price, so its LPs keep their full fee and no grant is signed. Fynd picks the next exclusive candidate instead. ([8392a54](https://github.com/propeller-heads/fynd/commit/8392a54dccc3c210b9cfc4832a71094f78d93ddd))
+- Drop public-pool quotes whose exclusive leg goes through a pool of the public route, so a grant is no longer signed for a pool the public route already uses. The public reference is re-picked from the remaining quotes, and `exclusive_route_competes_with_public_total` now counts once per order instead of once per checked quote. ([2978a9f](https://github.com/propeller-heads/fynd/commit/2978a9f060414cbbb5781b752348e885d601afc2))
+- Refuse Curve policies whose minimum fee is above 100%. Such pools get no exclusive view, and encoding fails with the fee in the error message instead of panicking on an integer underflow. ([1c42654](https://github.com/propeller-heads/fynd/commit/1c42654cbe5a7af68101979e2bc13d8b57343d70))
+- Return an error when the derived Curve grant fee does not fit in a u64, instead of silently falling back to the minimum fee. ([1c42654](https://github.com/propeller-heads/fynd/commit/1c42654cbe5a7af68101979e2bc13d8b57343d70))
+- Give Curve grants their own 50% input cap tolerance. Tuning the Ekubo output-cap setting through the environment no longer changes how far a Curve grant's input can drift before the swap reverts. ([d4e91ff](https://github.com/propeller-heads/fynd/commit/d4e91ffae7582a5eb1d6fe4b36300490def9fc43))
+
+### Performance
+
+- Re-check updated components on market updates only in the exclusive replacer, where a pool's policy state can change its membership. The RFQ replacer no longer does this needless work on every block. ([f8a8f95](https://github.com/propeller-heads/fynd/commit/f8a8f95274bbc02e87c307f74f879fad2ba91085))
+
+
+## [0.128.0](https://github.com/propeller-heads/fynd/compare/0.127.0...0.128.0) (2026-11-24)
+
+### Bug Fixes
+
+- Update `url` to 2.5.9 and `rustix` to 1.1.6 to pick up security fixes for a stack overflow when parsing nested blob URLs and for unwritten bytes being marked as initialized. ([4ee7df3](https://github.com/propeller-heads/fynd/commit/4ee7df3f5d2cd7fb8f7cfca8aff8b92d64eb3ec4))
+- Remove actix-web's unused cookie support from the RPC server, which drops the vulnerable `cookie` 0.16 dependency, where private cookie nonces could repeat after a fork. ([f1e159e](https://github.com/propeller-heads/fynd/commit/f1e159e93fe0c7faa4acb38c8ada1245fb3acd33))
+
+
+## [0.127.0](https://github.com/propeller-heads/fynd/compare/0.126.0...0.127.0) (2026-11-20)
+
+### Bug Fixes
+
+- Count pAMM simulation override legs in `finalize_quote`, so servers that compose router stages themselves (`solve`, `encode_quotes`, `simulate_quotes`, `finalize_quote`) now report the pAMM override metrics (legs, missing-block, conflict and block-mismatch) instead of zeros. With `--disable-pamm-simulation-overrides`, every pAMM swap counts as missing. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+- **Breaking:** Remove `WorkerPoolRouterConfig::with_pamm_simulation_overrides` and `WorkerPoolRouterConfig::pamm_simulation_overrides`. Use `FyndBuilder::pamm_simulation_overrides` to turn the quote stream on or off. ([4ead489](https://github.com/propeller-heads/fynd/commit/4ead489a1f1fd8de19e78427bc96ea1c41ebc83b))
+
+
 ## [0.126.0](https://github.com/propeller-heads/fynd/compare/0.125.2...0.126.0) (2026-11-19)
 
 ### Features

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use fynd_core::solver::defaults;
+
 /// The settings of the Tycho market.
 ///
 /// The market runs when `--tycho-url` is set, and then needs `--rpc-url` too.
@@ -25,6 +27,10 @@ pub struct MarketArgs {
     #[arg(long, env = "MIN_TVL")]
     pub min_tvl: Option<f64>,
 
+    /// Minimum Tycho token quality score; tokens below it are excluded.
+    #[arg(long, env = "MIN_TOKEN_QUALITY", default_value_t = defaults::MIN_TOKEN_QUALITY)]
+    pub min_token_quality: i32,
+
     /// Node RPC URL, which the market reads gas prices from.
     #[arg(long, env = "RPC_URL", hide_env_values = true)]
     pub rpc_url: Option<String>,
@@ -44,6 +50,7 @@ impl fmt::Debug for MarketArgs {
             .field("tycho_api_key", &self.tycho_api_key.is_some())
             .field("disable_tls", &self.disable_tls)
             .field("min_tvl", &self.min_tvl)
+            .field("min_token_quality", &self.min_token_quality)
             .field("rpc_url", &self.rpc_url.is_some())
             .finish()
     }
@@ -74,6 +81,7 @@ pub(crate) mod tests {
 
         assert!(!args.is_enabled());
         assert!(!args.disable_tls);
+        assert_eq!(args.min_token_quality, defaults::MIN_TOKEN_QUALITY);
         assert_eq!((args.min_tvl, args.rpc_url), (None, None));
     }
 
@@ -96,6 +104,13 @@ pub(crate) mod tests {
         let args = parse(&["--disable-tls"]).unwrap();
 
         assert!(args.disable_tls);
+    }
+
+    #[test]
+    fn test_min_token_quality_flag() {
+        let args = parse(&["--min-token-quality", "1"]).unwrap();
+
+        assert_eq!(args.min_token_quality, 1);
     }
 
     #[test]

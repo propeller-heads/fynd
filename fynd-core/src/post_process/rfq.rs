@@ -14,8 +14,8 @@ use crate::{
     post_process::{
         replace::{
             build_index, can_replace, replace_with_swap, update_index, CandidateRoute,
-            ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity, ReplacementSolver,
-            ReplacementTarget, RouteEvaluator,
+            MembershipChanges, ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity,
+            ReplacementSolver, ReplacementTarget, RouteEvaluator,
         },
         PostProcessRequest, RoutePostProcessor,
     },
@@ -47,7 +47,7 @@ impl MarketEventHandler for RfqSwapReplacer {
         let Some(market) = &self.market else {
             return Ok(());
         };
-        update_index(&mut self.index, market, event, |component| {
+        update_index(&mut self.index, market, event, MembershipChanges::OnAdd, |_, component| {
             is_rfq_protocol(&component.protocol_system)
         })
         .await;
@@ -59,7 +59,7 @@ impl MarketEventHandler for RfqSwapReplacer {
 impl RoutePostProcessor for RfqSwapReplacer {
     async fn initialize(&mut self, market: &MarketData) {
         self.index =
-            build_index(market, |component| is_rfq_protocol(&component.protocol_system)).await;
+            build_index(market, |_, component| is_rfq_protocol(&component.protocol_system)).await;
         self.market = Some(market.clone());
     }
 

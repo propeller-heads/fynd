@@ -1,8 +1,10 @@
 ---
-description: Route your users' swaps through Fynd InBlock. Keep your aggregators, quotes and fee.
+description: >-
+  Route your users' swaps through Fynd InBlock. Keep your aggregators, quotes
+  and fee.
 ---
 
-# Fynd InBlock for Swap Frontends
+# For Swap Frontends
 
 ## What Fynd InBlock gives you
 
@@ -39,34 +41,34 @@ Fynd InBlock pays all shares from the surplus, the extra output of the better ro
 
 Pick one of two paths.
 
-### Path A: through your aggregator
+### Path A: aggregator prepares the calldata
 
-Use this path when your aggregator supports Fynd InBlock. The aggregator API then prepares the transaction for you.
+On this path you don't modify the calldata returned by the aggregator API.
 
-1. Check with your aggregator or the Fynd team that your aggregator supports Fynd InBlock.
-2. Request Fynd InBlock quotes from the aggregator API. They differ from normal quotes in three ways:
-   * The transaction goes to the Fynd InBlock router, not to the aggregator router.
-   * The quote names the Fynd InBlock router as the caller (the taker) and the user as the receiver.
-   * The address for the token approval is the Fynd InBlock router, not the aggregator router.
+1. Check with your aggregator or the Fynd team if your aggregator supports Fynd InBlock. On this path, this is required.
+2. Request Fynd InBlock quotes from the aggregator API. Notice the differences from regular quotes that you may need to account for:
+   1. The transaction's `to` field is the Fynd InBlock router.
+   2. The address for the token approval is the Fynd InBlock router, not the aggregator router.
+3. Give the transaction to the user, as usual.
 
-### Path B: through your own contract
+### Path B: you prepare the calldata
 
-Use this path when your swaps go through your own contract. You prepare the calldata yourself, so your aggregators do not need to support Fynd InBlock.
+Use this path when you prepare the calldata yourself. Your aggregator's API doesn't need to support Fynd InBlock. The swap can go through your own contract.
 
 1. Check that Fynd InBlock has a decoder for each aggregator router you use. If one is missing, you or the Fynd team can write it.
-2. Ask each aggregator API for a quote with the Fynd InBlock router as the caller (the taker). Set the receiver to the user or to your contract.
-3. Change your contract to call the Fynd InBlock router, not the aggregator router. The calldata is `jitSwap(aggregatorRouter, quoteCalldata)`.
+2. When requesting a quote from the aggregator API, specify the Fynd InBlock router as the caller (the taker). Set the receiver to the user or to your contract.
+3. Call the Fynd InBlock router, not the aggregator router. The calldata is `jitSwap(aggregatorRouter, quoteCalldata)`. This call can be made by the user directly, or through your contract.
 4. If the decoder cannot read all the swap data from the quote calldata, send the missing data as an explicit order. The calldata is then `jitSwapWithOrder(aggregatorRouter, quoteCalldata, explicitOrder)`.
-5. Approve the Fynd InBlock router for the input token from your contract. The router takes the input tokens from your contract and sends unused input tokens back to it.
+5. Approve the Fynd InBlock router for the input token. The caller (the user or your contract) must grant this approval. Fynd InBlock router takes input tokens from the caller and returns unused input tokens to them.
 
 ### Your fee on a replaced swap
 
-Fynd InBlock preserves your fee only when it knows it. It learns the fee from the original calldata, or from an explicit order. In path A, the aggregator API sends the explicit order. In path B, you send it.
+Fynd InBlock preserves your fee only when it knows its rate. It learns the fee rate from the original calldata, or from an explicit order. In path A, the aggregator API controls the explicit order. In path B, you control it.
 
 On a replaced swap, the Fynd router pays this fee in the output token, as a balance in the Fynd router. You can withdraw this balance at any time.
 
 {% hint style="warning" %}
-If Fynd InBlock does not know your fee, you get no fee on a replaced swap.
+If Fynd InBlock does not know your fee rate, you get no fee on a replaced swap.
 {% endhint %}
 
 In path B, your contract can also take the fee from the output after the swap. Fynd InBlock then does not need to know the fee.

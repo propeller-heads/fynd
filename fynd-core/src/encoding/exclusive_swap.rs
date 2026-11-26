@@ -1,10 +1,14 @@
-//! Builds the controller-signed `user_data` payload for exclusive swaps.
+//! Holds the controller key that signs exclusive swaps, and builds Ekubo's signed payload.
 //!
-//! An exclusive leg (one carrying a committed amount, [`Swap::committed_amount_out`]) executes
-//! through an on-chain extension that charges a per-swap fee so the taker's output tracks the
-//! committed amount and the surplus goes to the pool's LPs. The committed amount is best-effort,
-//! not a hard floor — the ≥committed guarantee lives upstream in the quote/router and price-guard
-//! layer.
+//! [`ExclusiveSwapSigner`] hands out the nonce, the deadline and the signature of every exclusive
+//! swap. Each protocol in `exclusive_protocol` builds its own payload from them; the Curve grant
+//! and its layout live in `exclusive_protocol::curve`. The rest of this module is Ekubo's payload.
+//!
+//! An Ekubo exclusive leg (one carrying a committed amount, [`Swap::committed_amount_out`])
+//! executes through an on-chain extension that charges a per-swap fee so the taker's output tracks
+//! the committed amount and the surplus goes to the pool's LPs. The committed amount is
+//! best-effort, not a hard floor — the ≥committed guarantee lives upstream in the quote/router and
+//! price-guard layer.
 //!
 //! For Ekubo's `SignedExclusiveSwap` extension the payload is the tycho
 //! [`Swap::user_data`](tycho_execution) bytes `fee(8) | meta(32) | minBalanceUpdate(32) |
@@ -27,7 +31,7 @@ use std::{
 };
 
 use alloy::{
-    primitives::{keccak256, Address, B256, U256},
+    primitives::{keccak256, Address, Signature, B256, U256},
     signers::{local::PrivateKeySigner, SignerSync},
 };
 use num_bigint::BigUint;
@@ -35,7 +39,7 @@ use num_traits::ToPrimitive;
 use tracing::warn;
 use tycho_simulation::tycho_common::{models::protocol::ProtocolComponent, Bytes};
 
-use crate::{bps, SolveError, Swap};
+use crate::{bps, exclusive_protocol::Grantor, SolveError, Swap};
 
 /// Validity window of the exclusive-swap signature, in seconds. Well under the Ekubo extension's
 /// 30-day cap.
@@ -98,7 +102,7 @@ fn parse_output_cap_tolerance_bps(raw: &str) -> Option<u32> {
 /// it; a non-finite or non-positive value leaves no tolerance at all. The factor never goes below
 /// zero, so the floor stays non-negative and keeps rejecting the reverse swap — whose `token_in`
 /// delta is negative — however much slippage a request asks for.
-fn input_floor_factor_bps(slippage: f64) -> u32 {
+pub(crate) fn input_floor_factor_bps(slippage: f64) -> u32 {
     if !slippage.is_finite() || slippage <= 0.0 {
         return bps::DENOMINATOR;
     }
@@ -188,6 +192,14 @@ impl ExclusiveSwapSigner {
         self
     }
 
+    /// The controller address of this signer's key, and the router its payloads authorize.
+    pub(crate) fn grantor(&self) -> Grantor {
+        Grantor {
+            controller: Bytes::from(self.signer.address().to_vec()),
+            router: Bytes::from(self.authorized_locker.to_vec()),
+        }
+    }
+
     /// The locker every payload from this signer authorizes.
     #[cfg(test)]
     pub(crate) fn authorized_locker(&self) -> Address {
@@ -200,7 +212,7 @@ impl ExclusiveSwapSigner {
     /// # Errors
     /// Errors from the 2³²-th payload on. Wrapping the counter would resign a spent nonce, so the
     /// signer stops instead and a restart draws a fresh prefix.
-    fn next_nonce(&self) -> Result<u64, SolveError> {
+    pub(crate) fn next_nonce(&self) -> Result<u64, SolveError> {
         // Rust 1.98 renames `fetch_update` to `try_update`, but the Docker image builds on 1.92,
         // which has no `try_update`. Rename it once the image moves to 1.98.
         #[allow(deprecated)]
@@ -214,6 +226,29 @@ impl ExclusiveSwapSigner {
                 )
             })?;
         Ok((u64::from(self.nonce_prefix) << 32) | u64::from(counter))
+    }
+
+    /// The deadline, in unix seconds, of a payload signed now: now plus `deadline_window_secs`.
+    pub(crate) fn next_deadline(&self) -> Result<u32, SolveError> {
+        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
+        u32::try_from(deadline).map_err(|_| {
+            SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
+        })
+    }
+
+    /// The chain id every payload from this signer is bound to.
+    pub(crate) fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    /// Signs `digest` with the controller key.
+    ///
+    /// # Errors
+    /// Errors if signing fails.
+    pub(crate) fn sign_hash(&self, digest: &B256) -> Result<Signature, SolveError> {
+        self.signer
+            .sign_hash_sync(digest)
+            .map_err(|e| SolveError::FailedEncoding(format!("exclusive swap signing failed: {e}")))
     }
 
     /// Builds the signed `user_data` for one exclusive swap leg.
@@ -243,10 +278,7 @@ impl ExclusiveSwapSigner {
 
         let fee = derive_fee_q32(swap.amount_out(), committed);
         let nonce = self.next_nonce()?;
-        let deadline = now_unix_secs()?.saturating_add(u64::from(self.deadline_window_secs));
-        let deadline = u32::try_from(deadline).map_err(|_| {
-            SolveError::FailedEncoding("signed swap deadline overflows u32".to_string())
-        })?;
+        let deadline = self.next_deadline()?;
 
         // The extension's `isAuthorized` accepts only this locker, so a third party that lifts the
         // signed bytes cannot execute them through its own contract. The locker is the router,
@@ -496,7 +528,7 @@ fn attribute<'a>(component: &'a ProtocolComponent, key: &str) -> Result<&'a [u8]
 mod tests {
     use std::{collections::HashMap, str::FromStr};
 
-    use alloy::primitives::{b256, Address as EvmAddress, Signature};
+    use alloy::primitives::{b256, Address as EvmAddress};
     use chrono::NaiveDateTime;
     use rstest::rstest;
     use tycho_simulation::tycho_common::models::Chain as CommonChain;
