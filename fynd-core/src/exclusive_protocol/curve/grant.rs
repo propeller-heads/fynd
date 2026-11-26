@@ -17,7 +17,7 @@ use tycho_simulation::{
 
 use crate::{
     bps,
-    encoding::exclusive_swap::{input_floor_factor_bps, ExclusiveSwapSigner},
+    encoding::exclusive_swap::{deadline_after, input_floor_factor_bps, ExclusiveSwapSigner},
     SolveError, Swap,
 };
 
@@ -44,6 +44,20 @@ sol! {
 /// 50% the cap still stops a grant being spent at a multiple of the size it was quoted for.
 const INPUT_CAP_TOLERANCE_BPS: u32 = 5_000;
 
+/// The policy's `MAX_GRANT_WINDOW`: it rejects a grant whose deadline is more than this many
+/// seconds after the block's timestamp.
+const POLICY_MAX_GRANT_WINDOW_SECS: u32 = 120;
+
+/// How old a block can be, relative to the signing time, and still accept the grant.
+///
+/// Takers and solvers simulate or estimate gas on the latest block before they submit, and that
+/// block's timestamp is earlier than the signing time. A deadline at the policy's full window
+/// would revert every such check.
+const BLOCK_AGE_ALLOWANCE_SECS: u32 = 60;
+
+/// How long a grant stays valid after signing.
+const GRANT_DEADLINE_WINDOW_SECS: u32 = POLICY_MAX_GRANT_WINDOW_SECS - BLOCK_AGE_ALLOWANCE_SECS;
+
 /// The policy's minimum fee, when it is a valid Curve fee: at most `FEE_DENOMINATOR`.
 pub(super) fn min_fee(policy: &CurvePolicy) -> Option<u64> {
     u64::try_from(policy.min_fee())
@@ -57,7 +71,7 @@ pub(super) fn min_fee(policy: &CurvePolicy) -> Option<u64> {
 /// `taker` is the order's sender; the executor accepts the grant when `taker` is the router's
 /// caller or `tx.origin`. The grant's input band is the swap's input scaled down by `slippage` and
 /// up by `INPUT_CAP_TOLERANCE_BPS`, and its fee brings the output at the policy's minimum fee down
-/// to the swap's committed amount.
+/// to the swap's committed amount. It expires `GRANT_DEADLINE_WINDOW_SECS` after signing.
 ///
 /// # Errors
 /// Errors if `swap` has no committed amount, the policy's `min_fee` is above `FEE_DENOMINATOR`, the
@@ -92,7 +106,7 @@ pub(super) fn sign_grant(
         max_amount_in: scale_input(bps::DENOMINATOR.saturating_add(INPUT_CAP_TOLERANCE_BPS))?,
         fee: U256::from(derive_grant_fee(swap.amount_out(), committed, min_fee)?),
         nonce: signer.next_nonce()?,
-        deadline: signer.next_deadline()?,
+        deadline: deadline_after(GRANT_DEADLINE_WINDOW_SECS)?,
     };
     let policy = policy
         .address()
@@ -361,5 +375,37 @@ mod tests {
         let result = sign_grant(&signer, &grant_swap(), &policy, &Bytes::from([0xaa; 20]), 0.01);
 
         assert!(matches!(result, Err(SolveError::FailedEncoding(_))));
+    }
+
+    /// The policy accepts the grant on a block up to `BLOCK_AGE_ALLOWANCE_SECS` older than the
+    /// signing time, and the grant has not expired at signing.
+    #[test]
+    fn test_sign_grant_deadline() {
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs()
+        };
+        let key: PrivateKeySigner = SIGNER_KEY.parse().expect("key");
+        let signer = ExclusiveSwapSigner::new(key, 1, 3, 120, Address::repeat_byte(0x77));
+
+        let before = now();
+        let user_data =
+            sign_grant(&signer, &grant_swap(), &grant_policy(), &Bytes::from([0xaa; 20]), 0.01)
+                .expect("signed");
+        let after = now();
+
+        let deadline = u64::from(u32::from_be_bytes(
+            user_data[124..128]
+                .try_into()
+                .expect("4 bytes"),
+        ));
+        let oldest_block = before - u64::from(BLOCK_AGE_ALLOWANCE_SECS);
+        assert!(
+            deadline <= oldest_block + u64::from(POLICY_MAX_GRANT_WINDOW_SECS),
+            "deadline {deadline} is past the policy window of a block at {oldest_block}"
+        );
+        assert!(deadline >= after, "deadline {deadline} expired at signing ({after})");
     }
 }
