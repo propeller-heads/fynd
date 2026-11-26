@@ -139,7 +139,19 @@ impl ReplacementFinder for ExclusiveReplacementFinder {
                 .and_then(SplitSearcher::find_best_split_route);
         split_replacement.or(full_replacement)
     }
+
+    /// At least [`MIN_EXCLUSIVE_ROUNDS`], so a route of one swap can split its hop between two
+    /// exclusive pools.
+    fn max_rounds(&self, route_swaps: &[Swap]) -> usize {
+        route_swaps
+            .len()
+            .max(MIN_EXCLUSIVE_ROUNDS)
+    }
 }
+
+/// The fewest rounds the exclusive replacer runs. Each round adds at most one exclusive pool, and
+/// the default of one round per swap gives a route of one swap a single exclusive pool.
+const MIN_EXCLUSIVE_ROUNDS: usize = 2;
 
 impl ExclusiveReplacementFinder {
     /// Commits `candidate` to the amount that matches the original route. `None` when the route
