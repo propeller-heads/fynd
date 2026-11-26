@@ -1,4 +1,17 @@
 
+## [0.129.3](https://github.com/propeller-heads/fynd/compare/0.129.2...0.129.3) (2026-11-26)
+
+### Features
+
+- Label served exclusive routes by the protocols of their legs (sorted and joined with `+`, e.g. `ekubo+curve`), so you can see what each combination of exclusive legs earns. New protocols appear automatically. ([8b9fe8c](https://github.com/propeller-heads/fynd/commit/8b9fe8c1c1b5e8c1bf4bcdc7c50d5a464283fcd0))
+- Add the `exclusive_won_routes_fee_amount` metric, which records the whole fee of each served quote with the same protocol labels. ([8b9fe8c](https://github.com/propeller-heads/fynd/commit/8b9fe8c1c1b5e8c1bf4bcdc7c50d5a464283fcd0))
+- Count every exclusive leg of a served quote in the metrics. Each quote is counted once in `exclusive_won_routes_total`, labelled by its number of exclusive legs. It is also counted under each leg in `exclusive_won_quotes_total`, and each leg's share of the surplus is added to `exclusive_won_fee_amount`. Previously only the first leg was counted, with the whole fee attributed to it. ([7bf5eb6](https://github.com/propeller-heads/fynd/commit/7bf5eb6ae8ce7de0456eecd80112f88ad89abc73))
+
+### Bug Fixes
+
+- Stop Curve quotes from reverting with "deadline" when simulated or gas-estimated on the latest block. Grants are now signed for 60 seconds instead of 120, so blocks up to 60 seconds older than the signing time still accept them. Takers and solvers no longer pass on these quotes. ([caa13b9](https://github.com/propeller-heads/fynd/commit/caa13b955ba5b80168ed2945163503bb9872b265))
+
+
 ## [0.129.2](https://github.com/propeller-heads/fynd/compare/0.129.1...0.129.2) (2026-11-25)
 
 ### Features
