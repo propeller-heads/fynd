@@ -458,7 +458,10 @@ deadline and the signature. Encoding an exclusive leg without that env var fails
   pool's policy. The executor accepts the grant when its taker is the router's caller or
   `tx.origin`, as for subsidies. Its fee brings the output at `min_fee` down to the committed
   amount. Its input band runs from the quoted input scaled down by the request's slippage to 5000
-  bps above it (`INPUT_CAP_TOLERANCE_BPS`), separate from Ekubo's output cap. `user_data` is
+  bps above it (`INPUT_CAP_TOLERANCE_BPS`), separate from Ekubo's output cap. The grant expires
+  60 s after signing (`GRANT_DEADLINE_WINDOW_SECS`). The policy rejects a deadline more than 120 s
+  past the block's timestamp, so a simulation or gas estimate on a block up to 60 s older than the
+  signing time still accepts it. `user_data` is
   `taker(20) | min_amount_in(32) | max_amount_in(32) | fee(32) | nonce(8) | deadline(4) |
   signature(65)`.
 
