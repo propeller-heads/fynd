@@ -7,6 +7,7 @@ use num_traits::ToPrimitive;
 use tracing::warn;
 
 use crate::{
+    exclusive_route::is_exclusive_leg,
     feed::{events::MarketEvent, market_data::MarketData},
     post_process::{PostProcessRequest, RoutePostProcessor},
     types::RouteResult,
@@ -164,7 +165,8 @@ fn record_post_processor_outcome(
     .increment(1);
 }
 
-/// Records how much `replacement` gains over `input`, in basis points of the input net amount out.
+/// Records how much `replacement` gains over `input`, in basis points of the input net amount out,
+/// labelled by the number of exclusive legs in `replacement`.
 ///
 /// Records negative gains unchanged. Nothing is recorded when the input net amount out is not
 /// positive. A replacement that later fails the worker checks still counts here;
@@ -184,10 +186,17 @@ fn record_post_processor_gain(
         return;
     };
     let gain_bps = gain * 10_000.0 / input_net;
+    let exclusive_legs = replacement
+        .route()
+        .swaps()
+        .iter()
+        .filter(|swap| is_exclusive_leg(swap))
+        .count();
     metrics::histogram!(
         "worker_pool_post_processor_gain_bps",
         "pool" => worker_pool.to_string(),
-        "post_processor" => post_processor_name.to_string()
+        "post_processor" => post_processor_name.to_string(),
+        "exclusive_legs" => exclusive_legs.to_string()
     )
     .record(gain_bps);
 }
@@ -539,7 +548,11 @@ mod tests {
                 assert_eq!(gains.len(), 1);
                 assert_eq!(
                     gains[0].1,
-                    vec!["pool=test_pool".to_string(), "post_processor=set".to_string()]
+                    vec![
+                        "pool=test_pool".to_string(),
+                        "post_processor=set".to_string(),
+                        "exclusive_legs=0".to_string()
+                    ]
                 );
                 let DebugValue::Histogram(values) = &gains[0].2 else {
                     panic!("expected histogram, got {:?}", gains[0].2);
