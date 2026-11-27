@@ -7,6 +7,7 @@ use num_traits::ToPrimitive;
 use tracing::warn;
 
 use crate::{
+    exclusive_route::is_exclusive_leg,
     feed::{events::MarketEvent, market_data::MarketData},
     post_process::{PostProcessRequest, RoutePostProcessor},
     types::RouteResult,
@@ -164,7 +165,8 @@ fn record_post_processor_outcome(
     .increment(1);
 }
 
-/// Records how much `replacement` gains over `input`, in basis points of the input net amount out.
+/// Records how much `replacement` gains over `input`, in basis points of the input net amount out,
+/// labelled by the number of exclusive legs in `replacement`.
 ///
 /// Records negative gains unchanged. Nothing is recorded when the input net amount out is not
 /// positive. A replacement that later fails the worker checks still counts here;
@@ -184,10 +186,17 @@ fn record_post_processor_gain(
         return;
     };
     let gain_bps = gain * 10_000.0 / input_net;
+    let exclusive_legs = replacement
+        .route()
+        .swaps()
+        .iter()
+        .filter(|swap| is_exclusive_leg(swap))
+        .count();
     metrics::histogram!(
         "worker_pool_post_processor_gain_bps",
         "pool" => worker_pool.to_string(),
-        "post_processor" => post_processor_name.to_string()
+        "post_processor" => post_processor_name.to_string(),
+        "exclusive_legs" => exclusive_legs.to_string()
     )
     .record(gain_bps);
 }
@@ -214,12 +223,18 @@ mod tests {
     use num_bigint::BigInt;
     use rstest::rstest;
     use rustc_hash::FxHashMap;
+    use tycho_simulation::tycho_core::models::token::Token;
 
     use super::*;
     use crate::{
-        algorithm::test_utils::{order, setup_market_weighted, token},
+        algorithm::test_utils::{
+            component_with_protocol, order, setup_market_weighted, token, MockProtocolSim,
+        },
         derived::{DerivedData, SharedDerivedDataRef},
-        post_process::test_utils::{route_result, with_net_amount_out, MockPostProcessor},
+        feed::exclusivity::mark_exclusive,
+        post_process::test_utils::{
+            result, route_result, swap_through_pool, tokens, with_net_amount_out, MockPostProcessor,
+        },
         types::{Order, OrderSide, ResolvedRouteConstraints},
     };
 
@@ -539,7 +554,11 @@ mod tests {
                 assert_eq!(gains.len(), 1);
                 assert_eq!(
                     gains[0].1,
-                    vec!["pool=test_pool".to_string(), "post_processor=set".to_string()]
+                    vec![
+                        "pool=test_pool".to_string(),
+                        "post_processor=set".to_string(),
+                        "exclusive_legs=0".to_string()
+                    ]
                 );
                 let DebugValue::Histogram(values) = &gains[0].2 else {
                     panic!("expected histogram, got {:?}", gains[0].2);
@@ -552,6 +571,44 @@ mod tests {
             }
             None => assert!(gains.is_empty()),
         }
+    }
+
+    /// The gain of a replacement is labelled by the number of exclusive legs it routes through.
+    #[tokio::test]
+    async fn test_run_gain_bps_counts_exclusive_legs() {
+        let (a, b, c) = tokens();
+        let exclusive_swap = |id: &str, pair: (&Token, &Token)| {
+            let mut pool = component_with_protocol(
+                id,
+                "exclusive:ekubo_v3",
+                &[pair.0.clone(), pair.1.clone()],
+            );
+            mark_exclusive(&mut pool);
+            swap_through_pool(pool, pair, (1000, 2000), 0.0, MockProtocolSim::new(2.0))
+        };
+        let two_legs = result(
+            vec![exclusive_swap("excl_ab", (&a, &b)), exclusive_swap("excl_bc", (&b, &c))],
+            &[&a, &b, &c],
+        );
+        let set = MockPostProcessor::new(move |_| with_net_amount_out(two_legs.clone(), 125));
+        let post_processors = build_post_processors(vec![("set", set)]);
+        let fixture = Fixture::new();
+
+        let recorded = recorded_run(&post_processors, &fixture.request(), route_result(100)).await;
+
+        let labels: Vec<_> = recorded
+            .iter()
+            .filter(|(name, _, _)| name == "worker_pool_post_processor_gain_bps")
+            .map(|(_, labels, _)| labels.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![vec![
+                "pool=test_pool".to_string(),
+                "post_processor=set".to_string(),
+                "exclusive_legs=2".to_string()
+            ]]
+        );
     }
 
     #[tokio::test]

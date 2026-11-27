@@ -18,9 +18,9 @@ use crate::{
     },
     post_process::{
         replace::{
-            build_index, can_replace, replace_with_swap, update_index, CandidateRoute,
-            MembershipChanges, ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity,
-            ReplacementSolver, ReplacementTarget, RouteEvaluator,
+            build_index, replace_with_swap, update_index, CandidateRoute, MembershipChanges,
+            ReplacementComponentIndex, ReplacementFinder, ReplacementLiquidity, ReplacementSolver,
+            ReplacementTarget, RouteEvaluator,
         },
         PostProcessRequest, RoutePostProcessor,
     },
@@ -32,12 +32,13 @@ use crate::{
 /// component, or splits one swap or a segment between its swaps and the exclusive component. It
 /// keeps a replacement only when the net amount out rises and the route can commit to a price.
 ///
-/// The route gets at most one exclusive leg, and a route that already has one does not change. It
-/// acts only on a `public_only` pool, for a request with exclusive access: a pool that includes
-/// exclusive liquidity already routes through it.
+/// Each round of the search can add an exclusive leg, so the route can get one on each of several
+/// hops. A route the algorithm returns with an exclusive leg does not change. It acts only on a
+/// `public_only` pool, for a request with exclusive access: a pool that includes exclusive
+/// liquidity already routes through it.
 ///
 /// The result commits to the amount the router would commit to for an exclusive route against the
-/// route it replaces: see `matched_commitment`. A replacement the finder rejects is dropped.
+/// route it received: see `matched_commitment`. A replacement the finder rejects is dropped.
 #[derive(Default)]
 pub(crate) struct ExclusiveSwapReplacer {
     market: Option<MarketData>,
@@ -115,19 +116,10 @@ fn is_exclusive_member(view: &MarketDataView<'_>, component: &ProtocolComponent)
 /// swaps and the exclusive leg's pool.
 struct ExclusiveReplacementFinder;
 
+/// An exclusive leg fills partially, so it takes the default rule of
+/// [`ReplacementFinder::can_replace_target`]: a target at any index of the route, also in a route
+/// that already has an exclusive leg.
 impl ReplacementFinder for ExclusiveReplacementFinder {
-    /// An exclusive leg fills partially, so it accepts a target at any index of the route. It does
-    /// not accept a route that already has an exclusive leg.
-    fn can_replace_target(
-        &self,
-        swap: &Swap,
-        target: &ReplacementTarget,
-        route_swaps: &[Swap],
-        _evaluator: &RouteEvaluator<'_>,
-    ) -> bool {
-        !routes_through_exclusive(route_swaps) && can_replace(swap, target, route_swaps)
-    }
-
     fn find_best_replacement_route(
         &self,
         swap: &Swap,
@@ -147,7 +139,19 @@ impl ReplacementFinder for ExclusiveReplacementFinder {
                 .and_then(SplitSearcher::find_best_split_route);
         split_replacement.or(full_replacement)
     }
+
+    /// At least [`MIN_EXCLUSIVE_ROUNDS`], so a route of one swap can split its hop between two
+    /// exclusive pools.
+    fn max_rounds(&self, route_swaps: &[Swap]) -> usize {
+        route_swaps
+            .len()
+            .max(MIN_EXCLUSIVE_ROUNDS)
+    }
 }
+
+/// The fewest rounds the exclusive replacer runs. Each round adds at most one exclusive pool, and
+/// the default of one round per swap gives a route of one swap a single exclusive pool.
+const MIN_EXCLUSIVE_ROUNDS: usize = 2;
 
 impl ExclusiveReplacementFinder {
     /// Commits `candidate` to the amount that matches the original route. `None` when the route
@@ -385,7 +389,6 @@ mod tests {
     use crate::{
         algorithm::test_utils::{component_with_protocol, ConstantProductSim, MockProtocolSim},
         derived::DerivedData,
-        exclusive_route::is_exclusive_leg,
         feed::exclusivity::mark_exclusive,
         post_process::test_utils::{
             add_component, added, component_ids, far_deadline, insert_component, market, replaced,
@@ -542,8 +545,12 @@ mod tests {
         assert_eq!(committed_amount_out, committed.map(BigUint::from));
     }
 
+    /// Exclusive pools on both hops of the route: each replaces its hop, and the route commits
+    /// against the route the replacer received (4000 out), not against the route with one
+    /// exclusive leg it built on the way (6000 out, which would commit 6300). The user gets 4000
+    /// plus 10% of the 5000 improvement.
     #[tokio::test]
-    async fn test_exclusive_one_leg() {
+    async fn test_exclusive_legs_on_two_hops_commit_against_the_received_route() {
         let (a, b, c) = tokens();
         let market = market();
         add_exclusive(&market, "excl_ab", (&a, &b), MockProtocolSim::new(3.0).with_gas(10)).await;
@@ -554,15 +561,13 @@ mod tests {
             run_granted(&replacer, &market, &sell_order(&a, &c), sequential_route()).await,
         );
 
-        let exclusive_legs = replaced_route
-            .route()
-            .swaps()
-            .iter()
-            .filter(|swap| is_exclusive_leg(swap))
-            .count();
-        assert_eq!(exclusive_legs, 1);
-        assert_eq!(component_ids(&replaced_route), ["excl_ab", "bc"]);
-        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(5980));
+        assert_eq!(component_ids(&replaced_route), ["excl_ab", "excl_bc"]);
+        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(8980));
+        let commitment = replaced_route
+            .commitment()
+            .expect("the replacement commits");
+        assert_eq!(commitment.committed_amount_out(), &BigUint::from(4500u64));
+        assert_eq!(commitment.reference_amount_out(), &BigUint::from(4000u64));
     }
 
     #[tokio::test]
@@ -765,6 +770,28 @@ mod tests {
         // The original route's net amount out is 1970. The exclusive pool alone gives 1250 minus
         // 10 gas.
         assert_eq!(replaced_route.net_amount_out(), &BigInt::from(1991));
+    }
+
+    /// Two shallow exclusive pools beat a deep public pool on their first units. One round splits
+    /// the hop with one of them; the next splits the public remainder with the other.
+    #[tokio::test]
+    async fn test_exclusive_split_between_two_exclusive_pools() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl1_ab", (&a, &b), constant_product_state(1000, 2500)).await;
+        add_exclusive(&market, "excl2_ab", (&a, &b), constant_product_state(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+
+        let replaced_route = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &b), deep_route(&a, &b)).await,
+        );
+
+        assert_eq!(component_ids(&replaced_route), ["excl1_ab", "excl2_ab", "ab"]);
+        assert_eq!(splits_of(&replaced_route), [0.14589803375031532, 0.12461179749810718, 0.0]);
+        assert_eq!(total_amount_in_for_token(&replaced_route, &a), BigUint::from(1000u64));
+        // One exclusive pool alone nets 1991: see
+        // test_exclusive_split_when_price_falls_with_amount.
+        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(2012));
     }
 
     #[tokio::test]

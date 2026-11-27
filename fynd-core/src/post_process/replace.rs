@@ -308,14 +308,17 @@ impl CandidateRoute {
 /// Decides which swaps may replace a target, and finds the best route that puts one of them in
 /// its place: alone, or splitting the target with its own swaps. [`ReplacementSolver`] runs it.
 pub(super) trait ReplacementFinder {
-    /// Whether `swap` may replace `target` of `route_swaps`.
+    /// Whether `swap` may replace `target` of `route_swaps`. By default a swap may replace a
+    /// target at any index of the route, so only [`can_replace`] applies.
     fn can_replace_target(
         &self,
         swap: &Swap,
         target: &ReplacementTarget,
         route_swaps: &[Swap],
-        evaluator: &RouteEvaluator<'_>,
-    ) -> bool;
+        _evaluator: &RouteEvaluator<'_>,
+    ) -> bool {
+        can_replace(swap, target, route_swaps)
+    }
 
     /// Returns the replacement of `target` through `swap` that has the highest net amount out, if
     /// that amount is above `min_net_amount_out`. Evaluates each replacement with `evaluator`. A
@@ -328,6 +331,12 @@ pub(super) trait ReplacementFinder {
         evaluator: &RouteEvaluator<'_>,
         min_net_amount_out: &BigInt,
     ) -> Option<CandidateRoute>;
+
+    /// The most rounds of replacement to run on a route of `route_swaps`. By default one round
+    /// per swap of the route.
+    fn max_rounds(&self, route_swaps: &[Swap]) -> usize {
+        route_swaps.len()
+    }
 }
 
 /// Simulates replacements on the route under search: holds the original route, its gas cost,
@@ -486,15 +495,15 @@ impl<'a, F: ReplacementFinder> ReplacementSolver<'a, F> {
         Some(Self { evaluator, swaps: liquidity.swaps, finder, required_tokens })
     }
 
-    /// Applies the best replacement until none raises the net amount out, the search has run one
-    /// round per original swap, or the deadline passes. A candidate must beat the net amount out
-    /// of the current route; the first round simulates the original route again. `None` when the
-    /// route did not change, or when the final net amount out is not above the original one. The
-    /// result carries the commitment of the last candidate.
+    /// Applies the best replacement until none raises the net amount out, the search has run the
+    /// finder's [`ReplacementFinder::max_rounds`], or the deadline passes. A candidate must beat
+    /// the net amount out of the current route; the first round simulates the original route
+    /// again. `None` when the route did not change, or when the final net amount out is not above
+    /// the original one. The result carries the commitment of the last candidate.
     pub(super) fn apply_best_replacements(self) -> Option<RouteResult> {
         let original = self.evaluator.original;
         let mut swaps = original.route().swaps().to_vec();
-        let rounds = swaps.len();
+        let rounds = self.finder.max_rounds(&swaps);
         let mut net_amount_out = self
             .evaluator
             .simulate_baseline(&swaps)?;
