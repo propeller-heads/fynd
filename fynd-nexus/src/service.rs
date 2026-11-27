@@ -111,7 +111,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     if cli.market.is_enabled() {
         info!("starting the market");
         let launched = launch_market(cli.chain, &cli.market).await?;
-        let snapshots = Arc::new(DerivedSnapshots::new(cli.chain));
+        let snapshots = Arc::new(DerivedSnapshots::new(cli.chain, run_id));
         let writer =
             DerivedSnapshotWriter::new(launched.feed.derived_data(), Arc::clone(&snapshots));
         writer_task = Some(writer.spawn(launched.feed.subscribe_derived_events()));

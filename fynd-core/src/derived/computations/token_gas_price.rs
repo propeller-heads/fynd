@@ -165,10 +165,7 @@ use crate::{
         protocol_registry::is_rfq_protocol,
     },
     graph::{GraphManager, PetgraphStableDiGraphManager},
-    nexus::{
-        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
-        derived::TokenGasPriceSnapshot,
-    },
+    nexus::client::{NexusClient, NexusDerivedClient, NexusSnapshot},
     types::{
         constants::GasTokenConfig, ComponentId, ComponentTopology, Order, OrderSide,
         ResolvedRouteConstraints,
@@ -176,7 +173,7 @@ use crate::{
 };
 
 /// The tokens of the market's registry that `prices` has no price for.
-fn tokens_without_price(market: &MarketState, prices: &TokenGasPrices) -> Vec<String> {
+pub(crate) fn tokens_without_price(market: &MarketState, prices: &TokenGasPrices) -> Vec<String> {
     let mut unpriced = Vec::new();
     for token in market.token_registry_ref().keys() {
         if !prices.contains_key(token) {
@@ -1821,11 +1818,7 @@ impl DerivedComputation for TokenGasPriceComputation {
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         if let Some(nexus_client) = &self.nexus_client {
             let snapshot = nexus_client
-                .get_in_sync_snapshot(
-                    market,
-                    TokenGasPriceSnapshot::into_token_prices,
-                    tokens_without_price,
-                )
+                .get_in_sync_snapshot(market)
                 .await;
             match snapshot {
                 NexusSnapshot::InSync(prices) => return Ok(ComputationOutput::success(prices)),

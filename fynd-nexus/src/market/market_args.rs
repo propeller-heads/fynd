@@ -31,6 +31,11 @@ pub struct MarketArgs {
     #[arg(long, env = "MIN_TOKEN_QUALITY", default_value_t = defaults::MIN_TOKEN_QUALITY)]
     pub min_token_quality: i32,
 
+    /// Time in milliseconds after a token-pricing pass starts before the next one may start. A
+    /// block inside it serves the stored token prices. Defaults to the market's own interval.
+    #[arg(long, env = "PRICING_MIN_PASS_INTERVAL_MS")]
+    pub pricing_min_pass_interval_ms: Option<u64>,
+
     /// Node RPC URL, which the market reads gas prices from.
     #[arg(long, env = "RPC_URL", hide_env_values = true)]
     pub rpc_url: Option<String>,
@@ -51,6 +56,7 @@ impl fmt::Debug for MarketArgs {
             .field("disable_tls", &self.disable_tls)
             .field("min_tvl", &self.min_tvl)
             .field("min_token_quality", &self.min_token_quality)
+            .field("pricing_min_pass_interval_ms", &self.pricing_min_pass_interval_ms)
             .field("rpc_url", &self.rpc_url.is_some())
             .finish()
     }
@@ -83,6 +89,7 @@ pub(crate) mod tests {
         assert!(!args.disable_tls);
         assert_eq!(args.min_token_quality, defaults::MIN_TOKEN_QUALITY);
         assert_eq!((args.min_tvl, args.rpc_url), (None, None));
+        assert_eq!(args.pricing_min_pass_interval_ms, None);
     }
 
     #[rstest]
@@ -111,6 +118,13 @@ pub(crate) mod tests {
         let args = parse(&["--min-token-quality", "1"]).unwrap();
 
         assert_eq!(args.min_token_quality, 1);
+    }
+
+    #[test]
+    fn test_pricing_min_pass_interval_flag() {
+        let args = parse(&["--pricing-min-pass-interval-ms", "250"]).unwrap();
+
+        assert_eq!(args.pricing_min_pass_interval_ms, Some(250));
     }
 
     #[test]

@@ -33,19 +33,14 @@ use crate::{
             ComputationId, ComputationOutput, ComputationRequirements, DerivedComputation,
             FailedItem, FailedItemError,
         },
-        computations::{
-            components_without_entries, drop_unlisted_directions, spot_price::SpotPriceComputation,
-        },
+        computations::{drop_unlisted_directions, spot_price::SpotPriceComputation},
         error::ComputationError,
         manager::{ChangedComponents, SharedDerivedDataRef},
         store::DerivedData,
         types::{ComponentDepthKey, ComponentDepths, SpotPrices},
     },
     feed::market_data::{MarketData, MarketState},
-    nexus::{
-        client::{NexusClient, NexusDerivedClient, NexusSnapshot},
-        derived::PoolDepthSnapshot,
-    },
+    nexus::client::{NexusClient, NexusDerivedClient, NexusSnapshot},
     types::{ComponentId, SwapDirection},
 };
 
@@ -147,9 +142,7 @@ impl DerivedComputation for ComponentDepthComputation {
     ) -> Result<ComputationOutput<Self::Output>, ComputationError> {
         if let Some(nexus_client) = &self.nexus_client {
             let snapshot = nexus_client
-                .get_in_sync_snapshot(market, PoolDepthSnapshot::into_depths, |market, depths| {
-                    components_without_entries(market, depths.keys().map(|key| key.0.as_str()))
-                })
+                .get_in_sync_snapshot(market)
                 .await;
             match snapshot {
                 NexusSnapshot::InSync(depths) => return Ok(ComputationOutput::success(depths)),

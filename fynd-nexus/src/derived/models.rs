@@ -1,34 +1,33 @@
-//! The encoded derived data the API serves.
+//! What the API serves for a derived kind.
 
 use bytes::Bytes;
+use fynd_core::nexus::derived::DerivedCursor;
 
-/// A derived snapshot as JSON, plain and gzip-compressed, each encoded once when written.
+/// A full update of a derived kind as JSON, plain and gzip-compressed, each encoded once.
 #[derive(Debug, Clone)]
-pub struct EncodedDerivedSnapshot {
-    /// The block the snapshot was computed at.
-    pub block: u64,
-    /// The snapshot as JSON. Clones share one buffer.
+pub struct EncodedFullUpdate {
+    /// The position in the kind's history that the update brings a reader to.
+    pub cursor: DerivedCursor,
+    /// The update as JSON. Clones share one buffer.
     pub json: Bytes,
     /// `json` compressed with gzip. Clones share one buffer.
     pub gzip: Bytes,
 }
 
-impl EncodedDerivedSnapshot {
-    /// The HTTP `ETag` of this snapshot, such as `"21000000"`.
-    pub fn etag(&self) -> String {
-        format!("\"{}\"", self.block)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_etag_is_the_quoted_block() {
-        let encoded =
-            EncodedDerivedSnapshot { block: 21_000_000, json: Bytes::new(), gzip: Bytes::new() };
-
-        assert_eq!(encoded.etag(), "\"21000000\"");
-    }
+/// What the service answers to a request for a derived kind.
+#[derive(Debug, Clone)]
+pub enum DerivedAnswer {
+    /// The kind has no data yet.
+    NoData,
+    /// The reader already holds the latest update.
+    NotModified(DerivedCursor),
+    /// What changed between the reader's cursor and the latest update, as JSON.
+    Delta {
+        /// The latest update.
+        cursor: DerivedCursor,
+        /// The delta as JSON.
+        json: Bytes,
+    },
+    /// The whole kind.
+    Full(EncodedFullUpdate),
 }

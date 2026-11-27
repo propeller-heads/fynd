@@ -60,6 +60,9 @@ pub async fn launch_market(chain: Chain, args: &MarketArgs) -> anyhow::Result<La
     if let Some(api_key) = &args.tycho_api_key {
         builder = builder.tycho_api_key(api_key.clone());
     }
+    if let Some(interval_ms) = args.pricing_min_pass_interval_ms {
+        builder = builder.set_pricing_min_pass_interval(Duration::from_millis(interval_ms));
+    }
     let feed = Arc::new(
         builder
             .build_market()

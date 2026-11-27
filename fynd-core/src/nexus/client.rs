@@ -6,22 +6,25 @@ use std::{
 };
 
 use metrics::{counter, gauge};
-use reqwest::{header::IF_NONE_MATCH, StatusCode, Url};
-use serde::de::DeserializeOwned;
+use reqwest::{StatusCode, Url};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use super::{
-    derived::DerivedSnapshot,
+    derived::{DerivedChanges, DerivedCursor, DerivedUpdate, ServedDerivedOutput},
     price_levels::{PriceLevelsAssembler, PriceLevelsFeed},
 };
-use crate::{
-    derived::ComputationId,
-    feed::market_data::{MarketData, MarketState},
-};
+use crate::{derived::ComputationId, feed::market_data::MarketData};
 
-/// How long a derived snapshot request may take. A snapshot is a few megabytes.
+/// How long a derived update request may take. A full update is a few megabytes.
 const DERIVED_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The size from which an update body is parsed on the blocking pool. A full update is far above
+/// it and a delta far below.
+const BLOCKING_PARSE_MIN_BYTES: usize = 64 * 1024;
+
+/// How long a held output may go without a scan for missing ids when no update changed its keys.
+const MISSING_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How many blocks in a row a snapshot must be within `max_block_lag` before a computation that
 /// stopped using the service uses it again.
@@ -47,7 +50,7 @@ pub enum NexusError {
     HttpClient(String),
 }
 
-/// Why fetching a derived snapshot failed.
+/// Why fetching a derived update failed.
 #[derive(Debug, thiserror::Error)]
 enum DerivedFetchError {
     /// The request failed or its body could not be read.
@@ -56,9 +59,12 @@ enum DerivedFetchError {
     /// The service answered with a status other than 200, 204 or 304.
     #[error("request for {computation} at {url} got HTTP status {status}")]
     Status { computation: ComputationId, url: String, status: StatusCode },
-    /// The body is not a snapshot of the expected entries.
-    #[error("snapshot of {computation} at {url} is malformed: {source}")]
+    /// The body is not an update of the expected entries.
+    #[error("update of {computation} at {url} is malformed: {source}")]
     Malformed { computation: ComputationId, url: String, source: serde_json::Error },
+    /// The task that parses the body did not finish.
+    #[error("parsing the update of {computation} at {url} failed: {source}")]
+    ParseTask { computation: ComputationId, url: String, source: tokio::task::JoinError },
 }
 
 /// Connects a pod to a `fynd-nexus` service.
@@ -68,14 +74,16 @@ pub struct NexusClient {
     http: reqwest::Client,
 }
 
-/// A client for one derived computation's latest snapshot on a `fynd-nexus` service.
+/// A client for one derived computation's output on a `fynd-nexus` service.
 ///
-/// It caches the latest snapshot it accepted and counts the blocks it has been in sync with the
-/// market.
+/// It holds the output the service last described together with the cursor it reached, and asks
+/// the service for what changed since: a full update replaces the output and a delta patches it.
+/// It counts the blocks it has been in sync with the market.
 ///
 /// Exports `nexus_derived_block_lag`, `nexus_derived_snapshot_age_seconds` and
-/// `nexus_derived_missing_components` per computation, and counts failed fetches in
-/// `nexus_client_failed_polls_total`.
+/// `nexus_derived_missing_components` per computation, counts failed fetches in
+/// `nexus_client_failed_polls_total` and the updates it applied in
+/// `nexus_client_derived_updates_total`, labelled by `update`: `full` or `delta`.
 #[derive(Debug)]
 pub(crate) struct NexusDerivedClient<Output> {
     computation: ComputationId,
@@ -117,12 +125,31 @@ pub(crate) enum NexusSnapshot<Output> {
     OutOfSync,
 }
 
-/// The latest snapshot a client accepted, converted into the computation's output.
+/// The output a client holds, with the position it reached in the service's history.
 #[derive(Debug)]
 struct CachedSnapshot<Output> {
+    /// The last update applied, or `None` after a delta that did not fit: the next request then
+    /// asks for a full update.
+    cursor: Option<DerivedCursor>,
     block: u64,
     received_at: Instant,
+    last_missing_scan: Option<Instant>,
     output: Output,
+}
+
+/// An update body after parsing, with its entries converted for the output.
+enum ParsedUpdate<Output: ServedDerivedOutput> {
+    Full {
+        cursor: DerivedCursor,
+        block: u64,
+        output: Output,
+    },
+    Delta {
+        from: DerivedCursor,
+        cursor: DerivedCursor,
+        block: u64,
+        changes: DerivedChanges<Output>,
+    },
 }
 
 impl NexusClient {
@@ -154,7 +181,7 @@ impl NexusClient {
     }
 }
 
-impl<Output: Clone> NexusDerivedClient<Output> {
+impl<Output: ServedDerivedOutput> NexusDerivedClient<Output> {
     /// A client for `computation`'s snapshots from the service behind `client`.
     ///
     /// A change in the number of missing ids is logged as a warning when
@@ -183,54 +210,56 @@ impl<Output: Clone> NexusDerivedClient<Output> {
         }
     }
 
-    /// The latest snapshot from the service, when it is in sync with the market.
+    /// The output held from the service, when it is in sync with the market.
     ///
-    /// It may be called several times per block: blocks are counted by market block number. A
-    /// fetched snapshot replaces the held one only if its block is newer. When the fetch fails,
-    /// the held snapshot stays and the failure is logged and counted. `convert` turns a snapshot
-    /// into the output and `missing` lists the ids of `market` that the output has no entry for;
-    /// it runs only when a fetched snapshot replaced the held one. See [`classify`] for when a
-    /// snapshot is in sync.
+    /// It may be called several times per block: blocks are counted by market block number. Each
+    /// call asks for what changed since the held cursor. A full update replaces the held output,
+    /// even one of a lower block or another run. A delta patches it only when it starts at the
+    /// held cursor; otherwise the cursor is dropped, the failure is logged and counted, and the
+    /// next call asks for a full update. When the fetch fails, the held output stays and the
+    /// failure is logged and counted.
     ///
-    /// Logs a warning when the snapshot falls out of sync and a message when it is in sync again.
-    pub(crate) async fn get_in_sync_snapshot<Entry: DeserializeOwned>(
-        &self,
-        market: &MarketData,
-        convert: fn(DerivedSnapshot<Entry>) -> Output,
-        missing: fn(&MarketState, &Output) -> Vec<String>,
-    ) -> NexusSnapshot<Output> {
+    /// The held output lists the ids of `market` it has no entry for after a full update, a delta
+    /// that added or removed a key and at most every [`MISSING_SCAN_INTERVAL`] otherwise. See
+    /// [`classify`] for when the output is in sync.
+    ///
+    /// Logs a warning when the output falls out of sync and a message when it is in sync again.
+    pub(crate) async fn get_in_sync_snapshot(&self, market: &MarketData) -> NexusSnapshot<Output> {
         let mut state_guard = self.state.lock().await;
         let DerivedClientState { cached, in_sync_blocks, last_counted_block, last_answer } =
             &mut *state_guard;
-        let known_block = cached
+        let since = cached
             .as_ref()
-            .map(|cached| cached.block);
-        let mut replaced = false;
-        match fetch_derived_snapshot::<Entry>(&self.client, self.computation, known_block).await {
-            Ok(Some(snapshot)) if known_block.is_none_or(|known| snapshot.block > known) => {
-                *cached = Some(CachedSnapshot {
-                    block: snapshot.block,
-                    received_at: Instant::now(),
-                    output: convert(snapshot),
-                });
-                replaced = true;
-            }
-            Ok(_) => {}
+            .and_then(|cached| cached.cursor);
+        let mut keys_changed = false;
+        match fetch_derived_update::<Output>(&self.client, self.computation, since).await {
+            Ok(Some(update)) => keys_changed = self.apply_update(cached, update),
+            Ok(None) => {}
             Err(error) => {
-                counter!("nexus_client_failed_polls_total", "computation" => self.computation)
-                    .increment(1);
+                self.count_failed_poll();
                 warn!(computation = self.computation, "fetching from Fynd Nexus failed: {error}");
             }
         }
         let mut block_lag = None;
         let mut market_block = None;
-        if let Some(cached) = cached.as_ref() {
+        if let Some(cached) = cached.as_mut() {
             let view = market.read().await;
             market_block = view
                 .last_updated()
                 .map(|block| block.number());
-            let missing_ids = replaced.then(|| missing(view.base_market_state(), &cached.output));
+            let scan_due = keys_changed ||
+                cached
+                    .last_missing_scan
+                    .is_none_or(|scanned| scanned.elapsed() >= MISSING_SCAN_INTERVAL);
+            let missing_ids = scan_due.then(|| {
+                cached
+                    .output
+                    .ids_without_entry(view.base_market_state())
+            });
             drop(view);
+            if scan_due {
+                cached.last_missing_scan = Some(Instant::now());
+            }
             let lag = market_block.map_or(0, |block| block.saturating_sub(cached.block));
             self.report_held_snapshot(cached, market_block.map(|_| lag));
             if let Some(missing_ids) = missing_ids {
@@ -265,6 +294,75 @@ impl<Output: Clone> NexusDerivedClient<Output> {
                 NexusSnapshot::OutOfSync
             }
         }
+    }
+
+    /// Applies `update` to the held output and says whether that changed its set of keys. A full
+    /// update counts as changing them.
+    fn apply_update(
+        &self,
+        cached: &mut Option<CachedSnapshot<Output>>,
+        update: ParsedUpdate<Output>,
+    ) -> bool {
+        match update {
+            ParsedUpdate::Full { cursor, block, output } => {
+                *cached = Some(CachedSnapshot {
+                    cursor: Some(cursor),
+                    block,
+                    received_at: Instant::now(),
+                    last_missing_scan: None,
+                    output,
+                });
+                self.count_update("full");
+                true
+            }
+            ParsedUpdate::Delta { from, cursor, block, changes } => {
+                let Some(held) = cached
+                    .as_mut()
+                    .filter(|held| held.cursor == Some(from))
+                else {
+                    self.reject_delta(cached.as_mut(), from);
+                    return false;
+                };
+                let keys_changed = held.output.apply(&changes);
+                held.cursor = Some(cursor);
+                held.block = block;
+                held.received_at = Instant::now();
+                self.count_update("delta");
+                keys_changed
+            }
+        }
+    }
+
+    /// Drops the cursor of the held output, so the next call asks for a full update, and logs the
+    /// delta that did not start where the held output stands.
+    fn reject_delta(&self, held: Option<&mut CachedSnapshot<Output>>, delta_from: DerivedCursor) {
+        let held_cursor = held
+            .as_ref()
+            .and_then(|held| held.cursor);
+        warn!(
+            computation = self.computation,
+            held_cursor = ?held_cursor.map(|cursor| cursor.to_string()),
+            delta_from = %delta_from,
+            "fynd-nexus sent a delta that does not start at the held cursor, asking for a full \
+             update"
+        );
+        self.count_failed_poll();
+        if let Some(held) = held {
+            held.cursor = None;
+        }
+    }
+
+    fn count_failed_poll(&self) {
+        counter!("nexus_client_failed_polls_total", "computation" => self.computation).increment(1);
+    }
+
+    fn count_update(&self, update: &'static str) {
+        counter!(
+            "nexus_client_derived_updates_total",
+            "computation" => self.computation,
+            "update" => update
+        )
+        .increment(1);
     }
 
     fn log_answer(
@@ -377,20 +475,20 @@ fn classify<Output>(
     }
 }
 
-/// The latest snapshot of the computation `computation`, or `None` when the service has none
-/// newer than `known_block` (HTTP 304) or none yet (HTTP 204).
-async fn fetch_derived_snapshot<Entry: DeserializeOwned>(
+/// The update of the computation `computation` since `since`, or `None` when the service has
+/// nothing newer (HTTP 304) or no data yet (HTTP 204). Without `since` it is a full update.
+async fn fetch_derived_update<Output: ServedDerivedOutput>(
     client: &NexusClient,
     computation: ComputationId,
-    known_block: Option<u64>,
-) -> Result<Option<DerivedSnapshot<Entry>>, DerivedFetchError> {
+    since: Option<DerivedCursor>,
+) -> Result<Option<ParsedUpdate<Output>>, DerivedFetchError> {
     let url = format!("{}/v1/derived/{computation}", client.connection_url);
     let mut request = client
         .http
         .get(&url)
         .timeout(DERIVED_REQUEST_TIMEOUT);
-    if let Some(block) = known_block {
-        request = request.header(IF_NONE_MATCH, format!("\"{block}\""));
+    if let Some(cursor) = since {
+        request = request.query(&[("since", cursor.to_string())]);
     }
     let request_failed =
         |source| DerivedFetchError::Request { computation, url: url.clone(), source };
@@ -407,9 +505,42 @@ async fn fetch_derived_snapshot<Entry: DeserializeOwned>(
         .bytes()
         .await
         .map_err(request_failed)?;
-    serde_json::from_slice(&body)
+    let parsed = if body.len() >= BLOCKING_PARSE_MIN_BYTES {
+        tokio::task::spawn_blocking(move || parse_update::<Output>(&body))
+            .await
+            .map_err(|source| DerivedFetchError::ParseTask {
+                computation,
+                url: url.clone(),
+                source,
+            })?
+    } else {
+        parse_update::<Output>(&body)
+    };
+    parsed
         .map(Some)
         .map_err(|source| DerivedFetchError::Malformed { computation, url, source })
+}
+
+/// Reads an update body and converts its entries into the output's types.
+fn parse_update<Output: ServedDerivedOutput>(
+    body: &[u8],
+) -> Result<ParsedUpdate<Output>, serde_json::Error> {
+    let update: DerivedUpdate<Output::Entry, Output::Key> = serde_json::from_slice(body)?;
+    Ok(match update {
+        DerivedUpdate::Full { run_id, seq, block, entries } => ParsedUpdate::Full {
+            cursor: DerivedCursor { run_id, seq },
+            block,
+            output: Output::from_entries(entries),
+        },
+        DerivedUpdate::Delta { run_id, from_seq, seq, block, upserted, removed } => {
+            ParsedUpdate::Delta {
+                from: DerivedCursor { run_id, seq: from_seq },
+                cursor: DerivedCursor { run_id, seq },
+                block,
+                changes: DerivedChanges { upserted, removed, non_finite_left_out: 0 },
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -420,7 +551,7 @@ mod tests {
     use rstest::rstest;
     use serde_json::json;
     use wiremock::{
-        matchers::{header, method, path},
+        matchers::{method, path, query_param, query_param_is_missing},
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -429,8 +560,7 @@ mod tests {
         algorithm::test_utils::{
             set_last_updated_block, setup_market_weighted, token, MockProtocolSim,
         },
-        derived::{computations::components_without_entries, types::SpotPrices},
-        nexus::derived::{SpotPriceEntry, SpotPriceSnapshot},
+        derived::types::SpotPrices,
     };
 
     const TOKEN: &str = "0x0101010101010101010101010101010101010101";
@@ -460,16 +590,16 @@ mod tests {
         );
     }
 
-    fn snapshot_body(block: u64) -> serde_json::Value {
-        json!({"block": block, "entries": [{
+    fn full_body(block: u64) -> serde_json::Value {
+        json!({"type": "full", "run_id": 1, "seq": 1, "block": block, "entries": [{
             "component_id": "pool", "token_in": TOKEN, "token_out": TOKEN, "price": 1.5,
         }]})
     }
 
     async fn fetch_from(
         response: ResponseTemplate,
-        known_block: Option<u64>,
-    ) -> Result<Option<DerivedSnapshot<SpotPriceEntry>>, DerivedFetchError> {
+        since: Option<DerivedCursor>,
+    ) -> Result<Option<ParsedUpdate<SpotPrices>>, DerivedFetchError> {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/derived/spot_prices"))
@@ -478,51 +608,75 @@ mod tests {
             .await;
         let client = NexusClient::new(&server.uri()).unwrap();
 
-        fetch_derived_snapshot(&client, "spot_prices", known_block).await
+        fetch_derived_update(&client, "spot_prices", since).await
     }
 
     #[tokio::test]
-    async fn test_fetch_snapshot_ok() {
-        let response = ResponseTemplate::new(200).set_body_json(snapshot_body(7));
+    async fn test_fetch_update_full() {
+        let response = ResponseTemplate::new(200).set_body_json(full_body(7));
 
-        let snapshot = fetch_from(response, None)
+        let update = fetch_from(response, None)
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(snapshot.block, 7);
-        assert_eq!(snapshot.entries.len(), 1);
+        let ParsedUpdate::Full { cursor, block, output } = update else {
+            panic!("expected a full update");
+        };
+        assert_eq!((cursor, block, output.len()), (DerivedCursor { run_id: 1, seq: 1 }, 7, 1));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_update_delta() {
+        let response =
+            ResponseTemplate::new(200).set_body_json(delta_body(1, 3, 8, &[], &["pool"]));
+
+        let update = fetch_from(response, Some(DerivedCursor { run_id: 1, seq: 1 }))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ParsedUpdate::Delta { from, cursor, block, changes } = update else {
+            panic!("expected a delta");
+        };
+        assert_eq!(from, DerivedCursor { run_id: 1, seq: 1 });
+        assert_eq!((cursor, block), (DerivedCursor { run_id: 1, seq: 3 }, 8));
+        assert_eq!((changes.upserted.len(), changes.removed.len()), (0, 1));
     }
 
     #[rstest]
     #[case::not_modified(304)]
     #[case::no_snapshot_yet(204)]
     #[tokio::test]
-    async fn test_fetch_snapshot_none(#[case] status: u16) {
-        let snapshot = fetch_from(ResponseTemplate::new(status), Some(7))
+    async fn test_fetch_update_none(#[case] status: u16) {
+        let update = fetch_from(ResponseTemplate::new(status), None)
             .await
             .unwrap();
 
-        assert!(snapshot.is_none());
+        assert!(update.is_none());
     }
 
     #[tokio::test]
-    async fn test_fetch_snapshot_sends_the_known_block_as_etag() {
+    async fn test_fetch_update_sends_the_held_cursor_as_since() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/derived/spot_prices"))
-            .and(header("if-none-match", "\"7\""))
+            .and(query_param("since", "1-7"))
             .respond_with(ResponseTemplate::new(304))
             .expect(1)
             .mount(&server)
             .await;
         let client = NexusClient::new(&server.uri()).unwrap();
 
-        let snapshot = fetch_derived_snapshot::<SpotPriceEntry>(&client, "spot_prices", Some(7))
-            .await
-            .unwrap();
+        let update = fetch_derived_update::<SpotPrices>(
+            &client,
+            "spot_prices",
+            Some(DerivedCursor { run_id: 1, seq: 7 }),
+        )
+        .await
+        .unwrap();
 
-        assert!(snapshot.is_none());
+        assert!(update.is_none());
     }
 
     #[rstest]
@@ -530,19 +684,48 @@ mod tests {
     #[case::server_error(ResponseTemplate::new(503), "HTTP status 503")]
     #[case::not_json(ResponseTemplate::new(200).set_body_string("nope"), "malformed")]
     #[case::wrong_shape(
-        ResponseTemplate::new(200).set_body_json(json!({"block": 9, "entries": [{"x": 1}]})),
+        ResponseTemplate::new(200).set_body_json(
+            json!({"type": "full", "run_id": 1, "seq": 1, "block": 9, "entries": [{"x": 1}]})
+        ),
+        "malformed"
+    )]
+    #[case::snapshot_without_type(
+        ResponseTemplate::new(200).set_body_json(json!({"block": 9, "entries": []})),
         "malformed"
     )]
     #[tokio::test]
-    async fn test_fetch_snapshot_error(#[case] response: ResponseTemplate, #[case] reason: &str) {
+    async fn test_fetch_update_error(#[case] response: ResponseTemplate, #[case] reason: &str) {
         let error = fetch_from(response, None)
             .await
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string();
 
         assert!(error.contains(reason), "got {error}");
         assert!(error.contains("spot_prices"), "got {error}");
         assert!(error.contains("/v1/derived/spot_prices"), "got {error}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_update_parses_a_large_body_off_the_runtime() {
+        let entries: Vec<_> = (0..2000)
+            .map(|index| {
+                json!({"component_id": format!("pool_{index}"), "token_in": TOKEN,
+                       "token_out": TOKEN, "price": 1.5})
+            })
+            .collect();
+        let body = json!({"type": "full", "run_id": 1, "seq": 1, "block": 7, "entries": entries});
+        assert!(body.to_string().len() >= BLOCKING_PARSE_MIN_BYTES);
+
+        let update = fetch_from(ResponseTemplate::new(200).set_body_json(body), None)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ParsedUpdate::Full { output, .. } = update else {
+            panic!("expected a full update");
+        };
+        assert_eq!(output.len(), 2000);
     }
 
     fn market() -> MarketData {
@@ -554,16 +737,54 @@ mod tests {
         market
     }
 
-    fn served(block: u64, price: f64, components: &[&str]) -> ResponseTemplate {
+    fn spot_entry(component: &str, price: f64) -> serde_json::Value {
         let (eth, usdc) = (token(1, "ETH").address, token(2, "USDC").address);
+        json!({"component_id": component, "token_in": eth, "token_out": usdc, "price": price})
+    }
+
+    fn spot_key(component: &str) -> serde_json::Value {
+        let (eth, usdc) = (token(1, "ETH").address, token(2, "USDC").address);
+        json!({"component_id": component, "token_in": eth, "token_out": usdc})
+    }
+
+    fn full_at(
+        cursor: (u64, u64),
+        block: u64,
+        price: f64,
+        components: &[&str],
+    ) -> ResponseTemplate {
         let entries: Vec<_> = components
             .iter()
-            .map(|component| {
-                json!({"component_id": component, "token_in": eth, "token_out": usdc,
-                       "price": price})
-            })
+            .map(|component| spot_entry(component, price))
             .collect();
-        ResponseTemplate::new(200).set_body_json(json!({"block": block, "entries": entries}))
+        ResponseTemplate::new(200).set_body_json(json!({
+            "type": "full", "run_id": cursor.0, "seq": cursor.1, "block": block,
+            "entries": entries,
+        }))
+    }
+
+    fn delta_body(
+        from_seq: u64,
+        seq: u64,
+        block: u64,
+        upserted: &[(&str, f64)],
+        removed: &[&str],
+    ) -> serde_json::Value {
+        let upserted: Vec<_> = upserted
+            .iter()
+            .map(|(component, price)| spot_entry(component, *price))
+            .collect();
+        let removed: Vec<_> = removed
+            .iter()
+            .map(|component| spot_key(component))
+            .collect();
+        json!({"type": "delta", "run_id": 1, "from_seq": from_seq, "seq": seq, "block": block,
+               "upserted": upserted, "removed": removed})
+    }
+
+    /// A full update of run 1 at seq 1.
+    fn served(block: u64, price: f64, components: &[&str]) -> ResponseTemplate {
+        full_at((1, 1), block, price, components)
     }
 
     async fn serve(server: &MockServer, response: ResponseTemplate) {
@@ -594,13 +815,7 @@ mod tests {
         market: &MarketData,
     ) -> NexusSnapshot<SpotPrices> {
         client
-            .get_in_sync_snapshot::<SpotPriceEntry>(
-                market,
-                SpotPriceSnapshot::into_spot_prices,
-                |market, prices| {
-                    components_without_entries(market, prices.keys().map(|key| key.0.as_str()))
-                },
-            )
+            .get_in_sync_snapshot(market)
             .await
     }
 
@@ -651,24 +866,115 @@ mod tests {
     }
 
     #[rstest]
-    #[case::newer_block(7, 8, 2.0)]
-    #[case::equal_block(7, 7, 1.0)]
-    #[case::older_block(7, 5, 1.0)]
+    #[case::newer_block((1, 1), 8)]
+    #[case::equal_block((1, 2), 7)]
+    #[case::older_block((1, 2), 5)]
+    #[case::other_run((2, 1), 5)]
     #[tokio::test]
-    async fn test_second_snapshot_replaces_only_a_newer_block(
-        #[case] first_block: u64,
+    async fn test_full_update_replaces_the_held_output_whatever_its_block_or_run(
+        #[case] second_cursor: (u64, u64),
         #[case] second_block: u64,
-        #[case] expected_price: f64,
     ) {
         let server = MockServer::start().await;
         let client = derived_client(&server);
-        serve(&server, served(first_block, 1.0, &["eth_usdc"])).await;
+        serve(&server, served(7, 1.0, &["eth_usdc"])).await;
         latest_price(&client).await;
-        serve(&server, served(second_block, 2.0, &["eth_usdc"])).await;
+        serve(&server, full_at(second_cursor, second_block, 2.0, &["eth_usdc"])).await;
 
         let price = latest_price(&client).await;
 
-        assert_eq!(price, Some(expected_price));
+        assert_eq!(price, Some(2.0));
+    }
+
+    #[tokio::test]
+    async fn test_delta_patches_the_held_output() {
+        let server = MockServer::start().await;
+        let client = derived_client(&server);
+        serve(&server, served(7, 1.0, &["eth_usdc"])).await;
+        latest_price(&client).await;
+        serve(
+            &server,
+            ResponseTemplate::new(200).set_body_json(delta_body(
+                1,
+                2,
+                8,
+                &[("eth_usdc", 3.0)],
+                &[],
+            )),
+        )
+        .await;
+
+        let price = latest_price(&client).await;
+
+        assert_eq!(price, Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn test_each_update_is_counted_by_its_kind() {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let server = MockServer::start().await;
+        let client = derived_client(&server);
+        serve(&server, served(7, 1.0, &["eth_usdc"])).await;
+        latest_price(&client).await;
+        serve(&server, ResponseTemplate::new(200).set_body_json(delta_body(1, 2, 8, &[], &[])))
+            .await;
+        latest_price(&client).await;
+
+        let mut updates = HashMap::new();
+        for (key, _, _, value) in recorder
+            .snapshotter()
+            .snapshot()
+            .into_vec()
+        {
+            if key.key().name() != "nexus_client_derived_updates_total" {
+                continue;
+            }
+            let update = key
+                .key()
+                .labels()
+                .find(|label| label.key() == "update")
+                .map(|label| label.value().to_string());
+            let DebugValue::Counter(count) = value else {
+                panic!("expected a counter");
+            };
+            updates.insert(update.unwrap(), count);
+        }
+
+        assert_eq!(updates, HashMap::from([("full".to_string(), 1), ("delta".to_string(), 1)]));
+    }
+
+    #[rstest]
+    #[case::wrong_from_seq(1, 4)]
+    #[case::wrong_run_id(2, 1)]
+    #[tokio::test]
+    async fn test_delta_from_another_cursor_is_rejected_and_a_full_recovers(
+        #[case] delta_run_id: u64,
+        #[case] delta_from_seq: u64,
+    ) {
+        let recorder = DebuggingRecorder::new();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let server = MockServer::start().await;
+        let client = derived_client(&server);
+        serve(&server, served(7, 1.0, &["eth_usdc"])).await;
+        latest_price(&client).await;
+        let mut misplaced = delta_body(delta_from_seq, 5, 8, &[("eth_usdc", 9.0)], &[]);
+        misplaced["run_id"] = json!(delta_run_id);
+        serve(&server, ResponseTemplate::new(200).set_body_json(misplaced)).await;
+        let held_price = latest_price(&client).await;
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/derived/spot_prices"))
+            .and(query_param_is_missing("since"))
+            .respond_with(full_at((1, 6), 9, 2.0, &["eth_usdc"]))
+            .mount(&server)
+            .await;
+
+        let recovered_price = latest_price(&client).await;
+
+        assert_eq!(held_price, Some(1.0), "a mismatched delta must not patch the held output");
+        assert_eq!(metrics(&recorder)["nexus_client_failed_polls_total"], 1.0);
+        assert_eq!(recovered_price, Some(2.0));
     }
 
     #[rstest]
@@ -770,33 +1076,6 @@ mod tests {
             .iter()
             .all(|answer| *answer == NexusSnapshot::OutOfSync));
         assert!(matches!(resumed, NexusSnapshot::InSync(_)), "got {resumed:?}");
-    }
-
-    #[tokio::test]
-    async fn test_missing_ids_are_scanned_only_for_a_replacing_snapshot() {
-        static SCANS: AtomicUsize = AtomicUsize::new(0);
-        fn count_scan(_: &MarketState, _: &SpotPrices) -> Vec<String> {
-            SCANS.fetch_add(1, Ordering::Relaxed);
-            Vec::new()
-        }
-        let server = MockServer::start().await;
-        let client = derived_client(&server);
-        let market = market();
-        let mut scans_after_call = Vec::new();
-
-        for served_block in [7, 7, 8] {
-            serve(&server, served(served_block, 1.0, &["eth_usdc"])).await;
-            client
-                .get_in_sync_snapshot::<SpotPriceEntry>(
-                    &market,
-                    SpotPriceSnapshot::into_spot_prices,
-                    count_scan,
-                )
-                .await;
-            scans_after_call.push(SCANS.load(Ordering::Relaxed));
-        }
-
-        assert_eq!(scans_after_call, [1, 1, 2]);
     }
 
     #[rstest]

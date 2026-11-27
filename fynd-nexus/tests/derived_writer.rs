@@ -2,10 +2,13 @@ use std::{sync::Arc, time::Duration};
 
 use fynd_core::{
     derived::{types::TokenGasPrices, DerivedData, DerivedDataEvent, SharedDerivedDataRef},
-    nexus::derived::{DerivedKind, DerivedSnapshot, PoolDepthEntry, SpotPriceEntry},
+    nexus::derived::{DerivedCursor, DerivedKind, DerivedUpdate, PoolDepthEntry, SpotPriceEntry},
 };
-use fynd_nexus::derived::{snapshot::DerivedSnapshots, writer::DerivedSnapshotWriter};
+use fynd_nexus::derived::{
+    models::DerivedAnswer, snapshot::DerivedSnapshots, writer::DerivedSnapshotWriter,
+};
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tokio::{sync::broadcast, time::timeout};
 use tycho_simulation::{
     evm::tycho_models::Chain,
@@ -13,6 +16,7 @@ use tycho_simulation::{
 };
 
 const DEADLINE: Duration = Duration::from_secs(5);
+const RUN_ID: u64 = 1_761_550_000_000;
 
 fn key(component: &str) -> (String, Bytes, Bytes) {
     (component.to_string(), Bytes::from([1; 20]), Bytes::from([2; 20]))
@@ -55,7 +59,7 @@ fn writer_over(
     store: &SharedDerivedDataRef,
     capacity: usize,
 ) -> (DerivedSnapshotWriter, Arc<DerivedSnapshots>, broadcast::Sender<DerivedDataEvent>, Receiver) {
-    let snapshots = Arc::new(DerivedSnapshots::new(Chain::Ethereum));
+    let snapshots = Arc::new(DerivedSnapshots::new(Chain::Ethereum, RUN_ID));
     let (events, receiver) = broadcast::channel(capacity);
     (
         DerivedSnapshotWriter::new(Arc::clone(store), Arc::clone(&snapshots)),
@@ -77,12 +81,29 @@ async fn wait_for_block(snapshots: &DerivedSnapshots, kind: DerivedKind, block: 
     .expect("the snapshot should reach the block before the timeout");
 }
 
-fn decode<E: DeserializeOwned>(
+/// The block and entries of the full update of `kind`.
+async fn full_entries<E: DeserializeOwned>(
     snapshots: &DerivedSnapshots,
     kind: DerivedKind,
-) -> DerivedSnapshot<E> {
-    let current = snapshots.current(kind).unwrap();
-    serde_json::from_slice(&current.json).unwrap()
+) -> (u64, Vec<E>) {
+    let DerivedAnswer::Full(full) = snapshots
+        .answer(kind, None, None)
+        .await
+        .unwrap()
+    else {
+        panic!("expected a full update of {kind}");
+    };
+    match serde_json::from_slice::<DerivedUpdate<E, Value>>(&full.json).unwrap() {
+        DerivedUpdate::Full { block, entries, .. } => (block, entries),
+        DerivedUpdate::Delta { .. } => panic!("a full update parsed as a delta"),
+    }
+}
+
+async fn answer_since(snapshots: &DerivedSnapshots, kind: DerivedKind, seq: u64) -> DerivedAnswer {
+    snapshots
+        .answer(kind, Some(DerivedCursor { run_id: RUN_ID, seq }), None)
+        .await
+        .unwrap()
 }
 
 /// Writes a store filled at block 7 and returns once every kind holds it.
@@ -118,8 +139,8 @@ async fn test_startup_writes_what_the_store_holds_without_non_finite_prices() {
     writer.spawn(receiver);
     wait_for_block(&snapshots, DerivedKind::SpotPrices, 4).await;
 
-    let spot = decode::<SpotPriceEntry>(&snapshots, DerivedKind::SpotPrices);
-    assert_eq!((spot.entries.len(), spot.entries[0].price), (1, 1.5));
+    let (_, spot) = full_entries::<SpotPriceEntry>(&snapshots, DerivedKind::SpotPrices).await;
+    assert_eq!((spot.len(), spot[0].price), (1, 1.5));
 }
 
 #[tokio::test]
@@ -137,17 +158,15 @@ async fn test_completed_computation_writes_its_own_kind_only() {
 
     wait_for_block(&snapshots, DerivedKind::SpotPrices, 9).await;
     assert_eq!(blocks(&snapshots), [Some(9), Some(7), Some(7)]);
-    let depths = decode::<PoolDepthEntry>(&snapshots, DerivedKind::PoolDepths);
-    assert_eq!(depths.block, 7);
+    let (depths_block, _) =
+        full_entries::<PoolDepthEntry>(&snapshots, DerivedKind::PoolDepths).await;
+    assert_eq!(depths_block, 7);
 }
 
 #[tokio::test]
-async fn test_event_for_an_already_written_block_writes_nothing() {
+async fn test_event_for_an_unchanged_block_publishes_nothing() {
     let store = DerivedData::new_shared();
     let (snapshots, events) = start_at_block_7(&store).await;
-    let before = snapshots
-        .current(DerivedKind::SpotPrices)
-        .unwrap();
     set_depths(&store, 8).await;
 
     events
@@ -158,14 +177,31 @@ async fn test_event_for_an_already_written_block_writes_nothing() {
         .unwrap();
 
     wait_for_block(&snapshots, DerivedKind::PoolDepths, 8).await;
-    let after = snapshots
-        .current(DerivedKind::SpotPrices)
+    let spot = answer_since(&snapshots, DerivedKind::SpotPrices, 1).await;
+    assert!(matches!(spot, DerivedAnswer::NotModified(_)), "got {spot:?}");
+}
+
+#[tokio::test]
+async fn test_unchanged_data_at_a_new_block_publishes_an_empty_delta() {
+    let store = DerivedData::new_shared();
+    let (snapshots, events) = start_at_block_7(&store).await;
+    fill_store(&store, 9).await;
+
+    events
+        .send(completion_event("spot_prices", 9))
         .unwrap();
-    assert_eq!(
-        before.json.as_ptr(),
-        after.json.as_ptr(),
-        "the block 7 snapshot was not re-encoded"
-    );
+
+    wait_for_block(&snapshots, DerivedKind::SpotPrices, 9).await;
+    let DerivedAnswer::Delta { json, .. } =
+        answer_since(&snapshots, DerivedKind::SpotPrices, 1).await
+    else {
+        panic!("expected a delta");
+    };
+    let delta: DerivedUpdate<SpotPriceEntry, Value> = serde_json::from_slice(&json).unwrap();
+    let DerivedUpdate::Delta { block, upserted, removed, .. } = delta else {
+        panic!("expected a delta");
+    };
+    assert_eq!((block, upserted.len(), removed.len()), (9, 0, 0));
 }
 
 #[tokio::test]

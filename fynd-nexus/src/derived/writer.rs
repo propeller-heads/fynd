@@ -1,4 +1,4 @@
-//! Writes the market's default derived computations into the derived snapshot store.
+//! Publishes the market's default derived computations into the derived snapshot store.
 
 use std::{
     sync::Arc,
@@ -7,19 +7,16 @@ use std::{
 
 use fynd_core::{
     derived::{DerivedDataEvent, SharedDerivedDataRef},
-    nexus::derived::{
-        DerivedKind, DerivedSnapshot, PoolDepthSnapshot, SpotPriceSnapshot, TokenGasPriceSnapshot,
-    },
+    nexus::derived::DerivedKind,
 };
 use metrics::counter;
-use serde::Serialize;
 use tokio::{sync::broadcast, task::JoinHandle};
 use tracing::{debug, error, warn};
 
-use crate::derived::snapshot::DerivedSnapshots;
+use crate::derived::{history::PublishSummary, snapshot::DerivedSnapshots};
 
-/// Writes the latest snapshot of each derived computation into `DerivedSnapshots` when the market
-/// computes a new block.
+/// Publishes each derived computation into `DerivedSnapshots` when the market computes a new
+/// block.
 pub struct DerivedSnapshotWriter {
     derived_data: SharedDerivedDataRef,
     snapshots: Arc<DerivedSnapshots>,
@@ -64,7 +61,7 @@ impl DerivedSnapshotWriter {
         }
     }
 
-    /// Uses the blocking pool because converting and encoding a large market's maps takes
+    /// Uses the blocking pool because diffing a large market's maps takes
     /// milliseconds and would stall the runtime's other tasks.
     async fn write_off_runtime(self: Arc<Self>, kinds: Vec<DerivedKind>) {
         let writing = tokio::task::spawn_blocking(move || {
@@ -77,79 +74,66 @@ impl DerivedSnapshotWriter {
         }
     }
 
-    /// Writes the current snapshot for `kind` if the market has computed that data and has not
-    /// written its block yet.
+    /// Publishes the current output of `kind` if the market has computed it and it differs from
+    /// what was published, or comes from another block.
+    ///
+    /// The diff is taken against the last published output rather than from the market's change
+    /// lists, because the writer can skip blocks when it lags. It holds the derived data read
+    /// lock for the diff only.
     fn write(&self, kind: DerivedKind) {
         let derived_data = self.derived_data.blocking_read();
         let started = Instant::now();
-        match kind {
+        let summary = match kind {
             DerivedKind::SpotPrices => {
                 let Some((prices, status)) = derived_data.spot_prices_with_status() else {
                     return;
                 };
-                if self.is_written(kind, status.block()) {
-                    return;
-                }
-                let snapshot = SpotPriceSnapshot::from_spot_prices(prices, status.block());
-                let skipped = prices.len() - snapshot.entries.len();
-                drop(derived_data);
-                if skipped > 0 {
-                    warn!(
-                        %kind,
-                        block = snapshot.block,
-                        skipped,
-                        "left out prices that are not finite"
-                    );
-                    counter!("nexus_derived_skipped_entries_total", self.snapshots.labels(kind))
-                        .increment(skipped as u64);
-                }
-                self.write_snapshot(kind, &snapshot, started);
+                self.snapshots
+                    .spot_prices()
+                    .publish(prices, status.block())
             }
             DerivedKind::PoolDepths => {
                 let Some((depths, status)) = derived_data.component_depths_with_status() else {
                     return;
                 };
-                if self.is_written(kind, status.block()) {
-                    return;
-                }
-                let snapshot = PoolDepthSnapshot::from_depths(depths, status.block());
-                drop(derived_data);
-                self.write_snapshot(kind, &snapshot, started);
+                self.snapshots
+                    .pool_depths()
+                    .publish(depths, status.block())
             }
             DerivedKind::TokenPrices => {
                 let Some((prices, status)) = derived_data.token_prices_with_status() else {
                     return;
                 };
-                if self.is_written(kind, status.block()) {
-                    return;
-                }
-                let snapshot = TokenGasPriceSnapshot::from_token_prices(prices, status.block());
-                drop(derived_data);
-                self.write_snapshot(kind, &snapshot, started);
+                self.snapshots
+                    .token_prices()
+                    .publish(prices, status.block())
             }
+        };
+        drop(derived_data);
+        if let Some(summary) = summary {
+            self.report(kind, summary, started);
         }
     }
 
-    fn is_written(&self, kind: DerivedKind, block: u64) -> bool {
-        self.snapshots.block(kind) == Some(block)
-    }
-
-    fn write_snapshot<E: Serialize>(
-        &self,
-        kind: DerivedKind,
-        snapshot: &DerivedSnapshot<E>,
-        started: Instant,
-    ) {
-        let converted = started.elapsed();
-        let writing = Instant::now();
-        self.snapshots.replace(kind, snapshot);
+    fn report(&self, kind: DerivedKind, summary: PublishSummary, started: Instant) {
+        if summary.non_finite_left_out > 0 {
+            warn!(
+                %kind,
+                block = summary.block,
+                skipped = summary.non_finite_left_out,
+                "left out prices that are not finite"
+            );
+            counter!("nexus_derived_skipped_entries_total", self.snapshots.labels(kind))
+                .increment(summary.non_finite_left_out as u64);
+        }
         debug!(
             %kind,
-            block = snapshot.block,
-            entries = snapshot.entries.len(),
-            convert_ms = millis(converted),
-            write_ms = millis(writing.elapsed()),
-            "wrote derived snapshot"
+            seq = summary.seq,
+            block = summary.block,
+            upserted = summary.upserted,
+            removed = summary.removed,
+            publish_ms = millis(started.elapsed()),
+            "published derived data"
         );
     }
 }
