@@ -139,7 +139,19 @@ impl ReplacementFinder for ExclusiveReplacementFinder {
                 .and_then(SplitSearcher::find_best_split_route);
         split_replacement.or(full_replacement)
     }
+
+    /// At least [`MIN_EXCLUSIVE_ROUNDS`], so a route of one swap can split its hop between two
+    /// exclusive pools.
+    fn max_rounds(&self, route_swaps: &[Swap]) -> usize {
+        route_swaps
+            .len()
+            .max(MIN_EXCLUSIVE_ROUNDS)
+    }
 }
+
+/// The fewest rounds the exclusive replacer runs. Each round adds at most one exclusive pool, and
+/// the default of one round per swap gives a route of one swap a single exclusive pool.
+const MIN_EXCLUSIVE_ROUNDS: usize = 2;
 
 impl ExclusiveReplacementFinder {
     /// Commits `candidate` to the amount that matches the original route. `None` when the route
@@ -758,6 +770,28 @@ mod tests {
         // The original route's net amount out is 1970. The exclusive pool alone gives 1250 minus
         // 10 gas.
         assert_eq!(replaced_route.net_amount_out(), &BigInt::from(1991));
+    }
+
+    /// Two shallow exclusive pools beat a deep public pool on their first units. One round splits
+    /// the hop with one of them; the next splits the public remainder with the other.
+    #[tokio::test]
+    async fn test_exclusive_split_between_two_exclusive_pools() {
+        let (a, b, _) = tokens();
+        let market = market();
+        add_exclusive(&market, "excl1_ab", (&a, &b), constant_product_state(1000, 2500)).await;
+        add_exclusive(&market, "excl2_ab", (&a, &b), constant_product_state(1000, 2500)).await;
+        let replacer = replacer(&market).await;
+
+        let replaced_route = replaced(
+            run_granted(&replacer, &market, &sell_order(&a, &b), deep_route(&a, &b)).await,
+        );
+
+        assert_eq!(component_ids(&replaced_route), ["excl1_ab", "excl2_ab", "ab"]);
+        assert_eq!(splits_of(&replaced_route), [0.14589803375031532, 0.12461179749810718, 0.0]);
+        assert_eq!(total_amount_in_for_token(&replaced_route, &a), BigUint::from(1000u64));
+        // One exclusive pool alone nets 1991: see
+        // test_exclusive_split_when_price_falls_with_amount.
+        assert_eq!(replaced_route.net_amount_out(), &BigInt::from(2012));
     }
 
     #[tokio::test]
