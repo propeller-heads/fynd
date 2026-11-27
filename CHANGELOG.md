@@ -1,4 +1,13 @@
 
+## [0.129.4](https://github.com/propeller-heads/fynd/compare/0.129.3...0.129.4) (2026-11-27)
+
+### Features
+
+* **core:** run at least two exclusive replacement rounds ([a1b279a](https://github.com/propeller-heads/fynd/commit/a1b279aaa3c27297cb5655693d4e64464808933e))
+* **core:** let the exclusive replacer add an exclusive leg on several hops ([cb9e4aa](https://github.com/propeller-heads/fynd/commit/cb9e4aa8bb9e1720a0e4de1de89782f8ab95a8a9))
+* **core:** label the post-processor gain by the number of exclusive legs ([0343d36](https://github.com/propeller-heads/fynd/commit/0343d36c32765504d86fee1524d496e51a8f7d58))
+
+
 ## [0.129.3](https://github.com/propeller-heads/fynd/compare/0.129.2...0.129.3) (2026-11-26)
 
 ### Features
