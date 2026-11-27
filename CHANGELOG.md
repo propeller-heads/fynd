@@ -1,4 +1,13 @@
 
+## [0.129.4](https://github.com/propeller-heads/fynd/compare/0.129.3...0.129.4) (2026-11-27)
+
+### Features
+
+- Allow routes to include exclusive pools on multiple hops, so each hop uses an exclusive pool wherever one beats the public route. ([cb9e4aa](https://github.com/propeller-heads/fynd/commit/cb9e4aa8bb9e1720a0e4de1de89782f8ab95a8a9))
+- Split a single-swap route's hop between two exclusive pools when that increases the net amount out. The exclusive replacer now runs at least two rounds. ([a1b279a](https://github.com/propeller-heads/fynd/commit/a1b279aaa3c27297cb5655693d4e64464808933e))
+- Add an `exclusive_legs` label to the `worker_pool_post_processor_gain_bps` metric. It shows the number of exclusive legs in the replacement route, so you can compare gains from one versus two exclusive legs. ([0343d36](https://github.com/propeller-heads/fynd/commit/0343d36c32765504d86fee1524d496e51a8f7d58))
+
+
 ## [0.129.3](https://github.com/propeller-heads/fynd/compare/0.129.2...0.129.3) (2026-11-26)
 
 ### Features
