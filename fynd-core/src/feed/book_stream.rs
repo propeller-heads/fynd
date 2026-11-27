@@ -35,7 +35,7 @@ use super::{
     when_configured, DataFeedError, TychoFeedConfig,
 };
 use crate::{
-    feed::protocol_registry::{matches_streamed_system, RfqEntry},
+    feed::protocol_registry::{matches_streamed_system, BookEntry},
     nexus::client::NexusClient,
     types::ComponentId,
 };
@@ -144,8 +144,8 @@ impl std::fmt::Debug for ExternalLiquidity {
 }
 
 impl BookStream {
-    /// Subscribes to every `rfq:` entry in `config.protocols` and to `config.external_liquidity`.
-    /// Returns `None` if there are neither.
+    /// Subscribes to every `rfq:` and `pamm:` entry in `config.protocols` and to
+    /// `config.external_liquidity`. Returns `None` if there are neither.
     ///
     /// The venues price their books' TVL in USD stablecoins, so `config.min_tvl` is read here as a
     /// USD amount — unlike the native-token threshold the Tycho component filter takes. With
@@ -191,6 +191,7 @@ impl BookStream {
             },
             aggregate_rfqs: config.aggregate_rfqs,
             nexus_client,
+            rpc_url: config.rpc_url.clone(),
         };
         let book_config = &context.book_config;
 
@@ -415,7 +416,7 @@ fn reject_name_clash(
         .cartesian_product(external_liquidity)
     {
         let clashes = matches_streamed_system(entry, &source.protocol_system) ||
-            RfqEntry::parse(entry)
+            BookEntry::parse(entry)
                 .is_some_and(|venue| venue.protocol() == source.protocol_system);
         if clashes {
             return Err(DataFeedError::Config(format!(

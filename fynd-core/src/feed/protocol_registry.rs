@@ -65,6 +65,10 @@ const PRICE_LEVEL_STREAM_PREFIX: &str = "pricelevelstream:";
 /// `--protocols` entry and the protocol system of the components the feed publishes.
 pub(crate) const RFQ_PREFIX: &str = "rfq:";
 
+/// Marks a pAMM served from a book feed rather than from Tycho, e.g. `pamm:baibai`: both its
+/// `--protocols` entry and the protocol system of the components the feed publishes.
+const PAMM_PREFIX: &str = "pamm:";
+
 /// Removes the `fallback:` prefix from `protocol_system`, if it has one.
 pub(crate) fn strip_fallback_prefix(protocol_system: &str) -> &str {
     protocol_system
@@ -145,42 +149,48 @@ const METRIC_PRICE_LEVEL_VENUE: &str = "metric";
 /// The book feeds and the pAMM price level stream each connect to their own endpoint, so their
 /// entries never appear among the protocol systems Tycho serves.
 pub fn is_tycho_system(entry: &str) -> bool {
-    RfqEntry::parse(entry).is_none() && !entry.starts_with(PRICE_LEVEL_STREAM_PREFIX)
+    BookEntry::parse(entry).is_none() && !entry.starts_with(PRICE_LEVEL_STREAM_PREFIX)
 }
 
-/// An RFQ `--protocols` entry, by the contract its legs execute through.
+/// A book feed `--protocols` entry (an RFQ venue or a pAMM), by the contract its legs execute
+/// through.
 ///
-/// Each variant holds the `rfq:<protocol>` name, with any `fallback:` prefix removed.
+/// Each variant holds the `rfq:<protocol>` or `pamm:<protocol>` name, with any `fallback:` prefix
+/// removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RfqEntry<'a> {
-    /// `rfq:<protocol>`: the protocol's own executor.
+pub(crate) enum BookEntry<'a> {
+    /// `rfq:<protocol>` or `pamm:<protocol>`: the protocol's own executor.
     Direct(&'a str),
-    /// `fallback:rfq:<protocol>`: the protocol's fallback router, e.g. `MetricFallbackRouter`.
+    /// `fallback:rfq:<protocol>` or `fallback:pamm:<protocol>`: the protocol's fallback router,
+    /// e.g. `MetricFallbackRouter`.
     ViaFallbackRouter(&'a str),
 }
 
-impl<'a> RfqEntry<'a> {
+impl<'a> BookEntry<'a> {
     pub(crate) fn parse(entry: &'a str) -> Option<Self> {
-        if let Some(rfq) = entry
+        if let Some(protocol) = entry
             .strip_prefix(FALLBACK_PREFIX)
-            .filter(|rest| rest.starts_with(RFQ_PREFIX))
+            .filter(|rest| is_book_protocol(rest))
         {
-            return Some(Self::ViaFallbackRouter(rfq));
+            return Some(Self::ViaFallbackRouter(protocol));
         }
-        entry
-            .starts_with(RFQ_PREFIX)
-            .then_some(Self::Direct(entry))
+        is_book_protocol(entry).then_some(Self::Direct(entry))
     }
 
     pub(crate) fn protocol(self) -> &'a str {
         match self {
-            Self::Direct(rfq) | Self::ViaFallbackRouter(rfq) => rfq,
+            Self::Direct(protocol) | Self::ViaFallbackRouter(protocol) => protocol,
         }
     }
 
     pub(crate) fn uses_fallback_router(self) -> bool {
         matches!(self, Self::ViaFallbackRouter(_))
     }
+}
+
+/// Whether `protocol` names a venue a book feed serves, with any `fallback:` prefix removed.
+fn is_book_protocol(protocol: &str) -> bool {
+    protocol.starts_with(RFQ_PREFIX) || protocol.starts_with(PAMM_PREFIX)
 }
 
 /// Rejects `protocol_system` when tycho-execution's `executor_addresses.json` has no executor for
@@ -203,32 +213,33 @@ pub(crate) fn require_executor(chain: Chain, protocol_system: &str) -> Result<()
     )))
 }
 
-/// The RFQ entries in `protocols`, each with the entry it was parsed from. Rejects an RFQ
+/// The book feed entries in `protocols`, each with the entry it was parsed from. Rejects a
 /// protocol requested both with and without the `fallback:` prefix.
 ///
 /// Both feeds would emit the same component ids under different protocol systems, so each
 /// publication would overwrite the other feed's label.
-pub(crate) fn parse_rfq_entries(
+pub(crate) fn parse_book_entries(
     protocols: &[String],
-) -> Result<Vec<(&str, RfqEntry<'_>)>, DataFeedError> {
-    let mut variants: HashMap<&str, RfqEntry> = HashMap::new();
-    let mut rfq_entries = Vec::new();
+) -> Result<Vec<(&str, BookEntry<'_>)>, DataFeedError> {
+    let mut variants: HashMap<&str, BookEntry> = HashMap::new();
+    let mut book_entries = Vec::new();
     for protocol in protocols {
-        let Some(rfq_entry) = RfqEntry::parse(protocol) else {
+        let Some(book_entry) = BookEntry::parse(protocol) else {
             continue;
         };
         if variants
-            .insert(rfq_entry.protocol(), rfq_entry)
-            .is_some_and(|previous| previous != rfq_entry)
+            .insert(book_entry.protocol(), book_entry)
+            .is_some_and(|previous| previous != book_entry)
         {
             return Err(DataFeedError::Config(format!(
-                "RFQ protocol '{}' requested both with and without the '{FALLBACK_PREFIX}' prefix",
-                rfq_entry.protocol()
+                "book protocol '{}' requested both with and without the '{FALLBACK_PREFIX}' \
+                 prefix",
+                book_entry.protocol()
             )));
         }
-        rfq_entries.push((protocol.as_str(), rfq_entry));
+        book_entries.push((protocol.as_str(), book_entry));
     }
-    Ok(rfq_entries)
+    Ok(book_entries)
 }
 
 /// Whether any requested protocol is streamed from Tycho.
@@ -608,7 +619,7 @@ pub(crate) fn open_price_level_stream(
     for venue in venues {
         if venue == METRIC_PRICE_LEVEL_VENUE {
             if let Some(book_entry) = protocols.iter().find(|protocol| {
-                RfqEntry::parse(protocol)
+                BookEntry::parse(protocol)
                     .is_some_and(|entry| entry.protocol() == metric::PROTOCOL_SYSTEM)
             }) {
                 return Err(DataFeedError::Config(format!(
@@ -1347,15 +1358,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::rfq("rfq:bebop", Some(RfqEntry::Direct("rfq:bebop")))]
+    #[case::rfq("rfq:bebop", Some(BookEntry::Direct("rfq:bebop")))]
     #[case::rfq_via_fallback_router(
         "fallback:rfq:metric",
-        Some(RfqEntry::ViaFallbackRouter("rfq:metric"))
+        Some(BookEntry::ViaFallbackRouter("rfq:metric"))
+    )]
+    #[case::book_pamm("pamm:baibai", Some(BookEntry::Direct("pamm:baibai")))]
+    #[case::book_pamm_via_fallback_router(
+        "fallback:pamm:baibai",
+        Some(BookEntry::ViaFallbackRouter("pamm:baibai"))
     )]
     #[case::pamm("fallback:fermiswap", None)]
     #[case::tycho_system("uniswap_v3", None)]
-    fn test_rfq_entry_parse(#[case] entry: &str, #[case] expected: Option<RfqEntry>) {
-        assert_eq!(RfqEntry::parse(entry), expected);
+    fn test_book_entry_parse(#[case] entry: &str, #[case] expected: Option<BookEntry>) {
+        assert_eq!(BookEntry::parse(entry), expected);
         assert_eq!(is_tycho_system(entry), expected.is_none());
     }
 

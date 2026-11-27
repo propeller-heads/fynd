@@ -90,6 +90,8 @@ pub(crate) struct TychoFeedConfig {
     /// Whether the pAMM price level stream also reads Titan's quote stream, to attach the account
     /// state Titan priced each pAMM state on. Default `true`.
     pub(crate) pamm_simulation_overrides: bool,
+    /// The node the book venues that read the chain themselves poll, such as BaiBai.
+    pub(crate) rpc_url: Option<String>,
 }
 
 impl TychoFeedConfig {
@@ -120,6 +122,7 @@ impl TychoFeedConfig {
             external_liquidity: Vec::new(),
             nexus_url: None,
             pamm_simulation_overrides: true,
+            rpc_url: None,
         }
     }
 
@@ -183,6 +186,11 @@ impl TychoFeedConfig {
 
     pub(crate) fn nexus_url(mut self, url: String) -> Self {
         self.nexus_url = Some(url);
+        self
+    }
+
+    pub(crate) fn rpc_url(mut self, url: String) -> Self {
+        self.rpc_url = Some(url);
         self
     }
 }

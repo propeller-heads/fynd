@@ -1111,7 +1111,8 @@ impl FyndBuilder {
         .pamm_simulation_overrides(self.pamm_simulation_overrides)
         .max_sync_lag(self.max_sync_lag)
         .aggregate_rfqs(self.aggregate_rfqs)
-        .external_liquidity(std::mem::take(&mut self.external_liquidity));
+        .external_liquidity(std::mem::take(&mut self.external_liquidity))
+        .rpc_url(self.rpc_url.clone());
 
         let nexus_url = self.nexus_url.take();
         let tycho_feed_config = match &nexus_url {

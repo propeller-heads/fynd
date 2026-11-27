@@ -180,8 +180,8 @@ source needs no entry: external liquidity a caller adds in code (below).
 
 | Entry | Opened by | Stream |
 |---|---|---|
-| `rfq:<protocol>` | `BookStream::open` (`feed/book_stream.rs`) | Off-chain book venue publishing complete price-level snapshots through a latest-value feed |
-| `fallback:rfq:<protocol>` | `BookStream::open` (`feed/book_stream.rs`) | The same book feed, labelling components `fallback:rfq:<protocol>` so they execute through that protocol's fallback router (`MetricFallbackRouter`, `BebopFallbackRouter`, `HashflowFallbackRouter`) |
+| `rfq:<protocol>`, `pamm:<protocol>` | `BookStream::open` (`feed/book_stream.rs`) | Book venue (an RFQ venue, or a pAMM such as `pamm:baibai`) publishing complete price-level snapshots through a latest-value feed |
+| `fallback:rfq:<protocol>`, `fallback:pamm:<protocol>` | `BookStream::open` (`feed/book_stream.rs`) | The same book feed, labelling components with the `fallback:` prefix so they execute through that protocol's fallback router (`MetricFallbackRouter`, `BebopFallbackRouter`, `HashflowFallbackRouter`, BaiBai's fallback router) |
 | `pricelevelstream:<venue>` | `open_price_level_stream` (`feed/protocol_registry.rs`) | Titan pAMM price level WebSocket, an `impl Stream<Item = Update>` polled directly (it reconnects on its own, so there is no task to supervise) |
 
 `register_exchanges` skips all three forms. In the normal `run` mode, `has_tycho_protocols` decides
@@ -202,11 +202,12 @@ at that moment. `make_feed` gets an `ExternalLiquidityConfig` (chain, token univ
 runs on every `BookStream::open`. `BookStream` merges the built-in venue feeds and the external feeds
 (`external`) and turns both into the same `BookUpdate`s, so the rules below hold for both. Three checks
 guard the market. `open` refuses a source named like any `--protocols` entry (or like the venue behind a
-`rfq:` or `fallback:rfq:` entry), and two sources with one name. `BookStream` drops, with a warning, an
+`rfq:`, `pamm:` or `fallback:` form of either entry), and two sources with one name. `BookStream` drops, with a warning, an
 external component whose protocol system is not the source's name or that has a token outside the
 token universe. `handle_book_update` drops, for every book feed, a component whose id the market holds
 under another protocol system: it neither replaces nor removes it. The name's prefix decides the
-treatment: `fallback:` makes pAMMs, `rfq:` puts the components under the RFQ replacer.
+treatment: `fallback:` makes pAMMs, `rfq:` puts the components under the RFQ replacer, and a bare
+`pamm:` gets neither.
 
 A book venue publishes states of the world, not incremental changes: the newest set replaces the
 last one, and a pair missing from it is a pair the venue stopped serving. `BookStream` keeps the ids
@@ -222,7 +223,9 @@ environment before building its feed, so a missing one is a `DataFeedError::Conf
 the stream rather than a feed that silently serves nothing: `BEBOP_KEY` for `rfq:bebop`, `HASHFLOW_USER`/`HASHFLOW_KEY` for
 `rfq:hashflow`, `METRIC_API_KEY` for `rfq:metric`
 (whose `METRIC_API_URL` stays optional, defaulting to Metric's public endpoint), `NATIVE_API_KEY`
-for `rfq:native`, and `LIQUORICE_USER`/`LIQUORICE_KEY` for `rfq:liquorice`. `rfq:metric` is
+for `rfq:native`, and `LIQUORICE_USER`/`LIQUORICE_KEY` for `rfq:liquorice`. `pamm:baibai` needs no
+credentials: it reads its curves from the chain through the builder's `rpc_url`, which reaches the
+venues as `BookVenueContext::rpc_url`, and it is rejected off Base (`feed/book_venues/baibai.rs`). `rfq:metric` is
 also gated on `METRIC_CHAINS` (`feed/book_venues/metric.rs`), the chains tycho-execution deploys its executor to — elsewhere the
 entry is rejected instead of pricing legs that cannot be encoded. On Ethereum, Metric can come
 from either the book feed (`fallback:rfq:metric`, executing through `MetricFallbackRouter`) or the
